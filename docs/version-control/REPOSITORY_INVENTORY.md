@@ -1,6 +1,6 @@
 # GitHub 归档清单
 
-日期：2026-10-09。仓库：[AmadeusDrift/htc-listing-workbench](https://github.com/AmadeusDrift/htc-listing-workbench)，私有。
+日期：2026-10-09。仓库：[AmadeusDrift/htc-listing-workbench](https://github.com/AmadeusDrift/htc-listing-workbench)，已按用户要求设为公开。
 
 本次归档源码及合成测试，保留尚未修复的已知问题；不批准业务修改、部署或恢复任务。
 
@@ -16,9 +16,10 @@
 | samples/ | 示例商品及空凭据模板 |
 | docs/version-control/STABILITY_PLAN.md | 重新整理、不含真实SKU/任务/账号/调用记录的计划与回归清单 |
 | docs/version-control/repository-files.csv | 文件路径、Git内容字节数、SHA-256、Git blob SHA；不递归记录自身 |
-| 根目录 | 包与锁文件、TS/Vite配置、第三方声明、启动脚本、README、忽略规则及本清单 |
+| docs/version-control/REPOSITORY_INVENTORY.md | 上传范围、排除范围及归档限制（本清单） |
+| 根目录 | 包与锁文件、TS/Vite配置、第三方声明、启动脚本、README及忽略规则 |
 
-本次归档553个文件：src 297、tests 184、scripts 39、extension 7、native-host 1、samples 7、根目录16、净化文档及逐文件清单2。逐文件清单记录其余552个文件，Git树同时校验清单自身。原始业务与测试源码不修改。
+本次归档553个文件：src 297、tests 184、scripts 39、extension 7、native-host 1、samples 7、根目录15、净化文档及逐文件清单3。逐文件清单记录其余552个文件，Git树同时校验清单自身。原始业务与测试源码不修改。
 
 ## 排除并保留本地
 

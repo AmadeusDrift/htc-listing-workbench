@@ -4,13 +4,25 @@ Windows / Electron / React / TypeScript 批量上架工作台的源码归档基�
 
 当前处于稳定性诊断后的计划审核阶段。建仓不代表已修复已知问题、完成真实上架验收或批准恢复生产任务。
 
-- [上传范围与排除清单](REPOSITORY_INVENTORY.md)
+## 文档导航
+
+- [上传范围与排除清单](docs/version-control/REPOSITORY_INVENTORY.md)
 - [不含真实运行数据的稳定化计划及回归清单](docs/version-control/STABILITY_PLAN.md)
 - [逐文件清单与哈希](docs/version-control/repository-files.csv)
 
 ## 目录
 
-src 包含桌面主进程、IPC、页面和共享业务契约；tests 包含隔离测试及夹具；scripts 包含开发、构建和 E2E 工具；extension 与 native-host 包含采集扩展及 Windows 通信宿主；samples 为示例及空凭据模板。
+| 目录 | 内容 |
+|---|---|
+| [src/](src/) | 桌面主进程、IPC、页面和共享业务契约 |
+| [tests/](tests/) | 隔离测试及夹具 |
+| [scripts/](scripts/) | 开发、构建和 E2E 工具 |
+| [extension/](extension/) | 浏览器采集扩展 |
+| [native-host/](native-host/) | Windows 通信宿主 |
+| [samples/](samples/) | 示例及空凭据模板 |
+| [docs/version-control/](docs/version-control/) | 稳定化计划、归档范围和文件清单 |
+
+根目录保留 README、第三方声明、项目配置和启动脚本。启动脚本保持原位，避免改变相对路径。
 
 本次不上传原始历史文档、真实调用日志、业务表格、商品素材、数据库或凭据。它们保留在原电脑。此仓库为源码归档，不是生产工作区备份。
 
@@ -35,4 +47,4 @@ npm run build
 
 先复现，再编写失败测试，再修改，最后运行受影响测试及完整回归。不能为通过测试随意降低断言或改变业务预期。未知付费请求和未知提交不自动重发，原 SKU、图片及父子关系保持稳定。
 
-尚未选择开源许可证；仓库保持私有。第三方声明见 THIRD_PARTY_NOTICES.txt。
+仓库已公开，尚未选择开源许可证。第三方声明见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。

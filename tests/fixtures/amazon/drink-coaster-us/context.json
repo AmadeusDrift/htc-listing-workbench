@@ -1,0 +1,173 @@
+{
+  "exportedAt": "2026-10-07T02:01:23.510Z",
+  "appVersion": "0.6.0-rc.6",
+  "productType": "DRINK_COASTER",
+  "requirements": "LISTING",
+  "parentageLevel": "NONE",
+  "locale": "en_US",
+  "marketplaceId": "ATVPDKIKX0DER",
+  "mode": "live",
+  "version": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+  "checksum": "O12W+9pjlrgiDe5hV67FWg==",
+  "fetchedAt": "2026-10-07T02:01:23.476Z",
+  "expiresAt": "2026-10-08T02:01:23.476Z",
+  "fromCache": false,
+  "propertyGroups": {
+    "offer": {
+      "title": "Offer",
+      "propertyNames": [
+        "skip_offer",
+        "fulfillment_availability",
+        "map_policy",
+        "purchasable_offer",
+        "condition_type",
+        "condition_note",
+        "list_price",
+        "product_tax_code",
+        "merchant_release_date",
+        "merchant_shipping_group",
+        "max_order_quantity",
+        "gift_options",
+        "main_offer_image_locator",
+        "other_offer_image_locator_1",
+        "other_offer_image_locator_2",
+        "other_offer_image_locator_3",
+        "other_offer_image_locator_4",
+        "other_offer_image_locator_5",
+        "supplemental_condition_information"
+      ]
+    },
+    "images": {
+      "title": "Images",
+      "propertyNames": [
+        "main_product_image_locator",
+        "other_product_image_locator_1",
+        "other_product_image_locator_2",
+        "other_product_image_locator_3",
+        "other_product_image_locator_4",
+        "other_product_image_locator_5",
+        "other_product_image_locator_6",
+        "other_product_image_locator_7",
+        "other_product_image_locator_8",
+        "swatch_product_image_locator"
+      ]
+    },
+    "shipping": {
+      "title": "Shipping",
+      "propertyNames": [
+        "item_dimensions",
+        "item_package_dimensions",
+        "item_package_weight",
+        "master_pack_layers_per_pallet_quantity",
+        "master_packs_per_layer_quantity"
+      ]
+    },
+    "variations": {
+      "title": "Variations",
+      "propertyNames": [
+        "parentage_level",
+        "child_parent_sku_relationship",
+        "variation_theme"
+      ]
+    },
+    "safety_and_compliance": {
+      "title": "Safety & Compliance",
+      "propertyNames": [
+        "country_of_origin",
+        "batteries_required",
+        "batteries_included",
+        "battery",
+        "num_batteries",
+        "number_of_lithium_metal_cells",
+        "number_of_lithium_ion_cells",
+        "lithium_battery",
+        "supplier_declared_dg_hz_regulation",
+        "ghs",
+        "hazmat",
+        "safety_data_sheet_url",
+        "required_product_compliance_certificate",
+        "legal_compliance_certifications",
+        "is_this_product_subject_to_buyer_age_restrictions",
+        "california_proposition_65",
+        "pesticide_marking",
+        "regulatory_compliance_certification",
+        "dsa_responsible_party_address",
+        "compliance_media",
+        "gpsr_safety_attestation",
+        "gpsr_manufacturer_reference",
+        "has_multiple_battery_powered_components",
+        "ships_globally",
+        "contains_battery_or_cell",
+        "battery_contains_free_unabsorbed_liquid",
+        "is_battery_non_spillable",
+        "non_lithium_battery_packaging",
+        "has_replaceable_battery",
+        "non_lithium_battery_energy_content",
+        "has_less_than_30_percent_state_of_charge",
+        "battery_installation_device_type",
+        "is_oem_sourced_product",
+        "ghs_chemical_h_code",
+        "baa_taa_regulation_compliance",
+        "baa_taa_compliance_acknowledgement",
+        "taa_compliant_country"
+      ]
+    },
+    "product_identity": {
+      "title": "Product Identity",
+      "propertyNames": [
+        "item_name",
+        "title_differentiation",
+        "is_value_stores_item",
+        "brand",
+        "supplier_declared_has_product_identifier_exemption",
+        "externally_assigned_product_identifier",
+        "merchant_suggested_asin",
+        "item_type_keyword",
+        "package_level",
+        "package_contains_sku",
+        "model_number",
+        "model_name",
+        "manufacturer"
+      ]
+    },
+    "product_details": {
+      "title": "Product Details",
+      "propertyNames": [
+        "product_description",
+        "bullet_point",
+        "generic_keyword",
+        "style",
+        "material",
+        "number_of_items",
+        "item_package_quantity",
+        "color",
+        "size",
+        "part_number",
+        "item_shape",
+        "care_instructions",
+        "edition",
+        "is_dishwasher_safe",
+        "furniture_finish",
+        "orientation",
+        "pattern",
+        "unit_count",
+        "product_site_launch_date",
+        "league_name",
+        "team_name",
+        "athlete",
+        "scent",
+        "item_thickness",
+        "item_length_width",
+        "quality_grade",
+        "number_of_packs",
+        "set_name",
+        "letter_character",
+        "government_contract_information",
+        "collection_item",
+        "item_weight"
+      ]
+    }
+  },
+  "exportSha256": "57cf023934d37dcffbdf1be3cb7a887b60d80361dd323d5b5e1f470caa9c757d",
+  "source": "Sanitized offline fixture from the verified 2026-10-07 Amazon product-type definition"
+}

@@ -1,0 +1,19 @@
+{
+  "format": "red-product-data",
+  "version": 1,
+  "products": [
+    {
+      "title": "导入模板：收纳袋",
+      "sourceUrl": "",
+      "description": "示例数据，请替换为真实商品事实。采购价使用字符串保存精确小数。",
+      "status": "draft",
+      "variants": [
+        { "sku": "IMPORT-BAG-WHITE", "originalSpec": "白色 / 大号", "normalizedSpec": "White / Large", "purchasePrice": "1.80", "inventory": 0 },
+        { "sku": "IMPORT-BAG-GREEN", "originalSpec": "绿色 / 小号", "normalizedSpec": "Green / Small", "purchasePrice": "1.50", "inventory": null }
+      ],
+      "facts": [
+        { "name": "材质", "value": "", "source": "manual", "sourceRef": "请填写资料依据", "state": "missing" }
+      ]
+    }
+  ]
+}

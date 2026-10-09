@@ -1,0 +1,179 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { fixture, candidateFor, chat, reviewFor } from './fixtures/listing-ai.ts';
+
+const issue = (field: string) => ({code:'90220',message:`Missing ${field}`,severity:'ERROR' as const,attributeNames:[field],autoFixable:false,source:'amazon' as const,category:'field' as const});
+
+for(const field of ['theme','subject_character']) test(`schema-bound ${field} enters repair and independent evidence review`, async t => {
+  const schema={type:'array',items:{type:'object',properties:{value:{type:'string',enum:['Coaster']},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}};
+  const f=await fixture(t,{[field]:schema});let previews=0;
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:++previews===1?'BLOCKED':'AMAZON_VALIDATED',previewIssues:previews===1?[issue(field)]:[]});
+  f.respond(payload=>chat(payload.candidate?reviewFor(payload):{kind:'amazon-fields',candidates:[{field,items:[{value:'Coaster',evidenceIds:[payload.evidence.find((e:any)=>e.value==='Coaster').id],transformation:'copy'}]}],missing:[]}));
+  const result=await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,2);assert.deepEqual(result.remaining,[]);assert.equal((result.draft.attributes[field] as any)[0].value,'Coaster');
+});
+test('a schema-bound semantic field is repaired and independently reviewed before adoption', async t => {
+  const schema={title:'Included Components',description:'List only supplied components',type:'array',minItems:1,maxItems:1,items:{type:'object',properties:{value:{type:'string',enum:['Coaster']},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}};
+  const f=await fixture(t,{included_components:schema});let previews=0;
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:++previews===1?'BLOCKED':'AMAZON_VALIDATED',previewIssues:previews===1?[issue('included_components')]:[]});
+  f.respond(payload=>chat(payload.candidate ? reviewFor(payload) : {kind:'amazon-fields',candidates:[{field:'included_components',items:[{value:'Coaster',evidenceIds:[payload.evidence.find((e:any)=>e.value==='Coaster').id],transformation:'copy'}]}],missing:[]}));
+  const result=await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,2);assert.equal(result.previewAttempts,2);
+  assert.equal((result.draft.attributes.included_components as any)[0].value,'Coaster');
+  assert.ok(result.draft.fieldAdoptions?.[0].reviewResultId);
+  assert.equal(result.draft.fieldAdoptions?.[0].changes[0].evidence[0].value,'Coaster');
+  const payload=JSON.parse(f.requests[0].messages[1].content);
+  assert.deepEqual(payload.fields.map((field:any)=>field.name),['included_components']);
+  assert.deepEqual(payload.fields[0].allowedValues,['Coaster']);
+  assert.equal(payload.fields[0].description,'List only supplied components');
+  assert.equal(payload.candidate,undefined);
+});
+test('preview first: a valid draft uses no DeepSeek call or second review', async t => {
+  const f=await fixture(t); let previews=0;
+  f.amazon.previewDraft=async()=>{previews++;return {...f.amazon.getDraft(f.draft.id),state:'AMAZON_VALIDATED',previewIssues:[]};};
+  const result=await f.listing.complete(f.reference);
+  assert.equal(previews,1);assert.equal(result.aiCalls,0);assert.equal(f.requests.length,0);assert.deepEqual(result.remaining,[]);
+});
+test('known submit rejection remains repair evidence even if the next preview accepts the payload',async t=>{
+  const f=await fixture(t);const get=f.amazon.getDraft.bind(f.amazon);
+  f.amazon.wasSubmissionRejected=()=>true;
+  f.amazon.getDraft=id=>({...get(id),listingIssues:[issue('material')]});
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'AMAZON_VALIDATED',previewIssues:[]});
+  const result=await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,2);assert.equal((result.draft.attributes.material as any)[0].value,'Silicone');
+  assert.equal(JSON.parse(f.requests[0].messages[1].content).repairRequest.issues[0].field,'material');
+});
+test('repair only preview error fields and independently review before automatic adoption', async t => {
+  const f=await fixture(t);let previews=0;
+  f.amazon.previewDraft=async()=>{const draft=f.amazon.getDraft(f.draft.id);previews++;return {...draft,state:previews===1?'BLOCKED':'AMAZON_VALIDATED',previewIssues:previews===1?[issue('material')]:[]};};
+  const before=f.draft.attributes.item_name,result=await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,2);assert.equal(result.previewAttempts,2);assert.equal(f.requests.length,2);
+  const payload=JSON.parse(f.requests[0].messages[1].content);
+  assert.deepEqual(payload.fields.map((v:any)=>v.name),['material']);assert.equal(payload.repairRequest.issues[0].code,'90220');
+  assert.deepEqual(result.draft.attributes.item_name,before);assert.equal((result.draft.attributes.material as any)[0].value,'Silicone');
+  assert.ok(result.draft.fieldAdoptions?.[0].reviewResultId);
+});
+test('network and unfillable compliance errors never trigger a model call', async t => {
+  const f=await fixture(t);
+  f.amazon.previewDraft=async()=>{throw new Error('Network unavailable');};
+  await assert.rejects(f.listing.complete(f.reference),/Network unavailable/);assert.equal(f.requests.length,0);
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue('compliance_document')]});
+  const result=await f.listing.complete(f.reference);assert.equal(result.aiCalls,0);assert.ok(result.remaining.some(v=>v.includes('compliance_document')));
+});
+test('automatic repair has a bounded two-generation budget with independent reviews', async t => {
+  const f=await fixture(t);
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue('material')]});
+  const result=await f.listing.complete(f.reference);
+  assert.ok(result.aiCalls<=4);assert.ok(result.previewAttempts<=3);assert.ok(result.remaining.length>0);
+  assert.ok(f.requests.filter(r=>JSON.parse(r.messages[1].content).candidate===undefined).length<=2);
+});
+
+test('automatic repair keeps valid copy when another field has unsupported evidence', async t => {
+  const f=await fixture(t);let previews=0;
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:++previews===1?[issue('item_name'),issue('color')]:[issue('color')]});
+  f.respond(payload=>{
+    if (payload.candidate) return chat(reviewFor(payload));
+    const response=candidateFor(payload);
+    for(const candidate of response.candidates) if(candidate.field==='color') candidate.items=[{value:'Green',evidenceIds:[payload.evidence.find((e:any)=>e.meaning==='material').id],transformation:'translate'}];
+    return chat(response);
+  });
+  const result=await f.listing.complete(f.reference);
+  assert.equal((result.draft.attributes.item_name as any)[0].value,'Blue Silicone Coaster');
+  assert.notEqual((result.draft.attributes.color as any)?.[0]?.value,'Green');
+  assert.equal(result.aiCalls,3);assert.equal(f.requests.length,3);
+  assert.deepEqual(JSON.parse(f.requests[2].messages[1].content).fields.map((field:any)=>field.name),['color']);
+  assert.ok(result.remaining.some(value=>value.includes('color')&&value.includes('依据')));
+  assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);
+});
+
+test('automatic repair isolates a field length error but rejects unexpected envelope keys', async t => {
+  const f=await fixture(t);let previews=0;
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:++previews===1?[issue('item_name'),issue('material')]:[issue('compliance_document')]});
+  f.respond(payload=>{if(payload.candidate)return chat(reviewFor(payload));const response=candidateFor(payload);response.candidates.find((c:any)=>c.field==='material')!.items[0].value='x'.repeat(501);return chat(response);});
+  const result=await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,2);assert.equal((result.draft.attributes.item_name as any)[0].value,'Blue Silicone Coaster');
+  assert.notEqual((result.draft.attributes.material as any)?.[0]?.value,'x'.repeat(501));
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue('item_name')]});
+  f.respond(payload=>chat({...candidateFor(payload),unexpected:'must reject'}));
+  await assert.rejects(f.listing.complete({draftId:result.draft.id,draftRevision:result.draft.revision}));
+});
+test('manual adoption does not require a second model review, but cannot bypass an existing rejection', async t => {
+  const f=await fixture(t), suggestion=await f.listing.suggest(f.reference);
+  const result=await f.listing.adopt({...f.reference,suggestionResultId:suggestion.id,reviewResultId:null,fields:['material']});
+  assert.equal(result.fieldAdoptions?.[0].reviewResultId,null);
+  const reference={draftId:result.id,draftRevision:result.revision}, next=await f.listing.suggest(reference);
+  f.respond(p=>p.candidate?chat({kind:'amazon-fields-review',verdict:'BLOCKED',checks:p.candidate.candidates.flatMap((c:any)=>c.items.map((v:any,index:number)=>({field:c.field,index,verdict:'UNSUPPORTED',evidenceIds:[],reason:'Unsupported',claims:[{text:v.value,verdict:'UNSUPPORTED',evidenceIds:[],reason:'Unsupported'}]}))),issues:[{field:'material',message:'Unsupported'}]}):chat(candidateFor(p)));
+  await f.listing.review({...reference,suggestionResultId:next.id});
+  await assert.rejects(f.listing.adopt({...reference,suggestionResultId:next.id,reviewResultId:null,fields:['material']}),/复核/);
+});
+
+test('two explicit review rejections exhaust automatic repair without adopting either candidate', async t => {
+  const f = await fixture(t);
+  f.amazon.previewDraft = async () => ({ ...f.amazon.getDraft(f.draft.id), state: 'BLOCKED', previewIssues: [issue('material')] });
+  f.respond(payload => chat(payload.candidate ? { ...reviewFor(payload), verdict: 'NEEDS_CHANGES', issues: [{ field: 'material', message: 'Confirm the material wording.' }] } : candidateFor(payload)));
+  const result = await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls,4); assert.equal(f.requests.length,4);
+  assert.equal(result.draft.fieldAdoptions?.length ?? 0,0);
+  assert.deepEqual(result.draft.attributes.material,f.draft.attributes.material);
+  assert.ok(result.remaining.some(value => value.includes('Confirm the material wording')));
+  assert.ok(JSON.parse(f.requests[2].messages[1].content).repairRequest.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW'));
+});
+
+for (const secondReviewComplete of [true, false]) test(`incomplete claim coverage enters bounded repair; second review complete=${secondReviewComplete}`, async t => {
+  const f = await fixture(t); let reviews = 0;
+  f.amazon.previewDraft = async () => {
+    const draft = f.amazon.getDraft(f.draft.id), adopted = Boolean(draft.fieldAdoptions?.length);
+    return { ...draft, state: adopted ? 'AMAZON_VALIDATED' : 'BLOCKED', previewIssues: adopted ? [] : [issue('product_description')] };
+  };
+  f.respond(payload => {
+    if (!payload.candidate) return chat(candidateFor(payload));
+    const review = reviewFor(payload);
+    if (++reviews === 1 || !secondReviewComplete) review.checks[0].claims[0].text = 'blue silicone';
+    return chat(review);
+  });
+  const result = await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls, 4); assert.equal(f.requests.length, 4); assert.equal(reviews, 2);
+  const repair = JSON.parse(f.requests[2].messages[1].content).repairRequest;
+  assert.ok(repair.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW' && entry.message.includes('coaster')));
+  assert.equal(result.draft.fieldAdoptions?.length ?? 0, secondReviewComplete ? 1 : 0);
+  if (secondReviewComplete) {
+    assert.deepEqual(result.remaining, []);
+    assert.equal((result.draft.attributes.product_description as any)[0].value, 'A blue silicone coaster.');
+    const adoptedReview = f.ai.getResult(result.draft.fieldAdoptions![0].reviewResultId!);
+    assert.equal((adoptedReview!.output as any).verdict, 'PASS');
+  } else {
+    assert.deepEqual(result.draft.attributes.product_description, f.draft.attributes.product_description);
+    assert.ok(result.remaining.some(value => value.includes('复核遗漏文字')));
+  }
+});
+
+for (const secondReviewPass of [true, false]) test(`negative item verdict alias enters bounded completion; second review passes=${secondReviewPass}`, async t => {
+  const f = await fixture(t); let reviews = 0;
+  f.amazon.previewDraft = async () => {
+    const draft = f.amazon.getDraft(f.draft.id), adopted = Boolean(draft.fieldAdoptions?.length);
+    return { ...draft, state: adopted ? 'AMAZON_VALIDATED' : 'BLOCKED', previewIssues: adopted ? [] : [issue('product_description')] };
+  };
+  f.respond(payload => {
+    if (!payload.candidate) return chat(candidateFor(payload));
+    const review = reviewFor(payload);
+    if (++reviews === 1 || !secondReviewPass) {
+      review.verdict = 'NEEDS_CHANGES'; review.checks[0].verdict = 'NEEDS_CHANGES';
+      review.checks[0].claims[0].verdict = 'UNSUPPORTED';
+      review.issues = [{ field: 'product_description', message: 'Remove the unsupported wording.' }] as any;
+    }
+    return chat(review);
+  });
+  const result = await f.listing.complete(f.reference);
+  assert.equal(result.aiCalls, 4); assert.equal(f.requests.length, 4); assert.equal(reviews, 2);
+  assert.ok(result.previewAttempts <= 3);
+  const repair = JSON.parse(f.requests[2].messages[1].content).repairRequest;
+  assert.ok(repair.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW' && entry.message === 'Remove the unsupported wording.'));
+  assert.equal(result.draft.fieldAdoptions?.length ?? 0, secondReviewPass ? 1 : 0);
+  if (secondReviewPass) {
+    assert.deepEqual(result.remaining, []);
+    assert.equal((f.ai.getResult(result.draft.fieldAdoptions![0].reviewResultId!)!.output as any).verdict, 'PASS');
+  } else {
+    assert.deepEqual(result.draft.attributes.product_description, f.draft.attributes.product_description);
+    assert.ok(result.remaining.some(value => value.includes('Remove the unsupported wording.')));
+  }
+});

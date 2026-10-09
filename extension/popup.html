@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTC 采集箱</title><link rel="stylesheet" href="popup.css"></head>
+<body><header><div class="brand">HTC<span>采集助手</span></div><p>把当前商品整理到本机工作台</p></header>
+<main><section class="connection"><span id="connection" role="status">等待检查连接</span><button id="connect" class="quiet" type="button">检查连接</button></section>
+<p class="hint">在商品详情页点击读取，核对后送入采集箱。真实页面兼容性待联调。</p>
+<button id="read" class="secondary wide" type="button">读取当前商品</button>
+<p id="notice" role="status" aria-live="polite"></p><p id="error" role="alert" hidden></p>
+<section id="preview" aria-label="商品预览" hidden><h1 id="title"></h1><p id="source" class="muted"></p><dl class="counts"><div><dt>规格</dt><dd id="skus-count"></dd></div><div><dt>图片链接</dt><dd id="images-count"></dd></div></dl>
+<details><summary>查看规格与采购价</summary><div class="table-wrap"><table><thead><tr><th>来源 SKU / 规格</th><th>采购价</th></tr></thead><tbody id="skus"></tbody></table></div></details>
+<ul id="warnings" class="hint"></ul><button id="send" class="primary wide" type="button">送入采集箱</button><p id="receipt" role="status" hidden></p></section>
+</main><footer>仅主动读取当前页 · 资料保存在本机</footer><script type="module" src="popup.js"></script></body></html>

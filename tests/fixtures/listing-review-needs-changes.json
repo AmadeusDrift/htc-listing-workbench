@@ -1,0 +1,140 @@
+{
+  "context": {
+    "fields": [
+      {
+        "name": "product_description",
+        "title": "Product Description",
+        "description": "The description you provide should pertain to the product in general, not your particular item. There is a 2,000 character maximum.",
+        "requirement": "required",
+        "closedEnum": false,
+        "allowedValues": [],
+        "suggestedValues": [],
+        "maxUtf8ByteLength": 20000,
+        "minItems": 1
+      }
+    ],
+    "evidence": [
+      {
+        "id": "a27a49ab-4ea4-4599-aeed-598fe5479d65",
+        "name": "适用人群",
+        "value": "成人",
+        "meaning": "general",
+        "source": "source_confirmed"
+      },
+      {
+        "id": "9301ae9e-86eb-424c-a6ff-3365327c9a99",
+        "name": "产品类别",
+        "value": "手动",
+        "meaning": "general",
+        "source": "source_confirmed"
+      },
+      {
+        "id": "ee37de93-53ac-4707-aaed-6d4989ab286f",
+        "name": "功能",
+        "value": "软毛",
+        "meaning": "general",
+        "source": "source_confirmed"
+      }
+    ]
+  },
+  "output": {
+    "issues": [
+      {
+        "field": "product_description",
+        "message": "Unsupported claim: 'comfortable grip' is not evidenced."
+      }
+    ],
+    "verdict": "NEEDS_CHANGES",
+    "kind": "amazon-fields-review",
+    "checks": [
+      {
+        "field": "product_description",
+        "index": 0,
+        "verdict": "NEEDS_CHANGES",
+        "evidenceIds": [
+          "9301ae9e-86eb-424c-a6ff-3365327c9a99",
+          "ee37de93-53ac-4707-aaed-6d4989ab286f",
+          "a27a49ab-4ea4-4599-aeed-598fe5479d65"
+        ],
+        "reason": "The description contains an unsupported claim about a comfortable grip, which is not evidenced.",
+        "claims": [
+          {
+            "text": "manual toothbrush",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "9301ae9e-86eb-424c-a6ff-3365327c9a99"
+            ],
+            "reason": "Evidence '产品类别' value '手动' means manual, supporting 'manual toothbrush'."
+          },
+          {
+            "text": "designed for adults",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "a27a49ab-4ea4-4599-aeed-598fe5479d65"
+            ],
+            "reason": "Evidence '适用人群' value '成人' means adults, supporting 'designed for adults'."
+          },
+          {
+            "text": "soft bristles",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "ee37de93-53ac-4707-aaed-6d4989ab286f"
+            ],
+            "reason": "Evidence '功能' value '软毛' means soft bristles, supporting 'soft bristles'."
+          },
+          {
+            "text": "gentle everyday brushing",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "ee37de93-53ac-4707-aaed-6d4989ab286f"
+            ],
+            "reason": "Soft bristles reasonably imply gentle brushing; everyday use is a common toothbrush purpose, acceptable as restrained wording."
+          },
+          {
+            "text": "comfortable grip",
+            "verdict": "UNSUPPORTED",
+            "evidenceIds": [],
+            "reason": "No evidence supports a comfortable grip; this is an unverified claim."
+          },
+          {
+            "text": "routine oral care",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "9301ae9e-86eb-424c-a6ff-3365327c9a99"
+            ],
+            "reason": "A manual toothbrush is for oral care; routine use is a reasonable everyday-use wording."
+          },
+          {
+            "text": "daily use at home or while traveling",
+            "verdict": "SUPPORTED",
+            "evidenceIds": [
+              "9301ae9e-86eb-424c-a6ff-3365327c9a99",
+              "a27a49ab-4ea4-4599-aeed-598fe5479d65"
+            ],
+            "reason": "Manual toothbrush for adults is suitable for daily use; portability is inherent to toothbrushes, acceptable restrained wording."
+          }
+        ]
+      }
+    ]
+  },
+  "candidate": {
+    "kind": "amazon-fields",
+    "missing": [],
+    "candidates": [
+      {
+        "field": "product_description",
+        "items": [
+          {
+            "value": "This manual toothbrush is designed for adults and features soft bristles for gentle everyday brushing. The handle offers a comfortable grip for routine oral care. A practical choice for daily use at home or while traveling.",
+            "evidenceIds": [
+              "9301ae9e-86eb-424c-a6ff-3365327c9a99",
+              "ee37de93-53ac-4707-aaed-6d4989ab286f",
+              "a27a49ab-4ea4-4599-aeed-598fe5479d65"
+            ],
+            "transformation": "compose"
+          }
+        ]
+      }
+    ]
+  }
+}

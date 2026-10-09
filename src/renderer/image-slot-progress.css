@@ -1,0 +1,28 @@
+.image-slot-progress { margin: 10px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.image-slot-progress summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.image-slot-grid { list-style: none; margin: 10px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.image-slot-grid > li { display: flex; flex-direction: column; gap: 5px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; min-width: 0; }
+.image-slot-grid > li[data-state="PASSED"] { border-color: var(--success, #368465); }
+.image-slot-grid > li[data-state="FAILED"], .image-slot-grid > li[data-state="BLOCKED"], .image-slot-grid > li[data-state="UNKNOWN"] { border-color: var(--warning, #a16b14); }
+.image-slot-grid p { margin: 0; overflow-wrap: anywhere; color: var(--text-secondary); }
+.image-slot-context { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; margin: 12px 0; }
+.image-slot-context > span { font-weight: 400; color: var(--text-secondary); }
+.image-slot-heading { min-height: 37px; display: flex; flex-direction: column; gap: 3px; }
+.image-slot-heading > span { color: var(--text-secondary); font-size: 11px; }
+.image-slot-thumbnail, .image-slot-placeholder { position: relative; aspect-ratio: 1; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-soft); overflow: hidden; }
+.image-slot-thumbnail { padding: 0; cursor: zoom-in; }
+.image-slot-thumbnail img { display: block; width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.image-slot-thumbnail > span { position: absolute; right: 5px; bottom: 5px; display: flex; align-items: center; gap: 4px; padding: 3px 5px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff; font-size: 10px; }
+.image-slot-thumbnail:focus-visible, .image-slot-read-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.image-slot-placeholder { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 8px; text-align: center; padding: 8px; color: var(--text-secondary); }
+.image-slot-read-retry { padding: 3px; border: 0; background: transparent; color: var(--ink); text-decoration: underline; cursor: pointer; font-size: 11px; }
+.image-slot-adoption { align-self: flex-start; border-radius: 4px; padding: 3px 5px; font-size: 11px; background: var(--panel-soft); color: var(--text-secondary); }
+.image-slot-adoption[data-adopted="true"] { color: var(--success, #368465); background: color-mix(in srgb, var(--success, #368465) 10%, var(--panel)); }
+.image-slot-adoption[data-adopted="false"] { color: var(--warning, #a16b14); background: color-mix(in srgb, var(--warning, #a16b14) 10%, var(--panel)); }
+.image-slot-dialog { width: min(900px, calc(100vw - 40px)); max-width: none; max-height: calc(100vh - 40px); margin: auto; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); box-shadow: 0 20px 70px rgba(0,0,0,.35); }
+.image-slot-dialog::backdrop { background: rgba(0,0,0,.72); }
+.image-slot-dialog-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 12px; }
+.image-slot-dialog-heading strong { display: block; overflow-wrap: anywhere; }
+.image-slot-dialog-heading p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }
+.image-slot-dialog > img { display: block; width: 100%; max-height: calc(100vh - 145px); object-fit: contain; background: #fff; }
+@media (max-width: 600px) { .image-slot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .image-slot-dialog { padding: 10px; width: calc(100vw - 20px); } }

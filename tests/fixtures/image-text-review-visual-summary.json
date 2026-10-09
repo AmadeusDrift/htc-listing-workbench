@@ -1,0 +1,20 @@
+{
+  "verdict": "PASS",
+  "checks": [
+    {
+      "source": "summary",
+      "index": 0,
+      "text": "参考图仅1张，为暗光环境下的夜光青蛙摆件：整体呈浅蓝白荧光，圆润头部，两只大眼带橙红色眼圈，前肢外展、趾端分瓣，身体呈趴伏姿态，可见分节/关节结构，表面有3D打印层纹感。背景为深色织物或木质台面，几乎无环境光，仅靠自身荧光照明。图中无包装、无文字、无额外配件，无法从图像判断实际尺寸或磁铁位置。",
+      "verdict": "SUPPORTED",
+      "evidenceIds": [
+        "a76ab7bb-9084-4988-abbc-c16fa0f1a44e",
+        "721e7f36-f87d-4ea0-99a4-11cd1d5cdede",
+        "5da79514-b334-4ce1-9f23-ad99b004bebd:spec"
+      ],
+      "reason": "Summary describes the product as a glow-in-the-dark frog figurine with pale blue-white fluorescence, rounded head, orange-red eye rings, splayed front legs, segmented body, 3D print layer lines, dark fabric/wood background, no packaging/text/accessories. These details are supported by the evidence: shape is frog (a76ab7bb), production process is 3D printing (721e7f36), selected SKU specifies 夜光本色 (glow-in-the-dark natural color) and 中号15.5厘米长青蛙 (medium 15.5cm frog). The summary explicitly notes that size and magnet position cannot be determined from the image, which is consistent with the evidence that size is 15.5 cm from source_confirmed and magnet is mentioned in SKU but not visible in image. No contradictions found."
+    }
+  ],
+  "expectedTextChecks": [],
+  "noTextVerified": true,
+  "issues": []
+}

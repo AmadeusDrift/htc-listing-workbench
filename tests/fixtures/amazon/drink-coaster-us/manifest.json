@@ -1,0 +1,27 @@
+{
+  "source": "artifacts/amazon-schema-analysis-2026-10-07",
+  "productType": "DRINK_COASTER",
+  "marketplaceId": "ATVPDKIKX0DER",
+  "requirements": "LISTING",
+  "parentageLevel": "NONE",
+  "fieldCount": 106,
+  "groupNameCount": 119,
+  "sanitized": [
+    "merchant_shipping_group enum IDs and display names",
+    "purchasable_offer automated pricing rule IDs, including every exact reference"
+  ],
+  "sha256": {
+    "schema": {
+      "original": "05c92b9086a3372b5459c52ee67c771abf1732f3000ad8059ba9b3b227ac3304",
+      "fixture": "57cf023934d37dcffbdf1be3cb7a887b60d80361dd323d5b5e1f470caa9c757d"
+    },
+    "metaSchema": {
+      "original": "a1fb36eb6aae4dedd73fd5e3ac8429dfa64225f55f0c4f89bff66f56f1b95acb",
+      "fixture": "a1fb36eb6aae4dedd73fd5e3ac8429dfa64225f55f0c4f89bff66f56f1b95acb"
+    },
+    "context": {
+      "original": "00359bd9eaaf2326ce7bfa13dd2baf9fd1046a82979bf6ac2137db15a6ecf66f",
+      "fixture": "b995f3da8acfa175eb02fb5f993c468a9789f5c234a6236ed011a962907c8875"
+    }
+  }
+}

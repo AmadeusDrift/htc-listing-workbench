@@ -1,0 +1,84 @@
+import { useEffect, useState } from 'react';
+import { ArrowRight, Box, ChevronDown, Search } from 'lucide-react';
+import type { AutomaticListingItem } from '../shared/automatic-listing-contracts';
+import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
+import { ImageSlotProgress } from './ImageSlotProgress';
+import { automaticItemOutcome, filterAutomaticProductGroups } from './automatic-product-groups';
+import type { AutomaticItemOutcome, AutomaticProductGroup } from './automatic-product-groups';
+import { sourceLabel } from './utils';
+import './automatic-product-groups.css';
+
+const stageLabels: Record<AutomaticListingItem['stage'], string> = { PLAN: '来源规格待处理；修正后重新加入任务', SOURCES: '准备来源资料与参考图', CLASSIFY: '自动判断商品类目', DRAFT: '准备文案与草稿', IMAGES: '生成图片、IP 与文字检测', PARENT: '等待父体建档', EXECUTION: '上传图片、验证与提交', READBACK: '已提交，等待读回', LABELS: '准备商品标签', COMPLETE: '建档与标签已完成' };
+const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行', running: '处理中', waiting: '等待服务返回', completed: '流程完成', failed: '流程异常', pricingSkipped: '定价跳过', sourceReview: '来源待确认', submittedAwaitingReadback: '已提交待回读', labels: '准备标签' };
+interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string): void; onShipping?: (batchId: string) => void }
+
+function SalesItem({ item, busy, pending, revision, onManual, onShipping }: Actions & { item: AutomaticListingItem }) {
+  const [expanded, setExpanded] = useState(item.status === 'RUNNING');
+  const specification = item.salesPlan?.recipe.specification;
+  const outcome = automaticItemOutcome(item);
+  return <li data-testid={`automatic-result-${item.variantId}`} data-state={item.status}>
+    <button type="button" className="automatic-sale-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      <span><strong>{item.sku}</strong>{specification && <small>{specification}</small>}<small>{stageLabels[item.stage]}{item.stage === 'READBACK' ? '；Amazon 接受提交不等于已可售。' : ''}</small></span>
+      <Badge tone={outcome === 'failed' ? 'danger' : outcome === 'pricingSkipped' || outcome === 'sourceReview' ? 'warning' : outcome === 'completed' ? 'success' : outcome === 'submittedAwaitingReadback' ? 'info' : 'neutral'}>{itemLabels[outcome]}</Badge><ChevronDown size={16} className={expanded ? 'is-expanded' : ''} />
+    </button>
+    {item.error && <p className="workflow-notice">{item.error}</p>}
+    {expanded && <div className="automatic-sale-body">
+      <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
+      {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
+      {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
+      {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
+    </div>}
+    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} onClick={() => onManual(item.productId, item.draftId ?? undefined)}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
+  </li>;
+}
+
+function SourceVariants({ group, query }: { group: AutomaticProductGroup; query: string }) {
+  const [expanded, setExpanded] = useState(Boolean(query));
+  useEffect(() => { if (query) setExpanded(true); }, [query]);
+  return <details className="automatic-source-variants" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary>查看全部 {group.sourceVariantCount} 个来源规格 · {group.excludedCount} 个未纳入本次任务</summary>
+    <p className="small-copy">来源规格完整保留。销售 SKU 可由组套规则组合；下表展示每个来源规格对应的本次销售 SKU。</p>
+    <ul>{group.sourceVariants.map(({ variant, items }) => <li key={variant.id} data-testid={`automatic-source-variant-${variant.id}`} data-selected={Boolean(items.length)} data-search-match={query ? [variant.sku, variant.originalSpec, variant.normalizedSpec, variant.sourceSpec].some(value => value?.toLocaleLowerCase().includes(query)) : undefined}>
+      <span><strong>{variant.normalizedSpec || variant.originalSpec || variant.sourceSpec || '未填写规格'}</strong><small>来源 SKU：{variant.sku}</small></span>
+      <span>{items.length ? <><Badge tone="info">已纳入本次任务</Badge><small>销售 SKU：{items.map(item => item.sku).join('、')}</small></> : <Badge tone="neutral">未纳入本次任务</Badge>}</span>
+    </li>)}</ul>
+  </details>;
+}
+
+export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, ...actions }: Actions & { groups: AutomaticProductGroup[]; sourceErrors: Record<string, string>; loadingSources: boolean }) {
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
+  const [collapsedSearchIds, setCollapsedSearchIds] = useState<string[]>([]);
+  const visible = filterAutomaticProductGroups(groups, search);
+  const query = search.trim().toLocaleLowerCase();
+  return <div className="automatic-source-groups">
+    <div className="automatic-group-toolbar">
+      <label className="automatic-group-search"><Search size={16} /><input type="search" aria-label="搜索任务商品或 SKU" placeholder="搜索商品、颜色、来源或销售 SKU" value={search} onChange={event => { setSearch(event.target.value); setCollapsedSearchIds([]); }} /></label>
+      <button type="button" className="text-button" onClick={() => { setExpandedIds(visible.map(group => group.productId)); setCollapsedSearchIds([]); }}>展开全部商品</button>
+      <button type="button" className="text-button" onClick={() => { setExpandedIds([]); setSearch(''); }}>收起全部商品</button>
+    </div>
+    <p className="small-copy">按来源商品链接汇总；展开查看同款销售组、实际父 SKU 和子 SKU。来源链接与 Amazon 父体分别显示。</p>
+    {!visible.length && <p className="small-copy" role="status">没有匹配的商品或 SKU。</p>}
+    {visible.map(group => {
+      const expanded = expandedIds.includes(group.productId) || Boolean(query) && !collapsedSearchIds.includes(group.productId);
+      const status = group.statusCounts;
+      const outcomes = group.outcomeCounts;
+      return <article className="automatic-source-group" key={group.productId} data-testid={`automatic-product-group-${group.productId}`}>
+        <button type="button" className="automatic-source-toggle" aria-label={`${expanded ? '收起' : '展开'}来源商品 ${group.title}`} aria-expanded={expanded} aria-controls={`automatic-group-body-${group.productId}`} onClick={() => { setExpandedIds(values => expanded ? values.filter(id => id !== group.productId) : [...values, group.productId]); if (query) setCollapsedSearchIds(values => expanded ? [...values, group.productId] : values.filter(id => id !== group.productId)); }}>
+          <span className="workspace-thumb">{group.coverUrl ? <img src={group.coverUrl} alt="来源商品图片" loading="lazy" /> : <Box size={24} strokeWidth={1.35} />}</span>
+          <span className="automatic-source-identity"><strong>{group.title}</strong><small>{group.sourceUrl ? sourceLabel(group.sourceUrl) : '来源链接未保存'} · 来源规格 {group.sourceVariantCount ?? (loadingSources ? '读取中' : '未读取')} · 本次销售 SKU {group.items.length}</small><small>流程完成 {outcomes.completed} · 已提交待回读 {outcomes.submittedAwaitingReadback} · 处理中 {outcomes.running + outcomes.labels} · 等待服务 {outcomes.waiting} · 待执行 {outcomes.pending}{group.excludedCount !== null ? ` · 未纳入本次 ${group.excludedCount}` : ''}</small>{Boolean(status.FAILED) && <small>定价跳过 {outcomes.pricingSkipped} · 来源待确认 {outcomes.sourceReview} · 流程异常 {outcomes.failed}</small>}</span>
+          <Badge tone={outcomes.failed ? 'danger' : outcomes.sourceReview || outcomes.pricingSkipped ? 'warning' : status.DONE === group.items.length ? 'success' : status.RUNNING || outcomes.submittedAwaitingReadback ? 'info' : 'neutral'}>{outcomes.failed ? `${outcomes.failed} 个流程异常` : outcomes.sourceReview ? `${outcomes.sourceReview} 个来源待确认` : outcomes.pricingSkipped ? `${outcomes.pricingSkipped} 个定价跳过` : status.DONE === group.items.length ? '流程全部完成' : outcomes.submittedAwaitingReadback ? `${outcomes.submittedAwaitingReadback} 个已提交待回读` : status.RUNNING ? '处理中' : status.WAITING ? '等待返回' : '待执行'}</Badge>
+          <ChevronDown size={17} className={expanded ? 'is-expanded' : ''} />
+        </button>
+        {expanded && <div className="automatic-source-body" id={`automatic-group-body-${group.productId}`}>
+          {sourceErrors[group.productId] && <p className="workflow-notice" role="alert">来源规格读取失败：{sourceErrors[group.productId]}。任务进度仍可查看；请点击“刷新任务”重试。</p>}
+          {group.families.map(family => <section className="automatic-sales-family" key={family.key} aria-label={family.parentSku ? `父 SKU ${family.parentSku}` : '销售组'}>
+            <div className="automatic-family-heading"><strong>{family.label}</strong><span className="small-copy">{family.items.length} 个销售 SKU{!family.parentSku ? family.items.every(item => item.salesPlan?.familyResolved && item.salesPlan.parentage === 'NONE') ? ' · 独立销售，无 Amazon 父体' : ' · 尚未确认 Amazon 父体' : ' · 已有父 SKU 关系'}</span></div>
+            <ul className="automatic-task-items">{family.items.map(item => <SalesItem key={item.key} item={item} {...actions} />)}</ul>
+          </section>)}
+          {group.sourceVariantCount !== null && <SourceVariants group={group} query={query} />}
+        </div>}
+      </article>;
+    })}
+  </div>;
+}

@@ -1,0 +1,42 @@
+import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
+import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
+import { boundedText, integer, keys, object, uuid } from '../ai/validation.ts';
+import { listingFingerprint } from '../listing-ai/validation.ts';
+import { UserFacingError } from '../../shared/errors.ts';
+import { validateSalesRecipe } from '../sales-plans/records.ts';
+
+export function compatibleApprovalRecipe(run:ImageWorkflowRun,raw:unknown):boolean {
+  const recipe=raw===null?null:validateSalesRecipe(raw);
+  if(run.imageRecipeSha256)return listingFingerprint(recipe)===run.imageRecipeSha256;
+  const base=run.imageContext,counts=base?.listing.evidence.filter(item=>item.id===`${run.variantId}:sale-count`)??[];
+  if(recipe===null)return counts.length===0;
+  if(recipe.components.length!==1||base?.sourceVariantIds?.length!==1||base.sourceVariantIds[0]!==run.variantId)return false;
+  const component=recipe.components[0];
+  return component.variantId===run.variantId&&component.quantity===recipe.totalPieces&&counts.length===1&&counts[0].value===`${recipe.totalPieces} pieces`;
+}
+
+/** Identical stamp payload to the original workflow; image locators are transport data. */
+export function imageApprovalDraftSnapshot(draft:AmazonDraft):string {
+  const attributes=Object.fromEntries(Object.entries(draft.attributes).filter(([field])=>field!=='main_product_image_locator'&&!/^other_product_image_locator_\d+$/.test(field)));
+  return JSON.stringify({productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,targetId:draft.targetId,sellerId:draft.sellerId,marketplaceId:draft.marketplaceId,mode:draft.mode,schema:draft.schema,attributes});
+}
+export function validateApprovalReuse(raw:unknown,run:ImageWorkflowRun):NonNullable<ImageWorkflowRun['approvalReuse']> {
+  const a=keys(raw,['sourceRunId','draftRevision','draftSnapshot','recipeSnapshot']),sourceRunId=uuid(a.sourceRunId),draftRevision=integer(a.draftRevision,1,Number.MAX_SAFE_INTEGER);
+  const recipeSnapshot=boundedText(a.recipeSnapshot,200000);if(!compatibleApprovalRecipe(run,JSON.parse(recipeSnapshot)))throw new UserFacingError('图片审核复用销售组合不一致');
+  const draftSnapshot=boundedText(a.draftSnapshot,2000000),snapshot=keys(JSON.parse(draftSnapshot),['productId','productRevision','variantId','sku','targetId','sellerId','marketplaceId','mode','schema','attributes']);
+  const schema=object(snapshot.schema),context=run.imageContext?.listing;
+  object(snapshot.attributes);boundedText(snapshot.sellerId,100);if(!['demo','live'].includes(String(snapshot.mode)))throw new UserFacingError('图片审核复用快照无效');
+  if(!hasSevenApprovedImages(run)||!context||sourceRunId===run.id||draftRevision<context.draftRevision||listingFingerprint(snapshot)!==run.draftSha256
+    ||snapshot.productId!==run.productId||snapshot.productRevision!==run.productRevision||snapshot.variantId!==run.variantId||snapshot.sku!==run.sku
+    ||snapshot.targetId!==context.targetId||snapshot.marketplaceId!==context.marketplaceId||schema.targetId!==context.targetId||schema.productType!==context.productType
+    ||schema.parentageLevel!==context.parentageLevel||schema.requirements!==context.requirements||schema.locale!==context.locale||schema.checksum!==context.schemaChecksum||schema.version!==context.schemaVersion
+    ||listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})!==context.schemaSha256)throw new UserFacingError('图片审核复用快照与原审核范围不一致');
+  return {sourceRunId,draftRevision,draftSnapshot,recipeSnapshot};
+}
+export function assertApprovalReuseSource(run:ImageWorkflowRun,source:ImageWorkflowRun|undefined):void {
+  if(!source||source.approvalReuse||!hasSevenApprovedImages(source)||!run.approvalReuse||source.id!==run.approvalReuse.sourceRunId||source.updatedAt>run.createdAt)throw new UserFacingError('图片审核复用来源无效');
+  const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,...rest}=value;return rest;};
+  if(listingFingerprint(evidence(source))!==listingFingerprint(evidence(run)))throw new UserFacingError('图片审核复用记录与原审核证据不一致');
+  validateApprovalReuse(run.approvalReuse,run);
+}

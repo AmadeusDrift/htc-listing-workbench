@@ -1,0 +1,257 @@
+{
+  "$schema": "https://schemas.amazon.com/selling-partners/definitions/product-types/meta-schema/v1",
+  "$id": "https://example.test/nail-clipper-fields",
+  "$defs": {
+    "marketplace_id": {
+      "default": "ATVPDKIKX0DER",
+      "editable": false,
+      "hidden": true,
+      "examples": [
+        "Amazon.com"
+      ],
+      "type": "string",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "ATVPDKIKX0DER"
+          ],
+          "enumNames": [
+            "Amazon.com"
+          ]
+        }
+      ]
+    },
+    "language_tag": {
+      "default": "en_US",
+      "editable": false,
+      "hidden": true,
+      "examples": [
+        "English (United States)"
+      ],
+      "type": "string",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "en_US"
+          ],
+          "enumNames": [
+            "English (United States)"
+          ]
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "blade": {
+      "title": "Blade",
+      "description": "The attribute indicates Blade of the product",
+      "examples": [
+        "Alloy Steel"
+      ],
+      "type": "array",
+      "minItems": 1,
+      "minUniqueItems": 1,
+      "maxUniqueItems": 1,
+      "selectors": [
+        "marketplace_id"
+      ],
+      "items": {
+        "type": "object",
+        "required": [
+          "material"
+        ],
+        "properties": {
+          "edge": {
+            "title": "Blade Edge",
+            "description": "Provide the edge type of the nail clipper blade, describing how the cutting surface is shaped to trim nails.",
+            "examples": [
+              "Single Bevel"
+            ],
+            "type": "array",
+            "minItems": 1,
+            "minUniqueItems": 1,
+            "maxUniqueItems": 5,
+            "selectors": [
+              "language_tag"
+            ],
+            "items": {
+              "type": "object",
+              "required": [
+                "language_tag",
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "title": "Blade Edge",
+                  "description": "Provide the type of edge on the nail clipper blade, describing how the cutting surface is shaped to trim nails.",
+                  "editable": true,
+                  "hidden": false,
+                  "examples": [
+                    "Single Bevel"
+                  ],
+                  "type": "string",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "Concave",
+                        "Convex",
+                        "Serrated",
+                        "Straight"
+                      ],
+                      "enumNames": [
+                        "Concave",
+                        "Convex",
+                        "Serrated",
+                        "Straight"
+                      ]
+                    }
+                  ]
+                },
+                "language_tag": {
+                  "$ref": "#/$defs/language_tag"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "marketplace_id": {
+            "$ref": "#/$defs/marketplace_id"
+          },
+          "material": {
+            "title": "Blade Material",
+            "description": "Specify the type of material the blade is made of",
+            "examples": [
+              "Ceramic"
+            ],
+            "type": "array",
+            "minItems": 1,
+            "minUniqueItems": 1,
+            "maxUniqueItems": 3,
+            "selectors": [
+              "language_tag"
+            ],
+            "items": {
+              "type": "object",
+              "required": [
+                "language_tag",
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "title": "Blade Material",
+                  "description": "Specify the type of material the blade is made of",
+                  "editable": true,
+                  "hidden": false,
+                  "examples": [
+                    "Ceramic"
+                  ],
+                  "type": "string",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "Alloy Steel",
+                        "Carbon Steel",
+                        "High Carbon Steel",
+                        "Metal",
+                        "Stainless Steel"
+                      ],
+                      "enumNames": [
+                        "Alloy Steel",
+                        "Carbon Steel",
+                        "High Carbon Steel",
+                        "Metal",
+                        "Stainless Steel"
+                      ]
+                    }
+                  ]
+                },
+                "language_tag": {
+                  "$ref": "#/$defs/language_tag"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "target_audience": {
+      "title": "Target Audience",
+      "description": "Specify the target audience that the product is intended for",
+      "type": "array",
+      "minItems": 1,
+      "minUniqueItems": 1,
+      "maxUniqueItems": 35,
+      "selectors": [
+        "marketplace_id",
+        "language_tag"
+      ],
+      "items": {
+        "type": "object",
+        "required": [
+          "language_tag",
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "title": "Target Audience",
+            "description": "Specify the target audience that the product is intended for",
+            "editable": true,
+            "hidden": false,
+            "examples": [
+              "Tweens"
+            ],
+            "type": "string",
+            "maxLength": 3949,
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "Baby",
+                  "Elderly"
+                ],
+                "enumNames": [
+                  "Baby",
+                  "Elderly"
+                ]
+              }
+            ]
+          },
+          "language_tag": {
+            "$ref": "#/$defs/language_tag"
+          },
+          "marketplace_id": {
+            "$ref": "#/$defs/marketplace_id"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "blade",
+    "target_audience"
+  ],
+  "additionalProperties": false
+}

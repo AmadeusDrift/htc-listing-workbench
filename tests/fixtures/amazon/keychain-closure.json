@@ -1,0 +1,162 @@
+{
+  "type": "object",
+  "properties": {
+    "closure": {
+      "title": "Closure",
+      "description": "The attribute indicates the Closure of the product",
+      "examples": [
+        "Zipper"
+      ],
+      "type": "array",
+      "minItems": 1,
+      "minUniqueItems": 1,
+      "maxUniqueItems": 1,
+      "selectors": [
+        "marketplace_id"
+      ],
+      "items": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "marketplace_id": {
+            "$ref": "#/$defs/marketplace_id"
+          },
+          "type": {
+            "title": "Closure Type",
+            "description": "Provide the primary way the item closes or secures, like buckles, hooks, or zippers, to allow wearing or sealing it.",
+            "examples": [
+              "lace-up, hook-loop-closure, zip, pull-on (used for kids shoes)"
+            ],
+            "type": "array",
+            "minItems": 1,
+            "minUniqueItems": 1,
+            "maxUniqueItems": 2,
+            "selectors": [
+              "language_tag"
+            ],
+            "items": {
+              "type": "object",
+              "required": [
+                "language_tag",
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "title": "Closure Type",
+                  "description": "Provide the type of closing mechanism used by the item. The closing type allows a user to fully wear, seal, or close the item.",
+                  "editable": true,
+                  "hidden": false,
+                  "examples": [
+                    "Snap,Buckle"
+                  ],
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "maxUtf8ByteLength": 5000,
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "Buckle",
+                        "Button",
+                        "C Hook",
+                        "Clip",
+                        "Double Ring",
+                        "Drawstring",
+                        "Hook & Loop",
+                        "Lobster Clasp",
+                        "Magnetic",
+                        "Pull On",
+                        "Snap",
+                        "Snap Hook",
+                        "Split Ring",
+                        "Zipper"
+                      ],
+                      "enumNames": [
+                        "Buckle",
+                        "Button",
+                        "C Hook",
+                        "Clip",
+                        "Double Ring",
+                        "Drawstring",
+                        "Hook & Loop",
+                        "Lobster Clasp",
+                        "Magnetic",
+                        "Pull On",
+                        "Snap",
+                        "Snap Hook",
+                        "Split Ring",
+                        "Zipper"
+                      ]
+                    }
+                  ]
+                },
+                "language_tag": {
+                  "$ref": "#/$defs/language_tag"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "closure"
+  ],
+  "$defs": {
+    "marketplace_id": {
+      "default": "ATVPDKIKX0DER",
+      "editable": false,
+      "hidden": true,
+      "examples": [
+        "Amazon.com"
+      ],
+      "type": "string",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "ATVPDKIKX0DER"
+          ],
+          "enumNames": [
+            "Amazon.com"
+          ]
+        }
+      ]
+    },
+    "language_tag": {
+      "default": "en_US",
+      "editable": false,
+      "hidden": true,
+      "examples": [
+        "English (United States)"
+      ],
+      "type": "string",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "en_US"
+          ],
+          "enumNames": [
+            "English (United States)"
+          ]
+        }
+      ]
+    }
+  }
+}

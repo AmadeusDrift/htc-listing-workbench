@@ -1,0 +1,3 @@
+import type { ImageSetPlan } from '../../src/shared/image-ai-contracts.ts';
+/** A conservative fixture with no asserted feature claims; dedicated rule tests exercise marketing and dimensions. */
+export function sceneSet():ImageSetPlan{return {style:'Natural daylight, warm neutral surfaces.',dimensionEvidenceIds:[],dimensionReason:'No verified dimensions.',slots:Array.from({length:7},(_,i)=>({index:i+1,role:i===0?'main_scene':'scene',focus:'Daily use scene '+(i+1),evidenceIds:[],scene:'Distinct tabletop scene '+(i+1),prompt:'Show the source product in a realistic scene '+(i+1),textMode:'none',expectedText:[]}))};}

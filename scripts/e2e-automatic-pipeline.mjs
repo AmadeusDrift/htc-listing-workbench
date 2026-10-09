@@ -1,0 +1,37 @@
+import { _electron as electron } from 'playwright';
+import { expect } from '@playwright/test';
+import { build } from 'esbuild';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+await mkdir(resolve('.test-data'),{recursive:true});await mkdir(resolve('artifacts'),{recursive:true});
+const dataRoot=await mkdtemp(resolve('.test-data/automatic-pipeline-')),harness=join(dataRoot,'harness.cjs');
+await build({entryPoints:['tests/fixtures/execution-electron.ts'],outfile:harness,bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
+const require=createRequire(import.meta.url),env={...process.env,RED_DATA_DIR:dataRoot,RED_E2E:'1'};delete env.ELECTRON_RUN_AS_NODE;delete env.RED_DEV_SERVER_URL;
+let app;const checks=[];
+try{
+  app=await electron.launch({executablePath:require('electron'),args:[harness],cwd:resolve('.'),env,timeout:35000});
+  const page=await app.firstWindow();await page.waitForFunction(()=>Boolean(window.red));
+  await app.evaluate(({dialog},root)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[root+'/ftp-test-config.json']});dialog.showMessageBox=async()=>({response:0});},dataRoot);
+  await page.evaluate(async()=>{await window.red.importFtpProfile();await window.red.setFtpProfileEnabled({id:'alpha',enabled:true});const rules=await window.red.getListingRules();rules.product.variantLimit=1;await window.red.saveListingRules(rules);});
+  const input=await page.evaluate(async()=>{
+    const target=await window.red.enableAmazonDemo(),examples=await window.red.loadExamples();let product=await window.red.getProduct(examples.find(value=>value.variantCount===3).id);
+    for(const asset of product.assets)product=await window.red.updateAsset({productId:product.id,revision:product.revision,assetId:asset.id,role:asset.role,variantIds:asset.role==='main'?[product.variants[0].id]:[]});
+    await window.red.prepareAmazonDrafts({targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',listingProgram:'standard',items:[{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,attributes:{brand:[{value:'Generic',marketplace_id:target.marketplaceId}],color:[{value:'Blue',marketplace_id:target.marketplaceId}],purchasable_offer:[{marketplace_id:target.marketplaceId,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:12.5}]}]}]}}]});
+    return {productIds:[product.id],targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',profileId:'alpha'};
+  });
+  assert.equal(await page.evaluate(input=>window.red.startAutomaticListing(input),input),null);assert.equal((await page.evaluate(()=>window.red.listExecutionTasks())).length,0);checks.push('Native cancellation performs no upload/submission');
+  await app.evaluate(({dialog})=>{dialog.showMessageBox=async()=>({response:1});});
+  const task=await page.evaluate(input=>window.red.startAutomaticListing(input),input);assert.ok(task);
+  await expect.poll(async()=> (await page.evaluate(id=>window.red.getAutomaticListingTask(id),task.id)).status,{timeout:30000}).toBe('NEEDS_ATTENTION');
+  const state=await page.evaluate(async id=>{const task=await window.red.getAutomaticListingTask(id);return{task,children:await window.red.listExecutionTasks(),drafts:await window.red.listAmazonDrafts(task.items[0].productId),labels:await window.red.listItemLabels({jobId:id}),batch:await window.red.getProcurementBatch(task.items[0].batchId)};},task.id);
+  assert.equal(state.children.length,1);assert.equal(state.children[0].status,'COMPLETED');assert.ok(state.children[0].items[0].steps.every(step=>['DONE','SKIPPED'].includes(step.status)));
+  assert.ok(state.drafts[0].submittedAt);assert.ok(state.drafts[0].attributes.main_product_image_locator);assert.equal(state.batch.lines[0].stockQuantity,5);
+  assert.equal(state.labels[0].errorCode,'DEMO_LABEL_UNAVAILABLE');assert.equal(state.labels[0].attempts,0);
+  const ftp=await app.evaluate(()=>globalThis.__executionHarness.snapshot());assert.ok(ftp.stor>0&&ftp.probes>0);
+  checks.push('One native start completes real local FTP upload, URL fill, demo validation/submission/readback and sales-unit procurement binding');
+  checks.push('Demo reaches label boundary and truthfully reports no real Amazon label, with zero label API attempts');
+  await writeFile(join('artifacts','automatic-pipeline-e2e-report.json'),JSON.stringify({passed:true,dataRoot,checks,state,ftp},null,2));
+  console.log(checks.map(value=>'PASS '+value).join('\n'));
+}finally{await app?.close();}

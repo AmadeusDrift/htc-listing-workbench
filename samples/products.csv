@@ -1,0 +1,3 @@
+productKey,title,sourceUrl,description,sku,originalSpec,normalizedSpec,purchasePrice,inventory
+SAMPLE-1,导入模板：收纳袋,,示例数据请替换为真实商品事实,IMPORT-BAG-WHITE,白色 / 大号,White / Large,1.80,0
+SAMPLE-1,导入模板：收纳袋,,示例数据请替换为真实商品事实,IMPORT-BAG-GREEN,绿色 / 小号,Green / Small,1.50,

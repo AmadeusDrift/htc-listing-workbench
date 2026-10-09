@@ -1,0 +1,3153 @@
+{
+  "description": "Exact rejected provider output and matching frozen image context exported 2026-10-09. No live requests or source image bytes. Failed calls are historical diagnostics, not successful evidence.",
+  "cases": [
+    {
+      "sku": "H2-261008-27",
+      "callId": "30e6a21b-1428-466d-ba47-3633f2b6d024",
+      "raw": {
+        "kind": "image-plan",
+        "productUnderstanding": {
+          "summary": "参考图显示的是金达日美（RIMEI）RM-A610D 斜口指甲钳，采用吸塑挂卡包装：白色纸卡上有红色品牌标识、\"NAIL CLIPPERS\" 字样、型号 RM-A610D 及 \"RIMEI 金达日美\" 标志，右下角有橙色圆形警示贴纸。指甲钳本体为深色金属，细长弧形钳身，带旋转压杆，钳口为斜口设计，钳身上有金色刻字。产品为单件吸塑包装，非多件组合。",
+          "referenceAssetIds": [
+            "6d9418cf-38b4-4274-bb13-07621151d084"
+          ],
+          "uncertainties": [
+            "参考图仅一张，且为带包装的挂卡整体照，钳口斜角细节与金属表面质感不够清晰",
+            "钳身上的金色刻字内容无法完全辨认",
+            "无法从图片确认实际尺寸或比例",
+            "销售件数为 3 件，但参考图仅展示单件吸塑包装，包装形式与销售数量的对应关系不明确"
+          ],
+          "sufficient": true
+        },
+        "ipRisk": {
+          "verdict": "PASS",
+          "findings": [
+            {
+              "category": "brand",
+              "name": "RIMEI 金达日美",
+              "evidence": "参考图包装上可见 \"RIMEI\" 与 \"金达日美\" 品牌标识及型号 RM-A610D，属于来源标题中已声明的品牌，非第三方知名 IP 或角色。",
+              "referenceAssetIds": [
+                "6d9418cf-38b4-4274-bb13-07621151d084"
+              ]
+            }
+          ]
+        },
+        "prompt": "Photorealistic photograph of a single dark metal nail clipper with a slim curved body, rotating lever and angled cutting jaw, resting on a tidy vanity surface. A small round mirror and a neatly folded soft towel are softly blurred in the background. Warm natural window light from the left, shallow depth of field, calm neutral tones, clean minimal composition. The clipper is the clear hero at a three-quarter angle. No text, no logos, no packaging, no hands, no watermarks.",
+        "textMode": "planned",
+        "expectedText": [
+          {
+            "text": "For general use",
+            "evidenceIds": [
+              "89e28500-5aa7-402c-bff1-8794d4f7347d"
+            ]
+          }
+        ]
+      },
+      "context": {
+        "listing": {
+          "draftId": "51523d04-db4d-49ac-8f1d-5c52fa1f3562",
+          "draftRevision": 1,
+          "productId": "957c9197-d42b-4a12-91dd-55f2ac05e3b4",
+          "productRevision": 41,
+          "variantId": "1bca75be-3e54-49c3-a9c8-7a065727fa91",
+          "sku": "H2-261008-27",
+          "targetId": "83294028-8de1-4299-bbc8-3272eda99926",
+          "targetGeneration": 3,
+          "listingProgram": "haul",
+          "productType": "NAIL_CLIPPER",
+          "marketplaceId": "ATVPDKIKX0DER",
+          "locale": "en_US",
+          "requirements": "LISTING",
+          "parentageLevel": "NONE",
+          "schemaChecksum": "htDFMIcLJ5hCEVZ7bmOjIg==",
+          "schemaVersion": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+          "schemaSha256": "4c1386bb26fe4611166c4297ad04e680adf6c54b5204e7a19bdf359127c1ad83",
+          "policyVersion": "haul-us-copy-2026-10-07-v2",
+          "fields": [
+            {
+              "name": "item_name",
+              "title": "Title",
+              "description": "Provide a title for the item that may be customer facing",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 200,
+              "minItems": 1
+            },
+            {
+              "name": "product_description",
+              "title": "Product Description",
+              "description": "The description you provide should pertain to the product in general, not your particular item. There is a 2,000 character maximum.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "maxUtf8ByteLength": 20000,
+              "minItems": 1
+            },
+            {
+              "name": "bullet_point",
+              "title": "Key Product Features",
+              "description": "Max. 100 characters per line. Use these to highlight some of the product's most important qualities. Each line will be displayed as a separate bullet point above the product description.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 700,
+              "minItems": 1
+            },
+            {
+              "name": "generic_keyword",
+              "title": "Search Terms",
+              "description": "Provide specific search terms to help customers find your product.",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "material",
+              "title": "Material Type",
+              "description": "What material is the product made out of?",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Acrylic",
+                "Acrylonitrile Butadiene Styrene",
+                "Alloy Steel",
+                "Aluminum",
+                "Carbon Steel",
+                "High Carbon Steel",
+                "Iron",
+                "Metal",
+                "Nylon",
+                "Plastic",
+                "Polycarbonate",
+                "Polypropylene",
+                "Polyvinyl Chloride",
+                "Rubber",
+                "Silicone",
+                "Stainless Steel",
+                "Thermoplastic Elastomers",
+                "Titanium",
+                "Vinyl",
+                "Wood",
+                "Zinc"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "color",
+              "title": "Color",
+              "description": "Provide the color or visual appearance of the product, including solid colors, color combinations, patterns, or graphic designs, using branded or standardized color terms.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 1000,
+              "minItems": 1
+            }
+          ],
+          "evidence": [
+            {
+              "id": "3fca4f09-3dfe-457a-bc6d-f9c5486c7894",
+              "name": "是否进口",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "89e28500-5aa7-402c-bff1-8794d4f7347d",
+              "name": "适用人群",
+              "value": "通用",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "67f0f35e-6f4f-4588-9293-f4a1ec3e1992",
+              "name": "材质",
+              "value": "金属",
+              "meaning": "material",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "1de90f37-2984-48af-94ce-33604b7e6cc5",
+              "name": "产地",
+              "value": "广东",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "97a8de83-1dbb-43cb-909d-4e9d0763a269",
+              "name": "净含量",
+              "value": "120",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "84a0bb54-c37d-45d0-a73b-4dbf0b279bce",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "b09ea847-9a8f-47fd-b4ff-eb911e17b457",
+              "name": "产品类别",
+              "value": "指甲刀",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "365de56a-84d3-4dac-8cda-a24085107ca5",
+              "name": "款式",
+              "value": "便携式,家用款",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "b850a6e8-6829-4b36-bc70-f89ec70a8f94",
+              "name": "装箱数量",
+              "value": "1233",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "926ede5f-c8c9-4ff1-84cb-0f4aa3c74aa2",
+              "name": "包装种类",
+              "value": "基础包装",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "38f626b2-ff08-4dce-a8be-d9f310699d25",
+              "name": "销售件数",
+              "value": "3",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "1bca75be-3e54-49c3-a9c8-7a065727fa91:spec",
+              "name": "Selected SKU specification",
+              "value": "颜色分类: 610D【斜口】 · 3 pc",
+              "meaning": "general",
+              "source": "selected_sku"
+            },
+            {
+              "id": "1bca75be-3e54-49c3-a9c8-7a065727fa91:sale-count",
+              "name": "Sales package quantity",
+              "value": "3 pieces",
+              "meaning": "general",
+              "source": "selected_sku"
+            }
+          ],
+          "unverifiedSourceTitle": "金达日美独立包装指甲钳 男士女士大号剪指甲刀 吸塑挂卡超市修甲"
+        },
+        "currentListingCopy": [
+          {
+            "field": "material",
+            "values": [
+              "金属"
+            ]
+          }
+        ],
+        "listingReviewResultId": "3cc6023a-1af2-47d4-aa9e-a88e8e0ac2e1",
+        "referenceAssets": [
+          {
+            "assetId": "6d9418cf-38b4-4274-bb13-07621151d084",
+            "sha256": "338e368f6c39509cc34d7ea42889946cf2e38d4ca9ca6f431e22cae57b51f967",
+            "variantId": "1bca75be-3e54-49c3-a9c8-7a065727fa91"
+          }
+        ],
+        "purpose": "detail",
+        "policyVersion": "product-image/ip-v3",
+        "ipSource": {
+          "description": "品牌：金达日美\r\n是否进口：否\r\n适用人群：通用\r\n材质：金属\r\n货号：618\r\n颜色分类：6425,610F【斜口】,610D【斜口】,618【大号】,6576Z【三件套组合】,618C1【三件套组合】,602E,602Q,603【大号】,605E,6521,608F,6505【大号】,6520,618E【大号】,6509,6713,625R,679E,618HD【大号】,688D,6411【大号】,6423,6425E,6426-1,6426E,6442-1,6542【大号】,6535,6714【大号】,6470-1,6490,6491【大号】,6503【大号】,610【斜口】,6504【大号】,6507【大号】,6508,6513【大号】,6514【大号】,6515【大号.斜口】,6524【大号】,6552【大号】,6528【大号】,6529,6530【大号】,6537,6538【大号】,6539【大号斜口】,6545【斜口】,6546【大号】,6547【大号】,6548【大号】,6549【大号】,6550,6551\r\n产地：广东\r\n净含量：120\r\n是否跨境出口专供货源：否\r\n产品类别：指甲刀\r\n款式：便携式,家用款\r\n品牌类型：国货品牌\r\n装箱数量：1233\r\n包装种类：基础包装",
+          "originalSpec": "颜色分类: 610D【斜口】",
+          "sourceSpec": "颜色分类: 610D【斜口】",
+          "normalizedSpec": "",
+          "facts": [
+            {
+              "id": "a4493e54-a358-41ed-b720-80333f8a6547",
+              "name": "品牌",
+              "value": "金达日美",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "3fca4f09-3dfe-457a-bc6d-f9c5486c7894",
+              "name": "是否进口",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "89e28500-5aa7-402c-bff1-8794d4f7347d",
+              "name": "适用人群",
+              "value": "通用",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "67f0f35e-6f4f-4588-9293-f4a1ec3e1992",
+              "name": "材质",
+              "value": "金属",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "f92104ef-086e-498e-93ac-44c867d5928a",
+              "name": "货号",
+              "value": "618",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "d46eada3-9392-44cd-b2f4-b1767a2decdc",
+              "name": "颜色分类",
+              "value": "6425,610F【斜口】,610D【斜口】,618【大号】,6576Z【三件套组合】,618C1【三件套组合】,602E,602Q,603【大号】,605E,6521,608F,6505【大号】,6520,618E【大号】,6509,6713,625R,679E,618HD【大号】,688D,6411【大号】,6423,6425E,6426-1,6426E,6442-1,6542【大号】,6535,6714【大号】,6470-1,6490,6491【大号】,6503【大号】,610【斜口】,6504【大号】,6507【大号】,6508,6513【大号】,6514【大号】,6515【大号.斜口】,6524【大号】,6552【大号】,6528【大号】,6529,6530【大号】,6537,6538【大号】,6539【大号斜口】,6545【斜口】,6546【大号】,6547【大号】,6548【大号】,6549【大号】,6550,6551",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "1de90f37-2984-48af-94ce-33604b7e6cc5",
+              "name": "产地",
+              "value": "广东",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "97a8de83-1dbb-43cb-909d-4e9d0763a269",
+              "name": "净含量",
+              "value": "120",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "84a0bb54-c37d-45d0-a73b-4dbf0b279bce",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "b09ea847-9a8f-47fd-b4ff-eb911e17b457",
+              "name": "产品类别",
+              "value": "指甲刀",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "365de56a-84d3-4dac-8cda-a24085107ca5",
+              "name": "款式",
+              "value": "便携式,家用款",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "97280f3c-c765-46bb-87bb-61c1f35a2547",
+              "name": "品牌类型",
+              "value": "国货品牌",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "b850a6e8-6829-4b36-bc70-f89ec70a8f94",
+              "name": "装箱数量",
+              "value": "1233",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "926ede5f-c8c9-4ff1-84cb-0f4aa3c74aa2",
+              "name": "包装种类",
+              "value": "基础包装",
+              "source": "import",
+              "state": "source_confirmed"
+            }
+          ]
+        },
+        "sourceVariantIds": [
+          "1bca75be-3e54-49c3-a9c8-7a065727fa91"
+        ],
+        "setPolicy": "seven-product-v2",
+        "referenceMeasurements": [],
+        "sourceMeasurements": [],
+        "slot": {
+          "index": 5,
+          "total": 7,
+          "provisional": true
+        },
+        "setPlan": {
+          "style": "统一采用柔和自然光、浅景深、暖中性色调的写实生活摄影风格；背景为简洁浴室或梳妆台环境，主体始终为深色金属斜口指甲钳，构图干净、无杂乱道具，保持七张图一致的色调与质感。",
+          "dimensionEvidenceIds": [],
+          "dimensionReason": "来源未提供任何可信的产品尺寸数据，referenceMeasurements 为空，参考图中也没有可清晰辨认且可归属于本 SKU 的印刷尺寸，因此不设尺寸图槽位，避免用外观或道具推断比例。",
+          "slots": [
+            {
+              "index": 1,
+              "role": "main_scene",
+              "focus": "斜口指甲钳在真实修甲场景中的使用氛围",
+              "evidenceIds": [],
+              "scene": "明亮浴室洗手台边，深色金属斜口指甲钳静置于浅色台面，旁边有折叠毛巾与柔和自然光，无任何文字或品牌标识。",
+              "prompt": "Photorealistic lifestyle photograph of a single dark metal nail clipper with a slim curved body, rotating lever and angled cutting jaw, placed on a clean light bathroom countertop beside a neatly folded soft towel. Soft natural window light from the left, shallow depth of field, warm neutral tones, calm everyday grooming mood. The clipper is the clear hero at a three-quarter angle. No text, no logos, no packaging, no extra products, no hands, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 2,
+              "role": "selling_point",
+              "focus": "斜口钳口设计",
+              "evidenceIds": [
+                "1bca75be-3e54-49c3-a9c8-7a065727fa91:spec"
+              ],
+              "scene": "微距特写深色金属指甲钳的斜口钳口部位，背景虚化的浴室台面，突出钳口角度与金属质感。",
+              "prompt": "Macro close-up photograph of the angled cutting jaw of a dark metal nail clipper, showing the slanted blade edge and brushed metal surface. Soft diffused light, blurred bathroom countertop background, shallow depth of field, warm neutral tones. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Angled cutting jaw",
+                  "evidenceIds": [
+                    "1bca75be-3e54-49c3-a9c8-7a065727fa91:spec"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 3,
+              "role": "selling_point",
+              "focus": "金属材质",
+              "evidenceIds": [
+                "67f0f35e-6f4f-4588-9293-f4a1ec3e1992"
+              ],
+              "scene": "侧光下的深色金属指甲钳特写，强调金属表面反光与坚固质感，背景简洁。",
+              "prompt": "Close-up photograph of a dark metal nail clipper under soft side light, emphasizing the metallic sheen and solid construction of the curved body and lever. Clean neutral background, shallow depth of field, warm tones. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Metal construction",
+                  "evidenceIds": [
+                    "67f0f35e-6f4f-4588-9293-f4a1ec3e1992"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 4,
+              "role": "selling_point",
+              "focus": "便携家用款式",
+              "evidenceIds": [
+                "365de56a-84d3-4dac-8cda-a24085107ca5"
+              ],
+              "scene": "指甲钳放在旅行洗漱包旁的小台面上，体现便携与家用场景，光线柔和。",
+              "prompt": "Photorealistic photograph of a dark metal nail clipper resting on a small bathroom tray next to a soft travel pouch, suggesting a portable everyday grooming item. Soft natural light, shallow depth of field, warm neutral tones, clean composition. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Portable and home use",
+                  "evidenceIds": [
+                    "365de56a-84d3-4dac-8cda-a24085107ca5"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 5,
+              "role": "selling_point",
+              "focus": "通用适用人群",
+              "evidenceIds": [
+                "89e28500-5aa7-402c-bff1-8794d4f7347d"
+              ],
+              "scene": "简洁梳妆台上指甲钳与一面小镜子、毛巾搭配，传达适合日常通用修甲的场景。",
+              "prompt": "Photorealistic photograph of a dark metal nail clipper on a tidy vanity surface with a small round mirror and folded towel softly blurred in the background. Warm natural light, shallow depth of field, calm neutral tones. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "For general use",
+                  "evidenceIds": [
+                    "89e28500-5aa7-402c-bff1-8794d4f7347d"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 6,
+              "role": "scene",
+              "focus": "日常修甲后的整洁台面氛围",
+              "evidenceIds": [],
+              "scene": "修甲完成后，指甲钳静置于干净台面，旁边有毛巾与柔和光影，无文字。",
+              "prompt": "Photorealistic still-life photograph of a dark metal nail clipper resting on a clean bathroom countertop after use, with a soft towel and gentle window light creating calm shadows. Warm neutral tones, shallow depth of field, minimal composition. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 7,
+              "role": "scene",
+              "focus": "手持视角下的修甲准备场景",
+              "evidenceIds": [],
+              "scene": "俯视视角，指甲钳放在浅色台面中央，周围留白，光线柔和，无文字。",
+              "prompt": "Top-down photorealistic photograph of a single dark metal nail clipper centered on a light neutral bathroom surface, generous negative space around it, soft diffused daylight, subtle shadows, warm minimal styling. No text, no logos, no packaging, no hands, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            }
+          ]
+        }
+      },
+      "call": {
+        "id": "30e6a21b-1428-466d-ba47-3633f2b6d024",
+        "providerId": "deepseek",
+        "productId": "957c9197-d42b-4a12-91dd-55f2ac05e3b4",
+        "productRevision": 41,
+        "status": "FAILED",
+        "errorCode": "OUTPUT_INVALID",
+        "requestId": "c342d85c-fa8e-4dd7-a10f-a83f07e20017",
+        "model": "deepseek-flash",
+        "generation": 4,
+        "startedAt": "2026-10-09T11:48:29.951Z",
+        "finishedAt": "2026-10-09T11:48:33.731Z",
+        "usage": {
+          "promptTokens": 5564,
+          "completionTokens": 504,
+          "processedImages": 0
+        }
+      }
+    },
+    {
+      "sku": "H2-261008-35",
+      "callId": "b075c1ba-dc5b-48fa-9c31-dd8ea61ddfac",
+      "raw": {
+        "kind": "image-plan",
+        "productUnderstanding": {
+          "summary": "参考图显示为吸塑挂卡包装的指甲钳，共两件叠放展示。挂卡为白色纸卡，印有红色“金达日美”标识、红色“NAIL-CLIPPERS”字样、型号“NO:A6411”以及“RIMEI 金达日美”标志。指甲钳本体为深色（黑色/深灰）金属长条形，带银色铆钉与一体式压杆，钳口为直口。其中一件表面印有青绿色脚印图案与“FOREVER YOUNG”字样，另一件表面印有粉红色“Rimei FOREVER YOUNG”字样与卷草纹图案。所选 SKU 为 6411【大号】3 件装，但图中仅见两件，且无法确认哪一件对应 6411 大号的具体外观。",
+          "referenceAssetIds": [
+            "ac20521d-9084-4ebb-bd93-8bc372abaf6d"
+          ],
+          "uncertainties": [
+            "图中仅见两件指甲钳，无法确认所选 SKU 3 件装的实际数量与组合",
+            "无法确认图中哪一件对应 6411【大号】的具体款式",
+            "两件表面图案不同（青绿脚印 vs 粉红卷草纹），无法确定所选 SKU 对应哪种图案",
+            "无尺寸参照物，无法判断“大号”的实际尺寸",
+            "包装卡上型号为 NO:A6411，与所选 SKU 6411 的对应关系未获证据确认",
+            "金属材质为来源确认，但表面处理与颜色细节仅凭图片观察"
+          ],
+          "sufficient": false
+        },
+        "ipRisk": {
+          "verdict": "PASS",
+          "findings": []
+        },
+        "prompt": "",
+        "textMode": "none",
+        "expectedText": [],
+        "setPlan": {
+          "style": "统一采用干净明亮的中性灰或浅木色台面，柔和自然侧光，浅景深，产品居中偏侧构图，色调冷静克制，突出深色金属指甲钳与银色铆钉的质感；整体风格简洁、真实、家用护理场景感，避免夸张道具与文字堆砌。",
+          "dimensionEvidenceIds": [],
+          "dimensionReason": "未提供 referenceMeasurements，也无 requiredDimensionEvidenceIds；参考图中无任何可读的印刷尺寸标注，仅有型号 NO:A6411，无法据此得出可信的厘米/毫米/英寸数值，故不设尺寸图槽位。",
+          "slots": [
+            {
+              "index": 1,
+              "role": "main_scene",
+              "focus": "家用护理场景中自然使用指甲钳",
+              "evidenceIds": [],
+              "scene": "浅色木质桌面或浴室台面，旁边放一条折叠的浅灰毛巾与一只小玻璃杯，深色金属指甲钳斜置于台面中央，柔和窗光从左侧照入，浅景深虚化背景，无任何文字或品牌标识。",
+              "prompt": "A realistic lifestyle product-use scene: a dark metal nail clipper with a silver rivet and integrated lever resting diagonally on a light wood bathroom countertop, a folded light grey towel and a small clear glass nearby, soft natural window light from the left, shallow depth of field, calm neutral tones, no text, no logos, no packaging, no extra accessories implied as included.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 2,
+              "role": "selling_point",
+              "focus": "金属材质",
+              "evidenceIds": [
+                "67f0f35e-6f4f-4588-9293-f4a1ec3e1992"
+              ],
+              "scene": "深色金属指甲钳特写置于浅灰石纹台面，侧逆光勾勒金属边缘与铆钉高光，背景干净虚化。",
+              "prompt": "Close-up of a dark metal nail clipper on a light grey stone-textured surface, side backlight catching the metallic edge and the silver rivet, clean blurred background, restrained commercial lighting, short overlay text only as specified.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Metal Body",
+                  "evidenceIds": [
+                    "67f0f35e-6f4f-4588-9293-f4a1ec3e1992"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 3,
+              "role": "selling_point",
+              "focus": "便携式家用款",
+              "evidenceIds": [
+                "365de56a-84d3-4dac-8cda-a24085107ca5"
+              ],
+              "scene": "指甲钳平放于旅行洗漱包旁的浅色台面，旁边有折叠毛巾一角，构图简洁，突出小巧便携的形态。",
+              "prompt": "A dark metal nail clipper lying flat on a light countertop beside a partially open travel toiletry pouch and a folded towel corner, simple composition emphasizing a compact portable form, soft daylight, shallow depth of field, short overlay text only as specified.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Portable & Home Use",
+                  "evidenceIds": [
+                    "365de56a-84d3-4dac-8cda-a24085107ca5"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 4,
+              "role": "selling_point",
+              "focus": "通用适用人群",
+              "evidenceIds": [
+                "89e28500-5aa7-402c-bff1-8794d4f7347d"
+              ],
+              "scene": "两只手在浅色台面上自然持握指甲钳修剪指甲，画面聚焦手部与工具，背景柔和虚化。",
+              "prompt": "A realistic scene of two hands using a dark metal nail clipper on a light countertop, focus on the hands and the tool, soft blurred background, natural daylight, no visible text except the specified overlay.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "For Everyone",
+                  "evidenceIds": [
+                    "89e28500-5aa7-402c-bff1-8794d4f7347d"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 5,
+              "role": "scene",
+              "focus": "浴室收纳场景",
+              "evidenceIds": [],
+              "scene": "浅色浴室台面一角，指甲钳放在小托盘上，旁边有卷起的毛巾与绿植叶片，晨光柔和。",
+              "prompt": "A calm bathroom countertop corner scene: a dark metal nail clipper on a small ceramic tray, a rolled towel and a green plant leaf nearby, soft morning light, shallow depth of field, no text, no logos.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 6,
+              "role": "scene",
+              "focus": "桌面细节特写",
+              "evidenceIds": [],
+              "scene": "深色金属指甲钳的钳口与压杆局部特写，浅灰背景，侧光突出金属纹理与铆钉结构。",
+              "prompt": "Macro detail of the cutting jaw and lever of a dark metal nail clipper, light grey background, side lighting revealing metal texture and the silver rivet structure, no text, no logos.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 7,
+              "role": "scene",
+              "focus": "日常护理台面场景",
+              "evidenceIds": [],
+              "scene": "浅木色梳妆台面，指甲钳与一小块亚麻布、一只小碟并置，暖色柔光，构图安静整洁。",
+              "prompt": "A quiet daily grooming scene on a light wood dresser top: a dark metal nail clipper placed beside a small linen cloth and a tiny dish, warm soft light, tidy minimal composition, no text, no logos.",
+              "textMode": "none",
+              "expectedText": []
+            }
+          ]
+        }
+      },
+      "context": {
+        "listing": {
+          "draftId": "d10370a1-3a7d-4b21-a87e-044c1aaa90b6",
+          "draftRevision": 1,
+          "productId": "957c9197-d42b-4a12-91dd-55f2ac05e3b4",
+          "productRevision": 41,
+          "variantId": "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9",
+          "sku": "H2-261008-35",
+          "targetId": "83294028-8de1-4299-bbc8-3272eda99926",
+          "targetGeneration": 3,
+          "listingProgram": "haul",
+          "productType": "NAIL_CLIPPER",
+          "marketplaceId": "ATVPDKIKX0DER",
+          "locale": "en_US",
+          "requirements": "LISTING",
+          "parentageLevel": "NONE",
+          "schemaChecksum": "htDFMIcLJ5hCEVZ7bmOjIg==",
+          "schemaVersion": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+          "schemaSha256": "4c1386bb26fe4611166c4297ad04e680adf6c54b5204e7a19bdf359127c1ad83",
+          "policyVersion": "haul-us-copy-2026-10-07-v2",
+          "fields": [
+            {
+              "name": "item_name",
+              "title": "Title",
+              "description": "Provide a title for the item that may be customer facing",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 200,
+              "minItems": 1
+            },
+            {
+              "name": "product_description",
+              "title": "Product Description",
+              "description": "The description you provide should pertain to the product in general, not your particular item. There is a 2,000 character maximum.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "maxUtf8ByteLength": 20000,
+              "minItems": 1
+            },
+            {
+              "name": "bullet_point",
+              "title": "Key Product Features",
+              "description": "Max. 100 characters per line. Use these to highlight some of the product's most important qualities. Each line will be displayed as a separate bullet point above the product description.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 700,
+              "minItems": 1
+            },
+            {
+              "name": "generic_keyword",
+              "title": "Search Terms",
+              "description": "Provide specific search terms to help customers find your product.",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "material",
+              "title": "Material Type",
+              "description": "What material is the product made out of?",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Acrylic",
+                "Acrylonitrile Butadiene Styrene",
+                "Alloy Steel",
+                "Aluminum",
+                "Carbon Steel",
+                "High Carbon Steel",
+                "Iron",
+                "Metal",
+                "Nylon",
+                "Plastic",
+                "Polycarbonate",
+                "Polypropylene",
+                "Polyvinyl Chloride",
+                "Rubber",
+                "Silicone",
+                "Stainless Steel",
+                "Thermoplastic Elastomers",
+                "Titanium",
+                "Vinyl",
+                "Wood",
+                "Zinc"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "color",
+              "title": "Color",
+              "description": "Provide the color or visual appearance of the product, including solid colors, color combinations, patterns, or graphic designs, using branded or standardized color terms.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 1000,
+              "minItems": 1
+            }
+          ],
+          "evidence": [
+            {
+              "id": "3fca4f09-3dfe-457a-bc6d-f9c5486c7894",
+              "name": "是否进口",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "89e28500-5aa7-402c-bff1-8794d4f7347d",
+              "name": "适用人群",
+              "value": "通用",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "67f0f35e-6f4f-4588-9293-f4a1ec3e1992",
+              "name": "材质",
+              "value": "金属",
+              "meaning": "material",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "1de90f37-2984-48af-94ce-33604b7e6cc5",
+              "name": "产地",
+              "value": "广东",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "97a8de83-1dbb-43cb-909d-4e9d0763a269",
+              "name": "净含量",
+              "value": "120",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "84a0bb54-c37d-45d0-a73b-4dbf0b279bce",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "b09ea847-9a8f-47fd-b4ff-eb911e17b457",
+              "name": "产品类别",
+              "value": "指甲刀",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "365de56a-84d3-4dac-8cda-a24085107ca5",
+              "name": "款式",
+              "value": "便携式,家用款",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "b850a6e8-6829-4b36-bc70-f89ec70a8f94",
+              "name": "装箱数量",
+              "value": "1233",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "926ede5f-c8c9-4ff1-84cb-0f4aa3c74aa2",
+              "name": "包装种类",
+              "value": "基础包装",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "c77de102-63ed-4150-a0e3-f3b99feefaae",
+              "name": "销售件数",
+              "value": "3",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9:spec",
+              "name": "Selected SKU specification",
+              "value": "颜色分类: 6411【大号】 · 3 pc",
+              "meaning": "general",
+              "source": "selected_sku"
+            },
+            {
+              "id": "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9:sale-count",
+              "name": "Sales package quantity",
+              "value": "3 pieces",
+              "meaning": "general",
+              "source": "selected_sku"
+            }
+          ],
+          "unverifiedSourceTitle": "金达日美独立包装指甲钳 男士女士大号剪指甲刀 吸塑挂卡超市修甲"
+        },
+        "currentListingCopy": [
+          {
+            "field": "material",
+            "values": [
+              "金属"
+            ]
+          }
+        ],
+        "listingReviewResultId": "6e5f7f7e-11e6-4c8e-9d14-89af3b16c807",
+        "referenceAssets": [
+          {
+            "assetId": "ac20521d-9084-4ebb-bd93-8bc372abaf6d",
+            "sha256": "c8ac99f86969fd5ba3187c30b57cc7c0353fae6a2fd5779e5d5433c00d322ca0",
+            "variantId": "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9"
+          }
+        ],
+        "purpose": "main",
+        "policyVersion": "product-image/ip-v3",
+        "ipSource": {
+          "description": "品牌：金达日美\r\n是否进口：否\r\n适用人群：通用\r\n材质：金属\r\n货号：618\r\n颜色分类：6425,610F【斜口】,610D【斜口】,618【大号】,6576Z【三件套组合】,618C1【三件套组合】,602E,602Q,603【大号】,605E,6521,608F,6505【大号】,6520,618E【大号】,6509,6713,625R,679E,618HD【大号】,688D,6411【大号】,6423,6425E,6426-1,6426E,6442-1,6542【大号】,6535,6714【大号】,6470-1,6490,6491【大号】,6503【大号】,610【斜口】,6504【大号】,6507【大号】,6508,6513【大号】,6514【大号】,6515【大号.斜口】,6524【大号】,6552【大号】,6528【大号】,6529,6530【大号】,6537,6538【大号】,6539【大号斜口】,6545【斜口】,6546【大号】,6547【大号】,6548【大号】,6549【大号】,6550,6551\r\n产地：广东\r\n净含量：120\r\n是否跨境出口专供货源：否\r\n产品类别：指甲刀\r\n款式：便携式,家用款\r\n品牌类型：国货品牌\r\n装箱数量：1233\r\n包装种类：基础包装",
+          "originalSpec": "颜色分类: 6411【大号】",
+          "sourceSpec": "颜色分类: 6411【大号】",
+          "normalizedSpec": "",
+          "facts": [
+            {
+              "id": "a4493e54-a358-41ed-b720-80333f8a6547",
+              "name": "品牌",
+              "value": "金达日美",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "3fca4f09-3dfe-457a-bc6d-f9c5486c7894",
+              "name": "是否进口",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "89e28500-5aa7-402c-bff1-8794d4f7347d",
+              "name": "适用人群",
+              "value": "通用",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "67f0f35e-6f4f-4588-9293-f4a1ec3e1992",
+              "name": "材质",
+              "value": "金属",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "f92104ef-086e-498e-93ac-44c867d5928a",
+              "name": "货号",
+              "value": "618",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "d46eada3-9392-44cd-b2f4-b1767a2decdc",
+              "name": "颜色分类",
+              "value": "6425,610F【斜口】,610D【斜口】,618【大号】,6576Z【三件套组合】,618C1【三件套组合】,602E,602Q,603【大号】,605E,6521,608F,6505【大号】,6520,618E【大号】,6509,6713,625R,679E,618HD【大号】,688D,6411【大号】,6423,6425E,6426-1,6426E,6442-1,6542【大号】,6535,6714【大号】,6470-1,6490,6491【大号】,6503【大号】,610【斜口】,6504【大号】,6507【大号】,6508,6513【大号】,6514【大号】,6515【大号.斜口】,6524【大号】,6552【大号】,6528【大号】,6529,6530【大号】,6537,6538【大号】,6539【大号斜口】,6545【斜口】,6546【大号】,6547【大号】,6548【大号】,6549【大号】,6550,6551",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "1de90f37-2984-48af-94ce-33604b7e6cc5",
+              "name": "产地",
+              "value": "广东",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "97a8de83-1dbb-43cb-909d-4e9d0763a269",
+              "name": "净含量",
+              "value": "120",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "84a0bb54-c37d-45d0-a73b-4dbf0b279bce",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "b09ea847-9a8f-47fd-b4ff-eb911e17b457",
+              "name": "产品类别",
+              "value": "指甲刀",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "365de56a-84d3-4dac-8cda-a24085107ca5",
+              "name": "款式",
+              "value": "便携式,家用款",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "97280f3c-c765-46bb-87bb-61c1f35a2547",
+              "name": "品牌类型",
+              "value": "国货品牌",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "b850a6e8-6829-4b36-bc70-f89ec70a8f94",
+              "name": "装箱数量",
+              "value": "1233",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "926ede5f-c8c9-4ff1-84cb-0f4aa3c74aa2",
+              "name": "包装种类",
+              "value": "基础包装",
+              "source": "import",
+              "state": "source_confirmed"
+            }
+          ]
+        },
+        "sourceVariantIds": [
+          "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9"
+        ],
+        "setPolicy": "seven-product-v2",
+        "referenceMeasurements": [],
+        "sourceMeasurements": []
+      },
+      "workflow": {
+        "id": "25bf7dcc-bb3e-4b2b-8e75-8422a1721161",
+        "draftId": "d10370a1-3a7d-4b21-a87e-044c1aaa90b6",
+        "productId": "957c9197-d42b-4a12-91dd-55f2ac05e3b4",
+        "productRevision": 41,
+        "variantId": "2f79c3c3-df6e-4ba0-8fa0-7f9ab9621cc9",
+        "sku": "H2-261008-35",
+        "status": "FAILED",
+        "stage": "planning",
+        "attempt": 0,
+        "maxAttempts": 3,
+        "contextSha256": "94aac92111c4d297daadfb127a81a2506e879b7bbd1307a5a221e8bab90df66d",
+        "draftSha256": "5cf41835a42ad8246a468a9a6cac884ea2c3a404dd250c4fe7c470042ed4694c",
+        "referenceAssets": [
+          {
+            "id": "ac20521d-9084-4ebb-bd93-8bc372abaf6d",
+            "sha256": "c8ac99f86969fd5ba3187c30b57cc7c0353fae6a2fd5779e5d5433c00d322ca0"
+          }
+        ],
+        "planResultIds": [],
+        "candidateIds": [],
+        "ipReviewResultIds": [],
+        "ocrResultIds": [],
+        "reviewResultIds": [],
+        "approvedAssetId": null,
+        "approvedSha256": null,
+        "createdAt": "2026-10-09T05:00:21.178Z",
+        "updatedAt": "2026-10-09T11:48:44.769Z",
+        "error": "AI 返回内容未通过校验，未保存为商品资料",
+        "imagePolicyVersion": "product-image/ip-v3",
+        "slotPolicy": "seven-product-v2",
+        "slots": [
+          {
+            "index": 1,
+            "purpose": "main",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 2,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 3,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 4,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 5,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 6,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 7,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          }
+        ],
+        "riskInterceptionEnabled": false,
+        "copyReviewEnabled": false
+      },
+      "call": {
+        "id": "b075c1ba-dc5b-48fa-9c31-dd8ea61ddfac",
+        "providerId": "deepseek",
+        "productId": "957c9197-d42b-4a12-91dd-55f2ac05e3b4",
+        "productRevision": 41,
+        "status": "FAILED",
+        "errorCode": "OUTPUT_INVALID",
+        "requestId": "038c79a4-b383-4c26-864a-bd0d66023455",
+        "model": "deepseek-flash",
+        "generation": 4,
+        "startedAt": "2026-10-09T11:48:36.361Z",
+        "finishedAt": "2026-10-09T11:48:44.764Z",
+        "usage": {
+          "promptTokens": 4613,
+          "completionTokens": 1552,
+          "processedImages": 0
+        }
+      }
+    },
+    {
+      "sku": "H2-261008-43",
+      "callId": "1ee2a8c5-815c-4129-89d2-38c4da682166",
+      "raw": {
+        "kind": "image-plan",
+        "productUnderstanding": {
+          "summary": "唯一一张参考图是一张白底黑字的中文说明图，内容为：底座有多种颜色、仓库随机混发、不接受订单备注；所有颜色均为实用百搭款、不影响产品功能；以及致谢语。图中没有任何水豚玩偶、旋转底座或其它产品实物的可见图像，因此无法确认所选 SKU（H2-261008-43）的外观、颜色、表情款式、结构或尺寸。来源标题与规格仅文字描述为“旋转水豚噜噜”系列 PVC 卡通动物摆件，底座颜色随机，但这些文字信息不能替代实物外观证据。",
+          "referenceAssetIds": [
+            "18c22ce2-8819-4fda-ac4b-4b763361ceda"
+          ],
+          "uncertainties": [
+            "唯一参考图仅为中文文字说明图，未显示任何产品实物。",
+            "无法确认所选 SKU 的具体表情款式（大哭/哭唧唧/你瞅啥/震惊/想你/自行车）。",
+            "无法确认水豚玩偶的造型、比例、颜色与底座结构。",
+            "无法确认底座颜色，来源明确说明随机混发。",
+            "无任何尺寸数据，无法制作尺寸图。",
+            "无法确认包装形式（OPP 装）的实物外观。",
+            "无法确认是否含旋转机构及其外观表现。",
+            "无法确认材质 PVC 的视觉质感表现。"
+          ],
+          "sufficient": false
+        },
+        "ipRisk": {
+          "verdict": "PASS",
+          "findings": []
+        },
+        "prompt": "",
+        "textMode": "none",
+        "expectedText": [],
+        "setPlan": {
+          "style": "统一采用柔和自然光、浅色木质或暖灰桌面场景，浅景深，真实生活化摄影风格；因参考图无实物，所有画面均需以来源文字描述的水豚造型为基础，保持同一套色调与构图语言。",
+          "dimensionEvidenceIds": [],
+          "dimensionReason": "未提供任何 referenceMeasurements，来源 facts 与 selected SKU 规格中均无尺寸、重量或包装尺寸数据，参考图也无印刷尺寸，因此不设尺寸图槽位。",
+          "slots": [
+            {
+              "index": 1,
+              "role": "main_scene",
+              "focus": "水豚造型桌面旋转摆件置于办公桌面的真实使用场景",
+              "evidenceIds": [
+                "89e286bf-75cf-4726-aa60-cae94eafd208",
+                "118f381e-2bbb-48d0-9e7a-bf473e1f6951"
+              ],
+              "scene": "明亮整洁的办公桌面，浅木色桌面上放置一只卡通水豚造型小摆件，旁边有笔记本电脑一角、绿植与笔记本，自然窗光从侧面照入，浅景深，无任何文字。",
+              "prompt": "A realistic lifestyle product-use scene: a small cartoon capybara-shaped desk figurine sitting on a light wood office desk, beside a partially visible laptop edge, a small potted plant and a notebook, soft natural window light from the side, shallow depth of field, warm neutral tones, no text, no logos, no watermark, no collage.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 2,
+              "role": "selling_point",
+              "focus": "卡通动物造型",
+              "evidenceIds": [
+                "89e286bf-75cf-4726-aa60-cae94eafd208",
+                "118f381e-2bbb-48d0-9e7a-bf473e1f6951"
+              ],
+              "scene": "浅灰背景前的水豚造型摆件特写，柔和侧光突出圆润轮廓，无文字。",
+              "prompt": "Close-up of a small cartoon capybara-shaped desk figurine on a plain light gray background, soft side lighting, rounded silhouette clearly visible, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Cartoon animal design",
+                  "evidenceIds": [
+                    "89e286bf-75cf-4726-aa60-cae94eafd208",
+                    "118f381e-2bbb-48d0-9e7a-bf473e1f6951"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 3,
+              "role": "selling_point",
+              "focus": "PVC 材质",
+              "evidenceIds": [
+                "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf"
+              ],
+              "scene": "桌面近景，柔和光线落在摆件表面，呈现细腻质感，无文字。",
+              "prompt": "Macro-style close view of a small cartoon capybara desk figurine on a desk, soft diffused light showing a smooth matte surface texture, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "PVC material",
+                  "evidenceIds": [
+                    "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 4,
+              "role": "selling_point",
+              "focus": "单件销售",
+              "evidenceIds": [
+                "60dab0c6-3acf-4ebf-aa1e-741cbd26630e",
+                "e94a7e5c-b7f7-491a-92b3-6dea36566489:sale-count"
+              ],
+              "scene": "一只水豚摆件单独置于浅色桌面中央，构图简洁，无文字。",
+              "prompt": "A single small cartoon capybara desk figurine centered on a clean light-colored desk surface, simple minimal composition, soft even lighting, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "1 piece",
+                  "evidenceIds": [
+                    "60dab0c6-3acf-4ebf-aa1e-741cbd26630e",
+                    "e94a7e5c-b7f7-491a-92b3-6dea36566489:sale-count"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 5,
+              "role": "scene",
+              "focus": "车载场景",
+              "evidenceIds": [],
+              "scene": "汽车中控台一角，水豚摆件置于防滑垫上，车窗外为柔和虚化的日光，无文字。",
+              "prompt": "A realistic scene of a small cartoon capybara desk figurine placed on a car dashboard mat, soft blurred daylight through the windshield, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 6,
+              "role": "scene",
+              "focus": "居家书架场景",
+              "evidenceIds": [],
+              "scene": "居家书架一角，水豚摆件放在书本旁，暖色台灯光，无文字。",
+              "prompt": "A cozy home bookshelf corner with a small cartoon capybara desk figurine placed beside stacked books, warm lamp light, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 7,
+              "role": "scene",
+              "focus": "礼物赠送场景",
+              "evidenceIds": [],
+              "scene": "浅色桌面上摆件旁有简单包装纸与丝带，柔和自然光，无文字。",
+              "prompt": "A small cartoon capybara desk figurine on a light table beside simple wrapping paper and a ribbon, soft natural light, shallow depth of field, no text, no logos, no watermark.",
+              "textMode": "none",
+              "expectedText": []
+            }
+          ]
+        }
+      },
+      "context": {
+        "listing": {
+          "draftId": "dd3bca63-a986-4a03-a43d-4c0e64e0b276",
+          "draftRevision": 1,
+          "productId": "8bedf231-02df-4929-b620-d3b9752fda54",
+          "productRevision": 15,
+          "variantId": "e94a7e5c-b7f7-491a-92b3-6dea36566489",
+          "sku": "H2-261008-43",
+          "targetId": "83294028-8de1-4299-bbc8-3272eda99926",
+          "targetGeneration": 3,
+          "listingProgram": "haul",
+          "productType": "FIGURINE",
+          "marketplaceId": "ATVPDKIKX0DER",
+          "locale": "en_US",
+          "requirements": "LISTING",
+          "parentageLevel": "NONE",
+          "schemaChecksum": "j1xcXsU4YTgMqHrbrJszBw==",
+          "schemaVersion": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+          "schemaSha256": "2615da08284c0353c8ad752090312829e3850fc61affa762ceebcf4c2a026310",
+          "policyVersion": "haul-us-copy-2026-10-07-v2",
+          "fields": [
+            {
+              "name": "item_name",
+              "title": "Product Name",
+              "description": "Max. 250 characters",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 200,
+              "minItems": 1
+            },
+            {
+              "name": "product_description",
+              "title": "Product Description",
+              "description": "Max. 2,000 characters. Use this to describe the product in detail. Please enter only product-related features here. You'll have a chance later on to enter item condition, price, and other seller-specific info.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "maxUtf8ByteLength": 20000,
+              "minItems": 1
+            },
+            {
+              "name": "bullet_point",
+              "title": "Key Product Features",
+              "description": "Max. 100 characters per line. Use these to highlight some of the product's most important qualities. Each line will be displayed as a separate bullet point above the product description.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 700,
+              "minItems": 1
+            },
+            {
+              "name": "generic_keyword",
+              "title": "Search Terms",
+              "description": "Provide specific search terms to help customers find your product.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "material",
+              "title": "Material Type",
+              "description": "What material is the product made out of?",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Acrylic",
+                "Acrylonitrile Butadiene Styrene",
+                "Alloy Steel",
+                "Aluminum",
+                "Bamboo",
+                "Basswood",
+                "Beech Wood",
+                "Birch Wood",
+                "Bone China",
+                "Brass",
+                "Bronze",
+                "Carbon Fiber",
+                "Cardboard",
+                "Cast Iron",
+                "Cast Stone",
+                "Cement",
+                "Ceramic",
+                "Clay",
+                "Copper",
+                "Cotton",
+                "Crystal",
+                "Earthenware",
+                "Engineered Wood",
+                "Feather",
+                "Fiberglass",
+                "Glass",
+                "Iron",
+                "Leather",
+                "Maple Wood",
+                "Marble",
+                "Metal",
+                "Oak Wood",
+                "Paper",
+                "Pewter",
+                "Plastic",
+                "Polycarbonate (PC)",
+                "Polyester",
+                "Polystone",
+                "Polyurethane (PU)",
+                "Polyvinyl Chloride",
+                "Porcelain",
+                "Rattan",
+                "Resin",
+                "Rubber",
+                "Silicone",
+                "Silver",
+                "Stainless Steel",
+                "Stone",
+                "Stoneware",
+                "Straw",
+                "Synthetic Resin",
+                "Synthetic Rubber",
+                "Teak Wood",
+                "Terracotta",
+                "Tin",
+                "Vinyl",
+                "Wood",
+                "Wool",
+                "Zinc"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "color",
+              "title": "Color",
+              "description": "Provide the color or visual appearance of the product, including solid colors, color combinations, patterns, or graphic designs, using branded or standardized color terms.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Beige",
+                "Black",
+                "Blue",
+                "Bronze",
+                "Brown",
+                "Clear",
+                "Gold",
+                "Green",
+                "Grey",
+                "Metallic",
+                "Multicolor",
+                "Off White",
+                "Orange",
+                "Pink",
+                "Purple",
+                "Red",
+                "Silver",
+                "Turquoise",
+                "White",
+                "Yellow"
+              ],
+              "minLength": 0,
+              "maxLength": 1000,
+              "minItems": 1
+            },
+            {
+              "name": "item_shape",
+              "title": "Shape",
+              "description": "The shape of the item",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Heart",
+                "Oval",
+                "Rectangular",
+                "Round",
+                "Square"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            }
+          ],
+          "evidence": [
+            {
+              "id": "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf",
+              "name": "材质",
+              "value": "PVC",
+              "meaning": "material",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "118f381e-2bbb-48d0-9e7a-bf473e1f6951",
+              "name": "风格",
+              "value": "卡通",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "e8f8cf40-fc03-418b-9568-78d1477eef9e",
+              "name": "加工定制",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "0c7bbe49-0de1-4d62-bceb-d6f426258d9e",
+              "name": "是否专利货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "cbd97ee6-55cb-4ea4-8a04-fbce4865edbc",
+              "name": "功能",
+              "value": "其它",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "f4e204c4-0a80-4caa-8c1e-b809faebf7a5",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "89e286bf-75cf-4726-aa60-cae94eafd208",
+              "name": "外观造型",
+              "value": "动物",
+              "meaning": "item_shape",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "60dab0c6-3acf-4ebf-aa1e-741cbd26630e",
+              "name": "销售件数",
+              "value": "1",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "e94a7e5c-b7f7-491a-92b3-6dea36566489:spec",
+              "name": "Selected SKU specification",
+              "value": "颜色分类: 底座颜色随机不支持选 · 1 pc",
+              "meaning": "general",
+              "source": "selected_sku"
+            },
+            {
+              "id": "e94a7e5c-b7f7-491a-92b3-6dea36566489:sale-count",
+              "name": "Sales package quantity",
+              "value": "1 pieces",
+              "meaning": "general",
+              "source": "selected_sku"
+            }
+          ],
+          "unverifiedSourceTitle": "水豚噜噜玩偶车载办公桌面旋转摆件可爱手办公仔桌面摆件搞怪"
+        },
+        "currentListingCopy": [
+          {
+            "field": "material",
+            "values": [
+              "PVC"
+            ]
+          }
+        ],
+        "listingReviewResultId": "4b39fd6b-6ea6-48bb-918d-af44740f4475",
+        "referenceAssets": [
+          {
+            "assetId": "18c22ce2-8819-4fda-ac4b-4b763361ceda",
+            "sha256": "52b1894288b1b24c3f73db30a662bd8c9d8ef49ce2fe78363eb1f828365721a2",
+            "variantId": "e94a7e5c-b7f7-491a-92b3-6dea36566489"
+          }
+        ],
+        "purpose": "main",
+        "policyVersion": "product-image/ip-v3",
+        "ipSource": {
+          "description": "材质：PVC\r\n风格：卡通\r\n品牌：其他\r\n加工定制：否\r\n是否专利货源：否\r\n货号：旋转水豚摆件\r\n功能：其它\r\n颜色分类：旋转水豚噜噜—大哭（OPP）装,旋转水豚噜噜—哭唧唧（OPP）装,旋转水豚噜噜—你瞅啥（OPP）装,旋转水豚噜噜—震惊（OPP）装,旋转水豚噜噜—想你（OPP）装,旋转水豚噜噜—自行车（OPP）装,底座颜色随机不支持选\r\n是否跨境出口专供货源：否\r\n外观造型：动物",
+          "originalSpec": "颜色分类: 底座颜色随机不支持选",
+          "sourceSpec": "颜色分类: 底座颜色随机不支持选",
+          "normalizedSpec": "",
+          "facts": [
+            {
+              "id": "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf",
+              "name": "材质",
+              "value": "PVC",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "118f381e-2bbb-48d0-9e7a-bf473e1f6951",
+              "name": "风格",
+              "value": "卡通",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "d8bf3070-d1ef-44ca-80a3-faef81011669",
+              "name": "品牌",
+              "value": "其他",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "e8f8cf40-fc03-418b-9568-78d1477eef9e",
+              "name": "加工定制",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "0c7bbe49-0de1-4d62-bceb-d6f426258d9e",
+              "name": "是否专利货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "c5cd9544-6f11-42cc-a497-acb17c8c34af",
+              "name": "货号",
+              "value": "旋转水豚摆件",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "cbd97ee6-55cb-4ea4-8a04-fbce4865edbc",
+              "name": "功能",
+              "value": "其它",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "92afc2bb-7038-4389-9ef1-535dfe079ff2",
+              "name": "颜色分类",
+              "value": "旋转水豚噜噜—大哭（OPP）装,旋转水豚噜噜—哭唧唧（OPP）装,旋转水豚噜噜—你瞅啥（OPP）装,旋转水豚噜噜—震惊（OPP）装,旋转水豚噜噜—想你（OPP）装,旋转水豚噜噜—自行车（OPP）装,底座颜色随机不支持选",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "f4e204c4-0a80-4caa-8c1e-b809faebf7a5",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "89e286bf-75cf-4726-aa60-cae94eafd208",
+              "name": "外观造型",
+              "value": "动物",
+              "source": "import",
+              "state": "source_confirmed"
+            }
+          ]
+        },
+        "sourceVariantIds": [
+          "e94a7e5c-b7f7-491a-92b3-6dea36566489"
+        ],
+        "setPolicy": "seven-product-v2",
+        "referenceMeasurements": [],
+        "sourceMeasurements": []
+      },
+      "workflow": {
+        "id": "deeede78-1515-4741-860a-340682f3c211",
+        "draftId": "dd3bca63-a986-4a03-a43d-4c0e64e0b276",
+        "productId": "8bedf231-02df-4929-b620-d3b9752fda54",
+        "productRevision": 15,
+        "variantId": "e94a7e5c-b7f7-491a-92b3-6dea36566489",
+        "sku": "H2-261008-43",
+        "status": "FAILED",
+        "stage": "planning",
+        "attempt": 0,
+        "maxAttempts": 3,
+        "contextSha256": "60d4b61112acc5920605ce6ba97c10c06daf70c9135c7d80c59fefbe03c5d54f",
+        "draftSha256": "f0623598ef98d53424580fb5ff285e0a93dd2664371f90daf999374cefe54cca",
+        "referenceAssets": [
+          {
+            "id": "18c22ce2-8819-4fda-ac4b-4b763361ceda",
+            "sha256": "52b1894288b1b24c3f73db30a662bd8c9d8ef49ce2fe78363eb1f828365721a2"
+          }
+        ],
+        "planResultIds": [],
+        "candidateIds": [],
+        "ipReviewResultIds": [],
+        "ocrResultIds": [],
+        "reviewResultIds": [],
+        "approvedAssetId": null,
+        "approvedSha256": null,
+        "createdAt": "2026-10-09T05:53:55.739Z",
+        "updatedAt": "2026-10-09T11:48:53.804Z",
+        "error": "AI 返回内容未通过校验，未保存为商品资料",
+        "imagePolicyVersion": "product-image/ip-v3",
+        "slotPolicy": "seven-product-v2",
+        "slots": [
+          {
+            "index": 1,
+            "purpose": "main",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 2,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 3,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 4,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 5,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 6,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 7,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          }
+        ],
+        "riskInterceptionEnabled": false,
+        "copyReviewEnabled": false
+      },
+      "call": {
+        "id": "1ee2a8c5-815c-4129-89d2-38c4da682166",
+        "providerId": "deepseek",
+        "productId": "8bedf231-02df-4929-b620-d3b9752fda54",
+        "productRevision": 15,
+        "status": "FAILED",
+        "errorCode": "OUTPUT_INVALID",
+        "requestId": "40f3e283-7ee1-442a-9845-cfa72ebf4272",
+        "model": "deepseek-flash",
+        "generation": 4,
+        "startedAt": "2026-10-09T11:48:46.533Z",
+        "finishedAt": "2026-10-09T11:48:53.800Z",
+        "usage": {
+          "promptTokens": 4142,
+          "completionTokens": 1535,
+          "processedImages": 0
+        }
+      }
+    },
+    {
+      "sku": "H2-261008-48",
+      "callId": "9a6104dc-2797-4081-8524-b74d47308883",
+      "raw": {
+        "kind": "image-plan",
+        "productUnderstanding": {
+          "summary": "参考图显示一个黄色卡通水豚造型的旋转摆件：圆头、橙色大鼻吻、蓝色眼睛、头顶有一个橙色小果实/小南瓜造型装饰，身体为黄色，穿橙色围裙/背带，骑在一辆粉色小摩托车上，摩托车有黑色车轮和灰色车把/支架，下方连接一个黄色多瓣（南瓜状）旋转底座。整体为PVC卡通风格小摆件，尺寸未知。",
+          "referenceAssetIds": [
+            "fcba5bc9-7ca7-4fdc-95d0-a2d3e39a2840"
+          ],
+          "uncertainties": [
+            "仅有一张参考图，无法确认旋转底座的实际旋转功能与结构细节。",
+            "无法从图片判断实际尺寸、比例或包装形式（OPP装）。",
+            "底座颜色标注为随机，参考图仅显示黄色底座，不能代表所有发货颜色。",
+            "摩托车、围裙等部件是否为可拆卸件无法确认。",
+            "头顶橙色装饰的具体造型（果实/南瓜）无法完全确认。"
+          ],
+          "sufficient": true
+        },
+        "ipRisk": {
+          "verdict": "PASS",
+          "findings": []
+        },
+        "prompt": "Photorealistic lifestyle product photograph of a small yellow cartoon capybara figurine riding a pink toy motorcycle, mounted on a yellow multi-lobed rotating base. The capybara has a round yellow head, large orange snout, blue eyes, small ears, a tiny orange fruit-like ornament on top of its head, an orange apron/strap on its body, and a smiling expression. The pink motorcycle has black wheels and gray handlebar/frame details. The figurine sits on a glossy yellow pumpkin-shaped base. Place the figurine on a warm wooden office desk beside a laptop edge and a coffee mug, in a bright cozy workspace, natural window light from the left, shallow depth of field, 50mm lens look, eye-level slightly above angle, clean uncluttered composition, no text, no logos, no watermarks, no extra accessories included.",
+        "textMode": "none",
+        "expectedText": [],
+        "setPlan": {
+          "style": "统一采用温暖木质桌面与柔和自然光的写实生活场景风格，浅景深、50mm 视角、干净背景，突出黄色水豚与粉色小摩托车的卡通质感；全套保持同一色调与光线方向，避免文字堆砌。",
+          "dimensionEvidenceIds": [],
+          "dimensionReason": "提供的 referenceMeasurements 为空，且参考图中没有可清晰辨认的印刷尺寸标注，无法获得可信的尺寸数据，因此不设置尺寸图槽位。",
+          "slots": [
+            {
+              "index": 1,
+              "role": "main_scene",
+              "focus": "黄色水豚骑粉色小摩托车旋转摆件置于办公桌面场景",
+              "evidenceIds": [
+                "3199b7db-8293-4d3d-899b-f427557d599f:spec",
+                "89e286bf-75cf-4726-aa60-cae94eafd208"
+              ],
+              "scene": "温暖木质办公桌，旁边有笔记本电脑边缘和咖啡杯，窗外自然光从左侧照入，摆件位于画面中央偏下，浅景深虚化背景。",
+              "prompt": "Photorealistic lifestyle product photograph of a small yellow cartoon capybara figurine riding a pink toy motorcycle on a yellow multi-lobed rotating base, placed on a warm wooden office desk. The capybara has a round yellow head, large orange snout, blue eyes, small ears, a tiny orange fruit-like ornament on top of its head, an orange apron/strap, and a smiling expression. The pink motorcycle has black wheels and gray handlebar details. Nearby are a laptop edge and a coffee mug, softly out of focus. Natural window light from the left, shallow depth of field, 50mm lens look, eye-level slightly above angle, clean uncluttered composition, no text, no logos, no watermarks, no extra accessories included.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 2,
+              "role": "selling_point",
+              "focus": "卡通动物造型",
+              "evidenceIds": [
+                "89e286bf-75cf-4726-aa60-cae94eafd208",
+                "118f381e-2bbb-48d0-9e7a-bf473e1f6951"
+              ],
+              "scene": "浅色桌面近景，摆件居中，柔和侧光突出圆润轮廓。",
+              "prompt": "Close-up photorealistic product photo of the yellow cartoon capybara figurine riding a pink toy motorcycle on a yellow rotating base, centered on a light neutral desk surface, soft side lighting, shallow depth of field, clean background, no text, no logos, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Cartoon animal design",
+                  "evidenceIds": [
+                    "89e286bf-75cf-4726-aa60-cae94eafd208",
+                    "118f381e-2bbb-48d0-9e7a-bf473e1f6951"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 3,
+              "role": "selling_point",
+              "focus": "PVC 材质",
+              "evidenceIds": [
+                "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf"
+              ],
+              "scene": "微距质感特写，聚焦水豚头部与橙色鼻吻表面，柔光反射。",
+              "prompt": "Macro photorealistic close-up of the yellow cartoon capybara figurine head and orange snout, showing smooth matte PVC-like surface texture, soft diffused lighting, shallow depth of field, neutral background, no text, no logos, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "PVC material",
+                  "evidenceIds": [
+                    "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 4,
+              "role": "selling_point",
+              "focus": "旋转底座造型",
+              "evidenceIds": [
+                "c5cd9544-6f11-42cc-a497-acb17c8c34af",
+                "3199b7db-8293-4d3d-899b-f427557d599f:spec"
+              ],
+              "scene": "低角度特写，突出黄色多瓣底座与上方摆件的连接结构。",
+              "prompt": "Low-angle photorealistic close-up of the yellow multi-lobed rotating base of the capybara figurine, showing the connection between the base and the pink motorcycle above, soft studio lighting, shallow depth of field, clean neutral background, no text, no logos, no watermarks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Rotating base design",
+                  "evidenceIds": [
+                    "c5cd9544-6f11-42cc-a497-acb17c8c34af",
+                    "3199b7db-8293-4d3d-899b-f427557d599f:spec"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 5,
+              "role": "scene",
+              "focus": "桌面办公场景氛围",
+              "evidenceIds": [],
+              "scene": "办公桌一角，摆件位于键盘与笔记本之间，暖色台灯与自然光混合。",
+              "prompt": "Photorealistic lifestyle scene of the yellow capybara figurine riding a pink toy motorcycle on a yellow rotating base placed on an office desk between a keyboard and a laptop, warm desk lamp mixed with natural light, shallow depth of field, cozy workspace atmosphere, no text, no logos, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 6,
+              "role": "scene",
+              "focus": "车载摆放场景氛围",
+              "evidenceIds": [],
+              "scene": "汽车中控台表面，摆件置于防滑垫上，车窗外虚化街景与柔和日光。",
+              "prompt": "Photorealistic lifestyle scene of the yellow capybara figurine riding a pink toy motorcycle on a yellow rotating base placed on a car dashboard mat, blurred street view through the windshield, soft daylight, shallow depth of field, clean composition, no text, no logos, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 7,
+              "role": "scene",
+              "focus": "礼物赠送场景氛围",
+              "evidenceIds": [],
+              "scene": "浅色桌面，摆件旁有未拆的牛皮纸礼盒与丝带，柔和顶光。",
+              "prompt": "Photorealistic lifestyle scene of the yellow capybara figurine riding a pink toy motorcycle on a yellow rotating base on a light desk beside a plain kraft gift box with ribbon, soft overhead lighting, shallow depth of field, warm gifting mood, no text, no logos, no watermarks.",
+              "textMode": "none",
+              "expectedText": []
+            }
+          ]
+        }
+      },
+      "context": {
+        "listing": {
+          "draftId": "a9c6d83b-ebba-42fc-a651-72534d27f192",
+          "draftRevision": 1,
+          "productId": "8bedf231-02df-4929-b620-d3b9752fda54",
+          "productRevision": 15,
+          "variantId": "3199b7db-8293-4d3d-899b-f427557d599f",
+          "sku": "H2-261008-48",
+          "targetId": "83294028-8de1-4299-bbc8-3272eda99926",
+          "targetGeneration": 3,
+          "listingProgram": "haul",
+          "productType": "FIGURINE",
+          "marketplaceId": "ATVPDKIKX0DER",
+          "locale": "en_US",
+          "requirements": "LISTING",
+          "parentageLevel": "NONE",
+          "schemaChecksum": "j1xcXsU4YTgMqHrbrJszBw==",
+          "schemaVersion": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+          "schemaSha256": "2615da08284c0353c8ad752090312829e3850fc61affa762ceebcf4c2a026310",
+          "policyVersion": "haul-us-copy-2026-10-07-v2",
+          "fields": [
+            {
+              "name": "item_name",
+              "title": "Product Name",
+              "description": "Max. 250 characters",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 200,
+              "minItems": 1
+            },
+            {
+              "name": "product_description",
+              "title": "Product Description",
+              "description": "Max. 2,000 characters. Use this to describe the product in detail. Please enter only product-related features here. You'll have a chance later on to enter item condition, price, and other seller-specific info.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "maxUtf8ByteLength": 20000,
+              "minItems": 1
+            },
+            {
+              "name": "bullet_point",
+              "title": "Key Product Features",
+              "description": "Max. 100 characters per line. Use these to highlight some of the product's most important qualities. Each line will be displayed as a separate bullet point above the product description.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 700,
+              "minItems": 1
+            },
+            {
+              "name": "generic_keyword",
+              "title": "Search Terms",
+              "description": "Provide specific search terms to help customers find your product.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "material",
+              "title": "Material Type",
+              "description": "What material is the product made out of?",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Acrylic",
+                "Acrylonitrile Butadiene Styrene",
+                "Alloy Steel",
+                "Aluminum",
+                "Bamboo",
+                "Basswood",
+                "Beech Wood",
+                "Birch Wood",
+                "Bone China",
+                "Brass",
+                "Bronze",
+                "Carbon Fiber",
+                "Cardboard",
+                "Cast Iron",
+                "Cast Stone",
+                "Cement",
+                "Ceramic",
+                "Clay",
+                "Copper",
+                "Cotton",
+                "Crystal",
+                "Earthenware",
+                "Engineered Wood",
+                "Feather",
+                "Fiberglass",
+                "Glass",
+                "Iron",
+                "Leather",
+                "Maple Wood",
+                "Marble",
+                "Metal",
+                "Oak Wood",
+                "Paper",
+                "Pewter",
+                "Plastic",
+                "Polycarbonate (PC)",
+                "Polyester",
+                "Polystone",
+                "Polyurethane (PU)",
+                "Polyvinyl Chloride",
+                "Porcelain",
+                "Rattan",
+                "Resin",
+                "Rubber",
+                "Silicone",
+                "Silver",
+                "Stainless Steel",
+                "Stone",
+                "Stoneware",
+                "Straw",
+                "Synthetic Resin",
+                "Synthetic Rubber",
+                "Teak Wood",
+                "Terracotta",
+                "Tin",
+                "Vinyl",
+                "Wood",
+                "Wool",
+                "Zinc"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "color",
+              "title": "Color",
+              "description": "Provide the color or visual appearance of the product, including solid colors, color combinations, patterns, or graphic designs, using branded or standardized color terms.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Beige",
+                "Black",
+                "Blue",
+                "Bronze",
+                "Brown",
+                "Clear",
+                "Gold",
+                "Green",
+                "Grey",
+                "Metallic",
+                "Multicolor",
+                "Off White",
+                "Orange",
+                "Pink",
+                "Purple",
+                "Red",
+                "Silver",
+                "Turquoise",
+                "White",
+                "Yellow"
+              ],
+              "minLength": 0,
+              "maxLength": 1000,
+              "minItems": 1
+            },
+            {
+              "name": "item_shape",
+              "title": "Shape",
+              "description": "The shape of the item",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Heart",
+                "Oval",
+                "Rectangular",
+                "Round",
+                "Square"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            }
+          ],
+          "evidence": [
+            {
+              "id": "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf",
+              "name": "材质",
+              "value": "PVC",
+              "meaning": "material",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "118f381e-2bbb-48d0-9e7a-bf473e1f6951",
+              "name": "风格",
+              "value": "卡通",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "e8f8cf40-fc03-418b-9568-78d1477eef9e",
+              "name": "加工定制",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "0c7bbe49-0de1-4d62-bceb-d6f426258d9e",
+              "name": "是否专利货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "cbd97ee6-55cb-4ea4-8a04-fbce4865edbc",
+              "name": "功能",
+              "value": "其它",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "f4e204c4-0a80-4caa-8c1e-b809faebf7a5",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "89e286bf-75cf-4726-aa60-cae94eafd208",
+              "name": "外观造型",
+              "value": "动物",
+              "meaning": "item_shape",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "7691ad77-1f58-41a5-a117-5e59b0c74781",
+              "name": "销售件数",
+              "value": "1",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "3199b7db-8293-4d3d-899b-f427557d599f:spec",
+              "name": "Selected SKU specification",
+              "value": "颜色分类: 旋转水豚噜噜—自行车（OPP）装 · 1 pc",
+              "meaning": "general",
+              "source": "selected_sku"
+            },
+            {
+              "id": "3199b7db-8293-4d3d-899b-f427557d599f:sale-count",
+              "name": "Sales package quantity",
+              "value": "1 pieces",
+              "meaning": "general",
+              "source": "selected_sku"
+            }
+          ],
+          "unverifiedSourceTitle": "水豚噜噜玩偶车载办公桌面旋转摆件可爱手办公仔桌面摆件搞怪"
+        },
+        "currentListingCopy": [
+          {
+            "field": "material",
+            "values": [
+              "PVC"
+            ]
+          }
+        ],
+        "listingReviewResultId": "6f6c33ba-3749-4b9a-864d-1326c6b999e3",
+        "referenceAssets": [
+          {
+            "assetId": "fcba5bc9-7ca7-4fdc-95d0-a2d3e39a2840",
+            "sha256": "858c87c9908b7e0b0a769c19f6023b964718c1552cf3592860e8dd5cba9e4e0d",
+            "variantId": "3199b7db-8293-4d3d-899b-f427557d599f"
+          }
+        ],
+        "purpose": "main",
+        "policyVersion": "product-image/ip-v3",
+        "ipSource": {
+          "description": "材质：PVC\r\n风格：卡通\r\n品牌：其他\r\n加工定制：否\r\n是否专利货源：否\r\n货号：旋转水豚摆件\r\n功能：其它\r\n颜色分类：旋转水豚噜噜—大哭（OPP）装,旋转水豚噜噜—哭唧唧（OPP）装,旋转水豚噜噜—你瞅啥（OPP）装,旋转水豚噜噜—震惊（OPP）装,旋转水豚噜噜—想你（OPP）装,旋转水豚噜噜—自行车（OPP）装,底座颜色随机不支持选\r\n是否跨境出口专供货源：否\r\n外观造型：动物",
+          "originalSpec": "颜色分类: 旋转水豚噜噜—自行车（OPP）装",
+          "sourceSpec": "颜色分类: 旋转水豚噜噜—自行车（OPP）装",
+          "normalizedSpec": "",
+          "facts": [
+            {
+              "id": "dbf63a19-c3d9-4587-a3c1-5c538e2f74cf",
+              "name": "材质",
+              "value": "PVC",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "118f381e-2bbb-48d0-9e7a-bf473e1f6951",
+              "name": "风格",
+              "value": "卡通",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "d8bf3070-d1ef-44ca-80a3-faef81011669",
+              "name": "品牌",
+              "value": "其他",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "e8f8cf40-fc03-418b-9568-78d1477eef9e",
+              "name": "加工定制",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "0c7bbe49-0de1-4d62-bceb-d6f426258d9e",
+              "name": "是否专利货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "c5cd9544-6f11-42cc-a497-acb17c8c34af",
+              "name": "货号",
+              "value": "旋转水豚摆件",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "cbd97ee6-55cb-4ea4-8a04-fbce4865edbc",
+              "name": "功能",
+              "value": "其它",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "92afc2bb-7038-4389-9ef1-535dfe079ff2",
+              "name": "颜色分类",
+              "value": "旋转水豚噜噜—大哭（OPP）装,旋转水豚噜噜—哭唧唧（OPP）装,旋转水豚噜噜—你瞅啥（OPP）装,旋转水豚噜噜—震惊（OPP）装,旋转水豚噜噜—想你（OPP）装,旋转水豚噜噜—自行车（OPP）装,底座颜色随机不支持选",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "f4e204c4-0a80-4caa-8c1e-b809faebf7a5",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "89e286bf-75cf-4726-aa60-cae94eafd208",
+              "name": "外观造型",
+              "value": "动物",
+              "source": "import",
+              "state": "source_confirmed"
+            }
+          ]
+        },
+        "sourceVariantIds": [
+          "3199b7db-8293-4d3d-899b-f427557d599f"
+        ],
+        "setPolicy": "seven-product-v2",
+        "referenceMeasurements": [],
+        "sourceMeasurements": []
+      },
+      "call": {
+        "id": "9a6104dc-2797-4081-8524-b74d47308883",
+        "providerId": "deepseek",
+        "productId": "8bedf231-02df-4929-b620-d3b9752fda54",
+        "productRevision": 15,
+        "status": "FAILED",
+        "errorCode": "OUTPUT_INVALID",
+        "requestId": "e2d77636-ef71-4cff-9f51-c9e786c80c92",
+        "model": "deepseek-flash",
+        "generation": 4,
+        "startedAt": "2026-10-09T11:48:57.580Z",
+        "finishedAt": "2026-10-09T11:49:05.819Z",
+        "usage": {
+          "promptTokens": 4195,
+          "completionTokens": 1801,
+          "processedImages": 0
+        }
+      }
+    },
+    {
+      "sku": "H2-261008-51",
+      "callId": "0dad332c-e1be-49d5-80db-910a8dbf3224",
+      "raw": {
+        "kind": "image-plan",
+        "productUnderstanding": {
+          "summary": "参考图是一张零售货架陈列照，画面中密集悬挂着大量不同款式的毛绒小挂件（熊、猫、兔、鸭、企鹅、鲨鱼等），每个挂件顶部带金属钥匙圈与链条。所选 SKU 规格为“多种款式 随机发货 / 高度 11 厘米 · 1 件”，即单件随机款毛绒挂件，无法从该图确定买家实际收到的具体款式、颜色或造型。可见材质为短毛绒质感、PP 棉填充的软体公仔，尺寸约 11 厘米级别。图中还可见若干带明显卡通化造型的挂件，但无法确认具体品牌或授权角色。",
+          "referenceAssetIds": [
+            "555ee418-787d-4df2-a51a-a9990ffe38e3"
+          ],
+          "uncertainties": [
+            "参考图为货架多款混挂陈列，无法确定所选 SKU 实际发货的具体款式与颜色",
+            "“多种款式 随机发货”意味着单件商品外观不可预测，主图不能锁定某一具体造型",
+            "图中部分挂件疑似卡通化角色造型，但分辨率不足以确认是否为受保护 IP",
+            "无法从图片核实 11 厘米高度，仅能依据来源确认的规格数据",
+            "无法确认金属钥匙圈与链条的具体材质与规格",
+            "无法确认包装方式与是否含其他配件"
+          ],
+          "sufficient": false
+        },
+        "ipRisk": {
+          "verdict": "UNCERTAIN",
+          "findings": [
+            {
+              "category": "uncertain",
+              "name": "疑似卡通化角色造型挂件（未确认）",
+              "evidence": "货架图中多个挂件呈现高度卡通化的动物/角色造型，部分带明显面部图案与配色，但图像分辨率不足以确认是否为知名受保护角色或品牌授权形象；来源数据标注“是否IP授权：否”，但该字段为未核实来源，不能作为排除依据。",
+              "referenceAssetIds": [
+                "555ee418-787d-4df2-a51a-a9990ffe38e3"
+              ]
+            }
+          ]
+        },
+        "prompt": "",
+        "textMode": "none",
+        "expectedText": [],
+        "setPlan": {
+          "style": "统一采用柔和自然光、浅色木质或暖灰背景的实拍风格，浅景深突出毛绒质感与金属钥匙圈细节；整体色调温暖、干净、生活化，避免出现任何品牌标识、水印或可识别角色图案。",
+          "dimensionEvidenceIds": [
+            "584bc3ec-c492-45b1-87fc-1db880ea796b",
+            "aad8c236-4923-47d1-a586-89c9a6dba615:spec",
+            "measurement:aad8c236-4923-47d1-a586-89c9a6dba615:item.height"
+          ],
+          "dimensionReason": "来源确认字段“高度：11厘米”与所选 SKU 规格“高度: 11厘米 · 1 pc”一致，且 measurement:aad8c236-4923-47d1-a586-89c9a6dba615:item.height 明确标注为商品高度 11 cm，属于该 SKU 的成品高度，非包装或配件尺寸，故可用于尺寸图。参考图无法独立验证该数值，但来源数据一致且无冲突，故采纳。",
+          "slots": [
+            {
+              "index": 1,
+              "role": "main_scene",
+              "focus": "毛绒挂件挂在日常背包上的真实使用场景",
+              "evidenceIds": [],
+              "scene": "浅色帆布背包侧挂在木质椅背上，一只 11 厘米级别的软毛绒动物挂件通过金属钥匙圈挂在背包拉链头，背景为虚化的室内暖光环境，无任何文字或品牌标识。",
+              "prompt": "A realistic lifestyle product-use scene: a small soft plush animal keychain, about 11 cm tall, hanging by its metal key ring from the zipper pull of a light canvas backpack that rests on a wooden chair. Warm indoor daylight, shallow depth of field, soft natural shadows, cozy neutral background. The plush has short soft fur, rounded body, simple stitched face, no logos, no text, no brand marks. Focus on the plush and the metal ring detail. No captions, no watermarks, no extra accessories.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 2,
+              "role": "selling_point",
+              "focus": "柔软短毛绒触感",
+              "evidenceIds": [
+                "76212394-4ca2-4f5c-a76c-07a2741d8d3e",
+                "9bec6275-d50b-46cb-95c2-bf801e848e79"
+              ],
+              "scene": "微距特写毛绒表面纤维，柔和侧光下呈现细腻绒毛质感，背景虚化。",
+              "prompt": "Extreme close-up macro shot of the plush keychain's surface, showing the fine short soft fur texture under soft directional light. Shallow depth of field, warm neutral background, no text, no logos. Emphasize the velvety fiber detail and gentle highlights.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Soft short plush surface",
+                  "evidenceIds": [
+                    "76212394-4ca2-4f5c-a76c-07a2741d8d3e"
+                  ]
+                },
+                {
+                  "text": "Polyester material",
+                  "evidenceIds": [
+                    "9bec6275-d50b-46cb-95c2-bf801e848e79"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 3,
+              "role": "selling_point",
+              "focus": "PP 棉填充饱满回弹",
+              "evidenceIds": [
+                "4430f06f-74c0-4e4a-8960-ac8986560d96"
+              ],
+              "scene": "手指轻捏挂件侧面，展示填充饱满、形状回弹的柔软手感，浅色桌面背景。",
+              "prompt": "A hand gently squeezing the side of the small plush keychain to show its plump, springy filling, on a light wooden table with soft daylight. The plush keeps a rounded shape, short soft fur, simple stitched face, no logos or text. Clean minimal composition, shallow depth of field.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "PP cotton filling",
+                  "evidenceIds": [
+                    "4430f06f-74c0-4e4a-8960-ac8986560d96"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 4,
+              "role": "selling_point",
+              "focus": "金属钥匙圈与链条挂扣",
+              "evidenceIds": [
+                "aad8c236-4923-47d1-a586-89c9a6dba615:spec"
+              ],
+              "scene": "特写挂件顶部的金属钥匙圈与链条，挂在背包拉链头上，背景虚化。",
+              "prompt": "Close-up of the metal key ring and short chain attached to the top of the small plush keychain, hooked onto a backpack zipper pull. Soft daylight, blurred neutral background, focus on the metal hardware and the plush attachment point. No text, no logos, no brand marks.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Metal key ring and chain",
+                  "evidenceIds": [
+                    "aad8c236-4923-47d1-a586-89c9a6dba615:spec"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 5,
+              "role": "dimensions",
+              "focus": "11 厘米成品高度尺寸图",
+              "evidenceIds": [
+                "584bc3ec-c492-45b1-87fc-1db880ea796b",
+                "aad8c236-4923-47d1-a586-89c9a6dba615:spec",
+                "measurement:aad8c236-4923-47d1-a586-89c9a6dba615:item.height"
+              ],
+              "scene": "挂件直立置于浅色背景前，旁边以简洁标尺线标注高度，画面干净无多余道具。",
+              "prompt": "A clean product dimension diagram: the small plush keychain standing upright against a plain light background, with a simple vertical measurement line beside it indicating its height. Minimal composition, soft even lighting, no extra props, no logos. The plush has short soft fur and a simple stitched face.",
+              "textMode": "planned",
+              "expectedText": [
+                {
+                  "text": "Height: 11 cm",
+                  "evidenceIds": [
+                    "584bc3ec-c492-45b1-87fc-1db880ea796b",
+                    "aad8c236-4923-47d1-a586-89c9a6dba615:spec",
+                    "measurement:aad8c236-4923-47d1-a586-89c9a6dba615:item.height"
+                  ]
+                }
+              ]
+            },
+            {
+              "index": 6,
+              "role": "scene",
+              "focus": "挂件作为包包挂饰的日常搭配场景",
+              "evidenceIds": [],
+              "scene": "挂件挂在帆布托特包提手旁，与钥匙、耳机盒等日常小物同框，营造生活化搭配氛围。",
+              "prompt": "A casual everyday scene: the small plush keychain hanging from the handle of a canvas tote bag, alongside everyday items like keys and a small pouch on a light table. Warm natural light, soft shadows, shallow depth of field. No text, no logos, no brand marks.",
+              "textMode": "none",
+              "expectedText": []
+            },
+            {
+              "index": 7,
+              "role": "scene",
+              "focus": "挂件作为礼物赠送的温馨场景",
+              "evidenceIds": [],
+              "scene": "挂件放在浅色礼盒旁与丝带、干花点缀的桌面上，营造送礼氛围。",
+              "prompt": "A warm gift-giving scene: the small plush keychain placed on a light table next to a simple gift box, ribbon and dried flowers. Soft warm daylight, cozy neutral tones, shallow depth of field. No text, no logos, no brand marks, no extra accessories included.",
+              "textMode": "none",
+              "expectedText": []
+            }
+          ]
+        }
+      },
+      "context": {
+        "listing": {
+          "draftId": "c6f716ff-9f49-4e2b-bc3f-7b5e9eddada5",
+          "draftRevision": 2,
+          "productId": "6b261323-2c0e-49d7-87e8-910a8ec50933",
+          "productRevision": 25,
+          "variantId": "aad8c236-4923-47d1-a586-89c9a6dba615",
+          "sku": "H2-261008-51",
+          "targetId": "83294028-8de1-4299-bbc8-3272eda99926",
+          "targetGeneration": 3,
+          "listingProgram": "haul",
+          "productType": "KEYCHAIN",
+          "marketplaceId": "ATVPDKIKX0DER",
+          "locale": "en_US",
+          "requirements": "LISTING",
+          "parentageLevel": "NONE",
+          "schemaChecksum": "7fj9V19db/xRofnmWZ88Vw==",
+          "schemaVersion": "UAAAAAAAAAAAAAAAAlYDyu47x2lDtqFAtZ-PcHMd1",
+          "schemaSha256": "90e41eb7967c0ff8cf93d97facdfe37942f63917881ca128c0ac72989e95c968",
+          "policyVersion": "haul-us-copy-2026-10-07-v2",
+          "fields": [
+            {
+              "name": "item_name",
+              "title": "Product Name",
+              "description": "Max. 80 characters.  Please include the size and color of the item in the Product Name, if available.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 200,
+              "minItems": 1
+            },
+            {
+              "name": "product_description",
+              "title": "Product Description",
+              "description": "A text string; 2000 characters maximum in length. Note: Type 1 High ASCII characters (®, ©, ™, etc.) or other special characters are not supported.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "maxUtf8ByteLength": 20000,
+              "minItems": 1
+            },
+            {
+              "name": "bullet_point",
+              "title": "Key Product Features",
+              "description": "An alphanumeric string; 100 characters maximum length per bullet point. Please do not include an actual bullet point object, just the text used to describe your product. Note: Type 1 High ASCII characters (®, ©, ™, etc.) or other special characters are not supported.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "minItems": 1
+            },
+            {
+              "name": "generic_keyword",
+              "title": "Search Terms",
+              "description": "An alphanumeric string; 1 character minimum in length and 50 characters maximum in length.",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "special_feature",
+              "title": "Additional Features",
+              "description": "Provide the special features of the keychain that distinguish it from other comparable products, such as unique functionality.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Double-Sided Engraving",
+                "Dust Resistant",
+                "Elastic",
+                "Extendable",
+                "Fade Resistant",
+                "Floating",
+                "Foldable",
+                "Glow in the Dark",
+                "Integrated Wallet",
+                "Key Pouch Function",
+                "Lightweight",
+                "Locking Function",
+                "Low Profile",
+                "Multi Clip",
+                "Quick Release",
+                "Reflective",
+                "Reversible",
+                "Rotatable",
+                "Rust Proof",
+                "Scented",
+                "Scratch Resistant",
+                "See-Through",
+                "Shock Resistant",
+                "Smart Key Compatible",
+                "Tic-Tac-Toe Game",
+                "Water Resistant"
+              ],
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "material",
+              "title": "Material Type",
+              "description": "What material is the product made out of?",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Acrylic",
+                "Acrylonitrile Butadiene Styrene (ABS)",
+                "Aluminum",
+                "Brass",
+                "Bronze",
+                "Carbon Fiber",
+                "Ceramic",
+                "Copper",
+                "Cotton",
+                "Engineered Wood",
+                "Faux Fur",
+                "Faux Leather",
+                "Glass",
+                "Iron",
+                "Leather",
+                "Metal",
+                "Neoprene",
+                "Nylon",
+                "Paper",
+                "Pewter",
+                "Plastic",
+                "Plush",
+                "Polyester",
+                "Polypropylene (PP)",
+                "Polyurethane (PU)",
+                "Polyvinyl Chloride (PVC)",
+                "Resin",
+                "Rhinestone",
+                "Rubber",
+                "Silicone",
+                "Silver",
+                "Stainless Steel",
+                "Sterling Silver",
+                "Stone",
+                "Titanium",
+                "Vinyl",
+                "Wood",
+                "Zinc"
+              ],
+              "minLength": 1,
+              "maxLength": 500,
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "color",
+              "title": "Color",
+              "description": "Provide the color or visual appearance of the product, including solid colors, color combinations, patterns, or graphic designs, using branded or standardized color terms.",
+              "requirement": "required",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [],
+              "minLength": 0,
+              "maxLength": 1000,
+              "minItems": 1
+            },
+            {
+              "name": "item_shape",
+              "title": "Item Shape",
+              "description": "Specify the shape of the item",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Apple",
+                "Bottle",
+                "Butterfly",
+                "Cylinder",
+                "D Shape",
+                "Diamond",
+                "Heart",
+                "Hexagonal",
+                "Oblong",
+                "Octagonal",
+                "Oval",
+                "Pear",
+                "Pentagonal",
+                "Rectangular",
+                "Round",
+                "Semicircle",
+                "Square",
+                "Star",
+                "Teardrop",
+                "Triangular"
+              ],
+              "maxUtf8ByteLength": 2000,
+              "minItems": 1
+            },
+            {
+              "name": "included_components",
+              "title": "Included Components",
+              "description": "Specify the items that are included with this product",
+              "requirement": "optional",
+              "closedEnum": false,
+              "allowedValues": [],
+              "suggestedValues": [
+                "Bell",
+                "Brush",
+                "Carabiner",
+                "Card Holder",
+                "Dice",
+                "Gift Bag",
+                "Gift Box",
+                "Gift Tag",
+                "Lanyard",
+                "Magnet",
+                "Pepper Spray",
+                "Pompom",
+                "Screwdriver",
+                "Sticker",
+                "Straw",
+                "Tassel",
+                "Tweezers",
+                "Whistle",
+                "Zip Ties"
+              ],
+              "maxLength": 1000,
+              "minItems": 1
+            }
+          ],
+          "evidence": [
+            {
+              "id": "177c3b22-0d5d-44f7-8553-db48a95c318e",
+              "name": "所属分类",
+              "value": "毛绒公仔",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "bf14b550-ed12-4510-af95-a6de171e4376",
+              "name": "造型类别",
+              "value": "动物",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "008e78a1-ecfb-42c0-912b-aedbbd8813b1",
+              "name": "造型是否卡通、动漫",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "155282b6-4a67-4b95-adb9-44766f2a8b00",
+              "name": "动物分类",
+              "value": "熊",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "963cb98c-6873-4e4a-b581-09c3741400d5",
+              "name": "包装方式",
+              "value": "其他",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "4430f06f-74c0-4e4a-8960-ac8986560d96",
+              "name": "填充材质",
+              "value": "PP棉",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "76212394-4ca2-4f5c-a76c-07a2741d8d3e",
+              "name": "毛绒分类",
+              "value": "超柔短毛绒",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "6225e38a-59c1-423a-884c-62be1b085903",
+              "name": "是否多功能",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "f811d14c-7d4b-410a-b4ba-9c15e3855667",
+              "name": "加工定制",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "13e2e58e-a42c-4f92-97c4-d50922fc24e2",
+              "name": "是否有导购视频",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "36539669-186a-4652-8cbd-75343b44a925",
+              "name": "产地",
+              "value": "中国",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "73bdd4bf-50d6-4c5f-ac89-676b3834eae4",
+              "name": "是否外贸",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "50b583a6-08b0-43fc-98df-e8f00d6d19e9",
+              "name": "是否专供外贸",
+              "value": "是(本商品仅供外贸用途，可能不符合境内产品标准。请境内买家谨慎购入)",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "b93f1349-f821-4db3-a9df-f02fb9ae38af",
+              "name": "3C配置类别",
+              "value": "14岁以上的玩具",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "584bc3ec-c492-45b1-87fc-1db880ea796b",
+              "name": "高度",
+              "value": "11厘米",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "0be770ea-8888-427c-aa7b-29a30b85ef71",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "4a7c7490-a35d-4609-9170-6e3966414707",
+              "name": "适用年龄",
+              "value": "青年（15-35岁）",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "9bec6275-d50b-46cb-95c2-bf801e848e79",
+              "name": "材质",
+              "value": "聚酯纤维",
+              "meaning": "material",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "baf9720f-56b4-4b38-ae98-7b858cf65b2f",
+              "name": "销售件数",
+              "value": "1",
+              "meaning": "general",
+              "source": "source_confirmed"
+            },
+            {
+              "id": "aad8c236-4923-47d1-a586-89c9a6dba615:spec",
+              "name": "Selected SKU specification",
+              "value": "颜色: 多种款式 随机发货 / 高度: 11厘米 · 1 pc",
+              "meaning": "general",
+              "source": "selected_sku"
+            },
+            {
+              "id": "aad8c236-4923-47d1-a586-89c9a6dba615:sale-count",
+              "name": "Sales package quantity",
+              "value": "1 pieces",
+              "meaning": "general",
+              "source": "selected_sku"
+            }
+          ],
+          "unverifiedSourceTitle": "网红可爱萌小挂件毛绒玩具公仔包包挂饰钥匙扣混庆抛洒玩偶布娃娃"
+        },
+        "currentListingCopy": [
+          {
+            "field": "item_name",
+            "values": [
+              "Plush Bear Keychain, 11 cm, Soft Short Plush, Random Style"
+            ]
+          },
+          {
+            "field": "material",
+            "values": [
+              "Polyester"
+            ]
+          }
+        ],
+        "listingReviewResultId": "83bcd3cd-417f-4c52-8f92-09bd42bd1a3b",
+        "referenceAssets": [
+          {
+            "assetId": "555ee418-787d-4df2-a51a-a9990ffe38e3",
+            "sha256": "f05bfb02c1dfcccfcf71a4fe214236a52fc0cb6b8aaf2b1711e4e1d5c2fd07f6",
+            "variantId": "aad8c236-4923-47d1-a586-89c9a6dba615"
+          }
+        ],
+        "purpose": "main",
+        "policyVersion": "product-image/ip-v3",
+        "ipSource": {
+          "description": "所属分类：毛绒公仔\r\n造型类别：动物\r\n造型是否卡通、动漫：否\r\n动物分类：熊\r\n品牌：祈祷熊\r\n包装方式：其他\r\n填充材质：PP棉\r\n毛绒分类：超柔短毛绒\r\n是否多功能：否\r\n加工定制：否\r\n是否有导购视频：否\r\n产地：中国\r\n是否外贸：否\r\n是否专供外贸：是(本商品仅供外贸用途，可能不符合境内产品标准。请境内买家谨慎购入)\r\n3C配置类别：14岁以上的玩具\r\n颜色：多种款式 随机发货,星卡,猫,彩色鲨鱼,企鹅,彩色仔,头花熊,小号硬蛋,将军,裙子猫,眼镜鸭,黑白猫\r\n高度：11厘米\r\n是否跨境出口专供货源：否\r\n适用年龄：青年（15-35岁）\r\n是否IP授权：否\r\n材质：聚酯纤维",
+          "originalSpec": "颜色: 多种款式 随机发货 / 高度: 11厘米",
+          "sourceSpec": "颜色: 多种款式 随机发货 / 高度: 11厘米",
+          "normalizedSpec": "",
+          "facts": [
+            {
+              "id": "177c3b22-0d5d-44f7-8553-db48a95c318e",
+              "name": "所属分类",
+              "value": "毛绒公仔",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "bf14b550-ed12-4510-af95-a6de171e4376",
+              "name": "造型类别",
+              "value": "动物",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "008e78a1-ecfb-42c0-912b-aedbbd8813b1",
+              "name": "造型是否卡通、动漫",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "155282b6-4a67-4b95-adb9-44766f2a8b00",
+              "name": "动物分类",
+              "value": "熊",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "4f58f94b-5df7-4784-a668-93389c4d2757",
+              "name": "品牌",
+              "value": "祈祷熊",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "963cb98c-6873-4e4a-b581-09c3741400d5",
+              "name": "包装方式",
+              "value": "其他",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "4430f06f-74c0-4e4a-8960-ac8986560d96",
+              "name": "填充材质",
+              "value": "PP棉",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "76212394-4ca2-4f5c-a76c-07a2741d8d3e",
+              "name": "毛绒分类",
+              "value": "超柔短毛绒",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "6225e38a-59c1-423a-884c-62be1b085903",
+              "name": "是否多功能",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "f811d14c-7d4b-410a-b4ba-9c15e3855667",
+              "name": "加工定制",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "13e2e58e-a42c-4f92-97c4-d50922fc24e2",
+              "name": "是否有导购视频",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "36539669-186a-4652-8cbd-75343b44a925",
+              "name": "产地",
+              "value": "中国",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "73bdd4bf-50d6-4c5f-ac89-676b3834eae4",
+              "name": "是否外贸",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "50b583a6-08b0-43fc-98df-e8f00d6d19e9",
+              "name": "是否专供外贸",
+              "value": "是(本商品仅供外贸用途，可能不符合境内产品标准。请境内买家谨慎购入)",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "b93f1349-f821-4db3-a9df-f02fb9ae38af",
+              "name": "3C配置类别",
+              "value": "14岁以上的玩具",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "4c6614ce-b92b-4228-a527-d1b72a7b3b5c",
+              "name": "颜色",
+              "value": "多种款式 随机发货,星卡,猫,彩色鲨鱼,企鹅,彩色仔,头花熊,小号硬蛋,将军,裙子猫,眼镜鸭,黑白猫",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "584bc3ec-c492-45b1-87fc-1db880ea796b",
+              "name": "高度",
+              "value": "11厘米",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "0be770ea-8888-427c-aa7b-29a30b85ef71",
+              "name": "是否跨境出口专供货源",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "4a7c7490-a35d-4609-9170-6e3966414707",
+              "name": "适用年龄",
+              "value": "青年（15-35岁）",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "3ec6e09f-eebd-4d94-9b5d-1026276f586b",
+              "name": "是否IP授权",
+              "value": "否",
+              "source": "import",
+              "state": "source_confirmed"
+            },
+            {
+              "id": "9bec6275-d50b-46cb-95c2-bf801e848e79",
+              "name": "材质",
+              "value": "聚酯纤维",
+              "source": "import",
+              "state": "source_confirmed"
+            }
+          ]
+        },
+        "sourceVariantIds": [
+          "aad8c236-4923-47d1-a586-89c9a6dba615"
+        ],
+        "setPolicy": "seven-product-v2",
+        "referenceMeasurements": [],
+        "sourceMeasurements": [
+          {
+            "id": "measurement:aad8c236-4923-47d1-a586-89c9a6dba615:item.height",
+            "name": "商品高度",
+            "value": "11 cm",
+            "variantId": "aad8c236-4923-47d1-a586-89c9a6dba615",
+            "sourceSha256": "eb5470a62d7cfc11599ccd147ea806b7b65f9117f0c871b3dc7e5fd028fe36fb"
+          }
+        ]
+      },
+      "workflow": {
+        "id": "4023ff31-6036-45a1-898b-db7e79b6f5e6",
+        "draftId": "c6f716ff-9f49-4e2b-bc3f-7b5e9eddada5",
+        "productId": "6b261323-2c0e-49d7-87e8-910a8ec50933",
+        "productRevision": 25,
+        "variantId": "aad8c236-4923-47d1-a586-89c9a6dba615",
+        "sku": "H2-261008-51",
+        "status": "FAILED",
+        "stage": "planning",
+        "attempt": 0,
+        "maxAttempts": 3,
+        "contextSha256": "4e157162eb7fd2d371d99a6f737f7bf63ccaaae2085f588f52d14060424778ae",
+        "draftSha256": "2b2993c6a83b913b167e48be9017fca653166459af7a926df353c67a3662ea28",
+        "referenceAssets": [
+          {
+            "id": "555ee418-787d-4df2-a51a-a9990ffe38e3",
+            "sha256": "f05bfb02c1dfcccfcf71a4fe214236a52fc0cb6b8aaf2b1711e4e1d5c2fd07f6"
+          }
+        ],
+        "planResultIds": [],
+        "candidateIds": [],
+        "ipReviewResultIds": [],
+        "ocrResultIds": [],
+        "reviewResultIds": [],
+        "approvedAssetId": null,
+        "approvedSha256": null,
+        "createdAt": "2026-10-09T06:01:19.911Z",
+        "updatedAt": "2026-10-09T11:49:17.752Z",
+        "error": "AI 返回内容未通过校验，未保存为商品资料",
+        "imagePolicyVersion": "product-image/ip-v3",
+        "slotPolicy": "seven-product-v2",
+        "slots": [
+          {
+            "index": 1,
+            "purpose": "main",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 2,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 3,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 4,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 5,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 6,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          },
+          {
+            "index": 7,
+            "purpose": "detail",
+            "status": "PENDING",
+            "contextSha256": null,
+            "attempts": [],
+            "approvedAssetId": null,
+            "approvedSha256": null,
+            "error": null
+          }
+        ],
+        "riskInterceptionEnabled": false,
+        "copyReviewEnabled": false
+      },
+      "call": {
+        "id": "0dad332c-e1be-49d5-80db-910a8dbf3224",
+        "providerId": "deepseek",
+        "productId": "6b261323-2c0e-49d7-87e8-910a8ec50933",
+        "productRevision": 25,
+        "status": "FAILED",
+        "errorCode": "OUTPUT_INVALID",
+        "requestId": "f307425b-eb7c-491d-bb17-31a143968412",
+        "model": "deepseek-flash",
+        "generation": 4,
+        "startedAt": "2026-10-09T11:49:08.131Z",
+        "finishedAt": "2026-10-09T11:49:17.749Z",
+        "usage": {
+          "promptTokens": 4880,
+          "completionTokens": 2063,
+          "processedImages": 0
+        }
+      }
+    }
+  ]
+}

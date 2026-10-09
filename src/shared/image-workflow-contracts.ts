@@ -1,0 +1,81 @@
+import type { AmazonDraft } from './amazon-contracts.ts';
+import type { ProductDetail } from './contracts.ts';
+import type { CategoryFieldRepairGrant, CATEGORY_FIELD_REPAIR_POLICY_VERSION } from './automatic-listing-contracts.ts';
+import { IMAGE_TEXT_REVIEW_POLICY_VERSION } from './image-ai-contracts.ts';
+import type { ProductImageContext, ProductImagePolicyVersion, ImageSetPlan, ImageTextReviewPolicyVersion, CandidateImageIdentity } from './image-ai-contracts.ts';
+
+export interface ImageRiskSettings { enabled:boolean }
+export interface CopyReviewSettings { enabled:boolean }
+
+export const IMAGE_WORKFLOW_STAGES = ['content', 'planning', 'generating', 'ip-check', 'ocr', 'reviewing', 'adopting', 'complete'] as const;
+export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
+export interface ImageSlotAttempt {
+  number:number; requestId:string;
+  state:'PLANNING'|'READY'|'GENERATING'|'GENERATED'|'PASSED'|'RETRYABLE_FAILURE'|'BLOCKED'|'UNKNOWN';
+  planResultId:string|null;candidateId:string|null;ipReviewResultId:string|null;ocrResultId:string|null;reviewResultId:string|null;
+  /** Most recently attempted text policy, saved before sending so an unknown response cannot trigger another policy recheck. */
+  textReviewPolicyVersion?:ImageTextReviewPolicyVersion;
+  /** Detail slots are approved on saved IP evidence only; older OCR records remain as history. */
+  approvalPolicy?:'ip-only-detail/v1'|'risk-disabled-detail/v1';
+  /** User disabled interception; this is not a passing risk review. */
+  riskBypass?:{at:string;candidate:CandidateImageIdentity};
+  error:string|null;
+}
+export interface ImageWorkflowSlot {
+  index:number;purpose:'main'|'detail';status:'PENDING'|'RUNNING'|'PASSED'|'FAILED'|'BLOCKED'|'UNKNOWN';
+  contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
+}
+export interface ImageWorkflowRun {
+  id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
+  status: 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
+  stage: ImageWorkflowStage; attempt: number; maxAttempts: number;
+  contextSha256: string | null; draftSha256: string | null;
+  referenceAssets: { id: string; sha256: string }[];
+  planResultIds: string[]; candidateIds: string[]; ocrResultIds: string[]; reviewResultIds: string[];
+  approvedAssetId: string | null; approvedSha256: string | null;
+  createdAt: string; updatedAt: string; error: string | null;
+  imagePolicyVersion?: ProductImagePolicyVersion;
+  ipReviewResultIds?: string[];
+  recheckedFromRunId?: string;
+  /** Same approved bytes, bound to a later draft without repeating image-provider calls. */
+  approvalReuse?: { sourceRunId:string; draftRevision:number; draftSnapshot:string; recipeSnapshot:string };
+  /** Captured when planning begins; old records must never be backfilled from a later draft. */
+  imageRecipeSha256?:string;
+  /** Legacy runs keep their original rules and durable attempts. */
+  slotPolicy?:'seven-provisional-v1'|'seven-product-v2';slots?:ImageWorkflowSlot[];activeSlot?:number;
+  imageContext?:ProductImageContext;
+  setPlan?:ImageSetPlan;setPlanResultId?:string;
+  /** Reserved before each current-copy repair so restart cannot reset the paid budget. */
+  copyRepairAttempts?:number;
+  copyReviewResultId?:string;
+  categoryFieldPolicyVersion?:typeof CATEGORY_FIELD_REPAIR_POLICY_VERSION;
+  categoryFieldRepair?:CategoryFieldRepairGrant;
+  contentPreparation?:{state:'STARTED'|'DONE';draftRevision:number;remaining:string[];repairPolicyVersion?:'field-evidence/v2';copyReviewEnabled?:boolean;sourceColorEvidenceSha256?:string;draftSha256?:string};
+  /** Missing on old records means risk interception was enabled. */
+  riskInterceptionEnabled?:boolean;
+  /** Absent on existing runs means independent listing-copy review was enabled. */
+  copyReviewEnabled?:boolean;
+}
+export function hasSevenApprovedImages(run:ImageWorkflowRun|null|undefined):boolean{return !!run&&run.status==='COMPLETED'&&run.stage==='complete'&&!!run.approvedAssetId&&!!run.approvedSha256&&run.slots?.length===7&&run.slots.every(slot=>slot.status==='PASSED'&&!!slot.approvedAssetId&&!!slot.approvedSha256);}
+/** Metadata eligibility only; the main process must also verify the saved IP, OCR and negative review. */
+export function needsImageTextPolicyReview(attempt:ImageSlotAttempt|undefined):boolean{return !!attempt&&attempt.state==='RETRYABLE_FAILURE'&&!!attempt.candidateId&&!!attempt.planResultId&&!!attempt.ipReviewResultId&&!!attempt.ocrResultId&&!!attempt.reviewResultId&&attempt.textReviewPolicyVersion!==IMAGE_TEXT_REVIEW_POLICY_VERSION;}
+/** Unknown generation can only reconcile its existing request; complete never resends it. */
+export function canResumeImageWorkflow(run:ImageWorkflowRun|null|undefined):boolean{return !!run?.slots&&run.status!=='COMPLETED'&&!run.slots.some(slot=>slot.status==='BLOCKED')&&run.slots.some(slot=>slot.status!=='PASSED'&&(slot.attempts.length<run.maxAttempts||['GENERATING','GENERATED','UNKNOWN','PLANNING','READY'].includes(slot.attempts.at(-1)?.state??'')||slot.index>1&&slot.attempts.at(-1)?.state==='RETRYABLE_FAILURE'&&!!slot.attempts.at(-1)?.ipReviewResultId&&!!slot.attempts.at(-1)?.reviewResultId||run.slotPolicy==='seven-product-v2'&&needsImageTextPolicyReview(slot.attempts.at(-1))));}
+export interface CompleteAutomaticProductInput { draftId: string; draftRevision: number }
+export interface CompleteAutomaticProductResult {
+  draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[]; workflow: ImageWorkflowRun;
+}
+export interface AutomaticImageCandidatePreview { candidateId:string; previewUrl:string; width:number; height:number }
+export interface ImageWorkflowApi {
+  getAutomaticImageCandidatePreview(input:{draftId:string;slot:number;candidateId:string}):Promise<AutomaticImageCandidatePreview>;
+  approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowRun>;
+  getImageRiskSettings():Promise<ImageRiskSettings>;
+  saveImageRiskSettings(input:ImageRiskSettings):Promise<ImageRiskSettings>;
+  getCopyReviewSettings():Promise<CopyReviewSettings>;
+  saveCopyReviewSettings(input:CopyReviewSettings):Promise<CopyReviewSettings>;
+  prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string }[] }>;
+  cancelAutomaticProductSources(productId: string): Promise<{ cancelled: boolean }>;
+  completeAutomaticProduct(input: CompleteAutomaticProductInput): Promise<CompleteAutomaticProductResult>;
+  getAutomaticProductProgress(draftId: string): Promise<ImageWorkflowRun | null>;
+  cancelAutomaticProduct(draftId: string): Promise<{ cancelled: boolean }>;
+}

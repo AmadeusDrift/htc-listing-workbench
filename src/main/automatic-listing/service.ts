@@ -1,0 +1,617 @@
+import { randomUUID } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
+import type { AutomaticListingItem, AutomaticListingTask } from '../../shared/automatic-listing-contracts.ts';
+import { FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_POLICY_VERSION } from '../../shared/automatic-listing-contracts.ts';
+import type { ListingRules } from '../../shared/listing-rules.ts';
+import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import type { WorkspaceStore } from '../store.ts';
+import type { AmazonService } from '../amazon/service.ts';
+import type { HostingService } from '../hosting/service.ts';
+import type { ImageWorkflowService } from '../image-workflow/service.ts';
+import type { ExecutionService } from '../execution/service.ts';
+import type { FollowupService } from '../followup/service.ts';
+import type { ProcurementService } from '../procurement/service.ts';
+import type { ItemLabelService } from '../item-labels/service.ts';
+import type { ItemLabelFormat } from '../../shared/item-label-contracts.ts';
+import { validateItemLabelFormat } from '../item-labels/adapter.ts';
+import { openDatabase } from '../database.ts';
+import { identifier, record, text } from '../../shared/validation.ts';
+import { UserFacingError } from '../../shared/errors.ts';
+import { publicError } from '../security.ts';
+import { fingerprint } from '../execution/records.ts';
+import { sourceStamp, validateAutomaticListingTask } from './records.ts';
+import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
+import type { ProductClassification } from '../../shared/category-ai-contracts.ts';
+import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
+import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.ts';
+import { reconcileSalesIdentity } from '../sales-plans/reconciliation.ts';
+import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/service.ts';
+import { canResumeImageWorkflow, hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
+import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
+import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
+import { sourceMappingIssue } from '../image-workflow/sources.ts';
+import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
+
+export interface AutomaticListingDependencies {
+  store: Pick<WorkspaceStore, 'getProduct'>;
+  rules(): ListingRules;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'>;
+  hosting: Pick<HostingService, 'getProfile'>;
+  images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
+    getRiskSettings?: () => {enabled:boolean};
+    isRiskPolicyCompatible?: (run:ImageWorkflowRun) => boolean;
+    getCopyReviewSettings?: () => {enabled:boolean};
+    isCopyReviewPolicyCompatible?: (run:ImageWorkflowRun) => boolean;
+    canResumeRecheckDraft?: ImageWorkflowService['canResumeRecheckDraft'];
+  };
+  execution: Pick<ExecutionService, 'create' | 'prepareStart' | 'startAuthorized' | 'get' | 'list' | 'pause' | 'cancel' | 'waitForIdle'>;
+  followup: Pick<FollowupService, 'get' | 'schedule'>;
+  procurement: Pick<ProcurementService, 'candidates' | 'ensureAutomaticBatch'>;
+  labels: Pick<ItemLabelService, 'syncBatch' | 'list'> & Partial<Pick<ItemLabelService, 'pauseJob' | 'resumeJob' | 'cancelJob'>>;
+  labelFormat?(): ItemLabelFormat;
+  /** Main-only final field repair + re-review of the existing image; never generates another image. */
+  repairFields?: (draftId: string, signal: AbortSignal) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
+  prepareSourceColors?: (draftId: string, signal: AbortSignal) => Promise<{ aiCalls: number; evidenceChanged: boolean; evidenceSha256?: string }>;
+  recheckImage?: (input: { draftId: string; draftRevision: number; sourceWorkflowId: string }, signal: AbortSignal) => Promise<AmazonDraft>;
+  preflight?: () => void;
+  sourceReceipt?: (productId: string) => MiaoshouReceipt | null;
+  classify?: (input: { productId: string; productRevision: number; targetId: string }, signal: AbortSignal) => Promise<ProductClassification>;
+  planSales?: (productId:string,targetId:string) => SalesListingPlan[];
+  existingSale?: (productId:string,plan:SalesListingPlan,targetId:string) => AmazonDraft|undefined;
+  resolveFamily?: (input:{plans:SalesListingPlan[];targetId:string;productType:string;locale:string},signal:AbortSignal) => Promise<SalesListingPlan[]>;
+  ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
+  rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
+}
+const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
+const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
+const imageReady = hasSevenApprovedImages;
+const errorMessage = (error: unknown): string => publicError(error).slice(0, 2000);
+const frozenSourcesMessage = '同商品已有就绪 SKU，来源版本已冻结。请在“来源图片”下载所需图片，并在“图片工作区 → 关联 SKU”确认对应关系；其他已就绪 SKU 全部提交后，可继续本任务恢复未开始的 SKU。若仍有未完成草稿，请先完成或取消原任务，再建立新任务。';
+function fieldRepairRemaining(draft: AmazonDraft, remaining: string[] = []): string[] {
+  const issues = nonDeferredImageIssues(draft);
+  const pricing=pricingBlockingReason(draft);
+  return [...new Set([...(pricing?[pricing]:[]), ...withoutDeferredImageRemaining(draft,remaining), ...issues.map(issue => `${issue.attributeNames.join('、') || issue.code}：${issue.message}`)])].slice(0,100).map(message=>message.slice(0,2000));
+}
+const incompleteFields = (remaining: string[]) => new UserFacingError(`字段修复后仍有待处理项，已停止图片复核：${remaining.join('；')}`);
+const repairLimit = (row: AutomaticListingItem): number => 2 + (row.repairPolicyMigration?.grantedAttempts ?? 0) + (row.sourceColorRepair?.grantedAttempts ?? 0) + (row.categoryFieldRepair?.grantedAttempts ?? 0);
+const canMigrateCategory=(row:AutomaticListingItem,draft:AmazonDraft):boolean=>!row.categoryFieldPolicyVersion&&!row.categoryFieldRepair&&row.repair?.phase!=='FIELDS_STARTED'&&categoryRepairFields(draft,row.repair?.remaining).length>0;
+const needsSourceColor = (draft: AmazonDraft, remaining: string[] = []): boolean =>
+  [...nonDeferredImageIssues(draft),...draft.listingIssues.filter(issue=>issue.severity==='ERROR')].some(issue=>issue.attributeNames.includes('color'))
+  || remaining.some(message=>/^(?:color\b|颜色)(?:\s|[:：、]|$)/iu.test(message.trim()));
+
+/** Main-process state machine. Approval is volatile, while every costly/write intent is durable. */
+export class AutomaticListingService {
+  private db: DatabaseSync;
+  private deps: AutomaticListingDependencies;
+  private tasks = new Map<string, AutomaticListingTask>();
+  private grants = new Set<string>();
+  private worker: Promise<void> | null = null;
+  private observing: Promise<void> | null = null;
+  private controller: AbortController | null = null;
+  private activeId: string | null = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private closed = false;
+  private schedulingSuspended = false;
+  private closing: Promise<void> | null = null;
+  constructor(directory: string, dependencies: AutomaticListingDependencies) {
+    this.deps = dependencies; this.db = openDatabase(directory);
+    try {
+      for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
+        const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+        if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
+        this.tasks.set(task.id, task);
+        if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT')) {
+          task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
+          for (const row of task.items) if (row.status === 'RUNNING') row.status = 'PENDING';
+          this.save(task);
+        }
+      }
+    } catch (error) { this.db.close(); throw error; }
+  }
+  private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
+  private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
+  private save(task: AutomaticListingTask): void {
+    task.revision++; task.updatedAt = new Date().toISOString();
+    validateAutomaticListingTask(task);
+    this.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
+  }
+  list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
+  get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
+  get busy(): boolean { return this.worker !== null || this.observing !== null; }
+  start(): void {
+    this.schedulingSuspended = false;
+    this.ensureOpen(); if (this.timer) return;
+    this.timer = setInterval(() => { void this.refreshWaiting().catch(() => {}); }, 5000); this.timer.unref();
+    void this.refreshWaiting().catch(() => {});
+  }
+  suspendScheduling(): void {
+    this.schedulingSuspended = true;
+    if (this.timer) clearInterval(this.timer); this.timer = null;
+  }
+  private assertConnections(task: AutomaticListingTask): void {
+    const target = this.deps.amazon.executionTargetScope(task.targetId), profile = this.deps.hosting.getProfile(task.profileId);
+    if (!target.target.configured || target.target.paused || fingerprint(target) !== task.targetStamp) throw new UserFacingError('目标店铺授权或范围发生变化，请重新建立任务');
+    if (!profile.enabled || !profile.configured || fingerprint(profile) !== task.profileStamp) throw new UserFacingError('图床配置发生变化，请重新建立任务');
+    if (fingerprint(this.deps.rules()) !== task.rulesStamp) throw new UserFacingError('上架规则发生变化，请重新建立任务');
+  }
+  private canRebaseSources(task: AutomaticListingTask,row: AutomaticListingItem): boolean {
+    if(row.sourcesPrepared||row.stage!=='SOURCES'||row.draftId||row.imageStarted||row.executionTaskIds.length)return false;
+    return task.items.filter(sibling=>sibling.productId===row.productId&&sibling.sourcesPrepared).every(sibling=>
+      ['READBACK','LABELS','COMPLETE'].includes(sibling.stage)&&!!sibling.draftId&&submitted(this.deps.amazon.getDraft(sibling.draftId)));
+  }
+  private assertScope(task: AutomaticListingTask, row?: AutomaticListingItem, allowSourceRecovery=false): void {
+    const rows = row ? [row] : task.items.filter(value => !['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
+    if (!rows.length) return;
+    this.assertConnections(task);
+    for (const item of rows) {
+      const source=this.deps.store.getProduct(item.productId),product=projectSalesProduct(source,item.salesPlan,item.variantId), variant = product.variants.find(value => value.id === item.variantId);
+      if (!variant || variant.sku !== item.sku || sourceStamp(source) !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
+    }
+  }
+  create(raw: unknown): AutomaticListingTask {
+    this.ensureOpen();
+    const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId']);
+    if (!Array.isArray(input.productIds) || !input.productIds.length || input.productIds.length > 1000) throw new UserFacingError('请选择 1–1000 个商品');
+    const ids = input.productIds.map(identifier);
+    if (new Set(ids).size !== ids.length) throw new UserFacingError('商品范围不能重复');
+    const targetId = text(input.targetId, '店铺', 100, true), target = this.deps.amazon.executionTargetScope(targetId);
+    const profileId = text(input.profileId, '图床', 30, true), profile = this.deps.hosting.getProfile(profileId), rules = this.deps.rules();
+    if (!target.target.configured || target.target.paused) throw new UserFacingError('请选择已配置且启用的目标店铺');
+    if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用图片托管');
+    this.deps.preflight?.();
+    const regroupedSkus=new Set<string>();
+    const items: AutomaticListingItem[] = ids.flatMap(id => {
+      const product = this.deps.store.getProduct(id);
+      let plans:SalesListingPlan[]|undefined;
+      try{plans=this.deps.planSales?.(id,targetId);}catch(error){
+        const variant=product.variants[0];if(!variant)throw error;
+        return [{key:product.id+':'+variant.id,productId:product.id,productRevision:product.revision,sourceStamp:sourceStamp(product),productTitle:product.title,
+          variantId:variant.id,sku:variant.sku,stockSets:rules.product.stockSets,sourcesPrepared:false,status:'FAILED',stage:'PLAN',draftId:null,executionTaskIds:[],imageStarted:false,imageAttempts:0,repairAttempts:0,repair:null,batchId:null,error:errorMessage(error)} as AutomaticListingItem];
+      }
+      const selected=plans?plans.map(salesPlan=>({variant:product.variants.find(v=>v.id===salesPlan.recipe.components[0].variantId)!,salesPlan})):product.variants.slice(0,rules.product.variantLimit).map(variant=>({variant,salesPlan:undefined}));
+      return selected.map(({variant,salesPlan}) => {
+        const existing=salesPlan?this.deps.existingSale?.(product.id,salesPlan,targetId):undefined;
+        const frozen=existing&&submitted(existing)?existing:undefined;
+        const regrouped=!frozen&&existing?.salesPlan&&salesPlan&&existing.salesPlan.recipe.key===salesPlan.recipe.key
+          &&existing.salesPlan.sourceGroupKey!==salesPlan.sourceGroupKey?existing:undefined;
+        if(regrouped)regroupedSkus.add(regrouped.sku);
+        const canonical=frozen??regrouped;
+        const legacy=existing&&!existing.salesPlan&&existing.productId===product.id&&existing.variantId===variant.id&&existing.sku===variant.sku?existing:undefined;
+        const source=canonical?this.deps.store.getProduct(canonical.productId):product;
+        let plan=canonical?canonical.salesPlan:legacy?undefined:salesPlan;
+        // Keep allocated identity, but recompute unsent costs/components from the current source.
+        // A duplicate import may have new local variant IDs even for the same supplier recipe.
+        if(!canonical&&plan&&existing?.salesPlan?.sourceGroupKey===plan.sourceGroupKey&&existing.salesPlan.recipe.key===plan.recipe.key){
+          const prior=existing.salesPlan;
+          plan={...plan,namingGroupId:prior.namingGroupId,sku:prior.sku,baseSku:prior.baseSku,namingChildKey:prior.namingChildKey,collectedAt:prior.collectedAt,collectionBasis:prior.collectionBasis};
+        }
+        const variantId=canonical?.variantId??variant.id;
+        return {
+        key: source.id + ':' + (plan?.recipe.key??variantId), productId: source.id, productRevision: source.revision, sourceStamp: sourceStamp(source), productTitle: source.title,
+        variantId, sku: canonical?.sku??legacy?.sku??plan?.sku??variant.sku, ...(plan?{salesPlan:plan}:{}), stockSets: rules.product.stockSets, sourcesPrepared: false,
+        status: 'PENDING', stage: 'SOURCES', draftId: null, executionTaskIds: [], imageStarted: false, imageAttempts: 0, repairAttempts: 0, repairPolicyVersion: FIELD_REPAIR_POLICY_VERSION, categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION, repair: null, batchId: null, error: null,
+      } as AutomaticListingItem;});
+    });
+    // Repeated collection of the same source recipe uses the canonical saved listing once.
+    for(let index=items.length-1;index>=0;index--)if(items[index].stage!=='PLAN'&&items.findIndex(row=>row.stage!=='PLAN'&&row.sku===items[index].sku)!==index)items.splice(index,1);
+    if (!items.length || items.length > 5000) throw new UserFacingError('本次请选择 1–5000 个 SKU');
+    for (const existing of this.tasks.values()) if (!final(existing) && existing.sellerId === target.target.sellerId && existing.marketplaceId === target.target.marketplaceId && existing.mode === target.target.mode
+      && existing.items.some(row => row.stage!=='PLAN'&&items.some(item => item.stage!=='PLAN'&&item.sku === row.sku))) throw new UserFacingError('同一店铺 SKU 已在自动任务中，请继续或取消原任务');
+    // A new task has no authority to reprepare sources for an old draft's paid images.
+    // Active tasks conflict by the original SKU above; orphaned drafts need explicit recovery.
+    if(regroupedSkus.size)throw new UserFacingError(`销售 SKU ${[...regroupedSkus].slice(0,5).join('、')} 已有旧分组草稿，请从原草稿或原自动任务继续；不能以新 SKU 建立重复任务`);
+    const now = new Date().toISOString();
+    const task: AutomaticListingTask = { id: randomUUID(), revision: 0, status: 'CREATED', targetId, targetName: target.target.name, sellerId: target.target.sellerId,
+      marketplaceId: target.target.marketplaceId, mode: target.target.mode, targetStamp: fingerprint(target), profileId, profileStamp: fingerprint(profile),
+      rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
+      labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
+    this.save(task); this.tasks.set(task.id, task); return structuredClone(task);
+  }
+  prepareStart(id: string): AutomaticListingTask {
+    const task = this.task(id);
+    if (!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status) || this.activeId === id) throw new UserFacingError('此任务正在运行、等待平台或已经结束');
+    this.assertScope(task,undefined,true); return structuredClone(task);
+  }
+  startAuthorized(approved: AutomaticListingTask): AutomaticListingTask {
+    const task = this.task(approved.id);
+    if (fingerprint(task) !== fingerprint(approved)) throw new UserFacingError('确认期间任务范围发生变化');
+    this.prepareStart(task.id);
+    // A user-confirmed image binding may advance only untouched source rows. Submitted
+    // siblings retain their exact draft/product revision and never repeat paid work.
+    for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
+    for(const row of task.items)this.migrateRepairPolicy(task,row);
+    for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
+      row.status = 'PENDING';
+      // Retain the precise source failure if a ready sibling has frozen this product's revision.
+      if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
+    }
+    task.status = 'QUEUED'; task.error = null; this.grants.add(task.id); this.save(task); this.deps.labels.resumeJob?.(task.id); this.pump(); return structuredClone(task);
+  }
+  private migrateRepairPolicy(task: AutomaticListingTask,row: AutomaticListingItem): void {
+    if(row.repairPolicyVersion)return;
+    row.repairPolicyVersion=FIELD_REPAIR_POLICY_VERSION;
+    if(row.status!=='FAILED'||row.repairAttempts!==2||row.repair?.phase==='FIELDS_STARTED'||!row.draftId||!row.executionTaskIds.length)return;
+    const draft=this.deps.amazon.getDraft(row.draftId),child=this.deps.execution.get(row.executionTaskIds.at(-1)!);
+    if(!this.matching(task,row,draft)||submitted(draft)||child.items.some(item=>item.submitStarted)
+      ||row.repair&&(draft.revision!==row.repair.draftRevision||imageWorkflowDraftStamp(draft)!==row.repair.draftStamp))return;
+    const fields=newlyRepairableFields(draft,this.deps.store.getProduct(row.productId));
+    if(!fields.length)return;
+    row.repairPolicyMigration={version:FIELD_REPAIR_POLICY_VERSION,previousAttempts:2,grantedAttempts:1,grantedAt:new Date().toISOString(),fields};
+  }
+  private pump(): void {
+    if (this.worker || this.closed || this.closing) return;
+    this.worker = Promise.resolve().then(async () => {
+      for (;;) {
+        const task = [...this.tasks.values()].find(value => value.status === 'QUEUED' && this.grants.has(value.id));
+        if (!task || this.closed || this.closing) break;
+        this.activeId = task.id; this.controller = new AbortController(); task.status = 'RUNNING'; this.save(task);
+        try {
+          for (const row of task.items) {
+            if (!this.running(task)) break;
+            if (['DONE','FAILED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
+            try { await this.prepareItem(task, row); }
+            catch (error) {
+              if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
+              row.status = 'FAILED'; row.error = errorMessage(error); this.save(task);
+              try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.save(task); break; }
+            }
+          }
+          if (this.running(task)) this.summarize(task);
+        } finally { if(!task.items.some(row=>row.stage==='PARENT'&&row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
+      }
+      await this.refreshWaiting();
+    }).finally(() => { this.worker = null; if([...this.tasks.values()].some(task=>task.status==='QUEUED'&&this.grants.has(task.id)))this.pump(); });
+  }
+  private running(task: AutomaticListingTask): boolean { return !this.closed && !this.closing && task.status === 'RUNNING' && this.grants.has(task.id); }
+  private checkpoint(task: AutomaticListingTask, row: AutomaticListingItem): void {
+    if (!this.running(task)) throw new UserFacingError('自动任务已暂停或取消');
+    this.assertScope(task, row);
+  }
+  private matching(task: AutomaticListingTask, row: AutomaticListingItem, draft: AmazonDraft): boolean {
+    return draft.productId === row.productId && draft.variantId === row.variantId && draft.sku === row.sku && draft.targetId === task.targetId
+      && draft.sellerId === task.sellerId && draft.marketplaceId === task.marketplaceId && draft.mode === task.mode;
+  }
+  private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
+  private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
+  private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
+    this.checkpoint(task, row);
+    let draft = row.draftId ? this.deps.amazon.getDraft(row.draftId) : undefined;
+    if (!draft) {
+      const existing = this.deps.amazon.listDrafts(row.productId).filter(value => this.matching(task, row, value));
+      const sent = existing.find(submitted);
+      if (sent) { row.draftId = sent.id; row.stage = 'READBACK'; row.status = 'WAITING'; this.deps.followup.schedule(sent.id); this.save(task); return; }
+    } else if (!this.matching(task, row, draft)) throw new UserFacingError('任务草稿归属发生变化');
+    if (draft && submitted(draft)) { row.stage = 'READBACK'; row.status = 'WAITING'; this.deps.followup.schedule(draft.id); this.save(task); return; }
+    if (!row.sourcesPrepared) {
+      // Only an explicit local SKU binding, after all ready siblings submitted, can
+      // release the frozen source group. prepareSources verifies that binding itself.
+      const sourceProduct=this.deps.store.getProduct(row.productId);
+      const confirmedRecovery=this.canRebaseSources(task,row)&&(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).every(id=>sourceProduct.assets.some(asset=>asset.variantIds.includes(id)));
+      if (task.items.some(value => value.productId === row.productId && value.sourcesPrepared) && !confirmedRecovery) {
+        const product=this.deps.store.getProduct(row.productId);
+        const receipt=this.deps.sourceReceipt?.(row.productId);
+        const mappingReason=this.deps.sourceReceipt && (row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceMappingIssue(product,id,receipt)).find(Boolean);
+        const reason = mappingReason || row.error || '该 SKU 的来源图片尚未准备完成';
+        throw new UserFacingError(reason.includes(frozenSourcesMessage) ? reason : `${reason}；${frozenSourcesMessage}`);
+      }
+      const siblings = task.items.filter(value => value.productId === row.productId && !value.sourcesPrepared && value.stage === 'SOURCES');
+      row.status = 'RUNNING'; row.stage = 'SOURCES'; this.save(task);
+      const result = await this.deps.images.prepareSources({ productId: row.productId, productRevision: row.productRevision, variantIds: [...new Set(siblings.flatMap(value => value.salesPlan?.recipe.components.map(c=>c.variantId)??[value.variantId]))] });
+      if (sourceStamp(result.product) !== row.sourceStamp) throw new UserFacingError('准备来源图期间商品资料变化');
+      for (const sibling of siblings) {
+        sibling.productRevision = result.product.revision;
+        const missing = result.missing.find(value => (sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]).includes(value.variantId));
+        // Finish the group download first, then require every component of this sales SKU.
+        sibling.sourcesPrepared = !missing; sibling.stage = missing ? 'SOURCES' : 'DRAFT';
+        sibling.status = missing ? 'FAILED' : 'PENDING'; sibling.error = missing?.message ?? null;
+      }
+      if (siblings.some(sibling => sibling.sourcesPrepared)) {
+        for (const sibling of siblings) if (!sibling.sourcesPrepared) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));
+      }
+      this.save(task); this.checkpoint(task, row);
+      if (!row.sourcesPrepared) throw new UserFacingError(row.error!);
+    }
+    row.status = 'RUNNING';
+    if (task.productType === 'AUTO' && !row.classification) {
+      if (!this.deps.classify) throw new UserFacingError('逐商品分类服务尚未初始化');
+      row.stage = 'CLASSIFY'; this.save(task);
+      const classification = await this.deps.classify({ productId:row.productId,productRevision:row.productRevision,targetId:task.targetId }, this.controller!.signal);
+      this.checkpoint(task,row);
+      for (const sibling of task.items.filter(item=>item.productId===row.productId)) sibling.classification = structuredClone(classification);
+      this.save(task);
+    }
+    const productType = row.classification?.productType ?? task.productType;
+    if(row.salesPlan&&!row.salesPlan.familyResolved){
+      if(!this.deps.resolveFamily)throw new UserFacingError('销售组合类目规则尚未初始化');
+      const siblings=task.items.filter(value=>value.salesPlan?.sourceGroupKey===row.salesPlan!.sourceGroupKey);
+      const plans=await this.deps.resolveFamily({plans:siblings.map(value=>value.salesPlan!),targetId:task.targetId,productType,locale:task.locale},this.controller!.signal);
+      this.checkpoint(task,row);
+      for(const sibling of siblings){const plan=plans.find(value=>value.sku===sibling.sku);if(!plan)throw new UserFacingError('类目关系缺少销售 SKU');sibling.salesPlan=plan;}
+      this.save(task);
+    }
+    const parentage=row.salesPlan?.parentage??'NONE';
+    if (!draft) {
+      draft = this.deps.amazon.listDrafts(row.productId).find(value => this.matching(task, row, value) && value.productRevision === row.productRevision
+        && !submitted(value) && ['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(value.state) && value.schema.productType === productType
+        && value.schema.requirements === 'LISTING' && value.schema.parentageLevel === parentage && value.schema.locale === task.locale
+        && value.listingProgram === (task.mode === 'live' ? 'haul' : 'standard'));
+      if (draft) { row.draftId = draft.id; this.save(task); }
+    }
+    if (!draft) {
+      row.stage = 'DRAFT'; this.save(task);
+      // Preparation service reuses matching editable drafts and validates listing identity itself.
+      const result = await this.deps.amazon.prepareDrafts({ targetId: task.targetId, productType, parentageLevel: parentage, requirements: 'LISTING', locale: task.locale,
+        listingProgram: task.mode === 'live' ? 'haul' : 'standard', items: [{ productId: row.productId, productRevision: row.productRevision, variantId: row.variantId, attributes: {} }] },row.salesPlan?[row.salesPlan]:undefined);
+      const prepared = result.items.find(value => value.productId === row.productId && value.variantId === row.variantId);
+      if (!prepared?.draft || prepared.disposition === 'REJECTED') throw new UserFacingError(prepared?.error || prepared?.issues.map(value => value.message).join('；') || '草稿准备未返回有效结果');
+      draft = prepared.draft; row.draftId = draft.id; this.save(task); this.checkpoint(task, row);
+    }
+    if (!this.matching(task, row, draft) || draft.productRevision !== row.productRevision) throw new UserFacingError('准备后的草稿范围与任务不一致');
+    const pricingIssue=pricingBlockingReason(draft);
+    if(pricingIssue){row.stage='DRAFT';this.save(task);throw new UserFacingError(pricingIssue);}
+    if(row.familyTransition)draft=await this.finishFamilyTransition(task,row);
+    if (!row.executionTaskIds.length||this.deps.execution.get(row.executionTaskIds.at(-1)!).status==='CANCELLED') {
+      const prior = this.deps.images.getProgress(draft.id);
+      row.stage = 'IMAGES'; this.save(task);
+      if (!this.imageReady(prior)) {
+        const changedRiskPolicy=!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
+        if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
+        row.imageStarted = true; this.save(task);
+        const result = await this.deps.images.complete({ draftId: draft.id, draftRevision: draft.revision });
+        row.imageAttempts = result.workflow.attempt; this.save(task);
+        if (!this.imageReady(result.workflow)) throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');
+        draft = result.draft;
+      }
+      this.checkpoint(task, row);
+    }
+    if(row.repair){await this.finishRepair(task,row);draft=this.deps.amazon.getDraft(draft.id);}
+    draft=await this.reconcileFamily(task,row,draft);
+    if (!row.executionTaskIds.length||this.deps.execution.get(row.executionTaskIds.at(-1)!).status==='CANCELLED') {
+      if(row.salesPlan?.parentage==='CHILD'){
+        if(!this.deps.ensureParent)throw new UserFacingError('父体建档服务尚未初始化');
+        row.stage='PARENT';this.save(task);
+        const parent=await this.deps.ensureParent(this.deps.amazon.getDraft(draft.id),task.profileId,this.controller!.signal);
+        row.parentDraftId=parent.draftId;this.checkpoint(task,row);
+        if(!parent.ready){row.status='WAITING';this.save(task);return;}
+      }
+      const child = this.childFor(task, draft);
+      row.executionTaskIds.push(child.id); row.stage = 'EXECUTION'; this.save(task);
+    }
+    for (;;) {
+      this.checkpoint(task, row);
+      if(!this.imagePolicyCompatible(this.deps.images.getProgress(draft.id)))throw new UserFacingError('图片与当前风险拦截或文案复核设置不一致，请先在异常商品复核已有图片后继续；尚未上传或提交。');
+      if (row.repair) await this.finishRepair(task, row);
+      const childId = row.executionTaskIds.at(-1)!;
+      let child = this.deps.execution.get(childId);
+      if (child.status !== 'COMPLETED') {
+        this.deps.execution.startAuthorized(this.deps.execution.prepareStart(childId));
+        await this.deps.execution.waitForIdle(); child = this.deps.execution.get(childId);
+      }
+      const current = this.deps.amazon.getDraft(draft.id);
+      if (submitted(current)) {
+        row.stage = 'READBACK'; row.status = 'WAITING'; row.error = null;
+        this.deps.followup.schedule(current.id); this.save(task); return;
+      }
+      this.checkpoint(task, row);
+      if (child.status === 'COMPLETED') throw new UserFacingError('执行结束但没有可核对的提交记录');
+      const item = child.items[0], failed = item?.steps.find(step => step.status === 'FAILED');
+      if (!this.deps.repairFields || !this.deps.recheckImage || item?.submitStarted || !failed || !['validate','preview','submit'].includes(failed.name)
+        || row.repairAttempts >= repairLimit(row) && !canMigrateCategory(row,current) && (!this.deps.prepareSourceColors || row.sourceColorRepair || !needsSourceColor(current)))
+        throw new UserFacingError(failed?.error || child.error || '执行未完成，请查看异常原因');
+      const prior = this.deps.images.getProgress(draft.id);
+      if (!this.imageReady(prior)) throw new UserFacingError('原图片复核记录不可用，未自动重生成');
+      row.stage = 'IMAGES';
+      row.repair = { phase: 'FIELDS_PENDING', sourceWorkflowId: prior!.id, draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);
+    }
+  }
+  private async reconcileFamily(task:AutomaticListingTask,row:AutomaticListingItem,draft:AmazonDraft):Promise<AmazonDraft>{
+    if(!this.deps.rebindFamily||!this.deps.planSales||!this.deps.resolveFamily||!row.salesPlan||row.salesPlan.parentage!=='NONE'||submitted(draft))return draft;
+    const image=this.deps.images.getProgress(draft.id);if(!this.imageReady(image))return draft;
+    const selected=new Set(task.items.filter(i=>i.productId===row.productId).map(i=>i.salesPlan?.recipe.key));
+    const fresh=this.deps.planSales(row.productId,task.targetId).filter(p=>selected.has(p.recipe.key)),proposed=fresh.find(p=>p.recipe.key===row.salesPlan!.recipe.key);
+    if(!proposed)return draft;
+    const siblings=fresh.filter(p=>p.sourceGroupKey===proposed.sourceGroupKey);if(siblings.length<2)return draft;
+    const resolved=await this.deps.resolveFamily({plans:siblings,targetId:task.targetId,productType:draft.schema.productType,locale:task.locale},this.controller!.signal);
+    this.checkpoint(task,row);
+    const next=resolved.find(p=>p.recipe.key===row.salesPlan!.recipe.key);if(!next||next.parentage!=='CHILD')return draft;
+    const plan=reconcileSalesIdentity(row.salesPlan,next);
+    if(row.executionTaskIds.some(id=>this.deps.execution.get(id).items.some(i=>i.submitStarted)))throw new UserFacingError('已有提交意图，先按原任务核实结果后再调整父子关系');
+    // Save intent before changing the draft. A restart continues with the original
+    // seven-image source and never treats a changed schema as permission to regenerate.
+    row.familyTransition={phase:'BIND',plan,sourceWorkflowId:image!.id,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};
+    this.save(task);return this.finishFamilyTransition(task,row);
+  }
+  private async finishFamilyTransition(task:AutomaticListingTask,row:AutomaticListingItem):Promise<AmazonDraft>{
+    let change=row.familyTransition!,draft=this.deps.amazon.getDraft(row.draftId!);
+    if(!this.deps.rebindFamily||!this.deps.recheckImage||submitted(draft))throw new UserFacingError('父子体转换需要可编辑草稿及原图复核服务');
+    if(row.executionTaskIds.some(id=>this.deps.execution.get(id).items.some(i=>i.submitStarted)))throw new UserFacingError('已有提交意图，未继续转换草稿关系');
+    this.checkpoint(task,row);
+    if(change.phase==='BIND'){
+      const saved=draft.revision===change.draftRevision+1&&draft.salesPlan&&fingerprint(validateSalesPlan(draft.salesPlan))===fingerprint(validateSalesPlan(change.plan))
+        &&draft.events.at(-1)?.summary===FAMILY_REBIND_EVENT_SUMMARY&&draft.events.at(-1)?.at===draft.updatedAt;
+      if(!saved){
+        if(draft.revision!==change.draftRevision||imageWorkflowDraftStamp(draft)!==change.draftStamp)throw new UserFacingError('父子体转换前草稿已变化，保留原图等待核对');
+        draft=await this.deps.rebindFamily({id:draft.id,revision:draft.revision,plan:change.plan},this.controller!.signal);
+      }
+      row.salesPlan=structuredClone(change.plan);
+      row.familyTransition=change={...change,phase:'RECHECK',draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);
+      this.checkpoint(task,row);
+    }
+    if(change.phase==='RECHECK'){
+      if(draft.revision!==change.draftRevision||imageWorkflowDraftStamp(draft)!==change.draftStamp){
+        if(draft.revision<=change.draftRevision||!this.deps.images.canResumeRecheckDraft?.({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:change.sourceWorkflowId}))throw new UserFacingError('父子体转换后的草稿已变化，请核对原图复核进度');
+        row.familyTransition=change={...change,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);
+      }
+      draft=await this.deps.recheckImage({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:change.sourceWorkflowId},this.controller!.signal);
+      row.familyTransition=change={...change,phase:'READY',draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);
+      this.checkpoint(task,row);
+    }
+    if(draft.revision!==change.draftRevision||imageWorkflowDraftStamp(draft)!==change.draftStamp)throw new UserFacingError('父子体转换后草稿发生变化');
+    const active=row.executionTaskIds.map(id=>this.deps.execution.get(id));
+    if(active.some(t=>t.items.some(i=>i.submitStarted)))throw new UserFacingError('已有提交意图，未替换执行任务');
+    for(const prior of active)if(!['COMPLETED','CANCELLED'].includes(prior.status))this.deps.execution.cancel(prior.id);
+    row.stage='IMAGES';delete row.familyTransition;this.save(task);return draft;
+  }
+  private async finishRepair(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
+    let repair = row.repair!;
+    if (repair.phase === 'FIELDS_STARTED') {
+      const message = '上次字段修复结果尚未确认，请先核对异常草稿；未自动重发';
+      throw new UserFacingError(row.error?.startsWith(message) ? row.error : `${message}${row.error ? `。上次错误：${row.error}` : ''}${repair.remaining?.length ? `。此前待处理：${repair.remaining.join('；')}` : ''}`);
+    }
+    let current = this.deps.amazon.getDraft(row.draftId!);
+    if(repair.phase==='RECHECK_PENDING'&&current.revision>repair.draftRevision&&!submitted(current)
+      &&this.deps.images.canResumeRecheckDraft?.({draftId:current.id,draftRevision:current.revision,sourceWorkflowId:repair.sourceWorkflowId})){
+      // The recheck may repair copy before it fails or is paused. Adopt only a
+      // version proven by that same recheck; keep its failure and pending review.
+      row.repair=repair={...repair,draftRevision:current.revision,draftStamp:imageWorkflowDraftStamp(current)};this.save(task);
+    }
+    if (!this.matching(task,row,current) || current.revision !== repair.draftRevision || imageWorkflowDraftStamp(current) !== repair.draftStamp || submitted(current)) throw new UserFacingError('字段修复后草稿发生变化，请核对异常商品');
+    // Older checkpoints may have been saved without checking the field repair outcome.
+    const unresolved = fieldRepairRemaining(current, repair.remaining);
+    if (unresolved.length && repair.phase !== 'FIELDS_PENDING') {
+      row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
+    }
+    while (repair.phase === 'FIELDS_PENDING') {
+      const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);
+      if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
+      this.checkpoint(task,row);
+      const assertRepairScope=()=>{
+        const latest=this.deps.amazon.getDraft(current.id);
+        if(!this.matching(task,row,latest)||submitted(latest)||latest.revision!==repair.draftRevision||imageWorkflowDraftStamp(latest)!==repair.draftStamp)
+          throw new UserFacingError('字段修复后草稿发生变化，请核对异常商品');
+        if(row.executionTaskIds.some(id=>{const child=this.deps.execution.get(id);return child.items.length!==1||child.items[0].draftId!==current.id||child.items[0].submitStarted;}))
+          throw new UserFacingError('已有提交记录或执行范围变化，未继续字段修复');
+      };
+      assertRepairScope();
+      let evidenceSha256:string|undefined;
+      if(this.deps.prepareSourceColors&&needsSourceColor(current,repair.remaining)&&(!row.sourceColorRepair||row.repairAttempts<repairLimit(row))){
+        const evidence=await this.deps.prepareSourceColors(current.id,this.controller!.signal);
+        this.checkpoint(task,row);assertRepairScope();
+        if(evidence.evidenceSha256!==undefined&&!/^[a-f0-9]{64}$/.test(evidence.evidenceSha256))throw new UserFacingError('来源颜色证据指纹无效，未继续字段修复');
+        evidenceSha256=evidence.evidenceSha256;
+      }
+      if(row.repairAttempts>=repairLimit(row)){
+        if(canMigrateCategory(row,current))row.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,previousAttempts:row.repairAttempts as 2|3|4,grantedAttempts:1,grantedAt:new Date().toISOString(),fields:categoryRepairFields(current,repair.remaining)};
+        else if(!evidenceSha256||evidenceSha256===row.sourceColorEvidenceSha256||row.sourceColorRepair)
+          throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
+        else row.sourceColorRepair={evidenceSha256,previousAttempts:row.repairAttempts as 2|3|4,grantedAttempts:1,grantedAt:new Date().toISOString()};
+      }
+      row.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
+      if(evidenceSha256)row.sourceColorEvidenceSha256=evidenceSha256;
+      row.repairAttempts++;
+      // Grant, evidence and consumed attempt share the durable STARTED checkpoint.
+      // A cached preparation can resume safely; an unknown field result cannot replay.
+      row.repair = { ...repair, phase: 'FIELDS_STARTED' }; this.save(task);
+      const result = await this.deps.repairFields(current.id,this.controller!.signal);
+      current = 'draft' in result ? result.draft : result;
+      const remaining = fieldRepairRemaining(current,'draft' in result ? result.remaining : []);
+      // A known incomplete result is safe to retry; an interrupted unknown result is not.
+      row.repair = repair = { ...repair, phase: remaining.length ? 'FIELDS_PENDING' : 'RECHECK_PENDING', remaining,
+        draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);
+      this.checkpoint(task,row);
+    }
+    if (repair.phase === 'RECHECK_PENDING') {
+      if (!this.deps.recheckImage) throw new UserFacingError('现有图片复核服务不可用');
+      current = await this.deps.recheckImage({ draftId: current.id, draftRevision: current.revision, sourceWorkflowId: repair.sourceWorkflowId }, this.controller!.signal);
+      row.repair = { ...repair, phase: 'READY', draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);
+      this.checkpoint(task, row);
+    }
+    const priorChildId = row.executionTaskIds.at(-1)!;
+    const priorChild = this.deps.execution.get(priorChildId);
+    if (priorChild.items.some(item => item.submitStarted)) throw new UserFacingError('已有提交记录，未重建执行任务');
+    this.deps.execution.cancel(priorChildId);
+    const replacement = this.childFor(task, current);
+    row.executionTaskIds.push(replacement.id); row.repair = null; row.stage = 'EXECUTION'; this.save(task);
+  }
+  private childFor(task: AutomaticListingTask, draft: AmazonDraft) {
+    const existing = this.deps.execution.list().filter(child => !['CANCELLED','COMPLETED'].includes(child.status) && child.items.some(item => item.draftId === draft.id));
+    if (existing.length) {
+      const child = existing[0], item = child.items[0];
+      if (existing.length !== 1 || !['CREATED','PAUSED','NEEDS_ATTENTION'].includes(child.status) || child.items.length !== 1 || child.profileId !== task.profileId || child.profileStamp !== task.profileStamp
+        || item.draftId !== draft.id || item.draftRevision !== draft.revision || item.attributesHash !== fingerprint(draft.attributes) || item.schemaHash !== fingerprint(draft.schema)
+        || item.productId !== draft.productId || item.productRevision !== draft.productRevision || item.variantId !== draft.variantId || item.sku !== draft.sku
+        || item.targetStamp !== task.targetStamp || item.submitStarted) throw new UserFacingError('草稿已有不同范围的执行任务，请先核对原任务');
+      return child;
+    }
+    return this.deps.execution.create({ draftIds: [draft.id], profileId: task.profileId, concurrency: 1 });
+  }
+  private summarize(task: AutomaticListingTask): void {
+    if (['PAUSED','CANCELLED'].includes(task.status)) return;
+    task.status = task.items.every(row => row.status === 'DONE') ? 'COMPLETED'
+      : task.items.some(row => row.status === 'WAITING') ? 'WAITING' : 'NEEDS_ATTENTION';
+    task.error = task.items.find(row => row.status === 'FAILED')?.error ?? null; this.save(task);
+  }
+  refreshWaiting(): Promise<void> {
+    if (this.closed || this.closing || this.schedulingSuspended) return Promise.resolve();
+    if (this.observing) return this.observing;
+    this.observing = Promise.resolve().then(async () => {
+      const candidates = new Map(this.deps.procurement.candidates().map(value => [value.draftId, value]));
+      for (const task of this.tasks.values()) {
+        if (!['WAITING','NEEDS_ATTENTION'].includes(task.status)) continue;
+        let resumeParents=false;
+        for (const row of task.items) {
+          if(row.stage==='PARENT'&&row.parentDraftId&&row.status==='WAITING'){
+            const parent=this.deps.followup.get(row.parentDraftId);
+            if(parent.status==='NEEDS_ATTENTION'){row.status='FAILED';row.error=parent.error||'父体建档失败，保留子体图片和进度';}
+            else if(parent.status==='READY'&&this.grants.has(task.id)){row.status='PENDING';resumeParents=true;}
+            continue;
+          }
+          if (!row.draftId || row.status === 'DONE' || !['READBACK','LABELS'].includes(row.stage)) continue;
+          try {
+            if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
+            if (!row.batchId) {
+              if (!candidates.get(row.draftId)?.eligible) {
+                const followup = this.deps.followup.get(row.draftId);
+                if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
+                row.status = 'WAITING'; continue;
+              }
+              const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
+              const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
+              if (!batch) throw new UserFacingError('回读已就绪，但备货批次未建立');
+              row.batchId = batch.id; row.stage = 'LABELS'; this.save(task);
+            }
+            this.deps.labels.syncBatch(row.batchId, { jobId: task.id, format: task.labelFormat });
+            const labels = this.deps.labels.list({ batchId: row.batchId, jobId: task.id });
+            // Label records carry the exact draft identity and superseded versions remain excluded.
+            const relevant = labels.filter(label => label.draftId === row.draftId && label.current && !['STALE','CANCELLED'].includes(label.status));
+            if (relevant.length && relevant.every(label => label.status === 'READY')) { row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; }
+            else if (relevant.some(label => label.status === 'FAILED')) throw new UserFacingError(relevant.find(label => label.status === 'FAILED')?.message || '商品标签获取失败');
+            else { row.status = 'WAITING'; row.error = null; }
+          } catch (error) { row.status = 'FAILED'; row.error = errorMessage(error); }
+        }
+        if(resumeParents){task.status='QUEUED';this.save(task);queueMicrotask(()=>this.pump());}
+        else this.summarize(task);
+      }
+    }).finally(() => { this.observing = null; });
+    return this.observing;
+  }
+  pause(id: string): AutomaticListingTask {
+    const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
+    task.status = 'PAUSED'; this.grants.delete(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
+  }
+  cancel(id: string): AutomaticListingTask {
+    const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
+    task.status = 'CANCELLED'; this.grants.delete(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
+  }
+  private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
+    if (cancel) this.deps.labels.cancelJob?.(task.id); else this.deps.labels.pauseJob?.(task.id);
+    if (this.activeId === task.id) this.controller?.abort();
+    for (const row of task.items) {
+      if (row.stage === 'SOURCES' && row.status === 'RUNNING') this.deps.images.cancelSources(row.productId);
+      if (row.draftId && row.stage === 'IMAGES' && row.status === 'RUNNING') this.deps.images.cancel(row.draftId);
+      for (const id of row.executionTaskIds) {
+        const child = this.deps.execution.get(id);
+        if (!['COMPLETED','CANCELLED'].includes(child.status)) cancel ? this.deps.execution.cancel(id) : this.deps.execution.pause(id);
+      }
+    }
+  }
+  async waitForIdle(): Promise<void> { await this.worker; await this.observing; }
+  close(): Promise<void> {
+    if (this.closing) return this.closing; if (this.closed) return Promise.resolve();
+    if (this.timer) clearInterval(this.timer); this.timer = null;
+    for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
+    this.grants.clear();
+    this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });
+    return this.closing;
+  }
+}

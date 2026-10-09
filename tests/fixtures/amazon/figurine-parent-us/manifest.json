@@ -1,0 +1,9 @@
+{
+  "provenance": "Actual FIGURINE/PARENT/LISTING schema cached by HTC from Amazon Product Type Definitions API on 2026-10-09; local target/key identifiers omitted.",
+  "hasPurchasableOffer": false,
+  "hasHaulFlag": true,
+  "sha256": {
+    "schema": "ee4ec3c83edf898afe0eece03e2ff62f2cd7c3494eb0671bf86e6ef9ef976027",
+    "meta-schema": "a1fb36eb6aae4dedd73fd5e3ac8429dfa64225f55f0c4f89bff66f56f1b95acb"
+  }
+}

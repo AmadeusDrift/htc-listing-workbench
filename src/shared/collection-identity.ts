@@ -1,0 +1,5 @@
+/** Public extension identity only. The transient keypair used to create this public key was never saved. */
+export const COLLECTION_EXTENSION_PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAod9hefBSC3nNRC0BE0WnlFZ0q7EfEoygWC5E9+66VfQXu8KPR95C+2Qyb9cwx5KMJNQaYNv8vKfU0fpgdCVWw7+5z6Y27bf5GaO8ARMaK6sp1RwFJhYnpplyta90uxHdnPrcRmnUFK3POeGdlR8zD5EUz5xYHKCix0lTXRVhjfBpq1rBZecWkMEvuRZZ8qrEbbPyPbwACX4faSVMEwPnutR6kd5EYzw8J0jSRKnPY0suyaNHU9Hkmhrbl6LxqunXz91wMDVUw9sjznkx2rVxOVH2/Qfh0BpHRyuYed+UY5TX4C90TW8jz+QVNviCjVbAYMHeOCFnlQTaBOA86r8n0wIDAQAB';
+export const COLLECTION_EXTENSION_ID = 'klchaiogaakndaameaknjjopnmiifcoe';
+export const COLLECTION_EXTENSION_ORIGIN = `chrome-extension://${COLLECTION_EXTENSION_ID}/`;
+export const COLLECTION_NATIVE_HOST = 'com.htc.workbench.collection';

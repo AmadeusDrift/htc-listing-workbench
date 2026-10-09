@@ -1,0 +1,25 @@
+import type { IpcHandler } from './amazon-ipc.ts';
+import type { AutomaticListingTask } from '../shared/automatic-listing-contracts.ts';
+import type { AutomaticListingService } from './automatic-listing/service.ts';
+import { identifier } from '../shared/validation.ts';
+
+interface Hooks { confirm(task: AutomaticListingTask): Promise<boolean>; audit(action: string, summary: string): void }
+export function installAutomaticListingIpc(service: AutomaticListingService, handle: IpcHandler, hooks: Hooks): void {
+  const start = async (id: string) => {
+    const approved = service.prepareStart(id);
+    if (!await hooks.confirm(approved)) return null;
+    const task = service.startAuthorized(approved);
+    hooks.audit('automatic-listing.started', `启动 ${task.items.length} 个 SKU 的自动流程（${task.targetName}）`);
+    return task;
+  };
+  handle('red:automatic-listing:start', 1, async raw => {
+    const task = service.create(raw);
+    try { const started = await start(task.id); if (!started) service.cancel(task.id); return started; }
+    catch (error) { service.cancel(task.id); throw error; }
+  });
+  handle('red:automatic-listing:list', 0, () => service.list());
+  handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));
+  handle('red:automatic-listing:resume', 1, id => start(identifier(id)));
+  handle('red:automatic-listing:pause', 1, id => service.pause(identifier(id)));
+  handle('red:automatic-listing:cancel', 1, id => service.cancel(identifier(id)));
+}

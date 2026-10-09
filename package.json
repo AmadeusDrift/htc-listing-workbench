@@ -1,0 +1,58 @@
+{
+  "name": "htc-listing-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HTC 独立商品上架工作台",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs && node scripts/build-native-host.mjs && node scripts/build-extension.mjs",
+    "start": "node scripts/start.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "test:e2e": "node scripts/e2e.mjs",
+    "test:e2e:amazon": "node scripts/e2e-amazon.mjs",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:e2e && npm run test:e2e:amazon && npm run test:e2e:workspaces && npm run test:e2e:execution && npm run test:e2e:ai && npm run test:e2e:maintenance && npm run test:e2e:extension && npm run test:e2e:collection && npm run test:e2e:miaoshou && npm run test:e2e:inbox && npm run test:e2e:connections && npm run test:e2e:ui-feedback && npm run test:e2e:workspace-samples && npm run test:e2e:image-generation && npm run test:e2e:automatic-images && npm run test:e2e:automatic-listing",
+    "package": "node scripts/package.mjs",
+    "test:e2e:workspaces": "node scripts/e2e-workspaces.mjs",
+    "test:e2e:execution": "node scripts/e2e-execution.mjs",
+    "test:e2e:ai": "node scripts/e2e-ai.mjs",
+    "test:e2e:maintenance": "node scripts/e2e-maintenance.mjs",
+    "test:e2e:collection": "node scripts/e2e-collection.mjs",
+    "test:e2e:extension": "node scripts/e2e-extension-parser.mjs",
+    "test:e2e:miaoshou": "node scripts/e2e-miaoshou.mjs",
+    "test:e2e:inbox": "node scripts/e2e-inbox-ui.mjs",
+    "test:e2e:connections": "node scripts/e2e-connections.mjs",
+    "test:e2e:ui-feedback": "node scripts/e2e-ui-feedback.mjs",
+    "test:e2e:workspace-samples": "node scripts/e2e-workspace-samples.mjs",
+    "test:e2e:listing-ai": "npm run build && node scripts/e2e-listing-ai.mjs",
+    "test:e2e:appearance": "node scripts/e2e-appearance.mjs",
+    "test:e2e:image-generation": "node scripts/e2e-image-generation.mjs",
+    "test:e2e:automatic-images": "node scripts/e2e-automatic-images.mjs",
+    "test:e2e:automatic-listing": "node scripts/e2e-automatic-listing-ui.mjs && node scripts/e2e-automatic-pipeline.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "basic-ftp": "6.2.1",
+    "lucide-react": "1.48.0",
+    "pdf-lib": "1.17.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.4.5",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.1"
+  }
+}

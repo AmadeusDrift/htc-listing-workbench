@@ -1,0 +1,50 @@
+node_modules/
+.cache/
+dist/
+dist-electron/
+dist-native/
+dist-extension/
+release/
+artifacts/
+.test-data/
+*.zip
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+# Local credentials and live workspace data are never part of the source repository.
+/FTP导入配置/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.log
+*.pid
+*.pem
+*.pfx
+*.p12
+
+# Real listing spreadsheets and imported third-party archives stay local.
+/docs/低价商城真实上架表格参考/
+/docs/批量上品基座/
+/docs/U8低价商城字段填写矩阵_2026-10-07.csv
+
+# Local screenshots/previews; editable diagram and UI sources remain versioned.
+/docs/**/*.png
+/docs/**/*.jpg
+/docs/**/*.jpeg
+/docs/**/*.webp
+
+# Initial GitHub export: keep raw historical business/run documents local.
+/docs/*
+!/docs/version-control/
+/GitHub可复用底座与选型.md
+/RED-独立亚马逊上架中台需求文档.md
+/第一阶段实施范围.md
+/阶段目标.md
+

@@ -132,6 +132,112 @@ function productionWorkflow(f:Awaited<ReturnType<typeof fixture>>,failAfter?:num
   return {workflow,posts:()=>posts};
 }
 
+for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)for(const proof of ['caption','adoption'] as const)
+test((version??'v0')+' old-builder '+proof+' cannot join missing saved category proof with a current matching value',async t=>{
+  const f=await fixture(t,false,true),{workflow,posts}=productionWorkflow(f);
+  const legacy=(workflow as any).listing as ListingAiService,strict=legacy.currentContext.bind(legacy);
+  const omitAge=(context:ReturnType<ListingAiService['currentContext']>)=>({...context,evidence:context.evidence.filter(item=>item.name!=='适用年龄')});
+  legacy.currentContext=(...args)=>omitAge(strict(...args));
+  legacy.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+  let draft=f.draft;
+  if(proof==='adoption'){
+    const original=f.listing.currentContext.bind(f.listing);
+    f.listing.currentContext=(...args)=>omitAge(original(...args));
+    f.respond((operation,payload)=>{
+      if(operation==='ip-upload')return new Response(null,{status:200});
+      if(!operation&&payload.fields)return chat(payload.candidate?currentReview(payload):{kind:'amazon-fields',candidates:[{field:'item_name',items:[{value:'Adult Coaster',evidenceIds:payload.evidence.filter((e:any)=>e.meaning==='material').map((e:any)=>e.id),transformation:'compose'}]}],missing:payload.fields.filter((field:any)=>field.name!=='item_name').map((field:any)=>({field:field.name,reason:'Not requested here'}))});
+    });
+    const suggestion=await f.listing.suggest({draftId:draft.id,draftRevision:draft.revision}),review=await f.listing.review({draftId:draft.id,draftRevision:draft.revision,suggestionResultId:suggestion.id});
+    draft=await f.listing.adopt({draftId:draft.id,draftRevision:draft.revision,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['item_name']});
+    f.listing.currentContext=original;
+  }
+  const material=f.context.listing.evidence.find(e=>e.meaning==='material')!,set=sceneSet();
+  if(proof==='caption')set.slots[1]={...set.slots[1],role:'selling_point',focus:'Adult use',evidenceIds:[material.id],textMode:'planned',expectedText:[{text:'Adult Coaster',evidenceIds:[material.id]}]};
+  f.respond((operation,payload)=>{
+    if(operation==='ip-upload')return new Response(null,{status:200});
+    if(operation==='image-plan')return chat({...(payload.setPolicy&&!payload.slot?{setPlan:set}:{}),kind:'image-plan',prompt:'Preserve the selected SKU.',textMode:proof==='caption'&&payload.slot?.index===2?'planned':'none',expectedText:proof==='caption'&&payload.slot?.index===2?set.slots[1].expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)});
+  });
+  const first=await workflow.complete({draftId:draft.id,draftRevision:draft.revision});
+  assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+  legacy.currentContext=strict;
+  const prior=structuredClone(first.workflow);
+  if(version)prior.listingEvidenceContractVersion=version;else delete prior.listingEvidenceContractVersion;
+  const db=openDatabase(f.directory),saved=new Map<string,string>();
+  try{
+    for(const row of db.prepare('SELECT id,record_json FROM ai_results').all()){
+      const record=JSON.parse(String(row.record_json));
+      if(record.listingContext||record.imageContext){if(version)record.listingEvidenceContractVersion=version;else delete record.listingEvidenceContractVersion;}
+      const raw=JSON.stringify(record);saved.set(String(row.id),raw);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,row.id);
+    }
+    const raw=JSON.stringify(prior);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,prior.id);
+    assert.deepEqual(f.ai.getResult(prior.setPlanResultId!),JSON.parse(saved.get(prior.setPlanResultId!)!));
+    assert.throws(()=>approvedWorkflowAssets(db,first.draft,f.store.getProduct(f.product.id)));
+    const before=f.requests.length;
+    await assert.rejects(workflow.recheck({draftId:draft.id,draftRevision:first.draft.revision,sourceWorkflowId:prior.id}));
+    await assert.rejects(async()=>workflow.complete({draftId:draft.id,draftRevision:first.draft.revision}));
+    assert.equal(f.requests.length,before);assert.equal(posts(),7);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,raw);
+    const interrupted=JSON.stringify({...prior,status:'INTERRUPTED',error:'Historical interrupted fixture'});
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(interrupted,prior.id);
+    await assert.rejects(async()=>workflow.complete({draftId:draft.id,draftRevision:first.draft.revision}));
+    assert.equal(f.requests.length,before);assert.equal(posts(),7);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,interrupted);
+    for(const [id,bytes] of saved)assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json,bytes);
+  }finally{db.close();}
+});
+
+test('same-value prose citation repair permits rechecking seven valid legacy images without regeneration',async t=>{
+  const f=await fixture(t,false,true);
+  const respondFields=(operation:string,payload:any)=>{
+    if(operation==='ip-upload')return new Response(null,{status:200});
+    if(!operation&&payload.fields)return chat(payload.candidate?currentReview(payload):{kind:'amazon-fields',candidates:[{field:'item_name',items:[{value:'Adult Coaster',evidenceIds:payload.evidence.filter((e:any)=>e.name==='适用年龄').map((e:any)=>e.id),transformation:'compose'}]}],missing:payload.fields.filter((field:any)=>field.name!=='item_name').map((field:any)=>({field:field.name,reason:'Outside this repair'}))});
+  };
+  f.respond(respondFields);
+  const input={draftId:f.draft.id,draftRevision:f.draft.revision},suggestion=await f.listing.suggest(input),review=await f.listing.review({...input,suggestionResultId:suggestion.id});
+  let draft=await f.listing.adopt({...input,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['item_name']});
+  const market=draft.marketplaceId;
+  draft=f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,material:[{value:'Silicone',marketplace_id:market}],color:[{value:'Blue',marketplace_id:market}],brand:[{value:'Generic',marketplace_id:market}],purchasable_offer:[{marketplace_id:market,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:10}]}]}]}});
+  const {workflow,posts}=productionWorkflow(f),age=f.context.listing.evidence.find(e=>e.name==='适用年龄')!,set=sceneSet();
+  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(draft.id),state:'AMAZON_VALIDATED',previewIssues:[]});
+  set.slots[1]={...set.slots[1],role:'selling_point',focus:'Adult use',evidenceIds:[age.id],textMode:'planned',expectedText:[{text:'Adult Coaster',evidenceIds:[age.id]}]};
+  f.respond((operation,payload)=>{
+    if(operation==='image-plan')return chat({...(payload.setPolicy&&!payload.slot?{setPlan:set}:{}),kind:'image-plan',prompt:'Preserve the selected SKU.',textMode:payload.slot?.index===2?'planned':'none',expectedText:payload.slot?.index===2?set.slots[1].expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)});
+    return respondFields(operation,payload);
+  });
+  const first=await workflow.complete({draftId:draft.id,draftRevision:draft.revision});
+  assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+  const material=suggestion.listingContext!.evidence.find(e=>e.meaning==='material')!,oldSuggestion=structuredClone(suggestion),oldReview=structuredClone(review);
+  if(oldSuggestion.output.kind!=='amazon-fields'||oldReview.output.kind!=='amazon-fields-review')throw Error('fixture kind');
+  oldSuggestion.output.candidates[0].items[0].evidenceIds=[material.id];
+  oldReview.output.checks[0].evidenceIds=[material.id];oldReview.output.checks[0].claims[0].evidenceIds=[material.id];
+  const db=openDatabase(f.directory),oldRun={...first.workflow,listingEvidenceContractVersion:'listing-evidence/v2' as const};
+  try{
+    const saved=new Map<string,string>();
+    for(const row of db.prepare('SELECT id,record_json FROM ai_results').all()){
+      const result=row.id===suggestion.id?oldSuggestion:row.id===review.id?oldReview:JSON.parse(String(row.record_json));
+      if(result.listingContext||result.imageContext)result.listingEvidenceContractVersion='listing-evidence/v2';
+      const raw=JSON.stringify(result);saved.set(String(row.id),raw);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,row.id);
+    }
+    const record=JSON.parse(String(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(draft.id)!.record_json));
+    record.draft.fieldAdoptions[0].changes[0].evidence=[material];draft=record.draft;
+    db.prepare('UPDATE listing_drafts SET record_json=? WHERE id=?').run(JSON.stringify(record),draft.id);
+    const oldBytes=JSON.stringify(oldRun);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(oldBytes,oldRun.id);
+    assert.throws(()=>approvedWorkflowAssets(db,draft,f.store.getProduct(f.product.id)));
+    const before=f.requests.length;f.amazon.previewDraft=async()=>({...f.amazon.getDraft(draft.id),state:'AMAZON_VALIDATED',previewIssues:[]});
+    const repaired=await f.listing.complete({draftId:draft.id,draftRevision:draft.revision});
+    assert.equal(repaired.aiCalls,2);assert.equal(f.requests.length,before+2);assert.deepEqual(repaired.remaining,[]);
+    assert.deepEqual(repaired.draft.attributes,draft.attributes);assert.equal(repaired.draft.fieldAdoptions!.length,draft.fieldAdoptions!.length+1);
+    const rechecked=await workflow.recheck({draftId:draft.id,draftRevision:repaired.draft.revision,sourceWorkflowId:oldRun.id});
+    assert.equal(rechecked.workflow.status,'COMPLETED',rechecked.workflow.error??'');assert.equal(posts(),7);
+    assert.deepEqual(rechecked.workflow.slots!.map(slot=>slot.approvedAssetId),oldRun.slots!.map(slot=>slot.approvedAssetId));
+    assert.equal(approvedWorkflowAssets(db,rechecked.draft,f.store.getProduct(f.product.id))?.length,7);
+    const calls=f.requests.length,repeated=await workflow.recheck({draftId:draft.id,draftRevision:rechecked.draft.revision,sourceWorkflowId:oldRun.id});
+    assert.equal(repeated.aiCalls,0);assert.equal(f.requests.length,calls);assert.equal(posts(),7);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(oldRun.id)!.record_json,oldBytes);
+    for(const [id,raw] of saved)assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json,raw);
+  }finally{db.close();}
+});
+
 test('a cached legacy PASS with exact context and copy hashes cannot bypass current source parsing',async t=>{
   const f=await fixture(t,false,true),review=structuredClone(f.ai.getResult(f.context.listingReviewResultId!)!);
   const evidence=review.listingContext!.evidence.find(e=>e.name==='适用年龄')!;
@@ -236,7 +342,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`${version?
   const before=f.requests.length;await assert.rejects(f.ai.imagePlan(context,()=>{}));assert.equal(f.requests.length,before);
 });
 
-for(const version of [undefined,'listing-evidence/v1'] as const)for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} ${version??'unmarked'} recheck versions its new context without rewriting old paid evidence`,async t=>{
+for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} ${version??'unmarked'} recheck versions its new context without rewriting old paid evidence`,async t=>{
   const f=await fixture(t),{workflow,posts}=productionWorkflow(f),material=f.context.listing.evidence.find(e=>e.meaning==='material')!;
   const sourceDb=openDatabase(f.directory);
   try{sourceDb.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','成人','manual','upgrade-era omitted conflict','conflicting',99);}finally{sourceDb.close();}
@@ -250,7 +356,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)for(const resume
   });
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
   assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
-  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v3');
   const prior=structuredClone(first.workflow);if(version)prior.listingEvidenceContractVersion=version;else delete prior.listingEvidenceContractVersion;
   const oldRun=JSON.stringify(prior),oldResults=new Map<string,string>(),db=openDatabase(f.directory);
   try{
@@ -277,13 +383,13 @@ for(const version of [undefined,'listing-evidence/v1'] as const)for(const resume
     const created=workflow.getProgress(f.draft.id)!;
     workflow.cancel(f.draft.id);const cancelled=await starting;
     assert.equal(created.imageContext,undefined);assert.equal(created.status,'RUNNING');
-    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');
-    assert.equal(cancelled.workflow.status,'CANCELLED');assert.equal(cancelled.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v3');
+    assert.equal(cancelled.workflow.status,'CANCELLED');assert.equal(cancelled.workflow.listingEvidenceContractVersion,'listing-evidence/v3');
     assert.equal(f.requests.length,beforeCancel);assert.equal(posts(),7);
     if(pendingId)assert.equal(created.id,pendingId);else assert.notEqual(created.id,prior.id);
     const before=f.requests.length,result=await workflow.recheck(input);
     assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),7);
-    assert.equal(result.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(result.workflow.imageContext?.listing.evidenceBlockers?.[0].field,'age_range_description');
+    assert.equal(result.workflow.listingEvidenceContractVersion,'listing-evidence/v3');assert.equal(result.workflow.imageContext?.listing.evidenceBlockers?.[0].field,'age_range_description');
     if(pendingId)assert.equal(result.workflow.id,pendingId);
     assert.ok(f.requests.length>before);assert.deepEqual(result.workflow.slots!.map(slot=>slot.approvedAssetId),prior.slots!.map(slot=>slot.approvedAssetId));
     assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,oldRun);
@@ -293,7 +399,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)for(const resume
   }finally{db.close();}
 });
 
-for(const version of [undefined,'listing-evidence/v1'] as const)test(`an empty ${version??'unmarked'} run stamps current evidence before a configuration failure`,async t=>{
+for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)test(`an empty ${version??'unmarked'} run stamps current evidence before a configuration failure`,async t=>{
   const f=await fixture(t),{workflow,posts}=productionWorkflow(f),input={draftId:f.draft.id,draftRevision:f.draft.revision};
   const starting=workflow.complete(input);workflow.cancel(f.draft.id);const stopped=await starting;
   const old=structuredClone(stopped.workflow);if(version)old.listingEvidenceContractVersion=version;else delete old.listingEvidenceContractVersion;
@@ -302,8 +408,8 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`an empty $
   f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:false});
   const before=f.requests.length,pending=workflow.complete(input),created=workflow.getProgress(f.draft.id)!;
   const failed=await pending;
-  assert.equal(created.id,old.id);assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');
-  assert.equal(failed.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(failed.workflow.imageContext,undefined);
+  assert.equal(created.id,old.id);assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v3');
+  assert.equal(failed.workflow.listingEvidenceContractVersion,'listing-evidence/v3');assert.equal(failed.workflow.imageContext,undefined);
   assert.notEqual(failed.workflow.status,'COMPLETED');assert.match(failed.workflow.error??'',/配置并启用/);
   assert.equal(f.requests.length,before);assert.equal(posts(),0);
 });
@@ -314,15 +420,15 @@ test('the legacy single-image path stamps a new current context and fresh rechec
   const seed=validateStoredImageWorkflowRun({id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'RUNNING',stage:'content',attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION});
   const first=await (workflow as any).run(seed,f.draft,new AbortController().signal);
   assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
-  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(posts(),1);
+  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v3');assert.equal(posts(),1);
   const prior=structuredClone(first.workflow);delete prior.listingEvidenceContractVersion;
   const raw=JSON.stringify(prior),db=openDatabase(f.directory);
   try{
     db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,prior.id);
     const pending=(workflow as any).recheckWithFreshEvidence({draftId:f.draft.id,draftRevision:first.draft.revision,sourceWorkflowId:prior.id});
     const created=workflow.getProgress(f.draft.id)!,completed=await pending;
-    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');assert.notEqual(created.id,prior.id);
-    assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(completed.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v3');assert.notEqual(created.id,prior.id);
+    assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(completed.workflow.listingEvidenceContractVersion,'listing-evidence/v3');
     assert.equal(completed.workflow.approvedAssetId,prior.approvedAssetId);assert.equal(posts(),1);
     assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,raw);
     db.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','不适合儿童','manual','current exclusion fixture','human_confirmed',99);

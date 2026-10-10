@@ -43,7 +43,7 @@
 | 31 | 页面图片与实际 SKU/父子关系一致 | `tests/automatic-product-groups.test.ts`：`combined recipes include each source component once and retain distinct sales SKUs and actual parent families`；`scripts/e2e-automatic-listing-ui.mjs`：检查 `12 source cards preserve source/sales counts, actual parent families and excluded variants; search and manual folding survive polling, pricing/source/workflow outcomes and submission/completion remain distinct` | **部分，S**。数据分组与页面父子、数量展示有断言；未逐 DOM 图片 src/hash 对照持久化 SKU/父子绑定，不是图片对应关系验收。 |
 | 32 | 保存、崩溃、历史加载、隔离恢复一致 | `tests/fault-recovery.test.ts`：`actual process exits at all restore boundaries recover one complete workspace and retain newer safety history`；`tests/image-workflow-service.test.ts`：`blocked workflow is backed up durably, while a forged completion cannot enter a backup` | **部分，S+L**。确实对子进程退出、恢复日志、本地 SQLite/文件及未知写锁断言；夹具均合成，未包含本计划全部历史业务状态的脱敏回放。 |
 | 33 | 日志归因与环境权限错误可区分 | `tests/ai-provider-errors.test.ts`：`Aidge NoPermission explains service permission without blaming saved credentials or exposing server details`；`signature failures and generic authorization responses retain their distinct authentication error`；`tests/ai-output-diagnostics.test.ts`：`a paid-boundary service output failure retains only its unapproved reply and fixed rejection metadata` | **部分，S+L**。服务权限与鉴权分类、固定拒绝阶段及脱敏元数据有断言；尚缺贯通自动任务/字段/图片/外部请求的关联归因，以及 OS 权限失败与业务失败的统一报告。 |
-| 34 | 发布制品哈希与有界真实观察 | 没有对应的专门测试名；`scripts/package.mjs` 将文件 SHA-256 写入 `版本与摘要.json`，属构建逻辑，不是验收结果 | **缺口**。未验证本次隔离制品与源码提交绑定、交付文件摘要复核及获批后的有界真实样本；本次不启动真实观察。 |
+| 34 | 发布制品哈希与有界真实观察 | `tests/release-*.test.ts`；`scripts/snapshot-release.mjs`、`verify-package.mjs`、`e2e-release-candidate.mjs`；实际 S `8d0fd45` 的 94 文件候选与运行报告，详见本页末尾增量 | **部分（S/L）**。精确 Git 来源、完整文件摘要、同候选 EXE 隔离运行已验收；未启用正式入口，真实业务样本仍是缺口。 |
 | 35 | 暂停任务与独立回读调度组合和重启 | `tests/pause-readback-boundary.test.ts`：`real task … permits accepted-only readback … including restart`、两任务隔离、maintenance pause、UNKNOWN/SUBMITTING 和已排队标签暂停系列 | **直接（离线组合），S+L**。同 SQLite 组合真实 Automatic、Followup、Amazon、Execution、Procurement、Labels、ImageWorkflow，公共 due/refreshWaiting 验证已排期/在途回读及重建；外部 HTTP/托管和付费 provider 为替身，未启用真实周期调度器、打印 UI 或实际店铺。见 G3。 |
 
 ## 修复增量：定价原因与证据
@@ -211,3 +211,12 @@
 - UNKNOWN 的只读投影读取真实 journal；未发送 STARTED 和已完成不会误判，不写入持久 run，不触发重发。图片面板包括无 slot、无错误文案、字段阶段未知及普通图片未知，原 retry 权限保持。
 - 队列完成、待回读、重新评估和继续/取消原任务提示按有限状态展示；模型或历史自由文字不成为规则分类依据，敏感 reason 不在错误面板显示。missing-only、mixed false/0/合法 NA、旧无 sidecar 均有隔离 UI 证据。
 - 这些是模拟响应与真实本地机制组合，不能代替模型准确率、真实付费/上架或新安装包验收。广泛 UI 优化仍未实施。
+
+## 修复增量：制品追溯与隔离候选验收
+
+`chore/release-verification` 新增 12 项正式测试（11 项 release 机制、1 项混合业务）。最终全量 2092 tests、2091 pass、0 fail、0 cancelled、1 项同 Windows 文件符号链接权限 skipped，265263.4674 ms；类型检查通过。SPEC/QUALITY 及中文路径、运行等待、截图同步差异复审通过。业务综合冻结 `eccff5c` 的独立定向 83/83 证据继续有效，本分支没有修改产品 src。
+
+- S/L：临时 Git、真实文件、完整递归 SHA-256/size、错误路径/junction、dirty/伪源码/额外文件、被改 runtime/build/dependency、中文/空/二进制 blob 均有拒绝或正向用例。Windows tar 的中文失败已用准确反例修复，快照直接从已校验 Git 对象生成。
+- S/L：混合任务同时验证可信规则淘汰、真实 fact authority 缺资料、错色来源、来源 UNKNOWN 与正常兄弟，重建后无新增观察、图片或提交且历史保留；Amazon、图像/执行与报价为显式替身。既有真实本地七图复用、字段恢复等仍引用各原测试，不声称同一用例覆盖真实提供方。
+- L：最终源码 `8d0fd45bc4cb4c644fb8daf4e212aa283b7508b1` 在干净快照构建并生成独立 94 文件候选。仓库外 cwd 独立校验、快照自带脚本运行同一 HTC.exe、两次会话、实际 safeStorage/SQLite、185 API、受管合成图片与重启通过；8 项 Node/Electron/Chromium 禁网反例拦截，其他阶段零出网尝试。运行前后完整摘要一致，截图已目视确认。
+- 原安装包 143 文件未变，候选未启用；符号链接权限补验、真实业务覆盖率/准确率、3–5 SKU 有界外部验收与正式入口切换仍未完成。维护记录提供实际 S、manifest SHA-256、日志及失败证据；记录提交和合并提交不冒充候选源码。

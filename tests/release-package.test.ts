@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+const url = new URL('../scripts/release-package.mjs', import.meta.url).href;
+test('candidate assembly copies fresh runtime, excludes historical docs/maps and never replaces output', async t => {
+  const api = await import(url).catch(() => null); assert.ok(api, 'candidate producer must support exclusive output');
+  await mkdir(resolve('.test-data'), { recursive: true }); const root = await mkdtemp(resolve('.test-data/release-package-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, 'source'), runtime = join(root, 'runtime'), output = join(root, 'candidate');
+  for (const folder of ['dist/assets', 'dist-electron', 'dist-native', 'dist-extension', 'samples', 'docs']) await mkdir(join(source, folder), { recursive: true });
+  await mkdir(join(runtime, 'resources'), { recursive: true }); await mkdir(join(runtime, 'locales'));
+  for (const [file, value] of Object.entries({ 'dist/index.html': 'page', 'dist/assets/a.js': 'asset', 'dist-electron/main.cjs': 'main', 'dist-electron/preload.cjs': 'preload', 'dist-electron/main.cjs.map': 'source-map', 'dist-native/HTC.CollectionHost.exe': 'host', 'dist-native/Program.g.cs': 'generated', 'dist-extension/manifest.json': '{}', 'samples/miaoshou.template.json': '{}', 'docs/private-history.md': 'must-not-copy', 'THIRD_PARTY_NOTICES.txt': 'tracked-original' })) await writeFile(join(source, file), value);
+  await writeFile(join(runtime, 'electron.exe'), 'fresh-runtime'); await writeFile(join(runtime, 'locales/en.pak'), 'fresh-locale');
+  await api.assembleCandidate({ snapshot: source, runtime, output, pkg: { name: 'synthetic', version: '1.0.0', main: 'dist-electron/main.cjs' }, notices: 'candidate-notices', source: { commit: 'a'.repeat(40) }, build: {} });
+  assert.equal(await readFile(join(output, 'HTC.exe'), 'utf8'), 'fresh-runtime');
+  assert.equal(await readFile(join(source, 'THIRD_PARTY_NOTICES.txt'), 'utf8'), 'tracked-original');
+  for (const path of ['docs/private-history.md', 'resources/app/dist-electron/main.cjs.map', 'resources/app/dist-native/Program.g.cs']) await assert.rejects(readFile(join(output, path)), /ENOENT/);
+  const manifest = JSON.parse(await readFile(join(output, '版本与摘要.json'), 'utf8'));
+  assert.ok(manifest.files.some((f: any) => f.path === 'locales/en.pak'));
+  assert.ok(!manifest.files.some((f: any) => f.path === '版本与摘要.json'));
+  await writeFile(join(runtime, 'electron.exe'), 'changed');
+  await assert.rejects(api.assembleCandidate({ snapshot: source, runtime, output, pkg: {}, notices: '', source: {}, build: {} }), /exist/i);
+  assert.equal(await readFile(join(output, 'HTC.exe'), 'utf8'), 'fresh-runtime');
+});

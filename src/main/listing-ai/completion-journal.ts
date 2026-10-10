@@ -4,7 +4,7 @@ import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { boundedText, date, integer, keys, sha256, uuid, validateAiCall, validateAiResult } from '../ai/validation.ts';
+import { boundedText, date, integer, keys, sha256, uuid, validateAiCall, validateStoredAiResult } from '../ai/validation.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { validateAiUsageRecord } from '../ai/usage.ts';
 
@@ -104,7 +104,7 @@ export class CompletionJournal {
   result(call:CompletionCall,round:CompletionRound):AiResult|undefined {
     if(!call.resultId)return undefined;
     const row=this.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(call.resultId),callRow=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
-    if(!row||!callRow)invalid();const result=validateAiResult(JSON.parse(String(row.record_json))),saved=validateAiCall(JSON.parse(String(callRow.record_json)));
+    if(!row||!callRow)invalid();const result=validateStoredAiResult(JSON.parse(String(row.record_json))),saved=validateAiCall(JSON.parse(String(callRow.record_json)));
     if(result.id!==call.resultId||result.callId!==call.id||saved.id!==call.id||saved.status!=='SUCCEEDED'||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==result.providerId||saved.model!==result.model||saved.finishedAt!==result.createdAt||!result.listingContext||result.sourceSha256!==round.contextHash||listingFingerprint(result.listingContext)!==round.contextHash||result.output.kind!==(call.id===round.candidate.id?'amazon-fields':'amazon-fields-review')||call.id!==round.candidate.id&&result.sourceResultIds[0]!==round.candidate.resultId)invalid();return result;
   }
 }

@@ -17,13 +17,13 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
     if(!result||!call||call.status!=='SUCCEEDED'||call.productId!==result.productId||call.productRevision!==result.productRevision||call.providerId!==result.providerId||call.model!==result.model||call.finishedAt!==result.createdAt)return invalid();
     return result;
   };
-  const assertCopySource=(context:ProductImageContext,copyReviewEnabled:boolean|undefined):void=>{
-    validateProductImageContext(context);
+  const assertCopySource=(context:ProductImageContext,copyReviewEnabled:boolean|undefined,version?:string):void=>{
+    validateProductImageContext(context,{storedVersion:version??null});
     if(context.copyReviewBypass){if(copyReviewEnabled!==false)invalid();return;}
     if(context.listingReviewResultId===null)return invalid();
     const copy=successful(context.listingReviewResultId);
     if(copy.output.kind!=='listing-current-review'||copy.output.verdict!=='PASS'||!copy.listingContext||listingFingerprint(copy.listingContext)!==listingFingerprint(context.listing)||listingFingerprint(copy.output.currentListingCopy)!==listingFingerprint(context.currentListingCopy))return invalid();
-    assertCurrentListingReview({...copy.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing,{historical:true});
+    assertCurrentListingReview({...copy.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing,{storedVersion:copy.listingEvidenceContractVersion??null});
   };
   const runs=workflowRuns(db), byId=new Map(runs.map(run=>[run.id,run]));
   for(const run of runs) {
@@ -45,21 +45,21 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
         if(prior){if(run.setPlanResultId!==prior.setPlanResultId||listingFingerprint(run.setPlan)!==listingFingerprint(prior.setPlan))invalid();}
         else {
           if(listingFingerprint(set.imageContext)!==listingFingerprint(run.imageContext))invalid();
-          assertCopySource(set.imageContext!,run.copyReviewEnabled);
+          assertCopySource(set.imageContext!,run.copyReviewEnabled,set.listingEvidenceContractVersion);
         }
-        if(set.output.kind==='image-plan')assertImagePlan(set.output,set.imageContext!);
+        if(set.output.kind==='image-plan')assertImagePlan(set.output,set.imageContext!,{storedVersion:set.listingEvidenceContractVersion??null});
         if(run.slots.some(slot=>slot.attempts.length)&&(set.output.kind!=='image-plan'||!set.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&set.output.ipRisk?.verdict!=='PASS'))invalid();
       }
       for(const slot of run.slots){
         const owned=(id:string,kind:AiResult['output']['kind'])=>{
           const result=successful(id),context=result.imageContext;
           if(result.output.kind!==kind||!context||context.policyVersion!==run.imagePolicyVersion||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||result.sourceSha256!==slot.contextSha256||listingFingerprint(context)!==slot.contextSha256||context.listing.draftId!==run.draftId||context.listing.sku!==run.sku||context.slot?.index!==slot.index||context.purpose!==slot.purpose||listingFingerprint(context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(run.referenceAssets))return invalid();
-          assertCopySource(context,run.copyReviewEnabled);return result;
+          assertCopySource(context,run.copyReviewEnabled,result.listingEvidenceContractVersion);return result;
         };
         for(const [index,attempt] of slot.attempts.entries()){
           const plan=attempt.planResultId?owned(attempt.planResultId,'image-plan'):undefined;
           if(plan){
-            if(plan.output.kind!=='image-plan')invalid();else assertImagePlan(plan.output,plan.imageContext!);
+            if(plan.output.kind!=='image-plan')invalid();else assertImagePlan(plan.output,plan.imageContext!,{storedVersion:plan.listingEvidenceContractVersion??null});
             const previous=slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
             if(listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
           }
@@ -74,7 +74,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
           const review=attempt.reviewResultId?owned(attempt.reviewResultId,'image-text-review'):undefined;
           if(review){
             if(review.output.kind!=='image-text-review'||!plan||ocr?.output.kind!=='generated-image-ocr'||review.output.candidate.id!==attempt.candidateId||listingFingerprint(review.sourceResultIds)!==listingFingerprint([...imageCopySourceIds(review.imageContext!),plan.id,ocr.id]))invalid();
-            else assertImageTextReview(review.output,review.imageContext!,plan,ocr,ocr.output.candidate);
+            else assertImageTextReview(review.output,review.imageContext!,plan,ocr,ocr.output.candidate,{storedVersion:review.listingEvidenceContractVersion??null});
             if(attempt.state==='PASSED'&&!attempt.approvalPolicy&&review.output.kind==='image-text-review'&&review.output.verdict!=='PASS'||index<slot.attempts.length-1&&review.output.kind==='image-text-review'&&review.output.verdict==='PASS')invalid();
           }
           if(prior&&attempt.candidateId!==null&&attempt.candidateId!==prior.slots![slot.index-1].attempts.at(-1)?.candidateId)invalid();
@@ -107,12 +107,12 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
       if(context?.policyVersion===PRODUCT_IMAGE_POLICY_VERSION && run.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION)return invalid();
       if(result.output.kind!==kind||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||!context||result.sourceSha256!==run.contextSha256||listingFingerprint(context)!==run.contextSha256||context.listing.draftId!==run.draftId||context.listing.sku!==run.sku||
         listingFingerprint(context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(run.referenceAssets))return invalid();
-      assertCopySource(context,run.copyReviewEnabled);
+      assertCopySource(context,run.copyReviewEnabled,result.listingEvidenceContractVersion);
       return result;
     };
     for(const [index,id] of run.planResultIds.entries()) {
       const plan=owned(id,'image-plan'); if(plan.output.kind!=='image-plan')return invalid();
-      assertImagePlan(plan.output,plan.imageContext!);
+      assertImagePlan(plan.output,plan.imageContext!,{storedVersion:plan.listingEvidenceContractVersion??null});
       if(plan.imageContext!.policyVersion!=='product-image/v1' && index<run.candidateIds.length && !plan.output.productUnderstanding?.sufficient)invalid();
       if(plan.imageContext!.policyVersion===PRODUCT_IMAGE_POLICY_VERSION && index<run.candidateIds.length && plan.output.ipRisk?.verdict!=='PASS')invalid();
       const expected=[...imageCopySourceIds(plan.imageContext!),...(index?[run.planResultIds[index-1]]:[])];
@@ -133,7 +133,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
     for(const [index,id] of run.reviewResultIds.entries()) {
       const review=owned(id,'image-text-review'),plan=successful(run.planResultIds[index]),ocr=successful(run.ocrResultIds[index]);
       if(review.output.kind!=='image-text-review'||ocr.output.kind!=='generated-image-ocr'||review.output.candidate.id!==run.candidateIds[index]||review.output.planResultId!==plan.id||review.output.ocrResultId!==ocr.id||listingFingerprint(review.sourceResultIds)!==listingFingerprint([...imageCopySourceIds(review.imageContext!),plan.id,ocr.id]))return invalid();
-      assertImageTextReview(review.output,review.imageContext!,plan,ocr,ocr.output.candidate);
+      assertImageTextReview(review.output,review.imageContext!,plan,ocr,ocr.output.candidate,{storedVersion:review.listingEvidenceContractVersion??null});
       if(index<run.reviewResultIds.length-1&&review.output.verdict!=='NEEDS_CHANGES')invalid();
     }
     if(run.status==='COMPLETED') {

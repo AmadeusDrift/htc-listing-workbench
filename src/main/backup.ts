@@ -20,7 +20,7 @@ import { validateExecutionTask } from './execution/records.ts';
 import { validateFollowupRecord } from './followup/records.ts';
 import { validateCategoryLibrary } from './catalog/records.ts';
 import { validateProcurementBatch } from './procurement/records.ts';
-import { validateAiProfile, validateAiCall, validateAiResult } from './ai/validation.ts';
+import { validateAiProfile, validateAiCall, validateStoredAiResult } from './ai/validation.ts';
 import { assertSourceColorHistory } from './ai/source-color-validation.ts';
 import { assertListingHistory } from './listing-ai/history.ts';
 import { AiUsageLedger, retainAiUsage, retainSourceColorAttempts, validateAiUsageRecord, validateStoredAiUsagePolicy } from './ai/usage.ts';
@@ -35,7 +35,7 @@ import { assertMiaoshouHistory, validateMiaoshouReceipt } from './miaoshou/persi
 import { clearMiaoshouConfig } from './miaoshou/vault.ts';
 import { clearImageGenerationConnection } from './image-generation/vault.ts';
 import { MIAOSHOU_SYNC_INDEXES, assertSyncHistory, validateSyncRun, validateSyncItem } from './miaoshou/sync-records.ts';
-import { validateImageWorkflowRun } from './image-workflow/records.ts';
+import { validateStoredImageWorkflowRun } from './image-workflow/records.ts';
 import { assertImageWorkflowHistory } from './image-workflow/history.ts';
 import { readImageRiskSettings } from './image-workflow/risk-settings.ts';
 import { readCopyReviewSettings } from './listing-ai/review-settings.ts';
@@ -177,11 +177,11 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
           if (typeof row.record_json !== 'string' || Buffer.byteLength(row.record_json) > 4 * 1024 * 1024) throw new UserFacingError('备份任务或 FTP 记录过大');
           const value = JSON.parse(row.record_json);
           const validators = { hosting_profiles: validatePersistedProfile, hosting_uploads: validatePersistedUpload, execution_tasks: validateExecutionTask,
-            listing_completion_operations:validateCompletionOperation, ai_profiles: validateAiProfile, ai_calls: validateAiCall, ai_results: validateAiResult, ai_usage_policies: validateStoredAiUsagePolicy, ai_usage_ledger: validateAiUsageRecord,
+            listing_completion_operations:validateCompletionOperation, ai_profiles: validateAiProfile, ai_calls: validateAiCall, ai_results: validateStoredAiResult, ai_usage_policies: validateStoredAiUsagePolicy, ai_usage_ledger: validateAiUsageRecord,
             image_versions: validateImageVersion, image_selections: validateImageSelection, content_versions: validateContentVersion, image_write_operations: validateImageWriteOperation,
             collection_receipts: validateCollectionReceipt, collection_captures: validateCollectionCapture, miaoshou_receipts: validateMiaoshouReceipt,
             miaoshou_sync_runs: validateSyncRun, miaoshou_sync_items: validateSyncItem,
-            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateImageWorkflowRun,
+            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateStoredImageWorkflowRun,
             automatic_listing_tasks: validateAutomaticListingTask, item_labels: validateItemLabelRecord, shipment_documents: validateShipmentDocument };
           const validated = validators[name as keyof typeof validators](value);
           if (validated.id !== row.id) throw new UserFacingError('备份任务或 FTP 记录身份不一致');
@@ -265,7 +265,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
       artifactChecks.set(String(row.original_path),{sha256:String(row.sha256),byteSize:Number(row.byte_size)});
     }
     if (version >= 6) {
-      const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
+      const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateStoredAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
       const calls = new Map(database.prepare('SELECT record_json FROM ai_calls').all().map(row => { const call = validateAiCall(JSON.parse(String(row.record_json))); return [call.id, call] as const; }));
       for(const asset of assertSourceColorHistory(database,results,calls))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
       if (version >= 15) assertImageWorkflowHistory(database, results, calls);

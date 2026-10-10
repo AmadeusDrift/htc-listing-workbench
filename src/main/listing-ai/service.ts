@@ -18,6 +18,7 @@ import { buildListingContext } from './context.ts';
 import { assertListingEvidence, assertListingReview, listingFingerprint, selectedSkuCategoryConflicts, validateListingContext } from './validation.ts';
 import type { CurrentListingCopy } from '../../shared/image-ai-contracts.ts';
 import { currentImageListingSnapshot } from '../image-workflow/image-facts.ts';
+import { currentDraftEvidenceIssues } from './current-evidence.ts';
 
 export interface CurrentCopyRepairResult {
   draft: AmazonDraft;
@@ -166,7 +167,15 @@ export class ListingAiService {
     const adoptionId = listingFingerprint({ draftId: reference.draftId, revision: reference.draftRevision, suggestion: reference.suggestionResultId, review: reference.reviewResultId, fields: [...reference.fields].sort(), ...disposition });
     const existing = this.amazon.getDraft(reference.draftId);
     const prior = existing.fieldAdoptions?.find(a => a.id === adoptionId);
-    if (prior && existing.revision === prior.toRevision) return existing;
+    if (prior && existing.revision === prior.toRevision) {
+      const scope=this.ai.getResult(reference.suggestionResultId)?.listingContext;
+      if(!scope)throw new UserFacingError('已采用候选的来源记录不完整');
+      const current=this.current({draftId:existing.id,draftRevision:existing.revision},scope);await this.fresh({draftId:existing.id,draftRevision:existing.revision},current.context);
+      signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
+      const suggestion=this.result(reference.suggestionResultId,scope),candidate=this.candidates(suggestion,existing,current.context);
+      if(reference.reviewResultId){const review=this.result(reference.reviewResultId,scope);if(review.output.kind!=='amazon-fields-review'||review.output.verdict!=='PASS'||review.sourceResultIds[0]!==suggestion.id)throw new UserFacingError('已采用候选的复核记录不完整');assertListingReview(review.output,candidate,current.context);}
+      signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return existing;
+    }
     const scope = this.ai.getResult(reference.suggestionResultId)?.listingContext;
     const { draft, context } = this.current(reference, scope); await this.fresh(reference, context);
     this.assertReviewSetting(reviewEnabled);
@@ -194,6 +203,8 @@ export class ListingAiService {
     const reference = input(raw, 'suggest'), { draft, context } = this.current(reference);
     signal?.throwIfAborted();
     const snapshot = currentImageListingSnapshot(draft, context);
+    const evidenceIssues=currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id));
+    if(evidenceIssues.length)throw new UserFacingError(evidenceIssues.join('；').slice(0,2000));
     if (!snapshot.currentListingCopy.length) throw new UserFacingError('草稿还没有文案，请先完成文案');
     await this.fresh(reference, context); signal?.throwIfAborted();
     const current = this.current(reference);
@@ -289,8 +300,12 @@ export class ListingAiService {
     const reviewEnabled=operation.copyReviewEnabled;
     const refresh=()=>{operation=journal.get(operation.id);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);if(journal.unknown(operation.id))unknownCompletion();draft=this.completionDraft(operation);};
     const checkpoint=()=>{operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);journal.save(operation);};
-    const finish=(remaining:string[])=>{operation.state='DONE';operation.remaining=remaining.slice(0,100).map(v=>v.slice(0,2000));checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining};};
-    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:operation.remaining};
+    const currentRemaining=(remaining:string[])=>{
+      const context=this.current({draftId:draft.id,draftRevision:draft.revision}).context;
+      return [...new Set([...remaining,...currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
+    };
+    const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining};};
+    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:currentRemaining(operation.remaining)};
     if(!operation.rounds.length){
       aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;
       signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);

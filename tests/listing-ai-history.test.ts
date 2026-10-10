@@ -51,6 +51,7 @@ test('v2 adoption without a review survives a JSON round trip with a null review
 
 test('legacy adoption history remains restorable while current and versioned records reject SKU contradictions',async t=>{
   const h=await history(t),suggestion=h.suggestion,c=suggestion.listingContext!;
+  delete suggestion.listingEvidenceContractVersion;
   if(suggestion.output.kind!=='amazon-fields')throw Error('Expected fields');
   const spec=c.evidence.find(e=>e.source==='selected_sku'&&e.name==='Selected SKU specification')!;
   spec.value='颜色: 佳洁净808（中毛） · 1 pc';

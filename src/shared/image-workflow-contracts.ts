@@ -26,6 +26,8 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  /** Main-only evidence semantics for stored image captions; absent preserves pre-contract history. */
+  listingEvidenceContractVersion?:'listing-evidence/v1';
   id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
   status: 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
   stage: ImageWorkflowStage; attempt: number; maxAttempts: number;

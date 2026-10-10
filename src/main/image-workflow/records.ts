@@ -7,12 +7,15 @@ import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY, IMAGE_TEXT_REVIEW_POLIC
 import type { ImageTextReviewPolicyVersion } from '../../shared/image-ai-contracts.ts';
 import type { ImageWorkflowRun, ImageWorkflowSlot, ImageSlotAttempt } from '../../shared/image-workflow-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { boundedText, date, integer, keys, sha256, uuid, uuidList } from '../ai/validation.ts';
+import { boundedText, date, integer, keys, sha256, uuid, uuidList, validateStoredAiResult } from '../ai/validation.ts';
+import { LISTING_EVIDENCE_CONTRACT_VERSION } from '../../shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { validateProductImageContext, validateImageSetPlan, assertImageSetPlan, validateCandidateImageIdentity } from '../ai/image-validation.ts';
 import { readImageRiskSettings, riskPolicyCompatible } from './risk-settings.ts';
 import { readCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-ai/review-settings.ts';
 import { imageApprovalDraftSnapshot, validateApprovalReuse } from './approval-reuse.ts';
+import { buildListingContext } from '../listing-ai/context.ts';
+import { assertCurrentCopyEvidence, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
 export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = true, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
   if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
@@ -57,9 +60,9 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
   return run;
 }
 
-export function validateImageWorkflowRun(raw:unknown):ImageWorkflowRun {
+export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -84,18 +87,20 @@ export function validateImageWorkflowRun(raw:unknown):ImageWorkflowRun {
     if(Boolean(parsed.approvedAssetId)!==Boolean(parsed.approvedSha256)||(parsed.status==='PASSED')!==Boolean(parsed.approvedAssetId)||parsed.status==='PASSED'&&(attempts.at(-1)?.state!=='PASSED'||!parsed.contextSha256||parsed.error)||attempts.length&&!parsed.contextSha256)invalid();
     return parsed;
   });
-  const imageContext=o.imageContext===undefined?undefined:validateProductImageContext(o.imageContext);
+  if(o.listingEvidenceContractVersion!==undefined&&o.listingEvidenceContractVersion!==LISTING_EVIDENCE_CONTRACT_VERSION)invalid();
+  const evidenceOptions=options.stored?{storedVersion:o.listingEvidenceContractVersion as string??null}:{};
+  const imageContext=o.imageContext===undefined?undefined:validateProductImageContext(o.imageContext,evidenceOptions);
   if(imageContext?.copyReviewBypass&&o.copyReviewEnabled!==false)invalid();
   const setPlan=o.setPlan===undefined?undefined:validateImageSetPlan(o.setPlan),setPlanResultId=o.setPlanResultId===undefined?undefined:uuid(o.setPlanResultId);
   if(Boolean(setPlan)!==Boolean(setPlanResultId)||setPlan&&o.slotPolicy!==IMAGE_SET_POLICY||imageContext&&(imageContext.setPolicy===IMAGE_SET_POLICY)!==(o.slotPolicy===IMAGE_SET_POLICY))invalid();
-  if(setPlan&&imageContext)assertImageSetPlan(setPlan,imageContext);
+  if(setPlan&&imageContext)assertImageSetPlan(setPlan,imageContext,evidenceOptions);
   const refs=(o.referenceAssets as unknown[]).map(value=>{const ref=keys(value,['id','sha256']);return{id:uuid(ref.id),sha256:sha256(ref.sha256)};});
-  const run:ImageWorkflowRun={...(o.copyRepairAttempts===undefined?{}:{copyRepairAttempts:integer(o.copyRepairAttempts,0,2)}),id:uuid(o.id),draftId:uuid(o.draftId),productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),sku:boundedText(o.sku,100),status:o.status as ImageWorkflowRun['status'],stage:o.stage as ImageWorkflowRun['stage'],attempt:integer(o.attempt,0,21),maxAttempts,contextSha256:maybeHash(o.contextSha256),draftSha256:maybeHash(o.draftSha256),referenceAssets:refs,planResultIds:uuidList(o.planResultIds,21),candidateIds:uuidList(o.candidateIds,21),ipReviewResultIds:uuidList(o.ipReviewResultIds,21),ocrResultIds:uuidList(o.ocrResultIds,21),reviewResultIds:uuidList(o.reviewResultIds,21),approvedAssetId:maybeId(o.approvedAssetId),approvedSha256:maybeHash(o.approvedSha256),createdAt:date(o.createdAt),updatedAt:date(o.updatedAt),error:message(o.error),imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:o.slotPolicy as ImageWorkflowRun['slotPolicy'],slots,...(setPlan?{setPlan,setPlanResultId}:{}),...(imageContext?{imageContext}:{}),...(o.activeSlot===undefined?{}:{activeSlot:integer(o.activeSlot,1,7)}),...(o.recheckedFromRunId===undefined?{}:{recheckedFromRunId:uuid(o.recheckedFromRunId)})};
+  const run:ImageWorkflowRun={...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION}),...(o.copyRepairAttempts===undefined?{}:{copyRepairAttempts:integer(o.copyRepairAttempts,0,2)}),id:uuid(o.id),draftId:uuid(o.draftId),productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),sku:boundedText(o.sku,100),status:o.status as ImageWorkflowRun['status'],stage:o.stage as ImageWorkflowRun['stage'],attempt:integer(o.attempt,0,21),maxAttempts,contextSha256:maybeHash(o.contextSha256),draftSha256:maybeHash(o.draftSha256),referenceAssets:refs,planResultIds:uuidList(o.planResultIds,21),candidateIds:uuidList(o.candidateIds,21),ipReviewResultIds:uuidList(o.ipReviewResultIds,21),ocrResultIds:uuidList(o.ocrResultIds,21),reviewResultIds:uuidList(o.reviewResultIds,21),approvedAssetId:maybeId(o.approvedAssetId),approvedSha256:maybeHash(o.approvedSha256),createdAt:date(o.createdAt),updatedAt:date(o.updatedAt),error:message(o.error),imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:o.slotPolicy as ImageWorkflowRun['slotPolicy'],slots,...(setPlan?{setPlan,setPlanResultId}:{}),...(imageContext?{imageContext}:{}),...(o.activeSlot===undefined?{}:{activeSlot:integer(o.activeSlot,1,7)}),...(o.recheckedFromRunId===undefined?{}:{recheckedFromRunId:uuid(o.recheckedFromRunId)})};
   const attempts=slots.flatMap(slot=>slot.attempts);
   for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)if(listingFingerprint(run[plural])!==listingFingerprint(attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]]:[])))invalid();
   if(run.attempt!==attempts.length||new Set(attempts.map(a=>a.requestId)).size!==attempts.length||new Set(refs.map(ref=>ref.id)).size!==refs.length||run.updatedAt<run.createdAt||run.approvedAssetId!==slots[0].approvedAssetId||run.approvedSha256!==slots[0].approvedSha256||new Set(slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])).size!==slots.filter(slot=>slot.status==='PASSED').length)invalid();
   if(imageContext&&(listingFingerprint(imageContext)!==run.contextSha256||imageContext.listing.draftId!==run.draftId||imageContext.listing.productId!==run.productId||imageContext.listing.productRevision!==run.productRevision||imageContext.listing.variantId!==run.variantId||imageContext.listing.sku!==run.sku||listingFingerprint(imageContext.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(refs)))invalid();
-  for(const slot of slots)if(slot.contextSha256&&(!imageContext||listingFingerprint(validateProductImageContext({...imageContext,...(setPlan?{setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}}))!==slot.contextSha256))invalid();
+  for(const slot of slots)if(slot.contextSha256&&(!imageContext||listingFingerprint(validateProductImageContext({...imageContext,...(setPlan?{setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}},evidenceOptions))!==slot.contextSha256))invalid();
   if(o.slotPolicy===IMAGE_SET_POLICY&&slots.some(slot=>slot.attempts.length)&&!setPlan)invalid();
   if(run.status==='COMPLETED'&&(slots.some(slot=>slot.status!=='PASSED')||!run.draftSha256||!run.contextSha256||run.stage!=='complete'||run.error!==null)||run.stage==='complete'&&run.status!=='COMPLETED')invalid();
   if(o.copyReviewResultId!==undefined)run.copyReviewResultId=uuid(o.copyReviewResultId);
@@ -114,13 +119,14 @@ export function validateImageWorkflowRun(raw:unknown):ImageWorkflowRun {
   return run;
 }
 
+export const validateStoredImageWorkflowRun=(raw:unknown)=>validateImageWorkflowRun(raw,{stored:true});
 /** Image URLs are filled by execution after adoption; all other listing changes invalidate the selection. */
 export function imageWorkflowDraftStamp(draft: AmazonDraft): string {
   return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
 }
 export function workflowRuns(db: DatabaseSync, draftId?: string): ImageWorkflowRun[] {
   return db.prepare('SELECT id,record_json FROM image_workflow_runs ORDER BY rowid DESC').all().map(row => {
-    const run = validateImageWorkflowRun(JSON.parse(String(row.record_json)));
+    const run = validateStoredImageWorkflowRun(JSON.parse(String(row.record_json)));
     if (run.id !== row.id) throw new UserFacingError('图片流程记录身份不一致'); return run;
   }).filter(run => !draftId || run.draftId === draftId);
 }
@@ -134,6 +140,15 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
   if (run.status !== 'COMPLETED' || run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || run.draftSha256 !== imageWorkflowDraftStamp(draft)) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
+  const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
+  // This projection lacks image-observed color citations. Limit it to current
+  // deterministic conflicts; full review checks use the complete image snapshot.
+  const issues=currentDraftEvidenceIssues(draft,current,id=>{
+    const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
+    const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
+  },{adoptionFields:CONTRACT_ADOPTION_FIELDS,adoptionContext:'stored'});
+  if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
+  if(run.imageContext){if(run.setPlan)assertImageSetPlan(run.setPlan,run.imageContext);validateProductImageContext(run.imageContext);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,current);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,run.imageContext.listing);}
   const selected=run.slots?run.slots.map(slot=>({id:slot.approvedAssetId!,sha256:slot.approvedSha256!})):[{id:run.approvedAssetId!,sha256:run.approvedSha256!}];
   for(const item of selected){const asset = db.prepare('SELECT product_id,sha256 FROM assets WHERE id=?').get(item.id);
     if (!asset || asset.product_id !== product.id || asset.sha256 !== item.sha256 || !db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(item.id, draft.variantId)) throw new UserFacingError('自动图片成果或 SKU 关联已变化');}

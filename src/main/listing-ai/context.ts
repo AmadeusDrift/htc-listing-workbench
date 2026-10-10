@@ -9,6 +9,7 @@ import { protectedAttribute } from '../ai/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { projectSalesProduct } from '../sales-plans/records.ts';
+import { evidenceRole } from './evidence-contract-v1.ts';
 
 function meaning(name: string): ListingEvidence['meaning'] {
   const n = name.toLowerCase().replace(/[\s_-]/g, '');
@@ -38,6 +39,23 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
   for(const [field,value] of Object.entries(selectedAttributes))evidence.push({id:`${variant.id}:${field}`,name:field==='age_range_description'?'适用人群':field,value,meaning:'general',source:'selected_sku'});
   // Product-level color, measurements and counts cannot disambiguate multiple SKUs.
   if (product.variants.length > 1) for (let i = evidence.length - 1; i >= 0; i--) if (evidence[i].meaning === 'color' || /^(?:规格|商品规格|产品规格|规格型号)$/u.test(evidence[i].name.trim()) || skuDependentSourceFact(evidence[i].name)) evidence.splice(i, 1);
+  const selectedRoles=selectedSkuCategoryAttributes(variant),evidenceBlockers:NonNullable<ListingAiContext['evidenceBlockers']>=[];
+  for(const fact of product.facts){
+    if(fact.state!=='conflicting'||!fact.value.trim()||protectedAttribute(fact.name))continue;
+    if(product.variants.length>1&&(meaning(fact.name)==='color'||/^(?:规格|商品规格|产品规格|规格型号)$/u.test(fact.name.trim())||skuDependentSourceFact(fact.name)))continue;
+    const field=evidenceRole(fact.name,fact.value);if(!field)continue;
+    if(Object.hasOwn(selectedRoles,field)){
+      if(!evidence.some(e=>e.source==='selected_sku'&&evidenceRole(e.name,e.value)===field)){
+        for(let i=evidence.length-1;i>=0;i--)if(evidenceRole(evidence[i].name,evidence[i].value)===field)evidence.splice(i,1);
+        evidence.push({id:`${variant.id}:${field}`,name:field==='age_range_description'?'适用人群':field,value:selectedRoles[field],meaning:'general',source:'selected_sku'});
+      }
+      continue;
+    }
+    let blocker=evidenceBlockers.find(b=>b.field===field);
+    if(!blocker){blocker={field,reason:'source_conflict',facts:[]};evidenceBlockers.push(blocker);}
+    blocker.facts.push({id:fact.id,name:fact.name,value:fact.value});
+  }
+  if(evidenceBlockers.length)for(let i=evidence.length-1;i>=0;i--)if(evidenceBlockers.some(b=>b.field===evidenceRole(evidence[i].name,evidence[i].value)))evidence.splice(i,1);
   const spec = variant.normalizedSpec.trim() || variant.originalSpec.trim();
   if (spec) evidence.push({ id: `${variant.id}:spec`, name: 'Selected SKU specification', value: spec, meaning: 'general', source: 'selected_sku' });
   // Keep this persisted evidence representation stable for resumable image-context
@@ -53,7 +71,7 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
   const c = { draftId: draft.id, draftRevision: draft.revision, productId: product.id, productRevision: product.revision, variantId: variant.id, sku: variant.sku, targetId: draft.targetId, targetGeneration,
     listingProgram: draft.listingProgram ?? 'standard', productType: draft.schema.productType, marketplaceId: draft.marketplaceId, locale: draft.schema.locale, requirements: draft.schema.requirements, parentageLevel: draft.schema.parentageLevel,
     schemaChecksum: draft.schema.checksum, schemaVersion: draft.schema.version, schemaSha256: listingFingerprint({ schema: draft.schema.schema, metaSchema: draft.schema.metaSchema }), policyVersion: AMAZON_COPY_POLICY_VERSION,
-    fields, evidence, unverifiedSourceTitle: product.title,
+    fields, evidence, unverifiedSourceTitle: product.title,...(evidenceBlockers.length?{evidenceBlockers}:{}),
     ...(fields.some(card=>(CATEGORY_ATTRIBUTE_FIELDS as readonly string[]).includes(card.name))?{categoryInferencePolicyVersion:CATEGORY_INFERENCE_POLICY_VERSION}:{}) };
   if (Buffer.byteLength(JSON.stringify(c)) > 60000) throw new UserFacingError('当前字段和事实超出一次 AI 请求预算，请减少无关事实后重试');
   return validateListingContext(c);
@@ -64,5 +82,5 @@ export function listingModelPayload(context: ListingAiContext) {
     policy: { titleMaxCharacters: 75, preferredTitleMaxCharacters: 70, bulletCount: 5, bulletMaxCharacters: 500, descriptionMaxCharacters: 500, keywordMaxUtf8Bytes: 200 },
     fields: context.fields.map(field=>({...field,valueMode:field.closedEnum?(field.allowedValues.length===1?'fixed' as const:'single_choice' as const):'free_text' as const,
       options:field.closedEnum?field.allowedValues:[],suggestedOptions:field.closedEnum?[]:field.suggestedValues})),
-    evidence: context.evidence, ...(context.repairRequest ? { repairRequest: context.repairRequest } : {}) };
+    evidence: context.evidence, ...(context.evidenceBlockers?{evidenceBlockers:context.evidenceBlockers}:{}), ...(context.repairRequest ? { repairRequest: context.repairRequest } : {}) };
 }

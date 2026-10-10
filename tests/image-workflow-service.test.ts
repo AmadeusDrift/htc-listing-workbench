@@ -32,6 +32,12 @@ import { currentImageListingSnapshot } from '../src/main/image-workflow/image-fa
 
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13,8); png.write('IHDR',12); png.writeUInt32BE(256,16); png.writeUInt32BE(256,20);
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+function copyReview(context:ListingAiContext,copy:{field:any;values:string[]}[]){
+  return {kind:'listing-current-review' as const,verdict:'PASS' as const,currentListingCopy:copy,copySha256:listingFingerprint(copy),issues:[],checks:copy.flatMap(item=>item.values.map((value,index)=>{
+    const evidenceIds=context.evidence.filter(e=>['material','color','item_shape','care_instructions'].includes(item.field)?e.meaning===item.field:true).map(e=>e.id);
+    return {field:item.field,index,verdict:'SUPPORTED' as const,evidenceIds,reason:'Fixture source.',claims:[{text:value,verdict:'SUPPORTED' as const,evidenceIds,reason:'Fixture source.'}]};
+  }))};
+}
 async function fixture(t: test.TestContext, options: { familyMigration?:boolean; lostResponse?:boolean; rejectSlot?:number; knownGenerationFailures?:number; rejected?: number; configured?: boolean; generationError?: boolean; mutate?: boolean; hold?: boolean; rotateKeyDuringPlan?: boolean; insufficient?: boolean; legacyPlan?: boolean; ipVerdict?: 'PASS'|'BLOCKED'|'UNCERTAIN'; generatedRisk?: boolean; riskFailure?: boolean } = {}) {
   t.mock.method(globalThis,'fetch',()=>{throw new Error('External network is forbidden in image workflow fixtures');});
   await mkdir(resolve('.test-data'), { recursive:true }); const root = await mkdtemp(resolve('.test-data/image-flow-'));
@@ -70,7 +76,7 @@ async function fixture(t: test.TestContext, options: { familyMigration?:boolean;
   const listing = {
     snapshotCurrentForImages:async()=>({context:buildListingContext(amazon.getDraft(draft.id),store.getProduct(product.id),amazon.executionTargetScope(target.id).generation),currentListingCopy:[{field:'item_name' as const,values:[product.title]}]}),
     complete: async()=> { calls.push('content'); return {draft:amazon.getDraft(draft.id),aiCalls:2,previewAttempts:1,remaining:[] as string[]}; },
-    reviewCurrentForImages: async()=> { calls.push('content-review'); return {context:buildListingContext(amazon.getDraft(draft.id),store.getProduct(product.id),amazon.executionTargetScope(target.id).generation),review:outputResult({kind:'listing-current-review',verdict:'PASS'}),currentListingCopy:[{field:'item_name',values:[product.title]}]}; },
+    reviewCurrentForImages: async()=> { calls.push('content-review');const context=buildListingContext(amazon.getDraft(draft.id),store.getProduct(product.id),amazon.executionTargetScope(target.id).generation),currentListingCopy=[{field:'item_name',values:[product.title]}];return {context,review:outputResult(copyReview(context,currentListingCopy)),currentListingCopy}; },
   };
   const ai = {
     getResult: (id:string)=>results.get(id)!,
@@ -138,7 +144,7 @@ function currentListingBridge(f:Awaited<ReturnType<typeof fixture>>) {
   f.listing.reviewCurrentForImages=async()=>{
     const original=await review(),value=await snapshot();
     Object.assign(original.review,{listingContext:structuredClone(value.context),sourceSha256:listingFingerprint(value.context)});
-    Object.assign(original.review.output,{currentListingCopy:value.currentListingCopy,copySha256:listingFingerprint(value.currentListingCopy)});
+    Object.assign(original.review.output,copyReview(value.context,value.currentListingCopy));
     return {...value,review:original.review};
   };
   return {project:(value:typeof project)=>{project=value;}};
@@ -612,7 +618,7 @@ test('old completed workflows remain readable but cannot be reused as a vision-r
   const f=await fixture(t), first=await f.run();
   const db=openDatabase(f.root);
   try {
-    const {categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+    const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
     Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
     db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(legacy),first.workflow.id);
     assert.equal(f.service.getProgress(f.draft.id)!.id,first.workflow.id);

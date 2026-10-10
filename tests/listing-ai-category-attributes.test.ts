@@ -10,7 +10,7 @@ import { candidateTextValues, validateFieldValues, wrapCandidateValues } from '.
 import { currentImageListingSnapshot } from '../src/main/image-workflow/image-facts.ts';
 import { assertCurrentListingReview } from '../src/main/ai/image-validation.ts';
 import { suggestListingFields } from '../src/main/ai/listing-adapters.ts';
-import { validateAiResult } from '../src/main/ai/validation.ts';
+import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
 import { buildFieldCatalog } from '../src/main/amazon/field-catalog.ts';
 import { listingFieldPolicy, CATEGORY_INFERENCE_POLICY_VERSION } from '../src/shared/listing-ai-contracts.ts';
 import type { JsonObject } from '../src/shared/amazon-contracts.ts';
@@ -205,9 +205,10 @@ test('saved legacy current-copy reviews survive reading while current and marked
   const review=validateListingReviewOutput({kind:'amazon-fields-review',verdict:'PASS',checks:[{field:'item_name',index:0,verdict:'SUPPORTED',evidenceIds:[context.evidence[0].id],reason:'Recorded legacy review.',claims:[{text:value,verdict:'SUPPORTED',evidenceIds:[context.evidence[0].id],reason:'Recorded legacy review.'}]}],issues:[]});
   const result={id:randomUUID(),callId:randomUUID(),providerId:'deepseek-review',productId:context.productId,productRevision:context.productRevision,variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:'deepseek-v4-pro',createdAt:new Date().toISOString(),reviewState:'unreviewed',listingContext:context,sourceSha256:listingFingerprint(context),output:{...review,kind:'listing-current-review',currentListingCopy:copy,copySha256:listingFingerprint(copy)}};
   assert.throws(()=>assertCurrentListingReview(review,copy,context));
-  assert.doesNotThrow(()=>validateAiResult(result));
-  context.categoryInferencePolicyVersion=CATEGORY_INFERENCE_POLICY_VERSION;result.sourceSha256=listingFingerprint(context);
   assert.throws(()=>validateAiResult(result));
+  assert.doesNotThrow(()=>validateStoredAiResult(result));
+  context.categoryInferencePolicyVersion=CATEGORY_INFERENCE_POLICY_VERSION;result.sourceSha256=listingFingerprint(context);
+  assert.throws(()=>validateStoredAiResult(result));
 });
 
 test('real KEYCHAIN nested closure schema preserves constraints and wraps, validates and reads back its text leaf',async t=>{

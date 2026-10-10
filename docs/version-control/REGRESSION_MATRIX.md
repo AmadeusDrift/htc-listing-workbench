@@ -111,6 +111,17 @@
 - 同文件的真实来源颜色组合使用本地 AiService、ListingAiService、ImageWorkflowService、生成服务、SQLite 和替身 transport，覆盖 source_image 颜色采用，以及材质加 source_image 共同引用的普通年龄推断。已有七图与审核复用不新增调用；替换原图字节后拒绝。简化 records 检查不宣称具备完整像素新鲜度输入。
 - 共通来源存在但无法解析时，自由标题中的有限类别声明仍有旧缺口：`适用年龄=三岁以上` 与只引用材质的 `Adult Cleaner` 在冻结 v0 和当前版本均通过。独立后续 `fix/prose-evidence-boundary` 处理，不能把本轮 typed 字段及明确 blocker 覆盖扩大为全部自由文案。
 
+## 修复增量：分类否定证据
+
+`fix/category-negation-evidence` 为场景 10–13、20、23、30、32 增加离线证据，类型为 S/L。新增 46 项正式测试，规格与质量复审通过；最终全量 1817 项，1816 通过、0 失败、0 取消、1 项同 Windows 文件符号链接权限跳过，160529.6401 ms。类型检查与隔离流水线 3 项通过。完整反例、各轮修正和命令见 `docs/maintenance/2026-10-10-分类否定证据.md`。
+
+- `tests/category-negation-evidence.test.ts` 的 32 项测试覆盖 typed 候选、review、infer、current copy、DONE 和确定性映射。否定不推出相反属性；无法解析的相关否定仍保留词项约束。裸逗号/斜线列表不重置否定，有限肯定引导词可开始新分句；无香、无味、无蜡、false、非常柔软、non-slip 与 Non-smokers 保留合法既有语义。
+- 原始 sourceSpec/所选规格的否定或未解析来源不回退成 normalized Children。隐藏 age 卡仍保留原文角色，真实 blocker、兄弟 SKU 隔离及销售配方锚定继续有效；干净上下文的 ID、顺序、值和哈希不变。
+- 候选中的无关否定不能让已有来源排除或 age/power blocker 消失；按分句保留实际 unresolved 词项。来源排除 Electric/Soft 可以约束其既定子类，候选不凭该扩展发明子类；只排除 Corded Electric/Extra Soft 不误挡宽类，另一明确否定分句也不会重新激活不存在的子类肯定。真实肯定加否定仍受约束。
+- `tests/image-ai-service.test.ts` 新增 13 项、`tests/image-workflow-records.test.ts` 新增 1 项，与分类文件的版本测试共同验证无标记 v0、字面量 v1/v2 的嵌套图片计划、审核、workflow 和加密备份原 bytes/hash。当前校验不因旧 marker/PASS/cache 放松；fresh recheck 首次保存、早期取消/配置失败、旧空 context 继续及旧单图的新 context 均写当前版本，纯 approval reuse 保留旧 marker。
+- 合成旧 builder 丢失所选否定、旧字幕仍写 Child 的真实本地服务组合中，approved-assets 与公共 recheck 均在新增调用之前拒绝，保留七图和 21 条旧 JSON。批准图只检查实际当前方案，已被后来成功方案替代的失败字幕不误挡合法图。独立 SPEC 图片反例 3/3、相关回归 224/224；最终 QUALITY 原两组探针 27/27、正式 delta 10/10。外部 transport 为替身，未执行真实付费调用。
+- 本轮只补有限否定/排除义务，未把共通来源一般未解析、肯定不匹配或错误引用的自由文案缺口标为完成。后续文案分支聚焦已有相关来源；任意 NLP、来源缺失的普通文案、字段规范化、默认合规事实及真实店铺验收仍有明确边界。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）：离线反例已补齐。** 修复前 5 项定向测试中 4 项准确失败，包含仅字段说明变化使已有候选 UNKNOWN 被阻断；修复后相同测试通过。兼容范围明确为字段卡 `title/description`，推断权限和其他规则仍是严格语义边界。真实上下文构造、图片服务及本地持久机制已组合验证，外部提供方与真实业务验收仍未覆盖。

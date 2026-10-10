@@ -4,12 +4,12 @@ import { LISTING_CANDIDATE_FIELDS, CATEGORY_ATTRIBUTE_FIELDS, CATEGORY_INFERENCE
 import type { CandidateField, ListingAiContext, ListingEvidence, ListingFieldCard } from '../../shared/listing-ai-contracts.ts';
 import { buildFieldCatalog } from '../amazon/field-catalog.ts';
 import { AMAZON_COPY_POLICY_VERSION } from '../amazon/field-mapping.ts';
-import { skuDependentSourceFact, categoryAttributeField, selectedSkuCategoryAttributes } from '../amazon/demo.ts';
+import { skuDependentSourceFact, categoryAttributeField, selectedSkuCategoryAttributes, selectedSkuCategoryEvidence } from '../amazon/demo.ts';
 import { protectedAttribute } from '../ai/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { projectSalesProduct } from '../sales-plans/records.ts';
-import { evidenceRole } from './evidence-contract-v1.ts';
+import { evidenceRole } from './evidence-contract-v2.ts';
 
 function meaning(name: string): ListingEvidence['meaning'] {
   const n = name.toLowerCase().replace(/[\s_-]/g, '');
@@ -37,6 +37,13 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
   const selectedAttributes=Object.fromEntries(Object.entries(selectedSkuCategoryAttributes(variant)).filter(([field])=>fields.some(card=>card.name===field)));
   for(let i=evidence.length-1;i>=0;i--){const field=categoryAttributeField(evidence[i].name,evidence[i].value);if(field&&Object.hasOwn(selectedAttributes,field))evidence.splice(i,1);}
   for(const [field,value] of Object.entries(selectedAttributes))evidence.push({id:`${variant.id}:${field}`,name:field==='age_range_description'?'适用人群':field,value,meaning:'general',source:'selected_sku'});
+  // Raw exclusions/unparsed roles must survive even when their category card is
+  // hidden. Keep ordinary affirmative contexts byte-for-byte stable.
+  for(const [field,{raw,parsed}] of Object.entries(selectedSkuCategoryEvidence(variant))){
+    if(!parsed.excluded.length&&!parsed.unparsed&&parsed.values.length===1)continue;
+    for(let i=evidence.length-1;i>=0;i--)if(evidenceRole(evidence[i].name,evidence[i].value)===field)evidence.splice(i,1);
+    evidence.push({id:`${variant.id}:${field}`,name:field==='age_range_description'?'适用人群':field,value:raw,meaning:'general',source:'selected_sku'});
+  }
   // Product-level color, measurements and counts cannot disambiguate multiple SKUs.
   if (product.variants.length > 1) for (let i = evidence.length - 1; i >= 0; i--) if (evidence[i].meaning === 'color' || /^(?:规格|商品规格|产品规格|规格型号)$/u.test(evidence[i].name.trim()) || skuDependentSourceFact(evidence[i].name)) evidence.splice(i, 1);
   const selectedRoles=selectedSkuCategoryAttributes(variant),evidenceBlockers:NonNullable<ListingAiContext['evidenceBlockers']>=[];

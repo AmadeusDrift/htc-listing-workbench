@@ -207,7 +207,7 @@ test('stored legacy malformed semantic records remain readable without granting 
 
 test('main process stamps new results while model output cannot set the evidence contract version',async t=>{
   const f=await fixture(t),result=await f.listing.suggest(f.reference);
-  assert.equal((result as any).listingEvidenceContractVersion,'listing-evidence/v1');
+  assert.equal((result as any).listingEvidenceContractVersion,'listing-evidence/v2');
   assert.throws(()=>validateListingFieldsOutput({...result.output,listingEvidenceContractVersion:'listing-evidence/v1'}));
 });
 

@@ -33,3 +33,10 @@ test('persisted workflow cannot claim completion without exact image and review 
   assert.throws(() => validateImageWorkflowRun({ ...run, attempt: 3 }));
   assert.throws(() => validateImageWorkflowRun({ ...run, token: 'secret' }));
 });
+
+test('single-image record markers preserve explicit historical literals and reject unknown versions',()=>{
+  const now=new Date().toISOString(),run={id:id(),draftId:id(),productId:id(),productRevision:1,variantId:a,sku:'SKU-A',status:'RUNNING',stage:'content',attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null};
+  assert.deepEqual(validateImageWorkflowRun(run),run);
+  for(const version of ['listing-evidence/v1','listing-evidence/v2'])assert.deepEqual(validateImageWorkflowRun({...run,listingEvidenceContractVersion:version}),{...run,listingEvidenceContractVersion:version});
+  assert.throws(()=>validateImageWorkflowRun({...run,listingEvidenceContractVersion:'listing-evidence/v3'}));
+});

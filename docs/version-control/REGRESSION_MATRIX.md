@@ -24,7 +24,7 @@
 | 12 | 部分候选无效时隔离并保留脱敏原因 | `tests/listing-ai-rejection-reasons.test.ts`：`partial field repair retains specific fixed rejection reasons and keeps other valid fields`；`tests/listing-ai-completion.test.ts`：`automatic repair keeps valid copy when another field has unsupported evidence` | **直接（离线），S+L**。保留合法字段、拒绝非法颜色等字段；固定原因不含测试密钥、原始未知引用或原数值，剩余错误继续可见。 |
 | 13 | 单位/成分/危险品资料不足不编造 | `tests/amazon-business-rules.test.ts`：`keychain size uses the selected original size and never invents units from a bare number`；`tests/listing-ai-validation.test.ts`：`fabric composition requires material evidence and cannot invent percentages or mark cloth not applicable`；`tests/listing-ai-completion.test.ts`：`network and unfillable compliance errors never trigger a model call` | **部分，S+H**。裸数字不补单位、成分比例不编造、不可补合规字段不调用模型；危险品各字段及业务默认值组合未全部覆盖。 |
 | 14 | 品牌审批与程序错误分类不同，不改品牌规避 | `tests/amazon-transport.test.ts`：`HTTP 200 preview is insufficient unless status is VALID with no ERROR issues`；`tests/amazon-business-rules.test.ts`：`Haul unbranded source labels use Generic without relabeling genuine brands or editing source facts` | **部分，S+H**。QUALIFICATION_REQUIRED 映射 qualification 且阻断提交；真实品牌保留。没有品牌审批错误与程序错误对照、自动修复前后品牌不变的专门场景。 |
-| 15 | 仅字段元数据升级不使旧图成为颜色变更 | `tests/listing-ai-category-attributes.test.ts`：`unrequested optional category fields preserve old context fields and evidence until schema validation needs them`；`tests/image-workflow-service.test.ts`：`category migration repairs and resumes old seven images without a color observation` | **缺口；相关证据 S+L**。前者未经过图片上下文，后者手工删除策略字段并模拟修复；均未固定事实/像素/身份而只改变字段目录元数据后恢复旧图。见 G1。 |
+| 15 | 仅字段元数据升级不使旧图成为颜色变更 | `tests/image-workflow-service.test.ts`：`field title and description changes reuse completed images and preserve original context hashes`；`a lost paid response reconciles a durable candidate after restart and resumes without a second generation for that slot`；`tests/automatic-listing-recheck-evidence.test.ts` 的两条 metadata recheck proof | **直接（离线），S+L**。真实 `ListingAiService.currentContext` 接入图片服务，仅改变字段标题/说明，已完成图复用、已有候选 UNKNOWN 恢复且不重发生图；无候选 UNKNOWN 仍阻断。推断权限、约束、Schema 等语义规则变化不属于可忽略元数据。见修复增量与 G1。 |
 | 16 | 真颜色、来源字节或身份改变拒绝旧结果 | `tests/source-color-ai.test.ts`：`source-color rejects stale revision, spec, variant and image hash before network`；`source-color freshness reads actual bytes without any network and rejects replaced files`；`tests/image-workflow-service.test.ts`：`changed source and cancellation prevent late adoption` | **部分，S+L**。来源身份/hash 和实际文件字节变化均拒绝；图片晚采用的 source 修改用例实际改的是标题，不能代替七图旧快照对颜色/字节/身份的三组反例。 |
 | 17 | 外层字段修复在未发送前预校验超时后恢复 | `tests/listing-ai-completion.test.ts`：`network and unfillable compliance errors never trigger a model call`；`tests/automatic-listing.test.ts`：`unknown repair failure retains its original cause without replaying the field request` | **缺口；相关证据 S+L**。前者只证明预校验失败时模型请求为 0；后者将 repairFields 整体抛错视为未知，不测试零发送证明及安全恢复。见 G2。 |
 | 18 | 图片内字段准备在未发送前失败后恢复 | `tests/image-workflow-service.test.ts`：`known incomplete field preparation is retained across restart without repeating paid completion`；`tests/listing-ai-completion.test.ts`：`network and unfillable compliance errors never trigger a model call` | **缺口；相关证据 S+L**。已知 incomplete 返回并持久化 DONE 的测试不等于 STARTED 后预发送失败。尚无真实 ListingAiService 预校验失败、重启、恢复的组合断言。见 G2。 |
@@ -66,9 +66,19 @@
 - `tests/image-workflow-service.test.ts`：`read-only filtering proof requires successful exact BLOCKED evidence: …` 四种模式，核对规划/生成图明确拒绝；不以 UNCERTAIN 或服务异常淘汰，实际参考图字节、开关或关联证据变化使证明失效。`tests/automatic-documents-backup.test.ts` 补充 SCREENED 的加密备份恢复。
 - `scripts/e2e-automatic-listing-ui.mjs`：目标范围、部分/全部淘汰、待修复原因、销售配方计数、原因搜索和清除恢复。`scripts/e2e-automatic-pipeline.mjs`：真实本地 FTP 加演示提交/回读，图片服务为边界替身，真实 Amazon 与 AI 请求被禁止；不属于真实上架验收。
 
+## 修复增量：图片字段说明兼容
+
+`fix/image-context-metadata` 补齐场景 15 的局部服务组合，并为 16、20、30、32 增加负向保护，类型为 S/L。维护记录见 `docs/maintenance/2026-10-10-图片字段说明兼容修复.md`。
+
+- 图片服务使用真实 `ListingAiService.currentContext` 构造上下文。仅字段标题或说明变化时，已完成七图和审核复用不新增调用；已有持久候选的 lost paid response 在重启后沿用原 workflow、首图 request 和 attempt，累计生成仍为 7 次。历史 context/hash 不改写。
+- `field metadata changes cannot resend an unknown paid request with no durable candidate` 保持同一 UNKNOWN 请求且累计生成 1 次；语义负向矩阵覆盖字段集合/顺序、必填/枚举/推断权限、长度约束、事实、Schema、目标身份、文案及未来未知键，真实变化继续阻断。
+- 两条 recheck 路径先验证原始持久哈希，再忽略字段 `title/description` 比较；篡改历史字段说明也不能绕过原始 hash。规则淘汰证明对来源图片实际字节的校验保持有效。
+- `image metadata compatibility does not relax listing-field adoption context identity` 证明字段采用仍使用严格上下文。原 `tryReuseApproval` 的四字段能力迁移特例有独立保护，新 helper 不向其他路径扩散该例外。
+- 外部提供方响应为隔离替身；不是实际付费服务、真实历史工作区或正式上架验收。
+
 ## 优先补齐的最小反例
 
-- **G1（15，并以 16 作负向保护）**：固定 SKU/身份、来源像素及 hash、颜色事实和已完成/未完成七图，仅改变字段目录描述、推断权限或规则元数据。使用真实 `ListingAiService.currentContext` 接入 `ImageWorkflowService`，断言旧图不被归类为颜色变化、不重发既有付费请求，历史快照不被覆盖；另分别改变颜色事实、来源字节、身份，必须拒绝旧结果。源码线索：`src/main/image-workflow/service.ts` 的 `currentContextMatches` 比较整份图片 listing context，`runSeven` 对不匹配统一报“来源颜色证据已变化”。静态阅读是风险线索，尚非运行复现。
+- **G1（15，并以 16 作负向保护）：离线反例已补齐。** 修复前 5 项定向测试中 4 项准确失败，包含仅字段说明变化使已有候选 UNKNOWN 被阻断；修复后相同测试通过。兼容范围明确为字段卡 `title/description`，推断权限和其他规则仍是严格语义边界。真实上下文构造、图片服务及本地持久机制已组合验证，外部提供方与真实业务验收仍未覆盖。
 - **G2（17、18、19、20、22）**：外层 `finishRepair` 在 `repairFields` 前保存 `FIELDS_STARTED`；图片层在 `listing.complete` 前保存 `contentPreparation.state=STARTED`。`ListingAiService.complete` 在字段候选补全前执行 `previewDraft`，但此前的 `prepareSourceColors` 还可能产生来源颜色观察请求；真正请求发送点由 `AiService.start` 的 `beforeSend` 标记。应将同一真实服务组合分为：预校验超时且字段请求发送数为 0（来源颜色观察单独计数，夹具明确是否需要观察）；beforeSend 后结果未知；结果已落库但上层未确认。不能将字段预校验失败等同整个 complete 零付费调用。每种状态均检查恢复前后及重启后的调用次数、请求关联、预算、草稿和历史；不能仅靠错误类型推断“未发送”，也不能用生图 notSent 测试代替字段恢复。
 - **G3（23、35）**：用同一工作区内真实自动任务服务和独立 `FollowupService`，构造 ACCEPTED 已排期、正在 GET、UNKNOWN、多个待到期 SKU；在各屏障暂停任务、维护暂停及重启。先固化协议：任务暂停后哪些只读查询允许继续、哪些权限必须撤销；再断言不再发生付费/PUT/未经许可采用，晚 GET 仅按协议落库、不会触发发布，重启不恢复已撤销授权。源码中 `AutomaticListingService.stopChildren` 停止图片、执行、标签，未直接调用独立回读暂停；`FollowupService.pause` 是独立内存状态，不能把各自单测当作组合验收。
 

@@ -12,8 +12,10 @@ import { imageWorkflowDraftStamp } from '../src/main/image-workflow/records.ts';
 import { hasRecordedRecheckDraft } from '../src/main/image-workflow/recheck-evidence.ts';
 import type { AiCall, AiResult } from '../src/shared/ai-contracts.ts';
 import type { ImageWorkflowRun } from '../src/shared/image-workflow-contracts.ts';
+import type { ListingAiContext } from '../src/shared/listing-ai-contracts.ts';
 
 async function fixture(t:test.TestContext) {
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('External network is forbidden in recheck fixtures');});
   mkdirSync('.test-data',{recursive:true});const root=mkdtempSync(resolve('.test-data/recheck-evidence-'));
   const store=new WorkspaceStore(root),amazon=new AmazonService(root,id=>store.getProduct(id),{isEncryptionAvailable:()=>false,encryptString:()=>Buffer.alloc(0),decryptString:()=>''});
   t.after(()=>{amazon.close();store.close();rmSync(root,{recursive:true,force:true});});
@@ -68,9 +70,65 @@ test('a cancelled planning recheck proves its exact draft snapshot and still rej
   const f=await fixture(t),snapshot=currentImageListingSnapshot(f.input.draft,buildListingContext(f.input.draft,f.input.product,f.input.targetGeneration));
   Object.assign(f.input.run,{status:'CANCELLED',stage:'planning',draftSha256:imageWorkflowDraftStamp(f.input.draft),imageContext:{listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,
     listingReviewResultId:f.review.id,referenceAssets:[],purpose:'main',policyVersion:'product-image/ip-v3'}});
+  f.input.run.contextSha256=listingFingerprint(f.input.run.imageContext);
   assert.equal(hasRecordedRecheckDraft(f.input),true);
   f.input.draft=f.amazon.saveDraft({id:f.input.draft.id,revision:f.input.draft.revision,attributes:f.input.draft.attributes});
   assert.equal(hasRecordedRecheckDraft(f.input),false,'even saving identical copy advances beyond the recorded revision');
+});
+
+for(const path of ['planning','copy-review'] as const)
+test(`field title and description changes preserve the original ${path} recheck proof`,async t=>{
+  const f=await fixture(t),context=structuredClone(f.review.listingContext!);
+  if(path==='planning'){
+    Object.assign(f.input.run,{status:'CANCELLED',stage:'planning',draftSha256:imageWorkflowDraftStamp(f.input.draft),imageContext:{listing:structuredClone(context),currentListingCopy:(f.review.output as any).currentListingCopy,
+      listingReviewResultId:f.review.id,referenceAssets:[],purpose:'main',policyVersion:'product-image/ip-v3'}});
+    f.input.run.contextSha256=listingFingerprint(f.input.run.imageContext);
+  }
+  const before=JSON.stringify([f.input.run,f.review]);
+  for(const field of context.fields){field.title=`Updated ${field.name}`;field.description='Expanded field help from a newer catalog projection.';}
+  assert.notEqual(listingFingerprint(context),f.review.sourceSha256,'global listing identity remains strict');
+  assert.equal(hasRecordedRecheckDraft({...f.input,context}),true);
+  assert.equal(JSON.stringify([f.input.run,f.review]),before,'compatibility must never rewrite historical evidence');
+  const stored=path==='planning'?f.input.run.imageContext!.listing:f.review.listingContext!;
+  stored.fields[0].description='Tampered historical field help';
+  assert.equal(hasRecordedRecheckDraft({...f.input,context}),false,'the original stored context hash must still be valid');
+});
+
+for(const path of ['planning','copy-review'] as const)
+test(`field metadata compatibility keeps all semantic and identity guards in ${path} proof`,async t=>{
+  const f=await fixture(t),original=structuredClone(f.review.listingContext!);
+  if(path==='planning'){
+    Object.assign(f.input.run,{status:'CANCELLED',stage:'planning',draftSha256:imageWorkflowDraftStamp(f.input.draft),imageContext:{listing:structuredClone(original),currentListingCopy:(f.review.output as any).currentListingCopy,
+      listingReviewResultId:f.review.id,referenceAssets:[],purpose:'main',policyVersion:'product-image/ip-v3'}});
+    f.input.run.contextSha256=listingFingerprint(f.input.run.imageContext);
+  }
+  const changes:Record<string,(context:ListingAiContext)=>void>={
+    'field name':c=>{c.fields[0].name='theme';},
+    'field collection':c=>{c.fields.pop();},
+    'field order':c=>{c.fields.reverse();},
+    'required status':c=>{c.fields[0].requirement=c.fields[0].requirement==='required'?'optional':'required';},
+    'enum permission':c=>{c.fields[0].closedEnum=!c.fields[0].closedEnum;},
+    'allowed values':c=>{c.fields[0].allowedValues.push('Changed option');},
+    'suggested values':c=>{c.fields[0].suggestedValues.push('Changed suggestion');},
+    'inference policy':c=>{c.categoryInferencePolicyVersion='different-policy' as never;},
+    'future field permission':c=>{Object.assign(c.fields[0],{futureInferencePermission:true});},
+    'future context key':c=>{Object.assign(c,{futureContextPolicy:{enabled:true}});},
+    'source fact':c=>{c.evidence.push({id:randomUUID(),name:'Material',value:'Changed source material',meaning:'material',source:'human_confirmed'});},
+    'source title':c=>{c.unverifiedSourceTitle+=' changed';},
+    'repair request':c=>{c.repairRequest={issues:[{field:'item_name',code:'CHANGED',message:'Changed request'}],currentValues:{item_name:'Changed copy'}};},
+  };
+  for(const key of ['draftId','productId','variantId','sku','targetId','listingProgram','productType','marketplaceId','locale','requirements','parentageLevel','schemaChecksum','schemaVersion','schemaSha256','policyVersion'] as const)
+    changes[key]=c=>{Object.assign(c,{[key]:`${c[key]}-changed`});};
+  for(const key of ['draftRevision','productRevision','targetGeneration'] as const)changes[key]=c=>{c[key]++;};
+  for(const key of ['minLength','maxLength','minUtf8ByteLength','maxUtf8ByteLength','minItems','maxItems'] as const)changes[key]=c=>{c.fields[0][key]=(c.fields[0][key]??0)+1;};
+  for(const [label,change] of Object.entries(changes)){
+    const context=structuredClone(original);context.fields[0].description='Metadata may change';change(context);
+    assert.equal(hasRecordedRecheckDraft({...f.input,context}),false,label);
+  }
+  const context=structuredClone(original);context.fields[0].description='Metadata may change';
+  assert.equal(hasRecordedRecheckDraft({...f.input,context}),true);
+  f.input.draft.attributes.item_name=[{value:'Changed current copy',marketplace_id:f.input.draft.marketplaceId,language_tag:'en_US'}];
+  assert.equal(hasRecordedRecheckDraft({...f.input,context}),false,'current copy cannot change with metadata');
 });
 
 test('category field completion proves only its exact saved draft before the new image snapshot',async t=>{

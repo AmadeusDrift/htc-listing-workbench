@@ -25,6 +25,7 @@ import { FAMILY_REBIND_EVENT_SUMMARY } from '../src/main/amazon/service.ts';
 import { validateAutomaticListingTask } from '../src/main/automatic-listing/records.ts';
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
+import { currentFactAuthority } from '../src/main/amazon/fact-authority.ts';
 
 function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   mkdirSync(resolve('.test-data'), { recursive: true });
@@ -1087,4 +1088,53 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
   assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(after.items[1].status,outcome==='unknown'?'FAILED':'DONE');
+});
+
+test('release mixed synthetic sample separates rule, missing facts, wrong source and UNKNOWN while preserving healthy paid work',async t=>{
+  // Real automatic coordinator, AiService, source observations, fact validator and
+  // SQLite. Amazon/image generation/execution are the existing explicit substitutes.
+  const f=fixture(t,'live');f.setReady();f.rules.product.variantLimit=5;f.rules.pricing.bundleEnabled=false;
+  f.product.variants=['Red','Blue','Green','Yellow','White'].map((color,index)=>({...f.product.variants[0],id:randomUUID(),sku:`RELEASE-${index}`,originalSpec:color,normalizedSpec:color,sourceSpec:color}));
+  const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
+  const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{
+    sends++;const payload=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text),color=payload.claims.find((c:any)=>c.kind==='color')?.value||payload.claims[0].value;
+    if(color==='Green')throw new TypeError('synthetic ambiguous source result');
+    const observed=color==='Blue'?'Red':color;
+    return chat({kind:'source-image-consistency',assets:payload.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:[observed],appearance:[],claims:payload.claims.map((c:any)=>({claimId:c.id,value:observed,visibility:'visible'}))}))});
+  }});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-release-observation'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
+  f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{
+    materializeSourceSnapshot(f.directory,f.product,input.variantIds);
+    for(const variantId of input.variantIds){const selected={productId:input.productId,productRevision:input.productRevision,variantId};await ai.observeSourceConsistency(ai.sourceConsistencyContext(selected),fresh,signal);assertConsistencyView(await ai.getSourceConsistency(selected));}
+  };
+  const prepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async raw=>{
+    const result=await prepare(raw),draft=result.items[0].draft!;
+    if(draft.variantId===f.product.variants[3].id){
+      draft.attributes={batteries_required:[{value:false}]};
+      draft.localIssues=currentFactAuthority(f.product,realAmazonSchema(),f.target,draft.attributes).issues;
+      assert.ok(draft.localIssues.some(issue=>issue.code==='FACT_AUTHORITY_REQUIRED'));
+    }
+    if(draft.variantId===f.product.variants[4].id){
+      draft.attributes={item_package_dimensions:[{length:{value:1,unit:'inches'},width:{value:1,unit:'inches'},height:{value:1,unit:'inches'}}],item_package_weight:[{value:1,unit:'pounds'}],number_of_items:[{value:1}]};
+      draft.businessRules={revision:f.rules.revision,fields:{},notices:[],quote:null,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:100,quantity:1,saleUnitCostCny:100},pricingDecision:{version:1,status:'business_blocked',code:'ROI_MAX_PRICE',quoteError:'ROI_MAX_PRICE',inputs:{costCny:100,dimensionsInches:[1,1,1],weightPounds:1},evidence:{cost:'confirmed_cny',dimensions:'confirmed_source',weight:'confirmed_source',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:[1,1,1],weightPounds:1}}}};
+    }
+    f.drafts.set(draft.id,structuredClone(draft));return result;
+  };
+  const complete=f.dependencies.images.complete;
+  f.dependencies.images.complete=async input=>{const draft=f.drafts.get((input as {draftId:string}).draftId)!;if(draft.localIssues.length){f.workflow.set(draft.id,{status:'BLOCKED',slots:[],error:'Synthetic known facts are missing'});throw new UserFacingError('Synthetic known facts are missing');}return complete(input);};
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const first=f.service.get(task.id),row=(index:number)=>first.items.find(i=>i.variantId===f.product.variants[index].id)!;
+  assert.equal(row(0).status,'DONE',JSON.stringify({sends,rows:first.items.map(r=>({sku:r.sku,error:r.error,outcome:r.outcome?.kind}))}));assert.equal(row(1).outcome?.kind,'NEEDS_INPUT');assert.equal(row(2).outcome?.kind,'UNKNOWN');assert.equal(row(3).outcome?.kind,'NEEDS_INPUT');assert.equal(row(3).outcome?.code,'FACT_AUTHORITY_REQUIRED');assert.equal(row(4).outcome?.kind,'RULE_FILTERED');
+  assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+  const preserved=JSON.stringify(f.workflow.get(row(0).draftId!)),history=JSON.stringify(ai.listResults(f.product.id));
+  await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
+  try{
+    const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});
+    assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.filter(r=>r.kind==='UNKNOWN').length,1);
+    restored.startAuthorized(restored.prepareStart(task.id));await restored.waitForIdle();
+    assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+    assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
+  }finally{await restored.close();}
 });

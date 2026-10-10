@@ -41,7 +41,7 @@ export function sourceDimensionEvidence(context:ProductImageContext){return sour
 const equivalent=(a:Measurement,b:Measurement)=>a.kind===b.kind&&Math.abs(a.value-b.value)<=Math.max(0.01,Math.abs(b.value)*0.015);
 export function assertImageMeasurements(text:string,context:Pick<ListingAiContext,'evidence'>,onlyContradictions=false):void {
   const source=context.evidence.flatMap(item=>imageMeasurements(item.value));
-  if(imageMeasurements(text).some(value=>(!onlyContradictions||source.some(actual=>actual.kind===value.kind))&&!source.some(actual=>equivalent(value,actual))))throw new AiError('OUTPUT_INVALID');
+  if(imageMeasurements(text).some(value=>(!onlyContradictions||source.some(actual=>actual.kind===value.kind))&&!source.some(actual=>equivalent(value,actual))))throw new AiError('OUTPUT_INVALID','UNSUPPORTED_MEASUREMENT');
 }
 /** Only standalone camera-look directions in generation prompts are not product measurements.
  * Keep source facts, captions and bare lens specifications on the strict measurement path. */

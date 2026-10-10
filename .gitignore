@@ -43,6 +43,7 @@ artifacts/
 # Initial GitHub export: keep raw historical business/run documents local.
 /docs/*
 !/docs/version-control/
+!/docs/maintenance/
 /GitHub可复用底座与选型.md
 /RED-独立亚马逊上架中台需求文档.md
 /第一阶段实施范围.md

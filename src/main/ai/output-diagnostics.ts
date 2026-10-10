@@ -30,7 +30,7 @@ function diagnosticOutput(value: unknown, depth = 0): unknown {
 }
 
 /** Local failed-output evidence only. Never read by result/adoption APIs or included in requests. */
-export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; output: unknown }): void {
+export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; output: unknown }): void {
   let destination: string | undefined, file: number | undefined, complete = false;
   try {
     const { call } = input, name = `${input.createdAt.replace(/[-:.TZ]/g,'')}-${call.id}.json`;
@@ -38,7 +38,9 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
     const output = diagnosticOutput(input.output), outputByteLength = Buffer.byteLength(JSON.stringify(output),'utf8');
     const metadata = { version:1, approved:false, errorCode:'OUTPUT_INVALID', callId:call.id, operation:input.operation,
       productId:call.productId, productRevision:call.productRevision, providerId:call.providerId, model:call.model,
-      createdAt:input.createdAt, rejectionStage:input.rejectionStage, outputByteLength };
+      createdAt:input.createdAt, rejectionStage:input.rejectionStage,
+      // Only a fixed code is kept; free text never enters the file through this field.
+      ...(input.rejectionReason && /^[A-Z][A-Z_]{2,39}$/.test(input.rejectionReason) ? { rejectionReason:input.rejectionReason } : {}), outputByteLength };
     let json = JSON.stringify({ ...metadata, output });
     if (Buffer.byteLength(json,'utf8') > MAX_BYTES) json = JSON.stringify({ ...metadata, output:null, outputOmitted:'size_limit' });
     if (Buffer.byteLength(json,'utf8') > MAX_BYTES) return;

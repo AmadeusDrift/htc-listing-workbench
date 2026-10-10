@@ -12,9 +12,12 @@ const MESSAGES: Record<AiErrorCode, string> = {
   CANCELLED: 'AI 请求已取消', INTERRUPTED: '上次 AI 请求被中断，未自动重发', SERVICE_CLOSED: 'AI 服务已关闭',
 };
 /** Only fixed messages cross the IPC boundary; upstream errors and request options never do. */
+/** Fixed, diagnostic-only detail for a rejected output. The user-facing message stays the fixed one above. */
+export type AiRejectionReason = 'EMPTY_PROMPT' | 'UNSUPPORTED_MEASUREMENT';
 export class AiError extends UserFacingError {
   readonly code: AiErrorCode;
-  constructor(code: AiErrorCode) { super(MESSAGES[code]); this.code = code; }
+  readonly reason?: AiRejectionReason;
+  constructor(code: AiErrorCode, reason?: AiRejectionReason) { super(MESSAGES[code]); this.code = code; if (reason) this.reason = reason; }
 }
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason instanceof AiError ? signal.reason : new AiError('CANCELLED');

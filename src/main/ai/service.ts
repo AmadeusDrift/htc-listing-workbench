@@ -617,7 +617,7 @@ export class AiService {
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
           if (safe.code === 'OUTPUT_INVALID' && untrustedOutput) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;
-            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage,output:untrustedOutput.value});
+            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage,rejectionReason:safe.reason,output:untrustedOutput.value});
           }
         }
         throw safe;

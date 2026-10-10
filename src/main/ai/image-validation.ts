@@ -93,6 +93,25 @@ export function validateCandidateImageIdentity(raw: unknown): CandidateImageIden
   if (Math.max(width,height) / Math.min(width,height) >= 50) fail();
   return { id: uuid(candidate.id), sha256: sha256(candidate.sha256), width, height };
 }
+function planPrompt(raw: unknown, max: number, empty: boolean): string {
+  if (typeof raw === 'string' && !empty && !raw.trim()) throw new AiError('OUTPUT_INVALID','EMPTY_PROMPT');
+  return boundedText(raw, max, empty);
+}
+/** Initial set planning only: the model sometimes writes all seven slot prompts and leaves the
+ * outer prompt blank. Slot 1 is the main image, so its prompt is the outer prompt; the result
+ * then passes every normal check. A reply with nothing to copy stays rejected, and a source
+ * refusal is never given a prompt. */
+export function fillSetPlanPrompt(raw: unknown, context: ProductImageContext): unknown {
+  if (!context.setPolicy || context.slot || !raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const value = raw as Record<string, unknown>, set = value.setPlan;
+  if (typeof value.prompt !== 'string' || value.prompt.trim() || !set || typeof set !== 'object') return raw;
+  // A source refusal (sufficient:false) deliberately carries no generation instruction; keep it empty.
+  const understanding = value.productUnderstanding;
+  if (understanding && typeof understanding === 'object' && (understanding as Record<string, unknown>).sufficient === false) return raw;
+  const slots = (set as Record<string, unknown>).slots, first: unknown = Array.isArray(slots) ? slots[0] : undefined;
+  const prompt = first && typeof first === 'object' ? (first as Record<string, unknown>).prompt : undefined;
+  return typeof prompt === 'string' && prompt.trim() ? { ...value, prompt } : raw;
+}
 export function validateImagePlan(raw: unknown): ImagePlanOutput {
   const value = keys(raw, ['kind','prompt','textMode','expectedText'], ['productUnderstanding','ipRisk','setPlan']);
   if (value.kind !== 'image-plan' || !['none','planned'].includes(String(value.textMode))) fail();
@@ -122,7 +141,7 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
   }
   // A source refusal is a valid, cacheable observation, but never a generation
   // instruction. Slot prompts, source identities and all claims remain checked.
-  return { kind: 'image-plan', prompt: boundedText(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan)}) };
+  return { kind: 'image-plan', prompt: planPrompt(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan)}) };
 }
 export function validateImageSetPlan(raw:unknown):ImageSetPlan{
   const value=keys(raw,['style','dimensionEvidenceIds','dimensionReason','slots']);
@@ -174,9 +193,14 @@ export function repairImagePlanCaptions(plan:ImagePlanOutput,context:ProductImag
   // Known standalone camera directions describe photography, not measured
   // product properties. Use qualitative wording before the strict size check.
   const photography=(value:string)=>value.replace(/(^|[,;；，、\n])\s*(?:consistent\s+)?\d+(?:\.\d+)?\s*mm[ -]*(?:(?:macro\s+)?lens\s+look|macro\s+look|look(?:\s+perspective)?|three-quarter\s+angle|视角)(?:\s+across\s+all\s+seven\s+images)?(?=\s*(?:[,;.；，、。\n]|$))/gi,'$1 natural photographic perspective');
-  set.style=photography(set.style);repaired.prompt=photography(repaired.prompt);
+  // A bare "<n>mm lens" set off as its own clause is also a camera direction, unless the
+  // product evidence itself speaks of a lens or focal length; then it stays a strict fact.
+  const opticalProduct=evidence.some(item=>/lens|focal|镜头|焦距/iu.test(`${item.name} ${item.value}`));
+  const cameraLens=(value:string)=>opticalProduct?value:value.replace(/(^|[,;；，、\n])\s*\d+(?:\.\d+)?\s*mm[ -]*(?:(?:macro\s+)?lens|(?:微距)?镜头)(?=\s*(?:[,;.；，、。\n]|$))/gi,'$1 natural photographic perspective');
+  const direction=(value:string)=>cameraLens(photography(value));
+  set.style=direction(set.style);repaired.prompt=direction(repaired.prompt);
   for(const slot of set.slots){
-    slot.prompt=photography(slot.prompt);
+    slot.prompt=direction(slot.prompt);
     for(const id of [...slot.evidenceIds,...slot.expectedText.flatMap(line=>line.evidenceIds)]){
       const source=evidence.find(item=>item.id===id);
       if(!source||source.source==='selected_sku'&&context.listing.variantId&&!id.startsWith(`${context.listing.variantId}:`))fail();

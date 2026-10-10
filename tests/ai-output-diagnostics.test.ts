@@ -108,3 +108,16 @@ test('a throwing optional capture observer cannot alter an otherwise valid provi
   const reply=await requestDeepSeekJson({operation:'fixture'},'Return JSON.','deepseek-flash',{apiKey:'fake-offline-key'},new AbortController().signal,context);
   assert.equal(captured,true); assert.deepEqual(reply.content,{value:'accepted JSON'}); assert.equal(posts,1);
 });
+
+test('a rejection reason is stored as a fixed code and anything else is dropped', async t => {
+  const { recordInvalidAiOutput } = await import('../src/main/ai/output-diagnostics.ts');
+  const { mkdtempSync, rmSync } = await import('node:fs'); const { tmpdir } = await import('node:os');
+  const directory = mkdtempSync(join(tmpdir(),'htc-reason-')); t.after(()=>rmSync(directory,{recursive:true,force:true}));
+  const call = (id: string) => ({ id, productId:'11111111-1111-4111-8111-111111111111', productRevision:1, providerId:'deepseek', model:'deepseek-flash' }) as any;
+  recordInvalidAiOutput(directory,{call:call('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),operation:'image-plan',createdAt:'2026-10-10T04:00:00.000Z',rejectionStage:'operation-output-validation',rejectionReason:'EMPTY_PROMPT',output:{prompt:''}});
+  recordInvalidAiOutput(directory,{call:call('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),operation:'image-plan',createdAt:'2026-10-10T04:00:01.000Z',rejectionStage:'operation-output-validation',rejectionReason:'free text from a provider',output:{}});
+  recordInvalidAiOutput(directory,{call:call('cccccccc-cccc-4ccc-8ccc-cccccccccccc'),operation:'image-plan',createdAt:'2026-10-10T04:00:02.000Z',rejectionStage:'operation-output-validation',output:{}});
+  const saved = diagnostics(directory);
+  assert.equal(saved.length,3); assert.equal(saved[0].rejectionReason,'EMPTY_PROMPT');
+  assert.equal('rejectionReason' in saved[1],false); assert.equal('rejectionReason' in saved[2],false);
+});

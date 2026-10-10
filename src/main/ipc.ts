@@ -5,7 +5,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { WorkspaceStore } from './store.ts';
 import { identifier, parseMutation, record } from '../shared/validation.ts';
-import { authorizeSender, publicError, managedAssetPath } from './security.ts';
+import { authorizeSender, publicError, publicRejection, managedAssetPath } from './security.ts';
 import { importImageFiles } from './assets.ts';
 import { exportProductData, parseImport } from './import-export.ts';
 import { loadExamples, loadWorkspaceExamples } from './examples.ts';
@@ -65,7 +65,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
         if (restoring) throw new UserFacingError('正在恢复工作区，请等待完成后再操作');
         active += 1; entered = true;
         return { ok: true, data: await callback(...args) };
-      } catch (error) { return { ok: false, error: publicError(error) }; }
+      } catch (error) { return { ok: false, error: publicError(error), ...(publicRejection(error)?{rejection:publicRejection(error)}:{}) }; }
       finally { if (entered) active -= 1; }
     });
   }
@@ -163,11 +163,11 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
     handle('red:image-risk:save',1,input=>imageWorkflow.saveRiskSettings(input));
     handle('red:copy-review:settings',0,()=>imageWorkflow.getCopyReviewSettings());
     handle('red:copy-review:save',1,input=>imageWorkflow.saveCopyReviewSettings(input));
-    handle('red:automatic-product:unknown-retry',1,input=>imageWorkflow.approveUnknownRetry(input));
+    handle('red:automatic-product:unknown-retry',1,async input=>{const run=await imageWorkflow.approveUnknownRetry(input);return imageWorkflow.getProgressPresentation(run.draftId)!;});
     handle('red:automatic-product:sources', 1, input => imageWorkflow.prepareSources(input));
     handle('red:automatic-product:sources-cancel', 1, id => imageWorkflow.cancelSources(id));
     handle('red:automatic-product:complete', 1, input => imageWorkflow.complete(input));
-    handle('red:automatic-product:progress', 1, id => imageWorkflow.getProgress(id));
+    handle('red:automatic-product:progress', 1, id => imageWorkflow.getProgressPresentation(id));
     if (imageGeneration) handle('red:automatic-product:candidate-preview', 1, input => readWorkflowCandidatePreview(input, id => imageWorkflow.getProgress(id), id => imageGeneration.readCandidate(id)));
     handle('red:automatic-product:cancel', 1, id => imageWorkflow.cancel(id));
     window.once('closed', () => imageWorkflow.cancelAll());

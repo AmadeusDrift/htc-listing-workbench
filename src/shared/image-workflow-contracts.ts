@@ -26,6 +26,7 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  rejection?: {version:'rejection-presentation/v1';code:import('./rejection-presentation.ts').OutputRejection['code']|'SOURCE_OBSERVATION_INSUFFICIENT';callId:string;resultId:string|null;contextSha256:string;stage:'content'|'planning';slot:number};
   /** Main-only evidence semantics for stored image captions; absent preserves pre-contract history. */
   listingEvidenceContractVersion?:import('./listing-ai-contracts.ts').ListingEvidenceContractVersion;
   id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
@@ -74,9 +75,11 @@ export const AUTOMATIC_SOURCE_ISSUES = {
   SOURCE_DOWNLOAD_FAILED:'SYSTEM_REPAIR', SOURCE_MAPPING_MISSING:'SYSTEM_REPAIR', SOURCE_MAPPING_INVALID:'SYSTEM_REPAIR',
 } as const;
 export type AutomaticSourceIssueCode = keyof typeof AUTOMATIC_SOURCE_ISSUES;
+/** Read-only IPC projection; never persist resultUnknown in an ImageWorkflowRun. */
+export type ImageWorkflowProgress = ImageWorkflowRun & {resultUnknown?:boolean};
 export interface ImageWorkflowApi {
   getAutomaticImageCandidatePreview(input:{draftId:string;slot:number;candidateId:string}):Promise<AutomaticImageCandidatePreview>;
-  approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowRun>;
+  approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowProgress>;
   getImageRiskSettings():Promise<ImageRiskSettings>;
   saveImageRiskSettings(input:ImageRiskSettings):Promise<ImageRiskSettings>;
   getCopyReviewSettings():Promise<CopyReviewSettings>;
@@ -84,6 +87,6 @@ export interface ImageWorkflowApi {
   prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string; code?:AutomaticSourceIssueCode }[] }>;
   cancelAutomaticProductSources(productId: string): Promise<{ cancelled: boolean }>;
   completeAutomaticProduct(input: CompleteAutomaticProductInput): Promise<CompleteAutomaticProductResult>;
-  getAutomaticProductProgress(draftId: string): Promise<ImageWorkflowRun | null>;
+  getAutomaticProductProgress(draftId: string): Promise<ImageWorkflowProgress | null>;
   cancelAutomaticProduct(draftId: string): Promise<{ cancelled: boolean }>;
 }

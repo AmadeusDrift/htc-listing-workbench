@@ -9,7 +9,7 @@ import { MAX_VISION_REQUEST_BYTES, visionContent } from './vision.ts';
 import type { DeepSeekReferenceImage } from './vision.ts';
 import type { ListingNormalization } from '../../shared/listing-normalization-contracts.ts';
 
-export interface AdapterResult<T extends AiOutput = AiOutput> extends ProviderMetadata { output: T; listingNormalization?: ListingNormalization }
+export interface AdapterResult<T extends AiOutput = AiOutput> extends ProviderMetadata { output: T; listingNormalization?: ListingNormalization; fieldRejections?: import('../../shared/rejection-presentation.ts').FieldRejections }
 export interface TextPayload {
   productId: string;
   sourceTitle: string;

@@ -1,3 +1,5 @@
+import { presentRejection } from '../../shared/rejection-presentation.ts';
+import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
 import { assertProductConsistency,sourceConsistencyUnknown,SourceConsistencyError } from '../source-image-consistency/proof.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
@@ -111,6 +113,7 @@ export class AutomaticListingService {
     try {
       for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
         const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+        assertAutomaticRejectionHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
         if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT')) {
@@ -126,6 +129,7 @@ export class AutomaticListingService {
   private save(task: AutomaticListingTask): void {
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
+    assertAutomaticRejectionHistory(this.db,task);
     this.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
@@ -239,23 +243,23 @@ export class AutomaticListingService {
           else if(latest){
             const {task,item}=latest,outcome=item.outcome;
             if(outcome?.kind==='RULE_FILTERED'){
-              let stale=outcome.scope.rulesStamp!==fingerprint(rules)?'上架规则已变化，重新评估':outcome.scope.sourceStamp!==sourceStamp(product)?'来源资料已变化，重新评估':outcome.scope.recipeStamp!==recipe.stamp?'销售配方已变化，重新评估':null;
+              let stale:AutomaticQueueRow['noticeCode']=outcome.scope.rulesStamp!==fingerprint(rules)?'RULES_CHANGED':outcome.scope.sourceStamp!==sourceStamp(product)?'SOURCE_CHANGED':outcome.scope.recipeStamp!==recipe.stamp?'RECIPE_CHANGED':undefined;
               if(!stale&&item.draftId){
                 const draft=this.deps.amazon.getDraft(item.draftId);
-                if(draft.revision!==outcome.draftRevision||!this.matching(task,item,draft))stale='草稿资料已变化，重新评估';
-                else if(outcome.pricingReport&&!pricingEvidenceCurrent(draft,rules))stale='定价输入已变化，重新评估';
-                else if(outcome.image){const proof=await this.deps.images.getRuleFilterEvidence?.(draft.id);if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='图片证据或风险设置已变化，重新评估';}
+                if(draft.revision!==outcome.draftRevision||!this.matching(task,item,draft))stale='DRAFT_CHANGED';
+                else if(outcome.pricingReport&&!pricingEvidenceCurrent(draft,rules))stale='PRICING_CHANGED';
+                else if(outcome.image){const proof=await this.deps.images.getRuleFilterEvidence?.(draft.id);if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='IMAGE_EVIDENCE_CHANGED';}
               }
-              if(stale){view.reconsideration=stale;view.message=stale+'；原淘汰记录保留，旧任务不会自动重启';}
-              else {view.kind='RULE_FILTERED';view.eligible=false;view.message=outcome.message;}
+              if(stale){view.noticeCode=stale;view.reconsideration=({RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'定价输入已变化，重新评估',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估'} as const)[stale];view.message=view.reconsideration+'；原淘汰记录保留，旧任务不会自动重启';}
+              else {view.kind='RULE_FILTERED';view.eligible=false;view.reasonCode=outcome.code;view.message=presentRejection(view.reasonCode);}
             }else if(outcome?.kind==='UNKNOWN'){
               // Live request/submit markers were checked above. Keep the old outcome as audit only.
-              view.kind='SYSTEM_REPAIR';view.reconsideration='原未知结果已核对，可重新准备';view.message=view.reconsideration+'；历史未知记录保留，不会自动重试';
-            }else if(outcome){view.kind=outcome.kind;view.message=outcome.message;}
-            else if(item.status==='FAILED'){view.kind='UNCLASSIFIED';view.message=item.error||'历史失败未分类';}
-            if(!final(task)&&view.kind!=='RULE_FILTERED'){view.eligible=false;view.message=(view.message?view.message+'；':'')+'请继续或取消原任务';}
+              view.kind='SYSTEM_REPAIR';view.noticeCode='UNKNOWN_RECONCILED';view.reconsideration='原未知结果已核对，可重新准备';view.message=view.reconsideration+'；历史未知记录保留，不会自动重试';
+            }else if(outcome){view.kind=outcome.kind;view.reasonCode=item.rejection?.detail.code??outcome.code;view.message=presentRejection(view.reasonCode);}
+            else if(item.status==='FAILED'){view.kind='UNCLASSIFIED';view.reasonCode='LEGACY_FAILURE';view.message=presentRejection(view.reasonCode);}
+            if(!final(task)&&view.kind!=='RULE_FILTERED'){view.continuationRequired=true;view.eligible=false;view.message=(view.message?view.message+'；':'')+'请继续或取消原任务';}
           }
-        }catch{view.kind='SYSTEM_REPAIR';view.message='暂无法核对已保存证据，记录保留待修复';view.eligible=false;}
+        }catch{view.kind='SYSTEM_REPAIR';delete view.continuationRequired;view.noticeCode='EVIDENCE_READ_FAILED';view.message='暂无法核对已保存证据，记录保留待修复';view.eligible=false;}
         rows.push(view);
       }
       products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
@@ -513,6 +517,7 @@ export class AutomaticListingService {
         if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
         row.imageStarted = true; this.save(task);
         const result = await this.deps.images.complete({ draftId: draft.id, draftRevision: draft.revision });
+        if(result.workflow.rejection)row.rejection={workflowId:result.workflow.id,detail:structuredClone(result.workflow.rejection)};else delete row.rejection;
         row.imageAttempts = result.workflow.attempt; this.save(task);
         if (!this.imageReady(result.workflow)) throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');
         draft = result.draft;

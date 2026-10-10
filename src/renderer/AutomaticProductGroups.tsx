@@ -3,7 +3,7 @@ import { ArrowRight, Box, ChevronDown, Search } from 'lucide-react';
 import type { AutomaticListingItem } from '../shared/automatic-listing-contracts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
 import { ImageSlotProgress } from './ImageSlotProgress';
-import { automaticItemOutcome, filterAutomaticProductGroups } from './automatic-product-groups';
+import { automaticItemOutcome, automaticItemReason, filterAutomaticProductGroups } from './automatic-product-groups';
 import type { AutomaticItemOutcome, AutomaticProductGroup } from './automatic-product-groups';
 import { sourceLabel } from './utils';
 import './automatic-product-groups.css';
@@ -26,15 +26,14 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping }: Acti
       <span><strong>{item.sku}</strong>{specification && <small>{specification}</small>}<small>{stageLabels[item.stage]}{item.stage === 'READBACK' ? '；Amazon 接受提交不等于已可售。' : ''}</small></span>
       <Badge tone={itemTone}>{itemLabels[outcome]}</Badge><ChevronDown size={16} className={expanded ? 'is-expanded' : ''} />
     </button>
-    {['FAILED','SCREENED'].includes(item.status)&&item.outcome?.message&&item.outcome.message!==item.error&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{item.outcome.message}</p>}
-    {item.error && <p className="workflow-notice" data-tone={itemTone}>{item.error}</p>}
+    {(['FAILED','SCREENED'].includes(item.status)||item.error)&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{automaticItemReason(item)}</p>}
     {expanded && <div className="automatic-sale-body">
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
     </div>}
-    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} onClick={() => onManual(item.productId, item.draftId ?? undefined)}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
+    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => onManual(item.productId, item.draftId ?? undefined)}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
   </li>;
 }
 

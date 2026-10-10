@@ -664,7 +664,7 @@ test('generated-image risk or unavailable moderation stops without regenerating 
 test('unrecognizable references and legacy text-only plans stop before image generation',async t=>{
   const f=await fixture(t,{insufficient:true}), result=await f.run();
   assert.equal(result.workflow.status,'BLOCKED'); assert.equal(result.workflow.stage,'planning');
-  assert.match(result.workflow.error!,/Selected SKU cannot be identified/);
+  assert.match(result.workflow.error!,/来源图片不足以确认/);assert.doesNotMatch(result.workflow.error!,/Selected SKU cannot be identified/);
   assert.deepEqual(f.calls,['content','content-review','source-ocr','set-plan']); assert.equal(f.generationInputs.length,0);
   const g=await fixture(t,{legacyPlan:true}), legacy=await g.run();
   assert.notEqual(legacy.workflow.status,'COMPLETED'); assert.equal(g.calls.includes('generate'),false);

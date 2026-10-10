@@ -10,6 +10,8 @@ import { AiError } from './errors.ts';
 import { LISTING_REVIEW_OUTPUT_RULES, requireCompleteReview } from '../listing-ai/review-coverage.ts';
 import { BLADE_EVIDENCE_RULES } from '../listing-ai/semantic-evidence.ts';
 import { normalizeListingCandidate, normalizeListingGeneration } from '../listing-ai/normalization-v1.ts';
+import { localFieldRejection } from '../listing-ai/rejection-reasons.ts';
+import type { FieldRejection } from '../../shared/rejection-presentation.ts';
 import type { ListingNormalizationEntry } from '../../shared/listing-normalization-contracts.ts';
 
 /** The operation owns kind; tolerate only the observed JSON-mode envelope alias. */
@@ -26,7 +28,7 @@ export function parseListingGeneration(content: unknown, context?: ListingAiCont
 }
 
 /** An automatic repair can retain valid fields; rejected values never enter a draft or history. */
-function parseListingRepair(content: unknown, context: ListingAiContext, entries: ListingNormalizationEntry[]): ListingFieldsOutput {
+function parseListingRepair(content: unknown, context: ListingAiContext, entries: ListingNormalizationEntry[], rejections: FieldRejection[]): ListingFieldsOutput {
   const raw = generationEnvelope(content);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).sort().join() !== 'candidates,kind,missing') throw new AiError('OUTPUT_INVALID');
   const root = raw as Record<string,unknown>;
@@ -39,6 +41,7 @@ function parseListingRepair(content: unknown, context: ListingAiContext, entries
   const coverage = validateListingFieldsOutput({kind:'amazon-fields',candidates:[],missing:[...named,...root.missing]});
   if (coverage.missing.length !== context.fields.length || coverage.missing.some(item => !context.fields.some(field => field.name === item.field))) throw new AiError('OUTPUT_INVALID');
   const output: ListingFieldsOutput = {kind:'amazon-fields',candidates:[],missing:coverage.missing.slice(named.length)};
+  rejections.push(...output.missing.map(m=>({field:m.field,origin:'model-missing' as const,code:'FIELD_CANDIDATE_ABSENT' as const})));
   for (const [index,candidate] of root.candidates.entries()) {
     try {
       const normalized = normalizeListingCandidate(candidate, context);
@@ -55,6 +58,7 @@ function parseListingRepair(content: unknown, context: ListingAiContext, entries
       entries.push(...normalized.entries);
     } catch (error) {
       if (!(error instanceof AiError) || error.code !== 'OUTPUT_INVALID') throw error;
+      rejections.push({field:coverage.missing[index].field,origin:'local-validation',code:localFieldRejection(error)});
       const reason=error instanceof ListingValidationError?error.validationReason:'字段格式或来源依据校验未通过';
       output.missing.push({field:coverage.missing[index].field,reason:`${reason}；已保留其他合格字段`});
     }
@@ -70,10 +74,11 @@ export async function suggestListingFields(c: ListingAiContext, model: DeepSeekM
   const sourceMappings='\nFor color, an explicit color name in the selected SKU specification is valid even when the supplier swapped color and size axes. Translate 松针绿 as Pine Needle Green and 夜光本色 as Luminous Natural; never infer white or green from luminous natural. Extra genuine fact citations do not invalidate a separately supported color. Explicit non-textile material such as 合成树脂 (Synthetic Resin), resin, PLA or PVC supports fabric_type Not Applicable when the actual schema permits that value; do not invent fiber composition. For target_audience require an explicit intended-user fact: 通用 may be General or All, without implying any age group. '+BLADE_EVIDENCE_RULES;
   const imageColors='\nEvidence with source="source_image" records visible product color from the exact bound original SKU image. It can support only its named colors, never material, finish, dimensions, brand, quantity, or a licensed character. It is a model observation, not a human confirmation. Cite its exact evidence ID for color. Do not invent gradients, solid-color claims or a different shade.';
   const { content, ...metadata } = await requestDeepSeekJson(listingModelPayload(c), GENERATE + rules + semanticRules + sourceMappings + imageColors+'\n'+CATEGORY_ATTRIBUTE_INFERENCE_RULES, model, credentials, signal, context, 4096);
-  const entries: ListingNormalizationEntry[] = [];
-  const output = c.repairRequest ? parseListingRepair(content, c, entries) : parseListingGeneration(content, c, entries); assertListingEvidence(output, c);
+  const entries: ListingNormalizationEntry[] = [], rejections: FieldRejection[] = [];
+  let output:ListingFieldsOutput;try { output = c.repairRequest ? parseListingRepair(content, c, entries, rejections) : parseListingGeneration(content, c, entries); assertListingEvidence(output, c); } catch(error) { if(error instanceof AiError && error.code==='OUTPUT_INVALID')error.rejection={version:'rejection-presentation/v1',code:localFieldRejection(error)};throw error;}
   if (output.candidates.length + output.missing.length !== c.fields.length) throw new Error('Incomplete field coverage');
-  return { ...metadata, output, ...(entries.length ? { listingNormalization: { version: 'listing-normalization/v1' as const, entries } } : {}) };
+  if(!c.repairRequest)rejections.push(...output.missing.map(m=>({field:m.field,origin:'model-missing' as const,code:'FIELD_CANDIDATE_ABSENT' as const})));
+  return { ...metadata, output, ...(rejections.length?{fieldRejections:{version:'rejection-presentation/v1' as const,entries:rejections}}:{}), ...(entries.length ? { listingNormalization: { version: 'listing-normalization/v1' as const, entries } } : {}) };
 }
 export async function reviewListingFields(c: ListingAiContext, candidate: ListingFieldsOutput, model: DeepSeekModel, credentials: DeepSeekCredentials, signal: AbortSignal, context: AdapterContext): Promise<AdapterResult<ListingFieldsReviewOutput>> {
   const payload = listingModelPayload(c);

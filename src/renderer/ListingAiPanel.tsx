@@ -1,3 +1,4 @@
+import { presentRejection } from '../shared/rejection-presentation';
 import { useEffect, useState } from 'react';
 import type { AiResult } from '../shared/ai-contracts';
 import type { AmazonDraft, JsonValue } from '../shared/amazon-contracts';
@@ -27,6 +28,7 @@ export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:Amazon
   const reviewRequired=!review&&suggestion?.listingContext?.policyVersion!=='haul-us-copy-2026-10-07-v2';
   const reference={draftId:draft.id,draftRevision:draft.revision};
   const blocked=disabled||dirty||pending;
+  const blockedReason=disabled?'当前草稿操作不可用':dirty?'请先保存草稿':pending?'当前字段操作正在进行':undefined;
   async function act(kind:'complete'|'generate'|'review'|'adopt') {
     if(blocked)return;
     setPending(true);setNotice('');
@@ -61,11 +63,12 @@ export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:Amazon
     <p className="small-copy">{draft.listingProgram==='haul'?'Haul 低价商城':'标准商城'} · {draft.schema.productType} · 美国英语 · 标题 75 字符 / 五点 5 条 / 描述 500 字符</p>
     {dirty&&<p className="workflow-warning">请先保存上架草稿，再运行填报预览或采纳建议。</p>}
     {draft.mode==='demo'&&<p className="small-copy">本地演示的预览结果为模拟数据；需要生成文案时仍会调用已配置的 DeepSeek，计入用量。</p>}
-    <div className="workflow-actions"><button type="button" className="button primary" disabled={blocked} onClick={()=>void act('complete')}>规则填报并预览</button>{pending&&<button type="button" className="button secondary" disabled={cancelling} onClick={()=>void cancel()}>{cancelling?'正在取消…':'取消处理'}</button>}</div>
+    <div className="workflow-actions"><button type="button" className="button primary" disabled={blocked} title={blockedReason} onClick={()=>void act('complete')}>规则填报并预览</button>{pending&&<button type="button" className="button secondary" disabled={cancelling} onClick={()=>void cancel()}>{cancelling?'正在取消…':'取消处理'}</button>}</div>
     {completion&&<div className={completion.remaining.length?'workflow-warning':'workflow-notice'} role="status">
       <div><strong>{completion.draft.revision===draft.revision?'处理结果':'上次处理结果'}：{completion.draft.mode==='demo'?'演示 · ':''}{listingStateLabels[completion.draft.state]}</strong>
         <p>AI 调用 {completion.aiCalls} 次 · {completion.draft.mode==='demo'?'演示':'Amazon 验证'}预览 {completion.previewAttempts} 次 · 草稿修订 {completion.draft.revision}</p>
-        {completion.remaining.length?<><p>仍需处理：</p><ul>{completion.remaining.map((message,index)=><li key={index}>{message}</li>)}</ul></>:<p>本次流程没有返回待处理项，请继续核对草稿和预览记录。</p>}
+        {!!completion.rejections?.length&&<ul>{completion.rejections.flatMap(r=>r.details.entries.map(e=><li key={r.resultId+e.field}>{labels[e.field]}：{presentRejection(e.code)}</li>))}</ul>}
+        {completion.remaining.length?<><p>仍需处理：</p><ul>{completion.remaining.map((_message,index)=><li key={index}>该项尚未完成，请核对草稿字段与已有验证记录；历史文字未作结构化归因。</li>)}</ul></>:<p>本次流程没有返回待处理项，请继续核对草稿和预览记录。</p>}
       </div>
     </div>}
     {draft.businessRules&&<div className="settings-subsection">
@@ -86,16 +89,16 @@ export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:Amazon
       <details><summary>查看已填字段和原因 · {Object.keys(draft.businessRules.fields).length} 项</summary><ul>{Object.entries(draft.businessRules.fields).map(([field,entry])=><li key={field}><strong>{labels[field as CandidateField]??field}</strong><p className="small-copy">{entry.reason}</p><p>{textValue(entry.value)}</p></li>)}</ul></details>
     </div>}
     <div className="section-heading"><div><h4>手动英文字段建议</h4><p>可自行生成、选择写入，也可先运行独立复核。有复核结果时按最新结果处理。</p></div><span className={`status-badge ${stale||reviewBlocked?'warning':report?.verdict==='PASS'?'ready':''}`}>{stale?'建议已过期':report?.verdict==='PASS'?'复核通过':reviewBlocked?'需处理复核问题':output?reviewRequired?'旧建议需要复核':'尚未复核':'待生成建议'}</span></div>
-    <div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked} onClick={()=>void act('generate')}>生成英文字段建议</button><button type="button" className="button secondary" disabled={blocked||!output||stale||!output.candidates.length} onClick={()=>void act('review')}>复核字段建议（可选）</button></div>
+    <div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked} title={blockedReason} onClick={()=>void act('generate')}>生成英文字段建议</button><button type="button" className="button secondary" disabled={blocked||!output||stale||!output.candidates.length} title={blockedReason??(stale?'建议已过期':!output?.candidates.length?'没有可复核候选':undefined)} onClick={()=>void act('review')}>复核字段建议（可选）</button></div>
     {suggestions.length>0&&<label className="field"><span>建议记录</span><select aria-label="AI 字段建议记录" disabled={pending} value={suggestionId} onChange={e=>{setSuggestionId(e.target.value);setSelected([]);}}>{suggestions.map(r=><option key={r.id} value={r.id}>草稿修订 {r.listingContext?.draftRevision} · {new Date(r.createdAt).toLocaleString()} · {r.model}</option>)}</select></label>}
     {output&&<div className="listing-ai-candidates">{output.candidates.map(candidate=><article className="listing-ai-candidate" key={candidate.field}>
       <label className="listing-ai-choice"><input type="checkbox" aria-label={`采纳${labels[candidate.field]}`} checked={selected.includes(candidate.field)} disabled={blocked||stale||reviewBlocked||reviewRequired} onChange={e=>setSelected(values=>e.target.checked?[...values,candidate.field]:values.filter(f=>f!==candidate.field))}/><strong>{labels[candidate.field]}</strong></label>
       <div className="listing-ai-diff"><div><span className="small-copy">草稿当前值</span><p>{textValue(draft.attributes[candidate.field])}</p></div><div><span className="small-copy">建议值</span>{candidate.items.map((item,index)=><p key={index}>{item.value}</p>)}</div></div>
       <details><summary>查看依据</summary>{candidate.items.map((item,i)=><div key={i}>{item.transformation==='infer'&&<p className="small-copy">模型推断：{item.inferenceReason}</p>}<p className="small-copy">{item.evidenceIds.map(id=>{const fact=suggestion?.listingContext?.evidence.find(e=>e.id===id);return fact?`${fact.name}：${fact.value}`:id;}).join('；')}</p></div>)}</details>
     </article>)}</div>}
-    {!!output?.missing.length&&<div className="workflow-warning"><div><strong>需要补充事实</strong><ul>{output.missing.map(m=><li key={m.field}>{labels[m.field]}：{m.reason}</li>)}</ul></div></div>}
-    {!!report?.issues.length&&<div className="workflow-warning"><ul>{report.issues.map((issue,i)=><li key={i}>{labels[issue.field]}：{issue.message}</li>)}</ul></div>}
-    {output&&<div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked||stale||reviewBlocked||reviewRequired||!selected.length} onClick={()=>void act('adopt')}>采纳所选字段并检查</button><span className="small-copy">{reviewBlocked?'最新复核未通过，请先处理问题。':reviewRequired?'这份旧建议仍需独立复核，或重新生成。':'请核对候选事实；采纳后仍需运行验证预览。'}</span></div>}
+    {!!output?.missing.length&&<div className="workflow-warning"><div><strong>本次未取得可用字段</strong><ul>{output.missing.map(m=><li key={m.field}>{labels[m.field]}：{presentRejection(suggestion?.fieldRejections?.entries.find(e=>e.field===m.field)?.code)}</li>)}</ul></div></div>}
+    {!!report?.issues.length&&<div className="workflow-warning"><ul>{report.issues.map((issue,i)=><li key={i}>{labels[issue.field]}：复核未通过，请核对该字段的实际依据；模型说明尚未由本地校验归因。</li>)}</ul></div>}
+    {output&&<div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked||stale||reviewBlocked||reviewRequired||!selected.length} title={blockedReason??(stale?'建议已过期':reviewBlocked?'复核尚未通过':reviewRequired?'旧建议需要复核':!selected.length?'请先选择可用候选':undefined)} onClick={()=>void act('adopt')}>采纳所选字段并检查</button><span className="small-copy">{reviewBlocked?'最新复核未通过，请先处理问题。':reviewRequired?'这份旧建议仍需独立复核，或重新生成。':'请核对候选事实；采纳后仍需运行验证预览。'}</span></div>}
     {notice&&<p className="workflow-notice" role="status">{notice}</p>}
     {!!draft.fieldAdoptions?.length&&<details><summary>字段采纳记录 · {draft.fieldAdoptions.length} 次</summary>{draft.fieldAdoptions.map(a=><p className="small-copy" key={a.id}>修订 {a.fromRevision} → {a.toRevision} · {a.fields.map(f=>labels[f]).join('、')} · {a.reviewResultId?'含独立复核':'未运行独立复核'} · {new Date(a.at).toLocaleString()}</p>)}</details>}
   </section>;

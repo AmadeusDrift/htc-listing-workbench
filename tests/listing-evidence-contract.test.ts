@@ -197,8 +197,9 @@ test('stored legacy malformed semantic records remain readable without granting 
   const f=await fixture(t,{age_range_description:schema}),result=structuredClone(await f.listing.suggest(f.reference));
   const context=result.listingContext!,evidence=fact('适用年龄','三岁以上');
   context.fields.push({name:'age_range_description',title:'Age',requirement:'required',closedEnum:false,allowedValues:[],suggestedValues:[]});context.evidence.push(evidence);
+  delete result.fieldRejections; // Literal pre-presentation history has no field sidecar.
   result.output=candidate('age_range_description','Adult',[evidence]);result.sourceSha256=listingFingerprint(context);delete (result as any).listingEvidenceContractVersion;
-  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(result),result.id);}finally{db.close();}
+  const db=openDatabase(f.directory);try{const call=JSON.parse(String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!.record_json));delete call.presentationContext;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(result),result.id);}finally{db.close();}
   assert.deepEqual(f.ai.getResult(result.id),result);
   assert.ok(f.ai.listResults(f.product.id).some(r=>r.id===result.id));
   assert.throws(()=>assertListingEvidence(result.output as any,context));
@@ -335,9 +336,10 @@ test('existing source-absent ordinary judgment is preserved without inventing in
 test('legacy semantic result bytes and hashes survive encrypted backup while associations remain checked',async t=>{
   const f=await ageDraft(t),result=structuredClone(await f.listing.suggest(f.reference));
   const context=result.listingContext!,direct=context.evidence.find(e=>e.name==='适用年龄')!;
+  delete result.fieldRejections; // Literal pre-presentation history has no field sidecar.
   result.output=candidate('age_range_description','Adult',[direct]);delete result.listingEvidenceContractVersion;
   const raw=JSON.stringify(result),hash=result.sourceSha256;
-  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,result.id);}finally{db.close();}
+  const db=openDatabase(f.directory);try{const call=JSON.parse(String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!.record_json));delete call.presentationContext;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,result.id);}finally{db.close();}
   assert.ok(f.ai.queryResults({productId:f.product.id}).items.some(r=>r.id===result.id));
   const path=join(f.directory,'legacy.htcbackup'),target=join(f.directory,'restored'),password='isolated evidence contract backup';
   await createWorkspaceBackup(f.directory,path,password);const prepared=await prepareWorkspaceRestore(target,path,password);await commitWorkspaceRestore(target,prepared);

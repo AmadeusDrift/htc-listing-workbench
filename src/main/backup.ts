@@ -22,6 +22,8 @@ import { validateExecutionTask } from './execution/records.ts';
 import { validateFollowupRecord } from './followup/records.ts';
 import { validateCategoryLibrary } from './catalog/records.ts';
 import { validateProcurementBatch } from './procurement/records.ts';
+import { assertAutomaticRejectionHistory } from './automatic-listing/rejection-history.ts';
+import { assertPresentationResultOwner } from './ai/presentation-history.ts';
 import { validateAiProfile, validateAiCall, validateStoredAiResult } from './ai/validation.ts';
 import { assertSourceColorHistory } from './ai/source-color-validation.ts';
 import { assertListingHistory } from './listing-ai/history.ts';
@@ -274,8 +276,10 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 6) {
       const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateStoredAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
       const calls = new Map(database.prepare('SELECT record_json FROM ai_calls').all().map(row => { const call = validateAiCall(JSON.parse(String(row.record_json))); return [call.id, call] as const; }));
+      for(const result of results.values())assertPresentationResultOwner(result,calls.get(result.callId));
       for(const asset of assertSourceColorHistory(database,results,calls))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
       if (version >= 15) assertImageWorkflowHistory(database, results, calls);
+      if(version>=16)for(const row of database.prepare('SELECT record_json FROM automatic_listing_tasks').all())assertAutomaticRejectionHistory(database,validateAutomaticListingTask(JSON.parse(String(row.record_json))));
       for (const row of database.prepare('SELECT record_json FROM listing_drafts WHERE record_json IS NOT NULL').all()) assertListingHistory(JSON.parse(String(row.record_json)).draft, results, calls, database);
       for (const row of database.prepare('SELECT record_json FROM content_versions').all()) assertContentHistory(validateContentVersion(JSON.parse(String(row.record_json))), results, calls);
       const versions = database.prepare('SELECT record_json FROM image_versions').all().map(row => validateImageVersion(JSON.parse(String(row.record_json))));

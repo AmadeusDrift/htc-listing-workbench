@@ -1,3 +1,5 @@
+import { AiError } from './ai/errors.ts';
+import { presentRejection } from '../shared/rejection-presentation.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { resolve, sep } from 'node:path';
 import { identifier } from '../shared/validation.ts';
@@ -19,7 +21,9 @@ export function managedAssetPath(root: string, relative: string): string {
   if (!destination.startsWith(base + sep)) throw new UserFacingError('素材路径越界');
   return destination;
 }
+export function publicRejection(error:unknown){return error instanceof AiError?(error.rejection??(error.reason?{version:'rejection-presentation/v1' as const,code:error.reason}:undefined)):undefined;}
 export function publicError(error: unknown): string {
+  if (error instanceof AiError && (error.rejection||error.reason)) return presentRejection(error.rejection?.code??error.reason);
   if (error instanceof UserFacingError) return error.message.slice(0, 300);
   const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
   if (['EACCES', 'EPERM'].includes(code)) return '没有访问所选文件或数据目录的权限，请选择可访问的位置';

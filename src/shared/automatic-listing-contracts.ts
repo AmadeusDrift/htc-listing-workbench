@@ -22,7 +22,10 @@ export interface AutomaticListingOutcome {
   pricingReport?:import('./listing-rules.ts').BusinessRuleReport;
   image?:AutomaticRuleEvidence;
 }
+export type AutomaticQueueNotice = 'RULES_CHANGED'|'SOURCE_CHANGED'|'RECIPE_CHANGED'|'DRAFT_CHANGED'|'PRICING_CHANGED'|'IMAGE_EVIDENCE_CHANGED'|'UNKNOWN_RECONCILED'|'EVIDENCE_READ_FAILED';
 export interface AutomaticQueueRow {
+  noticeCode?:AutomaticQueueNotice;continuationRequired?:boolean;
+  reasonCode?:string;
   key:string;productId:string;recipeKey:string;specification:string;sku:string|null;
   kind:AutomaticOutcomeKind|'PENDING'|'SUBMITTED'|'COMPLETED';eligible:boolean;message:string;reconsideration:string|null;taskId:string|null;
 }
@@ -31,6 +34,7 @@ export interface AutomaticListingQueue {
   products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
 }
 export interface AutomaticListingItem {
+  rejection?:{workflowId:string;detail:NonNullable<import('./image-workflow-contracts.ts').ImageWorkflowRun['rejection']>};
   key: string; productId: string; productRevision: number; sourceStamp: string; productTitle: string;
   variantId: string; sku: string; stockSets: number; sourcesPrepared: boolean;
   status: 'PENDING' | 'RUNNING' | 'WAITING' | 'DONE' | 'FAILED' | 'SCREENED';

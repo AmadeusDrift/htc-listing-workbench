@@ -29,6 +29,13 @@ import { LISTING_REVIEW_OUTPUT_RULES } from '../src/main/listing-ai/review-cover
 import { assertImageWorkflowHistory } from '../src/main/image-workflow/history.ts';
 import type { AiCall } from '../src/shared/ai-contracts.ts';
 
+// Literal pre-presentation history has no new call sidecar; keep original result bytes below unchanged.
+function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiResult) {
+  const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!;
+  const call=JSON.parse(String(row.record_json));delete call.presentationContext;
+  db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);
+}
+
 const visualSummaryReview = JSON.parse(readFileSync(new URL('./fixtures/image-text-review-visual-summary.json', import.meta.url), 'utf8'));
 
 const understanding = (payload: any) => ({ summary: 'A blue round coaster with a raised rim.', referenceAssetIds: payload.referenceImages.map((image: any) => image.assetId), uncertainties: ['Exact dimensions cannot be measured from the photo.'], sufficient: true });
@@ -112,7 +119,7 @@ test('legacy PASS remains readable but cannot authorize a new image request with
   context.listing.evidence=[evidence];context.currentListingCopy=[{field:'age_range_description',values:['Adult']}];
   review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);delete review.listingEvidenceContractVersion;
   review.output={kind:'listing-current-review',verdict:'PASS',currentListingCopy:context.currentListingCopy,copySha256:listingFingerprint(context.currentListingCopy),checks:[{field:'age_range_description',index:0,verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Legacy source interpretation.',claims:[{text:'Adult',verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Legacy source interpretation.'}]}],issues:[]};
-  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
+  const db=openDatabase(f.directory);try{markLiteralLegacyCall(db,review);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
   assert.deepEqual(f.ai.getResult(review.id),review);
   const before=f.requests.length;await assert.rejects(f.ai.imagePlan(context,()=>{}),error=>{assert.equal((error as AiError).code,'OUTPUT_INVALID');return true;});assert.equal(f.requests.length,before);
 });
@@ -246,6 +253,7 @@ test('a cached legacy PASS with exact context and copy hashes cannot bypass curr
   evidence.value='三岁以上';review.sourceSha256=listingFingerprint(review.listingContext);delete review.listingEvidenceContractVersion;
   const db=openDatabase(f.directory);try{
     db.prepare('UPDATE facts SET value=? WHERE id=?').run(evidence.value,evidence.id);
+    markLiteralLegacyCall(db,review);
     db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);
   }finally{db.close();}
   const draft=f.amazon.getDraft(f.draft.id),snapshot=currentImageListingSnapshot(draft,f.listing.currentContext(draft,f.store.getProduct(f.product.id),f.amazon.executionTargetScope(draft.targetId).generation));
@@ -273,7 +281,9 @@ test('legacy caption and nested set-plan evidence remains readable and backup-st
   assert.deepEqual(validateStoredAiResult(nested),nested);assert.throws(()=>validateAiResult(nested));
   const at=new Date().toISOString(),run={id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'BLOCKED',stage:'planning',attempt:0,maxAttempts:3,contextSha256:listingFingerprint(context),draftSha256:imageWorkflowDraftStamp(f.draft),referenceAssets:context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})),planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:at,updatedAt:at,error:'Historical blocked plan',imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:'seven-product-v2',imageContext:context,setPlan:set,setPlanResultId:plan.id,slots:Array.from({length:7},(_,i)=>({index:i+1,purpose:i===0?'main':'detail',status:'PENDING',contextSha256:null,attempts:[],approvedAssetId:null,approvedSha256:null,error:null}))};
   const rawPlan=JSON.stringify(plan),rawRun=JSON.stringify(run),db=openDatabase(f.directory);try{
+    markLiteralLegacyCall(db,review);
     db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);
+    markLiteralLegacyCall(db,plan);
     db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawPlan,plan.id);
     db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(run.id,rawRun);
     assert.equal(workflowRuns(db)[0].contextSha256,run.contextSha256);
@@ -312,7 +322,9 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
   assert.deepEqual(validateStoredImageWorkflowRun(run),run);
   if(version==='listing-evidence/v2')assert.doesNotThrow(()=>validateImageWorkflowRun(run));else assert.throws(()=>validateImageWorkflowRun(run));
   const rawPlan=JSON.stringify(plan),rawRun=JSON.stringify(run),rawReview=JSON.stringify(review),db=openDatabase(f.directory);try{
+    markLiteralLegacyCall(db,review);
     db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawReview,review.id);
+    markLiteralLegacyCall(db,plan);
     db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawPlan,plan.id);
     db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(run.id,rawRun);
     assert.deepEqual(workflowRuns(db)[0],run);
@@ -339,7 +351,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`${version?
   review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);
   if(version)review.listingEvidenceContractVersion=version;else delete review.listingEvidenceContractVersion;
   review.output={kind:'listing-current-review',verdict:'PASS',currentListingCopy:context.currentListingCopy,copySha256:listingFingerprint(context.currentListingCopy),checks:[{field:'age_range_description',index:0,verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Historical keyword match.',claims:[{text:'Child',verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Historical keyword match.'}]}],issues:[]};
-  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
+  const db=openDatabase(f.directory);try{markLiteralLegacyCall(db,review);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
   assert.deepEqual(f.ai.getResult(review.id),review);assert.throws(()=>validateAiResult(review));assert.throws(()=>validateStoredAiResult({...review,listingEvidenceContractVersion:'listing-evidence/v2'}));
   const before=f.requests.length;await assert.rejects(f.ai.imagePlan(context,()=>{}));assert.equal(f.requests.length,before);
 });
@@ -1102,6 +1114,7 @@ for(const legacyVersion of ['product-image/v1','product-image/vision-v2'] as con
         delete legacy.output.ipRisk; legacy.model=legacyVersion==='product-image/v1'?'deepseek-v4-pro':'deepseek-flash';
         db.prepare("UPDATE ai_calls SET record_json=json_set(record_json,'$.model',?) WHERE id=?").run(legacy.model,legacy.callId);
       }
+      markLiteralLegacyCall(db,legacy);
       assert.deepEqual(validateAiResult(legacy),legacy);
       db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(legacy),legacy.id);
     }
@@ -1182,4 +1195,30 @@ test('interrupted IP rechecks reuse old approvals without calls but never overri
   f.respond((operation,payload)=>operation==='ImageModeration'?Response.json({Code:200,RequestId:'fixture-new-ip-risk',Data:{DataId:payload.dataId,RiskLevel:'high',Result:[{Label:'tm_goods',Confidence:99,Description:'Distinctive brand detected'}]}}):operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const rejected=await oldVersion.recheckWithFreshEvidence(request);assert.equal(rejected.workflow.slots![0].status,'BLOCKED');
   const denied=await workflow.recheck(request);assert.equal(denied.workflow.approvalReuse,undefined);assert.notEqual(denied.workflow.status,'COMPLETED');assert.equal(images,7);
+});
+
+for(const code of ['EMPTY_PROMPT','UNSUPPORTED_MEASUREMENT','SOURCE_OBSERVATION_INSUFFICIENT'] as const)test('actionable image reason '+code+' persists exact set-plan call before any generation and survives restart',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);
+ (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',setPlan:sceneSet(),prompt:code==='UNSUPPORTED_MEASUREMENT'?'Show a 999 cm product.':'',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),sufficient:code!=='SOURCE_OBSERVATION_INSUFFICIENT',uncertainties:code==='SOURCE_OBSERVATION_INSUFFICIENT'?['https://secret.invalid/?token=secret']:[]}}):undefined);
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+ assert.equal(result.workflow.rejection?.code,code);assert.equal(result.workflow.rejection?.slot,code==='EMPTY_PROMPT'?1:0);assert.equal(result.workflow.rejection?.stage,'planning');assert.equal(posts(),0);assert.equal(result.workflow.slots?.reduce((n,slot)=>n+slot.attempts.length,0),code==='EMPTY_PROMPT'?1:0);
+ const detail=result.workflow.rejection!,call=f.ai.getCall(detail.callId)!;assert.equal(call.presentationContext?.draftId,f.draft.id);assert.doesNotMatch(result.workflow.error??'',/secret|https/);
+ if(code==='SOURCE_OBSERVATION_INSUFFICIENT'){assert.equal(call.status,'SUCCEEDED');assert.equal(detail.resultId,result.workflow.setPlanResultId);}else{assert.equal(call.rejection?.code,code);assert.equal(detail.resultId,null);}
+ const before=f.requests.length;await workflow.close();
+ const db=openDatabase(f.directory);try{const {workflowRuns}=await import('../src/main/image-workflow/records.ts');assert.deepEqual(workflowRuns(db,f.draft.id)[0].rejection,detail);}finally{db.close();}
+ assert.equal(f.requests.length,before);assert.equal(posts(),0);
+ const backup=join(f.directory,'actionable-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'synthetic image reason passphrase');
+ if(code!=='SOURCE_OBSERVATION_INSUFFICIENT'){
+  assert.equal(call.presentationContext?.workflowId,result.workflow.id);
+  const db=openDatabase(f.directory),rawCall=String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id)!.record_json),rawRun=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(result.workflow.id)!.record_json);
+  try{
+   const foreignHash='b'.repeat(64),wrongCall={...call,presentationContext:{...call.presentationContext,sourceSha256:foreignHash}},wrongRun={...result.workflow,rejection:{...detail,contextSha256:foreignHash}};
+   db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(wrongCall),call.id);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(wrongRun),result.workflow.id);
+   assert.throws(()=>workflowRuns(db,f.draft.id));await assert.rejects(createWorkspaceBackup(f.directory,join(f.directory,'wrong-context.htcbackup'),'synthetic image reason passphrase'));
+   db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(rawRun,result.workflow.id);
+   db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...call,presentationContext:{...call.presentationContext,workflowId:randomUUID()}}),call.id);
+   assert.throws(()=>workflowRuns(db,f.draft.id));await assert.rejects(createWorkspaceBackup(f.directory,join(f.directory,'wrong-workflow.htcbackup'),'synthetic image reason passphrase'));
+  }finally{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(rawCall,call.id);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(rawRun,result.workflow.id);db.close();}
+ }
 });

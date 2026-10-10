@@ -14,8 +14,11 @@ test('reference selection prioritizes selected SKU and excludes other SKU, unbou
 });
 test('single-SKU images are automatically usable but explicit unconfirmed bindings are excluded', () => {
   const unbound = image([], 'main'), pending = image([a]);
-  assert.deepEqual(selectImageReferences(product([pending,unbound], [a]), a, new Set(), () => false).map(r => r.id), [unbound.id]);
+  assert.deepEqual(selectImageReferences(product([pending,unbound], [a]), a, new Set(), () => false,true).map(r => r.id), [unbound.id]);
   assert.throws(() => selectImageReferences(product([image([b])]), a, new Set(), () => true), /参考图/);
+});
+test('unbound reference selection requires explicit current source authorization',()=>{
+  assert.throws(()=>selectImageReferences(product([image([])],[a]),a,new Set(),()=>false));
 });
 test('mixed sales references cover every component before spending the remaining reference budget', () => {
   const variants = Array.from({length:5}, id), assets = variants.flatMap(variant => [image([variant], 'main'), image([variant])]);

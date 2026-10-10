@@ -1,4 +1,5 @@
 import { sceneSet } from './fixtures/image-set.ts';
+import { attachNativeHistory } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -35,6 +36,15 @@ import { ListingRuleStore } from '../src/main/listing-rules.ts';
 import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13,8); png.write('IHDR',12); png.writeUInt32BE(256,16); png.writeUInt32BE(256,20);
+test('native historical multiplicity blocks orphan refs in runSeven, completed reuse, recheck and rule proof',async t=>{
+  const fresh=await fixture(t);attachNativeHistory(fresh.root,fresh.product);
+  const blocked=await fresh.run();assert.equal(blocked.workflow.status,'BLOCKED');assert.equal(fresh.calls.includes('generate'),false);
+  const prior=await fixture(t),completed=await prior.run();assert.equal(completed.workflow.status,'COMPLETED');
+  attachNativeHistory(prior.root,prior.product);const count=prior.calls.length;
+  await assert.rejects(async()=>prior.run());
+  await assert.rejects(prior.service.recheck({draftId:prior.draft.id,draftRevision:prior.amazon.getDraft(prior.draft.id).revision,sourceWorkflowId:completed.workflow.id}));
+  assert.equal(await prior.service.getRuleFilterEvidence(prior.draft.id),null);assert.equal(prior.calls.length,count);
+});
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 function copyReview(context:ListingAiContext,copy:{field:any;values:string[]}[]){
   return {kind:'listing-current-review' as const,verdict:'PASS' as const,currentListingCopy:copy,copySha256:listingFingerprint(copy),issues:[],checks:copy.flatMap(item=>item.values.map((value,index)=>{

@@ -210,7 +210,7 @@ test('v16 migration adds naming state while leaving original variants untouched'
   const { directory, service, SkuNamingService, cleanup } = await fixture(t);
   const store = new WorkspaceStore(directory), product = store.createProduct(); store.close(); service.close();
   const old = openDatabase(directory);
-  old.exec('DROP TABLE sku_naming_identities; DROP TABLE sku_naming_groups; DROP TABLE sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; PRAGMA user_version=16'); old.close();
+  old.exec('DROP TABLE sku_naming_identities; DROP TABLE sku_naming_groups; DROP TABLE sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; PRAGMA user_version=16'); old.close();
   const migrated = new SkuNamingService(directory); cleanup.push(() => migrated.close());
   const reopened = new WorkspaceStore(directory); cleanup.push(() => reopened.close());
   assert.deepEqual(reopened.getProduct(product.id), product);

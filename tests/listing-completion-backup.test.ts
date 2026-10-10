@@ -54,10 +54,10 @@ test('completion backup validates strict records, call/result identity, usage an
 });
 
 test('schema 17 encrypted backup migrates without inventing a completion operation',async t=>{
-  const f=await fixture(t),db=openDatabase(f.directory);db.exec('DROP TABLE listing_completion_operations; PRAGMA user_version=17;');db.close();
+  const f=await fixture(t),db=openDatabase(f.directory);db.exec('DROP TABLE listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; PRAGMA user_version=17;');db.close();
   const file=join(f.directory,'schema17.htcbackup');await createWorkspaceBackup(f.directory,file,pass);
   const restored=await prepareWorkspaceRestore(f.directory,file,pass),snapshot=openDatabase(restored.stagingDirectory);
-  try{assert.equal(snapshot.prepare('PRAGMA user_version').get()!.user_version,18);assert.equal(snapshot.prepare('SELECT id FROM listing_completion_operations').all().length,0);}finally{snapshot.close();}
+  try{assert.equal(snapshot.prepare('PRAGMA user_version').get()!.user_version,19);assert.equal(snapshot.prepare('SELECT id FROM listing_completion_operations').all().length,0);}finally{snapshot.close();}
 });
 
 for(const sent of [false,true])test(`normal draft retention keeps exportable ${sent?'sent safety':'unsent historical'} operation records`,async t=>{

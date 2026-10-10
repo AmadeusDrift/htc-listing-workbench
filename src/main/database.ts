@@ -1,3 +1,4 @@
+import { assertSourceImageHistory } from './source-image-provenance.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { MIAOSHOU_INDEXES } from './miaoshou/indexes.ts';
 import { MIAOSHOU_SYNC_INDEXES } from './miaoshou/sync-records.ts';
 import { SKU_NAMING_SCHEMA } from './sku-naming/schema.ts';
 
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 export function openDatabase(directory: string): DatabaseSync {
   mkdirSync(directory, { recursive: true });
   const db = new DatabaseSync(join(directory, 'red.sqlite'));
@@ -224,6 +225,11 @@ export function openDatabase(directory: string): DatabaseSync {
     try { db.exec('BEGIN IMMEDIATE; CREATE TABLE listing_completion_operations (id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); PRAGMA user_version=18; COMMIT;'); }
     catch (error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
   }
+  if (version < 19) {
+    try { db.exec('BEGIN IMMEDIATE; CREATE TABLE source_image_provenance (id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); PRAGMA user_version=19; COMMIT;'); }
+    catch(error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
+  }
+  try { assertSourceImageHistory(db); } catch(error) { db.close();throw error; }
   // Idempotent for databases created during development of schema version 2.
   db.exec(`CREATE TABLE IF NOT EXISTS amazon_exchanges (
     id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES listing_drafts(id) ON DELETE CASCADE,

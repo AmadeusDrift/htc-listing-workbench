@@ -1,3 +1,4 @@
+import { persistSourceImageFixture, sourceImageId } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -13,13 +14,14 @@ test('source previews validate image identity, coalesce requests and do not modi
   const store = new WorkspaceStore(directory), product = store.createProduct();
   const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(10, 16); png.writeUInt32BE(10, 20);
   const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'image-1', role: 'main', url: 'https://images.example.com/a.png' }] } } as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   let requests = 0;
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => { requests++; return png; }, getSourceUpdate: () => ({ images: [{ id: 'image-new', url: 'https://images.example.com/new.png', role: 'main' }] }) as never });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
   assert.equal(typeof service.preview, 'function');
   await assert.rejects(service.preview({ productId: product.id, imageId: 'invented' }));
   assert.equal(requests, 0);
-  const input = { productId: product.id, imageId: 'image-1' };
+  const input = { productId: product.id, imageId: sourceImageId('https://images.example.com/a.png') };
   const [first, second] = await Promise.all([service.preview(input), service.preview(input)]);
   assert.equal(first, `data:image/png;base64,${png.toString('base64')}`); assert.equal(first, second);
   assert.equal(await service.preview(input), first); assert.equal(requests, 1);
@@ -35,25 +37,26 @@ test('22 trusted Fake-IP source images serve gallery previews and imports withou
   const store = new WorkspaceStore(directory), product = store.createProduct();
   const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(10, 16); png.writeUInt32BE(10, 20);
   const sourceImages = Array.from({ length: 22 }, (_, index) => ({ id: `source-${index}`, role: index === 0 ? 'main' : 'gallery', url: `https://cbu01.alicdn.com/img/ibank/image-${index}.png` }));
-  const receipt = { productId: product.id, mode: 'live', snapshot: { images: sourceImages }, skuMappings: [{ sourceKey: 'one', localVariantId: product.variants[0].id, imageIds: ['source-0'] }] } as MiaoshouReceipt;
+  const receipt = { productId: product.id, mode: 'live', snapshot: { images: sourceImages }, skuMappings: [{ sourceKey: 'one', localVariantId: product.variants[0].id, imageIds: [sourceImageId('https://cbu01.alicdn.com/img/ibank/image-0.png')] }] } as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   const requested: string[] = [];
   const download = createSourceImageDownloader({ lookup: async () => [{ address: '198.18.0.91', family: 4 }], request: (() => { throw new Error('Unexpected public transport'); }) as never,
     nativeFetch: async (url, init) => { requested.push(url); assert.equal(init.credentials, 'omit'); return new Response(png, { headers: { 'content-type': 'image/png' } }); } });
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download,
-    getSourceUpdate: () => ({ images: [{ ...sourceImages[0], url: 'https://cbu01.alicdn.com/img/ibank/updated.png' }] }) as never });
+    getSourceUpdate: () => ({ images: [{ ...receipt.snapshot.images[0], url: 'https://cbu01.alicdn.com/img/ibank/updated.png' }] }) as never });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
-  const input = { productId: product.id, imageId: 'source-0' };
+  const input = { productId: product.id, imageId: sourceImageId('https://cbu01.alicdn.com/img/ibank/image-0.png') };
   await assert.rejects(service.preview({ ...input, url: 'https://evil.example/image.png' }));
   await assert.rejects(service.preview({ ...input, imageId: 'unknown' }));
   assert.equal(requested.length, 0);
-  const previews = await Promise.all([...sourceImages.map(image => service.preview({ productId: product.id, imageId: image.id })), service.preview(input)]);
+  const previews = await Promise.all([...receipt.snapshot.images.map(image => service.preview({ productId: product.id, imageId: image.id })), service.preview(input)]);
   assert.equal(previews.length, 23); assert.ok(previews.every(value => value === `data:image/png;base64,${png.toString('base64')}`));
   assert.equal(requested.length, 22, 'hero and thumbnail share the same trusted image request');
   assert.deepEqual(store.getProduct(product.id), product);
   await service.preview({ ...input, version: 'latest' });
   assert.equal(requested.at(-1), 'https://cbu01.alicdn.com/img/ibank/updated.png');
   await service.preview(input); assert.equal(requested.length, 23, 'imported preview keeps its own cached source URL');
-  const result = await service.download({ productId: product.id, revision: product.revision, imageIds: ['source-0'] });
+  const result = await service.download({ productId: product.id, revision: product.revision, imageIds: [sourceImageId('https://cbu01.alicdn.com/img/ibank/image-0.png')] });
   assert.equal(result.downloaded, 1); assert.deepEqual(result.failures, []);
   assert.equal(requested.at(-1), sourceImages[0].url, 'asset import still reads the imported receipt, not the latest preview');
   assert.equal(result.product.assets[0].role, 'main'); assert.deepEqual(result.product.assets[0].variantIds, [product.variants[0].id]);
@@ -77,15 +80,16 @@ test('image import uses only receipt URLs, preserves SKU mapping and repeated im
   await mkdir(resolve('.test-data'), { recursive: true }); const directory = await mkdtemp(resolve('.test-data/miaoshou-images-'));
   const store = new WorkspaceStore(directory); let product = store.createProduct();
   const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(10, 16); png.writeUInt32BE(10, 20);
-  const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'image-1', role: 'main', url: 'https://images.example.com/a.png' }] }, skuMappings: [{ sourceKey: 'one', localVariantId: product.variants[0].id, imageIds: ['image-1'] }] } as MiaoshouReceipt;
+  const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'image-1', role: 'main', url: 'https://images.example.com/a.png' }] }, skuMappings: [{ sourceKey: 'one', localVariantId: product.variants[0].id, imageIds: [sourceImageId('https://images.example.com/a.png')] }] } as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   let requests = 0;
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => { requests++; return png; } });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
   await assert.rejects(service.download({ productId: product.id, revision: product.revision, imageIds: ['invented'] })); assert.equal(requests, 0);
-  const first = await service.download({ productId: product.id, revision: product.revision, imageIds: ['image-1'] });
+  const first = await service.download({ productId: product.id, revision: product.revision, imageIds: [sourceImageId('https://images.example.com/a.png')] });
   assert.equal(first.downloaded, 1); assert.deepEqual(first.product.assets[0].variantIds, [product.variants[0].id]);
   product = store.updateAsset({ productId: product.id, revision: first.product.revision, assetId: first.product.assets[0].id, role: 'main', variantIds: [] });
-  const repeated = await service.download({ productId: product.id, revision: product.revision, imageIds: ['image-1'] });
+  const repeated = await service.download({ productId: product.id, revision: product.revision, imageIds: [sourceImageId('https://images.example.com/a.png')] });
   assert.equal(repeated.existing, 1); assert.equal(repeated.product.revision, product.revision); assert.deepEqual(repeated.product.assets[0].variantIds, []);
 });
 
@@ -98,6 +102,7 @@ test('source image cancellation settles pending DNS', async () => {
 test('image batch stops before a fifth 20 MB download and reports every unattempted image', async t => {
   const directory = await mkdtemp(resolve('.test-data/miaoshou-image-budget-')), store = new WorkspaceStore(directory), product = store.createProduct();
   const receipt = { productId: product.id, mode: 'live', snapshot: { images: Array.from({ length: 20 }, (_, i) => ({ id: `image-${i}`, role: 'gallery', url: `https://images.example.com/${i}.png` })) }, skuMappings: [] } as unknown as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   let requests = 0;
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => { requests++; return Buffer.alloc(20 * 1024 * 1024); } });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
@@ -121,22 +126,24 @@ test('different source URLs with identical bytes merge explicit SKU bindings onl
   const directory = await mkdtemp(resolve('.test-data/miaoshou-image-alias-')), store = new WorkspaceStore(directory), product = store.createProduct();
   const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(10, 16); png.writeUInt32BE(10, 20);
   const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'main', role: 'main', url: 'https://images.example.com/main.png' }, { id: 'color', role: 'gallery', url: 'https://images.example.com/color.png' }] }, skuMappings: [{ sourceKey: 'one', localVariantId: product.variants[0].id, imageIds: ['color'] }] } as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => png });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
-  const first = await service.download({ productId: product.id, revision: product.revision, imageIds: ['main', 'color'] });
+  const first = await service.download({ productId: product.id, revision: product.revision, imageIds: receipt.snapshot.images.map(i=>i.id) });
   assert.equal(first.downloaded, 1); assert.equal(first.existing, 1); assert.deepEqual(first.product.assets[0].variantIds, [product.variants[0].id]);
   const edited = store.updateAsset({ productId: product.id, revision: first.product.revision, assetId: first.product.assets[0].id, role: 'main', variantIds: [] });
-  const repeated = await service.download({ productId: product.id, revision: edited.revision, imageIds: ['main', 'color'] });
+  const repeated = await service.download({ productId: product.id, revision: edited.revision, imageIds: receipt.snapshot.images.map(i=>i.id) });
   assert.equal(repeated.product.revision, edited.revision); assert.deepEqual(repeated.product.assets[0].variantIds, []);
 });
 
 test('a product edit during temporary-directory setup rejects stale download and leaves no staging directory', async t => {
   const directory = await mkdtemp(resolve('.test-data/miaoshou-image-race-')), store = new WorkspaceStore(directory), product = store.createProduct();
   const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'main', role: 'main', url: 'https://images.example.com/main.png' }] }, skuMappings: [] } as unknown as MiaoshouReceipt;
+  persistSourceImageFixture(directory,receipt);
   let requests = 0;
   const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => { requests++; return Buffer.alloc(0); } });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
-  const pending = service.download({ productId: product.id, revision: product.revision, imageIds: ['main'] });
+  const pending = service.download({ productId: product.id, revision: product.revision, imageIds: receipt.snapshot.images.map(i=>i.id) });
   store.saveProduct({ id: product.id, revision: product.revision, title: '中途修改', sourceUrl: '', description: '', status: 'draft', facts: [], variants: [] });
   await assert.rejects(pending); assert.equal(requests, 0);
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.miaoshou-images-')), []);

@@ -9,6 +9,8 @@ import { AiError, throwIfAborted } from '../ai/errors.ts';
 import { integer, keys, uuid, uuidList } from '../ai/validation.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { selectImageReferences, workflowRuns } from './records.ts';
+import { SourceImageIdentityError, readSourceImageReceipt, allowSourceUnbound, sourceImageReceipt, sourceImageMappings } from '../source-images.ts';
+import type { SourceImageReceipt } from '../source-images.ts';
 
 export interface AutomaticImageSources { getReceipt(id: string): MiaoshouReceipt | null; images: Pick<MiaoshouImageService, 'download'> }
 export type AutomaticSourcesResult = Awaited<ReturnType<ImageWorkflowApi['prepareAutomaticProductSources']>>;
@@ -34,6 +36,12 @@ export function sourceMappingDiagnosis(product:ProductDetail,variantId:string,re
   if(!mapping.imageIds.some(id=>images.some(image=>image.id===id)))return {code:'SOURCE_MAPPING_INVALID',message:'所选 SKU 的来源图片映射 ID 无效或对应链接为空，请核对来源记录'};
   return null;
 }
+export function sourceImageMappingDiagnosis(product:ProductDetail,variantId:string,source:SourceImageReceipt|null):{code:AutomaticSourceIssueCode;message:string}|null {
+  if(source?.kind!=='native1688')return sourceMappingDiagnosis(product,variantId,source?.receipt);
+  if(!source.receipt.snapshot.images.some(i=>i.url.trim()))return {code:'SOURCE_LINKS_MISSING',message:'没有可用的来源图片链接，请补充来源图片'};
+  if(!sourceImageMappings(source).find(m=>m.localVariantId===variantId)?.images.length)return {code:'SOURCE_BINDING_UNCONFIRMED',message:'所选 SKU 没有确定的来源图片映射，请人工确认图片绑定'};
+  return null;
+}
 export function parseAutomaticSources(raw: unknown) {
   const value=keys(raw,['productId','productRevision','variantIds']);
   return { productId:uuid(value.productId),productRevision:integer(value.productRevision,1,Number.MAX_SAFE_INTEGER),variantIds:uuidList(value.variantIds,200,1) };
@@ -48,45 +56,51 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   const input=parseAutomaticSources(raw); throwIfAborted(signal);
   let product=store.assertRevision({productId:input.productId,revision:input.productRevision});
   if(input.variantIds.some(id=>!product.variants.some(variant=>variant.id===id)))throw new UserFacingError('商品 SKU 已变化');
-  const receipt=sources?.getReceipt(product.id),allowUnbound=allowUnboundSingleSku(product,receipt);
+  const resolve=()=>sources?sourceImageReceipt(store.getCollectionReceipt(product.id),sources.getReceipt(product.id)):readSourceImageReceipt(db,product.id);
+  let source:SourceImageReceipt|null;
+  try{source=resolve();}catch(error){return {product,missing:input.variantIds.map(variantId=>({variantId,code:error instanceof SourceImageIdentityError?'SOURCE_IDENTITY_CONFLICT':'SOURCE_STORAGE_INVALID',message:error instanceof SourceImageIdentityError?error.message:'来源图片记录无法校验，请修复来源记录后重试'}))};}
+  const receipt=source?.receipt,allowUnbound=allowSourceUnbound(product,source);
+  const mappings=source?sourceImageMappings(source):[];
   const originalStamp=sourceStamp(product),derived=new Set(workflowRuns(db).flatMap(run=>run.slots?run.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):run.approvedAssetId?[run.approvedAssetId]:[]));
   const ready=(variantId:string)=>{
     try { selectImageReferences(product,variantId,derived,(assetId,id)=>Boolean(db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,id)),allowUnbound);return true; }
     catch(error) { if(error instanceof UserFacingError)return false;throw error; }
   };
-  const receiptStamp=listingFingerprint(receipt??null),attempted=new Set<string>(),failures=new Map<string,string>();
-  const session={createdAssets:new Set<string>()};
+  const receiptStamp=listingFingerprint(source),attempted=new Set<string>(),failedUrls=new Map<string,string>();
+  const imageUrl=(id:string)=>receipt?.snapshot.images.find(i=>i.id===id)?.url??'';
+  const session={createdAssets:new Set<string>(),variantIds:input.variantIds};
   const candidates=new Map(input.variantIds.map(variantId=>{
-    const mapped=receipt?.skuMappings.find(row=>row.localVariantId===variantId)?.imageIds??[];
-    const ids=receipt?.snapshot.images.filter(image=>image.url.trim() && (mapped.includes(image.id) || allowUnbound)).map(image=>image.id)??[];
+    const mapped=[...(mappings.find(row=>row.localVariantId===variantId)?.images??[])].sort((a,b)=>Number(a.basis==='spec-value')-Number(b.basis==='spec-value')).map(i=>i.imageId);
+    const ids=source?.kind==='native1688'?mapped.filter(id=>imageUrl(id).trim()):receipt?.snapshot.images.filter(image=>image.url.trim() && (mapped.includes(image.id) || allowUnbound)).map(image=>image.id)??[];
     return [variantId,ids.slice(0,3)];
   }));
   const fresh=()=>{
     throwIfAborted(signal);
     const current=store.getProduct(product.id);
-    if(current.revision!==product.revision || sourceStamp(current)!==originalStamp || listingFingerprint(sources?.getReceipt(product.id)??null)!==receiptStamp)throw new AiError('SOURCE_CHANGED');
+    if(current.revision!==product.revision || sourceStamp(current)!==originalStamp || listingFingerprint(resolve())!==receiptStamp)throw new AiError('SOURCE_CHANGED');
   };
   // At most three different source candidates per SKU; a failed URL is never retried in this run.
   for(let round=0;sources&&receipt&&round<3;round++) {
     fresh();
+    const urls=new Set<string>();
     const ids=[...new Set(input.variantIds.filter(id=>!ready(id)).flatMap(id=>{
-      const next=candidates.get(id)!.find(imageId=>!attempted.has(imageId));return next?[next]:[];
-    }))];
+      const next=candidates.get(id)!.find(imageId=>!attempted.has(imageId)&&!failedUrls.has(imageUrl(imageId)));return next?[next]:[];
+    }))].filter(id=>{const url=imageUrl(id);if(urls.has(url))return false;urls.add(url);return true;});
     if(!ids.length)break;
     for(let offset=0;offset<ids.length;offset+=20) {
       fresh();const imageIds=ids.slice(offset,offset+20);imageIds.forEach(id=>attempted.add(id));
       const downloaded=await sources.images.download({productId:product.id,revision:product.revision,imageIds},signal,session);
       product=downloaded.product; fresh();
-      for(const failure of downloaded.failures)failures.set(failure.imageId,failure.message);
+      for(const failure of downloaded.failures)failedUrls.set(imageUrl(failure.imageId),failure.message);
     }
   }
   fresh();
   return {product,missing:input.variantIds.filter(id=>!ready(id)).map(variantId=>{
-    const failure=candidates.get(variantId)?.map(id=>failures.get(id)).find(Boolean);
-    const mappingIssue=sourceMappingDiagnosis(product,variantId,receipt);
+    const failure=candidates.get(variantId)?.map(id=>failedUrls.get(imageUrl(id))).find(Boolean);
+    const mappingIssue=sourceImageMappingDiagnosis(product,variantId,source);
     const localUnconfirmed=product.assets.some(asset=>!derived.has(asset.id)&&asset.variantIds.includes(variantId)&&!db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(asset.id,variantId));
     const issue:{code:AutomaticSourceIssueCode;message:string}=localUnconfirmed?{code:'SOURCE_BINDING_UNCONFIRMED',message:'该 SKU 的来源图片绑定尚未确认，请确认图片与 SKU 的对应关系'}
-      :mappingIssue??(failure?{code:'SOURCE_DOWNLOAD_FAILED',message:`来源图片下载失败：${failure}`}:{code:'SOURCE_REFERENCE_UNUSABLE',message:'来源图片已处理，但该 SKU 的图片绑定仍未确认，或参考图超出可用大小限制，请核对来源图片'});
+      :mappingIssue??(!sources&&candidates.get(variantId)?.length?{code:'SOURCE_DOWNLOAD_FAILED',message:'来源图片下载服务不可用，请重新加载工作区后重试'}:failure?{code:'SOURCE_DOWNLOAD_FAILED',message:`来源图片下载失败：${failure}`}:{code:'SOURCE_REFERENCE_UNUSABLE',message:'来源图片已处理，但该 SKU 的图片绑定仍未确认，或参考图超出可用大小限制，请核对来源图片'});
     return {variantId,...issue};
   })};
 }

@@ -18,7 +18,7 @@ test('version 13 indexed sync cache survives encrypted backup and interrupted ru
   service.setMode('demo'); await service.startSync({ pageSize: 500 });
   while (service.getSyncStatus().status === 'running') await new Promise(resolve => setImmediate(resolve));
   const db = openDatabase(root);
-  try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 18); db.exec("UPDATE miaoshou_sync_runs SET record_json=json_set(record_json,'$.status','running')"); } finally { db.close(); }
+  try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 19); db.exec("UPDATE miaoshou_sync_runs SET record_json=json_set(record_json,'$.status','running')"); } finally { db.close(); }
   const file = join(root, 'cache.htcbackup'); await createWorkspaceBackup(root, file, 'sync-backup-test-passphrase');
   const target = join(root, 'restored'), prepared = await prepareWorkspaceRestore(target, file, 'sync-backup-test-passphrase'); await commitWorkspaceRestore(target, prepared);
   const restoredStore = new WorkspaceStore(target), restored = new MiaoshouService(target, restoredStore, crypto);
@@ -48,10 +48,10 @@ test('schema 12 migrates to indexed sync tables without changing existing produc
   await mkdir(resolve('.test-data'), { recursive: true }); const root = await mkdtemp(resolve('.test-data/miaoshou-sync-migration-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const store = new WorkspaceStore(root), product = store.createProduct(); store.close();
-  const old = openDatabase(root); old.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP INDEX miaoshou_receipts_remote_scope; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; PRAGMA user_version=12'); old.close();
+  const old = openDatabase(root); old.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP INDEX miaoshou_receipts_remote_scope; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; PRAGMA user_version=12'); old.close();
   const migrated = openDatabase(root);
   try {
-    assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 18);
+    assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 19);
     assert.equal(migrated.prepare('SELECT title FROM products WHERE id=?').get(product.id)!.title, product.title);
     const plan = migrated.prepare("EXPLAIN QUERY PLAN SELECT record_json FROM miaoshou_sync_items WHERE json_extract(record_json,'$.scopeId')=? AND json_extract(record_json,'$.cycle')=? AND json_extract(record_json,'$.status')=? LIMIT 20 OFFSET 20").all('a'.repeat(64), 1, 'ready');
     assert.match(JSON.stringify(plan), /USING INDEX miaoshou_sync_items_scope_cycle_status/);
@@ -61,7 +61,7 @@ test('schema 12 migrates to indexed sync tables without changing existing produc
 test('ambiguous legacy receipt JSON rolls back schema 13 index creation', async t => {
   await mkdir(resolve('.test-data'), { recursive: true }); const root = await mkdtemp(resolve('.test-data/miaoshou-sync-migration-bad-'));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  const old = openDatabase(root); old.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP INDEX miaoshou_receipts_remote_scope; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; PRAGMA user_version=12');
+  const old = openDatabase(root); old.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP INDEX miaoshou_receipts_remote_scope; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; PRAGMA user_version=12');
   old.prepare('INSERT INTO miaoshou_receipts VALUES(?,?)').run('ambiguous', '{"accountScope":"first","accountScope":"second"}'); old.close();
   assert.throws(() => openDatabase(root), /重复 JSON 字段/);
   const unchanged = new DatabaseSync(join(root, 'red.sqlite'));

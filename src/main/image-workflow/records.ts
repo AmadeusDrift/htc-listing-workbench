@@ -18,7 +18,7 @@ import { imageApprovalDraftSnapshot, validateApprovalReuse } from './approval-re
 import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
-export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = true, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
+export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = false, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
   if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
   if(!sourceVariantIds.length||new Set(sourceVariantIds).size!==sourceVariantIds.length||sourceVariantIds.some(id=>!product.variants.some(v=>v.id===id)))throw new UserFacingError('销售组合来源 SKU 已变化');
   const belongs=(asset:Asset,id:string)=>asset.variantIds.includes(id)?confirmed(asset.id,id):allowUnboundSingleSku&&product.variants.length===1&&asset.variantIds.length===0;

@@ -1,3 +1,4 @@
+import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { withoutDeferredImageRemaining, legacyContentRepairFields, pricingBlockingReason, nonDeferredImageIssues, categoryRepairFields } from './deferred-fields.ts';
 import { FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_POLICY_VERSION } from '../../shared/automatic-listing-contracts.ts';
@@ -33,7 +34,7 @@ import { privateDirectory } from '../image-generation/vault.ts';
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
 import { approvedWorkflowAsset, currentWorkflowPlanIds, imageWorkflowDraftStamp, selectImageReferences, validateStoredImageWorkflowRun, workflowRuns } from './records.ts';
-import { allowUnboundSingleSku, parseAutomaticSources, prepareImageWorkflowSources } from './sources.ts';
+import { parseAutomaticSources, prepareImageWorkflowSources } from './sources.ts';
 import type { AutomaticImageSources, AutomaticSourcesResult } from './sources.ts';
 import { currentSourceImageMeasurements } from './source-measurements.ts';
 import { imageApprovalDraftSnapshot, assertApprovalReuseSource, compatibleApprovalRecipe } from './approval-reuse.ts';
@@ -175,7 +176,7 @@ export class ImageWorkflowService {
       if(saved.length>1000)return null;
       const derived=new Set(saved.map(value=>validateStoredImageWorkflowRun(JSON.parse(String(value.record_json)))).flatMap(value=>value.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(value.approvedAssetId?[value.approvedAssetId]:[])));
       const variants=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])];
-      const refs=selectImageReferences(product,draft.variantId,derived,confirmed,allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)),variants,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
+      const refs=selectImageReferences(product,draft.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(listingFingerprint(references)!==listingFingerprint(run.referenceAssets)||listingFingerprint(variants)!==listingFingerprint(base.sourceVariantIds??[draft.variantId]))return null;
       const successful=(result:AiResult|undefined,context:ProductImageContext)=>{
@@ -239,6 +240,12 @@ export class ImageWorkflowService {
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     const prior = this.getProgress(draftId);
+    if(prior?.referenceAssets.length){
+      const product=this.store.getProduct(draft.productId),allowUnbound=allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants=draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId];
+      for(const ref of prior.referenceAssets){const asset=product.assets.find(a=>a.id===ref.id);
+        if(!asset||!(allowUnbound&&!asset.variantIds.length||variants.some(id=>asset.variantIds.includes(id)&&this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(asset.id,id))))throw new AiError('SOURCE_CHANGED');
+      }
+    }
     if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
     if(hasSevenApprovedImages(prior)&&this.canRecheckImageContent(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
     if(hasSevenApprovedImages(prior)&&this.listing.prepareSourceColors
@@ -318,7 +325,7 @@ export class ImageWorkflowService {
     const derived=new Set(workflowRuns(this.db).flatMap(run=>run.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(run.approvedAssetId?[run.approvedAssetId]:[])));
     const sourceVariants=[...new Set(draft.salesPlan?.recipe.components.map(component=>component.variantId)??[prior.variantId])];
     if(listingFingerprint(sourceVariants)!==listingFingerprint(base.sourceVariantIds??[prior.variantId]))return undefined;
-    const references=selectImageReferences(product,prior.variantId,derived,confirmed,allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)),sourceVariants,prior.slotPolicy===IMAGE_SET_POLICY?10:undefined);
+    const references=selectImageReferences(product,prior.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),sourceVariants,prior.slotPolicy===IMAGE_SET_POLICY?10:undefined);
     if(listingFingerprint(references.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256})))!==listingFingerprint(prior.referenceAssets))return undefined;
     for(const slot of prior.slots!){
       const attempt=slot.attempts.at(-1)!,ip=attempt.ipReviewResultId?this.ai.getResult(attempt.ipReviewResultId):undefined;
@@ -400,7 +407,7 @@ export class ImageWorkflowService {
       const derived=new Set(workflowRuns(this.db).flatMap(record=>record.slots?record.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):record.approvedAssetId?[record.approvedAssetId]:[]));
       const variantIds=[...new Set(initial.salesPlan?.recipe.components.map(component=>component.variantId)??[run.variantId])];
       const confirmed=(assetId:string,variantId:string)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId));
-      const refs=selectImageReferences(product,run.variantId,derived,confirmed,allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)),variantIds,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
+      const refs=selectImageReferences(product,run.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variantIds,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
@@ -681,7 +688,7 @@ export class ImageWorkflowService {
       const profileStamp=listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)));
       const derived = new Set(workflowRuns(this.db).flatMap(r => r.approvedAssetId ? [r.approvedAssetId] : []));
       const product = this.store.getProduct(run.productId);
-      const refs = selectImageReferences(product,run.variantId,derived,(assetId,variantId)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId)),allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)));
+      const refs = selectImageReferences(product,run.variantId,derived,(assetId,variantId)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId)),allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)));
       run.referenceAssets=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256})); this.save(run);
       if(reuse){
         if(listingFingerprint(run.referenceAssets)!==listingFingerprint(reuse.referenceAssets))throw new AiError('SOURCE_CHANGED');

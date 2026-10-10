@@ -1,3 +1,4 @@
+import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
@@ -33,7 +34,7 @@ import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/service.ts';
 import { canResumeImageWorkflow, hasSevenApprovedImages, AUTOMATIC_SOURCE_ISSUES } from '../../shared/image-workflow-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
-import { sourceMappingDiagnosis } from '../image-workflow/sources.ts';
+import { sourceImageMappingDiagnosis } from '../image-workflow/sources.ts';
 import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
 import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow, AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, recipeKey } from './outcomes.ts';
@@ -409,8 +410,8 @@ export class AutomaticListingService {
       const confirmedRecovery=this.canRebaseSources(task,row)&&(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).every(id=>sourceProduct.assets.some(asset=>asset.variantIds.includes(id)));
       if (task.items.some(value => value.productId === row.productId && value.sourcesPrepared) && !confirmedRecovery) {
         const product=this.deps.store.getProduct(row.productId);
-        const receipt=this.deps.sourceReceipt?.(row.productId);
-        const issue=this.deps.sourceReceipt && (row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceMappingDiagnosis(product,id,receipt)).find(Boolean);
+        const receipt=readSourceImageReceipt(this.db,row.productId)??sourceImageReceipt(null,this.deps.sourceReceipt?.(row.productId));
+        const issue=receipt&&(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceImageMappingDiagnosis(product,id,receipt)).find(Boolean);
         if(issue)row.outcome={version:1,kind:AUTOMATIC_SOURCE_ISSUES[issue.code],code:issue.code,message:issue.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:null,draftRevision:null};
         const reason = issue?.message || row.error || '该 SKU 的来源图片尚未准备完成';
         throw new UserFacingError(reason.includes(frozenSourcesMessage) ? reason : `${reason}；${frozenSourcesMessage}`);

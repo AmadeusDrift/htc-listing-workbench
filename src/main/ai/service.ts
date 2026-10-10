@@ -1,3 +1,5 @@
+import { readManagedImageSync } from './source.ts';
+import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
 import { assertCurrentCopyEvidence } from '../listing-ai/current-evidence.ts';
@@ -58,8 +60,6 @@ import type { SourceColorContext, SourceColorOutput } from '../../shared/source-
 import { validateSourceColorContext } from './source-color-validation.ts';
 import { observeSourceColor as requestSourceColor } from './source-color-adapter.ts';
 import { selectImageReferences } from '../image-workflow/records.ts';
-import { allowUnboundSingleSku } from '../image-workflow/sources.ts';
-import { getReceipt } from '../miaoshou/persistence.ts';
 
 export interface AiDependencies {
   fetch?: typeof fetch; now?: () => Date; timeoutMs?: number; maxConcurrency?: number; maxResponseBytes?: number; nonce?: () => string;
@@ -449,7 +449,7 @@ export class AiService {
       const asset = this.source({ productId: product.id, productRevision: product.revision, assetId: reference.assetId });
       const image = product.assets.find(image => image.id === asset.id);
       if (asset.sha256 !== reference.sha256 || !image) throw new AiError('SOURCE_CHANGED');
-      if (reference.variantId === null ? image.variantIds.length > 0 : !image.variantIds.includes(reference.variantId) || this.db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(asset.id, reference.variantId)?.confirmed !== 1) throw new AiError('SOURCE_CHANGED');
+      if (reference.variantId === null ? image.variantIds.length > 0 || !allowSourceUnbound(source,readSourceImageReceipt(this.db,source.id)) : !image.variantIds.includes(reference.variantId) || this.db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(asset.id, reference.variantId)?.confirmed !== 1) throw new AiError('SOURCE_CHANGED');
       return asset;
     });
   }
@@ -489,7 +489,7 @@ export class AiService {
     const product=this.product(uuid(input.productId),integer(input.productRevision,1,Number.MAX_SAFE_INTEGER)),variant=product.variants.find(item=>item.id===uuid(input.variantId));
     if(!variant)throw new AiError('SOURCE_CHANGED');
     const generated=new Set(this.db.prepare("SELECT json_extract(record_json,'$.approvedAssetId') AS assetId FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? UNION SELECT json_extract(s.value,'$.approvedAssetId') AS assetId FROM image_workflow_runs w, json_each(w.record_json,'$.slots') s WHERE json_extract(w.record_json,'$.productId')=?").all(product.id,product.id).map(row=>String(row.assetId)));
-    const refs=selectImageReferences(product,variant.id,generated,(assetId,variantId)=>this.db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(assetId,variantId)?.confirmed===1,allowUnboundSingleSku(product,getReceipt(this.db,product.id)),[variant.id],10);
+    const refs=selectImageReferences(product,variant.id,generated,(assetId,variantId)=>this.db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(assetId,variantId)?.confirmed===1,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),[variant.id],10);
     return validateSourceColorContext({policyVersion:SOURCE_COLOR_POLICY_VERSION,productId:product.id,productRevision:product.revision,variantId:variant.id,sourceSpec:variant.normalizedSpec.trim()||variant.originalSpec.trim(),referenceAssets:refs.map(ref=>({assetId:ref.id,sha256:this.source({productId:product.id,productRevision:product.revision,assetId:ref.id}).sha256}))});
   }
   private assertSourceColorIdentity(context:SourceColorContext):void {
@@ -605,6 +605,8 @@ export class AiService {
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
             const draftId=prepared.listingContext?.draftId??prepared.imageContext?.listing.draftId;
             if(draftId)assertStoredPricingForPaid(this.db,draftId);
+            if(prepared.imageContext)for(const asset of this.imageSources(prepared.imageContext))readManagedImageSync(this.directory,asset);
+            if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             prepared.assertBeforeSend?.();
             call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}) }, body, completion ? call => this.completionJournal.markSent(completion,call) : undefined);
           },

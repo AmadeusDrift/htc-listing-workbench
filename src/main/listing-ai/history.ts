@@ -8,17 +8,88 @@ import { assertListingEvidence, assertListingReview, listingFingerprint } from '
 import { validateSalesPlan } from '../sales-plans/records.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { adoptionSchema } from './schema-lineage.ts';
+import { QUOTE_FAILURE_CODES } from '../../shared/listing-rules.ts';
+import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 
 const OPTIONAL_REVIEW_POLICY = 'haul-us-copy-2026-10-07-v2';
 function exactKeys(raw: unknown, names: string[]): boolean {
   return !!raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).sort().join() === [...names].sort().join();
+}
+function assertPricingDecision(report: BusinessRuleReport, draft: AmazonDraft): void {
+  if (!Object.hasOwn(report, 'pricingDecision')) return;
+  const invalid = (): never => { throw new UserFacingError('商品规则快照的定价原因或输入证据无效'); };
+  const d = report.pricingDecision;
+  if (!d || !exactKeys(d, ['version','status','code','quoteError','inputs','evidence']) || d.version !== 1
+    || !exactKeys(d.inputs, ['costCny','dimensionsInches','weightPounds'])
+    || !exactKeys(d.evidence, ['cost','dimensions','weight','packageScope','saleUnit','sourcePackage'])
+    || !exactKeys(d.evidence.sourcePackage, ['dimensionsInches','weightPounds'])) return invalid();
+  const positive = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  const dimensions = (value: unknown) => Array.isArray(value) && value.length === 3 && value.every(positive);
+  const { inputs, evidence: e } = d;
+  const marketplaceId = draft.marketplaceId, recipe = draft.salesPlan?.recipe;
+  for (const pack of [inputs, e.sourcePackage]) {
+    if (pack.dimensionsInches !== null && !dimensions(pack.dimensionsInches) || pack.weightPounds !== null && !positive(pack.weightPounds)) invalid();
+  }
+  if (inputs.costCny !== null && !positive(inputs.costCny) || !['confirmed_cny','unconfirmed'].includes(e.cost)
+    || (e.cost === 'confirmed_cny') !== (inputs.costCny !== null)
+    || !['source_sale_unit','unconfirmed'].includes(e.packageScope) || !['confirmed','conflicting','unconfirmed'].includes(e.saleUnit)) invalid();
+  for (const kind of ['dimensions','weight'] as const) {
+    const key = kind === 'dimensions' ? 'dimensionsInches' : 'weightPounds', basis = e[kind];
+    if (!['confirmed_source','business_default','unverified','missing','conflicting'].includes(basis)) invalid();
+    if (basis === 'confirmed_source' && (inputs[key] === null || e.sourcePackage[key] === null
+      || JSON.stringify(inputs[key]) !== JSON.stringify(e.sourcePackage[key]))) invalid();
+    if (basis === 'missing' && inputs[key] !== null || ['business_default','unverified'].includes(basis) && inputs[key] === null) invalid();
+  }
+  const quoteError = d.quoteError !== null && QUOTE_FAILURE_CODES.includes(d.quoteError);
+  if (d.quoteError !== null && !quoteError) invalid();
+  const businessFailure = quoteError && d.quoteError !== 'QUOTE_INVALID_INPUT';
+  const complete = inputs.costCny !== null && inputs.dimensionsInches !== null && inputs.weightPounds !== null;
+  const attempted = () => {
+    const cost = report.pricingBasis?.saleUnitCostCny;
+    if (!complete || cost === undefined || inputs.costCny === null || Math.abs(cost - inputs.costCny) > Math.max(cost, inputs.costCny) * 1e-10) invalid();
+  };
+  if (e.packageScope === 'source_sale_unit' && (report.pricingBasis?.kind === 'auto_bundle'
+    || recipe && (recipe.components.length !== 1 || recipe.components[0].quantity !== recipe.components[0].sourcePackPieces || report.bundleQuantity !== recipe.totalPieces))) invalid();
+  if (d.status === 'quoted') {
+    if (d.code !== 'QUOTE_VALID' || d.quoteError !== null || report.quote === null || e.saleUnit === 'conflicting' || marketplaceId !== 'ATVPDKIKX0DER') invalid();
+    attempted();
+  } else if (d.status === 'business_blocked') {
+    if (!businessFailure || d.code !== d.quoteError || report.quote !== null || e.cost !== 'confirmed_cny'
+      || e.dimensions !== 'confirmed_source' || e.weight !== 'confirmed_source' || e.packageScope !== 'source_sale_unit'
+      || e.saleUnit !== 'confirmed' || marketplaceId !== 'ATVPDKIKX0DER') invalid();
+    attempted();
+  } else if (d.status === 'system_error') {
+    if (d.code !== 'PRICING_SYSTEM_ERROR' || d.quoteError !== null || report.quote !== null) invalid();
+    attempted();
+  } else if (d.status === 'needs_input') {
+    if (report.quote !== null) invalid();
+    switch (d.code) {
+      case 'COST_CNY_UNCONFIRMED': if (inputs.costCny !== null || d.quoteError !== null) invalid(); break;
+      case 'MARKETPLACE_UNSUPPORTED': if (marketplaceId === 'ATVPDKIKX0DER' || d.quoteError !== null) invalid(); break;
+      case 'PACKAGE_MEASUREMENTS_MISSING': if (inputs.dimensionsInches !== null && inputs.weightPounds !== null || d.quoteError !== null) invalid(); break;
+      case 'SOURCE_QUANTITY_CONFLICT': case 'LEGACY_QUANTITY_CONFLICT': if (e.saleUnit !== 'conflicting' || d.quoteError !== null) invalid(); break;
+      case 'SOURCE_QUANTITY_UNCONFIRMED':
+        if (!businessFailure || e.saleUnit !== 'unconfirmed' || e.packageScope !== 'unconfirmed') invalid();
+        attempted(); break;
+      case 'SALE_QUANTITY_CHANGED': if (e.saleUnit !== 'unconfirmed' || d.quoteError !== null) invalid(); break;
+      case 'PACKAGE_INPUT_UNCONFIRMED':
+        if (!businessFailure || e.dimensions === 'confirmed_source' && e.weight === 'confirmed_source' || e.packageScope !== 'source_sale_unit' || e.saleUnit !== 'confirmed') invalid();
+        attempted(); break;
+      case 'PACKAGE_SCOPE_UNCONFIRMED':
+        if (!businessFailure || e.packageScope !== 'unconfirmed' || e.saleUnit !== 'confirmed') invalid();
+        attempted(); break;
+      case 'QUOTE_INVALID_INPUT': if (d.quoteError !== 'QUOTE_INVALID_INPUT') invalid(); break;
+      default: invalid();
+    }
+  } else invalid();
 }
 function assertBusinessRules(draft: AmazonDraft): void {
   const report = draft.businessRules; if (report === undefined) return;
   const invalid = (): never => { throw new UserFacingError('商品规则快照的字段或报价格式无效'); };
   const boundedText = (value: unknown) => typeof value === 'string' && !!value.trim() && value.length <= 4000 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
   const hasPricingBasis = report !== null && Object.hasOwn(report, 'pricingBasis');
-  if (!exactKeys(report, ['revision','fields','notices','quote','bundleQuantity', ...(hasPricingBasis ? ['pricingBasis'] : [])]) || !Number.isSafeInteger(report.revision) || report.revision < 0 || !Number.isSafeInteger(report.bundleQuantity) || report.bundleQuantity < 1) invalid();
+  const hasPricingDecision = report !== null && Object.hasOwn(report, 'pricingDecision');
+  if (!exactKeys(report, ['revision','fields','notices','quote','bundleQuantity', ...(hasPricingBasis ? ['pricingBasis'] : []), ...(hasPricingDecision ? ['pricingDecision'] : [])]) || !Number.isSafeInteger(report.revision) || report.revision < 0 || !Number.isSafeInteger(report.bundleQuantity) || report.bundleQuantity < 1) invalid();
   // Validate the complete snapshot as bounded JSON, including every wrapped field value.
   attributesObject({ businessRules: report });
   const properties = draft.schema.schema.properties;
@@ -36,6 +107,7 @@ function assertBusinessRules(draft: AmazonDraft): void {
     const expected = basis.sourceCostCny * basis.quantity;
     if (!Number.isFinite(expected) || Math.abs(expected - basis.saleUnitCostCny) > Math.max(expected, basis.saleUnitCostCny) * 1e-10) invalid();
   }
+  assertPricingDecision(report, draft);
   if (report.quote === null) return;
   const quote = report.quote;
   if (!exactKeys(quote, ['price','minimum','roi','deliveryFee','commission','upfrontCny','dimensionalWeightGrams','billableWeightGrams','promotionPrice','promotionRoi'])) invalid();

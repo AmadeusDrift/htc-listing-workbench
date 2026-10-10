@@ -424,7 +424,8 @@ export class AmazonService {
     const costCny = currency.cny ? salesPlan ? salesPlan.recipe.totalCostCny : sourceQuotedCost(variant,validReceipt?receipt:null) : null;
     const matchingPackage=!salesPlan || salesPlan.recipe.components.length===1 && salesPlan.recipe.components[0].quantity===salesPlan.recipe.components[0].sourcePackPieces;
     const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, now: new Date(this.now()),
-      ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
+      ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
+      measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
     if (currency.notice) result.report.notices.push(currency.notice);
     return result;
   }

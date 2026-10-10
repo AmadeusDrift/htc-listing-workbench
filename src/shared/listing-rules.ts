@@ -97,6 +97,33 @@ export function parseListingRules(raw: unknown): ListingRules {
 
 export const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 export interface QuoteInput { costCny: number; dimensionsInches: [number, number, number]; weightPounds: number }
+export const QUOTE_FAILURE_CODES = ['QUOTE_INVALID_INPUT', 'DIMENSIONAL_WEIGHT_LIMIT', 'ROI_MAX_PRICE', 'ROI_PROMOTION_OR_MARGIN'] as const;
+export type QuoteFailureCode = typeof QUOTE_FAILURE_CODES[number];
+export class ListingQuoteError extends UserFacingError {
+  readonly code: QuoteFailureCode;
+  constructor(code: QuoteFailureCode, message: string) { super(message); this.name = 'ListingQuoteError'; this.code = code; }
+}
+export type PricingDecisionCode = 'QUOTE_VALID' | QuoteFailureCode | 'COST_CNY_UNCONFIRMED' | 'MARKETPLACE_UNSUPPORTED'
+  | 'PACKAGE_MEASUREMENTS_MISSING' | 'PACKAGE_INPUT_UNCONFIRMED' | 'PACKAGE_SCOPE_UNCONFIRMED'
+  | 'SOURCE_QUANTITY_CONFLICT' | 'SOURCE_QUANTITY_UNCONFIRMED' | 'LEGACY_QUANTITY_CONFLICT' | 'SALE_QUANTITY_CHANGED' | 'PRICING_SYSTEM_ERROR';
+export type PackageInputBasis = 'confirmed_source' | 'business_default' | 'unverified' | 'missing' | 'conflicting';
+export interface PricingPackageInputs { dimensionsInches: [number, number, number] | null; weightPounds: number | null }
+/** Evidence describes the inputs to this attempt, not the current editable draft. */
+export interface PricingDecision {
+  version: 1;
+  status: 'quoted' | 'business_blocked' | 'needs_input' | 'system_error';
+  code: PricingDecisionCode;
+  quoteError: QuoteFailureCode | null;
+  inputs: PricingPackageInputs & { costCny: number | null };
+  evidence: {
+    cost: 'confirmed_cny' | 'unconfirmed';
+    dimensions: PackageInputBasis; weight: PackageInputBasis;
+    packageScope: 'source_sale_unit' | 'unconfirmed';
+    saleUnit: 'confirmed' | 'conflicting' | 'unconfirmed';
+    /** Current confirmed source values, mapped through the same Schema/unit conversions. */
+    sourcePackage: PricingPackageInputs;
+  };
+}
 export interface ListingQuote { price: number; minimum: number; roi: number; deliveryFee: number; commission: number; upfrontCny: number; dimensionalWeightGrams: number; billableWeightGrams: number; promotionPrice: number | null; promotionRoi: number | null }
 export interface ListingPricingBasis {
   kind: 'source_sale_unit' | 'source_piece_quote' | 'auto_bundle';
@@ -106,12 +133,13 @@ export interface BusinessRuleReport {
   revision: number; fields: Record<string, { value: JsonValue; reason: string }>;
   notices: string[]; quote: ListingQuote | null; bundleQuantity: number;
   pricingBasis?: ListingPricingBasis;
+  pricingDecision?: PricingDecision;
 }
 export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuote {
   const { costCny, dimensionsInches, weightPounds } = input;
-  if (!Number.isFinite(costCny) || costCny <= 0 || !Number.isFinite(weightPounds) || weightPounds <= 0 || dimensionsInches.length !== 3 || dimensionsInches.some(value => !Number.isFinite(value) || value <= 0)) return fail('定价需要有效采购成本、完整包装尺寸和包装重量');
+  if (!Number.isFinite(costCny) || costCny <= 0 || !Number.isFinite(weightPounds) || weightPounds <= 0 || dimensionsInches.length !== 3 || dimensionsInches.some(value => !Number.isFinite(value) || value <= 0)) throw new ListingQuoteError('QUOTE_INVALID_INPUT', '定价需要有效采购成本、完整包装尺寸和包装重量');
   const dimensionalWeightGrams = dimensionsInches.reduce((a,b) => a*b, 1) / rules.dimensionalDivisor * 453.59237;
-  if (dimensionalWeightGrams > rules.maxDimensionalWeightGrams + 1e-8) return fail(`包装抛重 ${round2(dimensionalWeightGrams)} g 超出上限 ${rules.maxDimensionalWeightGrams} g`);
+  if (dimensionalWeightGrams > rules.maxDimensionalWeightGrams + 1e-8) throw new ListingQuoteError('DIMENSIONAL_WEIGHT_LIMIT', `包装抛重 ${round2(dimensionalWeightGrams)} g 超出上限 ${rules.maxDimensionalWeightGrams} g`);
   const billableWeightGrams = Math.max(weightPounds * 453.59237, dimensionalWeightGrams), oz = billableWeightGrams / 28.349523125;
   const upfrontCny = costCny + rules.inboundCost + rules.packingCost;
   const evaluate = (price: number) => {
@@ -124,14 +152,14 @@ export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuo
   };
   const cap = Math.floor(rules.maxPrice * 100 + 1e-8); let minimum: number | null = null;
   for (let cents = 1; cents <= cap; cents++) if (evaluate(cents / 100).roi > rules.targetRoi + 1e-10) { minimum = cents / 100; break; }
-  if (minimum === null) return fail('售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置');
+  if (minimum === null) throw new ListingQuoteError('ROI_MAX_PRICE', '售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置');
   for (let cents = Math.ceil((minimum + rules.margin) * 100 - 1e-8); cents <= cap; cents++) {
     const normal = evaluate(cents / 100), promotionPrice = rules.promoEnabled ? round2(normal.price - rules.promoDiscount) : null;
     const promotion = promotionPrice === null ? null : evaluate(promotionPrice);
     if (normal.roi <= rules.targetRoi + 1e-10 || (promotion && (promotion.price <= 0 || promotion.roi <= rules.targetRoi + 1e-10))) continue;
     return { ...normal, minimum, upfrontCny, dimensionalWeightGrams, billableWeightGrams, promotionPrice, promotionRoi: promotion?.roi ?? null };
   }
-  return fail('加价或促销后的报价无法同时满足 ROI 和售价上限');
+  throw new ListingQuoteError('ROI_PROMOTION_OR_MARGIN', '加价或促销后的报价无法同时满足 ROI 和售价上限');
 }
 export function bundleQuantity(costCny: number, skuCount: number, rules: PricingRules): number {
   if (!rules.bundleEnabled || skuCount !== 1 || !Number.isFinite(costCny) || costCny <= 0 || costCny / rules.fx >= rules.bundleThresholdUsd) return 1;

@@ -27,6 +27,24 @@ export function legacyContentRepairFields(checkpoint:{state:'STARTED'|'DONE';dra
 /** Preserve the business rule's cause instead of presenting its missing price symptom. */
 export function pricingBlockingReason(draft: AmazonDraft): string | null {
   if(!draft.businessRules || draft.businessRules.quote!==null)return null;
+  const decision = draft.businessRules.pricingDecision;
+  if (decision) {
+    if (decision.status === 'quoted') return null;
+    const labels = {
+      QUOTE_VALID: '已计算报价', QUOTE_INVALID_INPUT: '定价输入无效，须确认有效成本和包装参数',
+      DIMENSIONAL_WEIGHT_LIMIT: '已确认包装抛重超出上限', ROI_MAX_PRICE: '已确认输入在售价上限内无法满足目标 ROI',
+      ROI_PROMOTION_OR_MARGIN: '已确认输入的加价或促销报价无法同时满足 ROI 和售价上限',
+      COST_CNY_UNCONFIRMED: '采购成本或人民币币种待确认', MARKETPLACE_UNSUPPORTED: '当前站点不适用已确认的美元定价规则',
+      PACKAGE_MEASUREMENTS_MISSING: '缺少完整包装尺寸或包装重量', PACKAGE_INPUT_UNCONFIRMED: '包装尺寸或重量待确认，当前报价尝试不能判定商品不符合业务要求',
+      PACKAGE_SCOPE_UNCONFIRMED: '当前销售单元的整套包装参数待确认，来源单包测量不能直接证明组套包装',
+      SOURCE_QUANTITY_CONFLICT: '来源件数或计价口径冲突，待确认销售单元成本', LEGACY_QUANTITY_CONFLICT: '旧组套记录件数冲突，待确认销售单元成本',
+      SOURCE_QUANTITY_UNCONFIRMED: '来源件数尚未确认或与销售组合不一致，待确认销售单元成本',
+      SALE_QUANTITY_CHANGED: '自动组套件数已变更，待确认销售单元成本', PRICING_SYSTEM_ERROR: '定价计算发生系统异常，需排查后重试',
+    };
+    const prefix = decision.status === 'business_blocked' ? '定价未通过' : decision.status === 'system_error' ? '定价异常' : '定价资料待确认';
+    return `${prefix}：${labels[decision.code]}。请核对实际成本、包装参数或定价设置后重新准备草稿；系统不会自动提高售价上限或降低目标 ROI。`;
+  }
+  // Display-only compatibility for old snapshots; text never creates structured evidence.
   const notices=draft.businessRules.notices.filter(message=>/售价上限|报价无法.*ROI|抛重.*超出上限|采购成本或人民币币种尚未确认|计价口径.*无法计算|组套.*成本|组套记录.*冲突/.test(message));
   return notices.length?`定价未通过：${notices.join('；')}。请核对实际成本、包装参数或定价设置后重新准备草稿；系统不会自动提高售价上限或降低目标 ROI。`:null;
 }

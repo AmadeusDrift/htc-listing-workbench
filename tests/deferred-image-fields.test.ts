@@ -7,6 +7,23 @@ import type { AmazonDraft, ListingIssue } from '../src/shared/amazon-contracts.t
 import type { ProductDetail } from '../src/shared/contracts.ts';
 import { CATEGORY_FIELD_REPAIR_FIELDS } from '../src/shared/automatic-listing-contracts.ts';
 
+test('pricing blocking display prefers structured causes over legacy notice wording', () => {
+  const draft = { businessRules: { revision: 0, fields: {}, quote: null, bundleQuantity: 1, notices: ['售价上限内无法满足目标 ROI'],
+    pricingDecision: { version: 1, status: 'needs_input', code: 'PACKAGE_INPUT_UNCONFIRMED', quoteError: 'ROI_MAX_PRICE',
+      inputs: { costCny: 999, dimensionsInches: [1,1,1], weightPounds: .2 },
+      evidence: { cost: 'confirmed_cny', dimensions: 'business_default', weight: 'business_default', packageScope: 'source_sale_unit', saleUnit: 'confirmed',
+        sourcePackage: { dimensionsInches: null, weightPounds: null } } } } } as AmazonDraft;
+  assert.match(fieldRecovery.pricingBlockingReason(draft)!, /包装.*待确认/);
+  assert.doesNotMatch(fieldRecovery.pricingBlockingReason(draft)!, /定价未通过/);
+  draft.businessRules!.notices = ['Arbitrary translated message'];
+  assert.match(fieldRecovery.pricingBlockingReason(draft)!, /包装.*待确认/);
+  delete draft.businessRules!.pricingDecision;
+  assert.equal(fieldRecovery.pricingBlockingReason(draft), null);
+  draft.businessRules!.notices = ['售价上限内无法满足目标 ROI'];
+  assert.match(fieldRecovery.pricingBlockingReason(draft)!, /定价未通过/);
+  assert.equal(draft.businessRules!.pricingDecision, undefined);
+});
+
 test('planned required main URL is deferred while missing color stays actionable', () => {
   const issues = validateAttributes({type:'object',properties:{main_product_image_locator:{type:'array'},color:{type:'array'}},required:['main_product_image_locator','color']},{});
   const draft = {attributes:{},localIssues:issues,previewIssues:[]} as unknown as AmazonDraft;

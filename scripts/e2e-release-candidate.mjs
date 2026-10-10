@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { expect } from '@playwright/test';
 import { cli, digest, reserveOutput } from './release-verification.mjs';
 import { assertArtifactLocation } from './release-source.mjs';
 import { verifyCandidate } from './release-package.mjs';
@@ -53,14 +54,30 @@ try {
   checks.push('actual Electron safeStorage, SQLite write, nativeImage PNG');
   assert.deepEqual(await page.evaluate(() => window.red.listProducts()), []);
   await page.getByRole('button', { name: '载入示例商品', exact: true }).click();
-  await page.waitForFunction(async () => (await window.red.listProducts()).length === 2);
+  // Poll the resolved IPC value in the host; waitForFunction treats a returned
+  // Promise as truthy before its boolean result is available.
+  await expect.poll(() => page.evaluate(() => window.red.listProducts().then(rows => rows.length)), { timeout: 20000 }).toBe(2);
   const products = await page.evaluate(() => window.red.listProducts()); assert.equal(products.length, 2);
   const bag = products.find(p => p.title === '棉质抽绳收纳袋'); assert.ok(bag);
-  await page.getByTestId(`product-${bag.id}`).click(); await page.getByRole('tab', { name: '图片工作区', exact: false }).click();
+  await page.getByTestId(`product-${bag.id}`).click();
+  const imageTab = page.getByRole('tab', { name: '图片工作区', exact: false });
+  await imageTab.click(); await expect(imageTab).toHaveAttribute('aria-selected', 'true');
   await page.waitForFunction(() => { const imgs = [...document.querySelectorAll('.asset-card img')]; return imgs.length === 3 && imgs.every(img => img.complete && img.naturalWidth > 0); });
   const imageBindings = await page.evaluate(id => window.red.getProduct(id), bag.id);
   await writeFile(join(output, 'synthetic-product.json'), JSON.stringify(imageBindings, null, 2));
-  const screenshot = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString('base64'));
+  // DOM readiness precedes the hidden window's composited frame.
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    const transitions = document.getAnimations().filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime));
+    await Promise.all(transitions.map(animation => animation.finished.catch(() => {})));
+    await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(null))));
+  });
+  await expect(imageTab).toHaveAttribute('aria-selected', 'true');
+  const screenshot = await app.evaluate(async ({ BrowserWindow }) => {
+    const captured = await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+    if (captured.isEmpty()) throw Error('Electron returned an empty screenshot');
+    return captured.toPNG().toString('base64');
+  });
   await writeFile(join(output, 'candidate-images.png'), Buffer.from(screenshot, 'base64')); checks.push('real preload/IPC sample persistence and managed image rendering');
   report.guardProbes = await probeGuard(app); assert.equal(report.guardProbes.attempts.length, 8); assert.equal(report.guardProbes.total, 8, 'Only deliberate guard probes may attempt outbound');
   await app.close(); app = undefined;

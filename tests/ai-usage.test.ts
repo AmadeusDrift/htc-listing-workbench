@@ -84,7 +84,7 @@ test('schema 7 upgrades preserve historical attempts and unknown token liability
   const old = new DatabaseSync(join(f.directory, 'red.sqlite')); dropRecordQueryIndexes(old); old.exec('DROP TABLE IF EXISTS ai_usage_policies; DROP TABLE IF EXISTS ai_usage_ledger; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; PRAGMA user_version=7'); old.close();
   const restarted = new AiService(f.directory, f.store, f.hosting, storage, { fetch: async () => { throw new Error('must not send'); } });
   try {
-    assert.equal(SCHEMA_VERSION, 17); const summary = restarted.getUsageSummary('deepseek'); assert.equal(summary.attempts, 2); assert.equal(summary.reportedTokens, 40); assert.equal(summary.unknownCalls, 1); assert.equal(summary.unboundedCalls, 1); assert.equal(summary.usedTokens, null);
+    assert.equal(SCHEMA_VERSION, 18); const summary = restarted.getUsageSummary('deepseek'); assert.equal(summary.attempts, 2); assert.equal(summary.reportedTokens, 40); assert.equal(summary.unknownCalls, 1); assert.equal(summary.unboundedCalls, 1); assert.equal(summary.usedTokens, null);
     restarted.setUsagePolicy({ providerId: 'deepseek', dailyCallLimit: null, dailyTokenLimit: 1000000000000 }); await assert.rejects(restarted.suggest(f.textInput), isCode('QUOTA_EXCEEDED'));
   } finally { await restarted.close(); }
 });

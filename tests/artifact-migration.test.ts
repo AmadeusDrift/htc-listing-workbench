@@ -14,7 +14,7 @@ test('v5 workspaces gain independent image and copy version tables without alter
   legacy.prepare('INSERT INTO ai_profiles VALUES(?,?)').run('fixture', '{"sentinel":"preserved"}'); legacy.close();
   const db = openDatabase(root);
   try {
-    assert.equal(SCHEMA_VERSION, 17);
+    assert.equal(SCHEMA_VERSION, 18);
     for (const table of ['image_versions', 'image_selections', 'content_versions', 'image_write_operations']) assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n, 0);
     assert.equal(db.prepare('SELECT record_json FROM ai_profiles WHERE id=?').get('fixture')!.record_json, '{"sentinel":"preserved"}');
   } finally { db.close(); }

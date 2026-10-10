@@ -38,7 +38,7 @@ function fixture(t: test.TestContext) {
   const reads: string[] = [];
   const dependencies = { store: { getProduct(id: string) { reads.push(id); const product = [oldSource, imported].find(p => p.id === id); assert.ok(product); return structuredClone(product); } },
     rules: () => defaultListingRules(), hosting: { getProfile: () => ({ id: 'alpha', enabled: true, configured: true }) },
-    amazon: { executionTargetScope: () => ({ target, generation: 1 }) }, labels: {},
+    amazon: { executionTargetScope: () => ({ target, generation: 1 }) }, images: { getProgress: () => null }, execution: { list: () => [] }, labels: {},
     planSales: () => [structuredClone(selected)], existingSale: () => existing ? structuredClone(existing) : undefined,
     previewSales: () => [structuredClone(selected.recipe)],
   } as unknown as AutomaticListingDependencies;

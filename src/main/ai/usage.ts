@@ -103,7 +103,7 @@ export class AiUsageLedger {
     result.usedTokens = result.unboundedCalls ? null : add(result.reportedTokens, result.reservedTokens); return result;
   }
   /** Reservation and RUNNING call insertion share a SQLite write lock across service instances. */
-  reserve(rawCall: AiCall, body: string | Buffer): AiCall {
+  reserve(rawCall: AiCall, body: string | Buffer, recordSend?: (call:AiCall)=>void): AiCall {
     const call = validateAiCall(rawCall), reservation = requestTokenReservation(call.providerId, body);
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -111,7 +111,7 @@ export class AiUsageLedger {
       if ((policy.dailyCallLimit !== null && summary.attempts >= policy.dailyCallLimit)
         || (policy.dailyTokenLimit !== null && (summary.usedTokens === null || summary.usedTokens + reservation > policy.dailyTokenLimit))) throw new AiError('QUOTA_EXCEEDED');
       saveRecord(this.db, { id: call.id, providerId: call.providerId, day: call.startedAt.slice(0, 10), startedAt: call.startedAt, finishedAt: null, state: 'PENDING', reservedTokens: reservation, usage: zeroUsage() });
-      this.db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(call.id, JSON.stringify(call)); this.db.exec('COMMIT'); return call;
+      this.db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(call.id, JSON.stringify(call)); recordSend?.(call); this.db.exec('COMMIT'); return call;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   /** Caller includes this update in its result/call transaction. */

@@ -1,3 +1,5 @@
+import { CompletionJournal } from '../listing-ai/completion-journal.ts';
+import type { CompletionRequest } from '../listing-ai/completion-journal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { AI_PROVIDER_IDS, TEXT_REVIEW_POLICY_VERSION } from '../../shared/ai-contracts.ts';
@@ -78,6 +80,7 @@ export interface ReviewedContentSource {
 
 /** Main-process provider boundary. It persists suggestions and calls, never source facts or listing drafts. */
 export class AiService {
+  readonly completionJournal: CompletionJournal;
   private directory: string;
   private store: WorkspaceStore;
   private hosting: HostingService;
@@ -96,6 +99,7 @@ export class AiService {
     this.requests = new AiRequestControl(integer(dependencies.maxConcurrency ?? 2, 1, 8), integer(dependencies.timeoutMs ?? 120000, 1, 600000));
     this.context = { fetch: dependencies.fetch ?? globalThis.fetch, now: dependencies.now ?? (() => new Date()), nonce: dependencies.nonce ?? randomUUID, maxResponseBytes: integer(dependencies.maxResponseBytes ?? 2 * 1024 * 1024, 1024, 16 * 1024 * 1024) };
     this.db = openDatabase(directory);
+    this.completionJournal = new CompletionJournal(this.db);
     this.records = new RecordReader(this.db);
     this.usage = new AiUsageLedger(this.db, this.context.now);
     try {
@@ -384,7 +388,7 @@ export class AiService {
     return { suggestion: prepared.suggestion, review: prepared.review, assertFresh };
   }
   /** Trusted main-process entry only. Shares credentials, request control and usage accounting. */
-  async listingFields(context: ListingAiContext, assertContextFresh: () => Promise<void>, review?: { suggestionId: string; candidate: ListingFieldsOutput }, signal?: AbortSignal): Promise<AiResult> {
+  async listingFields(context: ListingAiContext, assertContextFresh: () => Promise<void>, review?: { suggestionId: string; candidate: ListingFieldsOutput }, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
     this.ensureOpen(); const profile = this.assertProfile(review ? 'deepseek-review' : 'deepseek');
     return this.start(profile, { productId: context.productId, productRevision: context.productRevision }, { operation: review ? 'amazon-fields-review' : 'amazon-fields', context, review }, async activeSignal => {
       const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal); };
@@ -393,7 +397,7 @@ export class AiService {
         invoke: (credentials, adapterContext) => review
           ? reviewListingFields(context, review.candidate, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext)
           : suggestListingFields(context, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
-    }, signal);
+    }, signal, completion);
   }
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
@@ -577,11 +581,11 @@ export class AiService {
         invoke:(credentials,adapterContext)=>reviewImageWithAliyun(image,candidate,plan.id,credentials as AliyunCredentials,activeSignal,adapterContext)};
     },signal);
   }
-  private start(profile: AiProfile, input: { productId: string; productRevision: number }, source: unknown, prepare: (signal: AbortSignal) => Promise<PreparedRequest>, signal?: AbortSignal): Promise<AiResult> {
+  private start(profile: AiProfile, input: { productId: string; productRevision: number }, source: unknown, prepare: (signal: AbortSignal) => Promise<PreparedRequest>, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
     this.ensureOpen();
-    const key = requestKey({ profile, input, source, product: this.product(input.productId, input.productRevision) });
+    const key = requestKey({ profile, input, source, ...(completion?{completion}:{}), product: this.product(input.productId, input.productRevision) });
     return this.requests.run(key, profile.id, async activeSignal => {
-      const id = randomUUID(); let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
+      const id = completion?.callId ?? randomUUID(); let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       let untrustedOutput: { value: unknown } | undefined, rejectionStage: AiOutputRejectionStage = 'operation-output-validation';
       try {
         throwIfAborted(activeSignal);
@@ -591,7 +595,7 @@ export class AiService {
           beforeSend: body => {
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
-            call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}) }, body);
+            call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}) }, body, completion ? call => this.completionJournal.markSent(completion,call) : undefined);
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: value => { if (call && !finished && !activeSignal.aborted) untrustedOutput = { value }; },
@@ -607,7 +611,7 @@ export class AiService {
         try {
           this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id, JSON.stringify(result));
           this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'SUCCEEDED', finishedAt: result.createdAt });
-          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); this.db.exec('COMMIT'); return result;
+          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(completion)this.completionJournal.recordResult(completion,result); this.db.exec('COMMIT'); return result;
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       } catch (error) {
         const safe = safeError(error, activeSignal);

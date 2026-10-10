@@ -150,7 +150,7 @@ test('schema 8 migration adds query indexes without rewriting records and rolls 
   const row = value('ai_results', f.product.id); db.prepare('INSERT INTO ai_results VALUES(?,?)').run(row.id, JSON.stringify(row));
   dropRecordQueryIndexes(db); db.exec('DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; PRAGMA user_version=8'); db.close();
   const migrated = openDatabase(f.directory);
-  try { assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 17); assert.deepEqual(JSON.parse(String(migrated.prepare('SELECT record_json FROM ai_results WHERE id=?').get(row.id)!.record_json)), row); assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='record_ai_results_product'").get()); }
+  try { assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 18); assert.deepEqual(JSON.parse(String(migrated.prepare('SELECT record_json FROM ai_results WHERE id=?').get(row.id)!.record_json)), row); assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='record_ai_results_product'").get()); }
   finally { migrated.close(); }
   const bad = new DatabaseSync(join(f.directory, 'red.sqlite')); dropRecordQueryIndexes(bad); bad.exec('DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; PRAGMA user_version=8'); bad.prepare('UPDATE ai_results SET record_json=?').run('{bad'); bad.close();
   assert.throws(() => openDatabase(f.directory));
@@ -166,7 +166,7 @@ test('backup allows the exact nonunique query indexes and restores genuine schem
   const oldFile = join(f.directory, 'old-eight.htcbackup');
   try { await writeRawBackup(legacy, f.directory, oldFile); } finally { legacy.close(); }
   const target = join(f.directory, 'restored-eight'), prepared = await prepareWorkspaceRestore(target, oldFile, 'record pagination backup passphrase'); await commitWorkspaceRestore(target, prepared);
-  const restored = openDatabase(target); try { assert.equal(restored.prepare('PRAGMA user_version').get()!.user_version, 17); } finally { restored.close(); }
+  const restored = openDatabase(target); try { assert.equal(restored.prepare('PRAGMA user_version').get()!.user_version, 18); } finally { restored.close(); }
 });
 
 test('backup rejects arbitrary, unique, partial, collated and misleadingly named indexes', async t => {
@@ -245,7 +245,7 @@ test('migration rejects identical duplicate values and nested aliases without co
   const canonical = { ...row, output: { ...output, attributes: [{ name: 'Material', value: 'Cotton', factIds: [randomUUID()] }, { name: 'Color', value: 'Red', factIds: [randomUUID()] }] } };
   clean.prepare('UPDATE ai_results SET record_json=?').run(JSON.stringify(canonical).replace('"productId"', `"${escapedKey('productId')}"`)); clean.close();
   const migrated = openDatabase(f.directory);
-  try { assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 17); assert.deepEqual(f.service.queryResults({ productId: f.product.id }).items, [canonical]); }
+  try { assert.equal(migrated.prepare('PRAGMA user_version').get()!.user_version, 18); assert.deepEqual(f.service.queryResults({ productId: f.product.id }).items, [canonical]); }
   finally { migrated.close(); }
 });
 

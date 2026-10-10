@@ -88,7 +88,7 @@ export interface ConfirmedMeasurements { item?: MeasurementSet; package?: Measur
 
 const LENGTH_UNITS: Record<string, number> = { cm:1/2.54, centimeters:1/2.54, mm:1/25.4, millimeters:1/25.4, m:100/2.54, meters:100/2.54, in:1, inch:1, inches:1 };
 const WEIGHT_UNITS: Record<string, number> = { g:1/453.59237, grams:1/453.59237, kg:1000/453.59237, kilograms:1000/453.59237, lb:1, lbs:1, pound:1, pounds:1, oz:1/16, ounces:1/16 };
-function convertToUnit(value: unknown, unit: unknown, kind: 'length' | 'weight', target: string): {status:'mapped';value:number;unit:string} | {status:'needs_input';reason:string} {
+export function convertToUnit(value: unknown, unit: unknown, kind: 'length' | 'weight', target: string): {status:'mapped';value:number;unit:string} | {status:'needs_input';reason:string} {
   const number = typeof value === 'number' ? value : typeof value === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)$/u.test(value.trim()) ? Number(value) : NaN;
   if (!Number.isFinite(number) || number <= 0) return {status:'needs_input',reason:'必须提供大于零的有限数字'};
   if (typeof unit !== 'string' || !unit.trim()) return {status:'needs_input',reason:'来源单位缺失，不能猜测单位'};

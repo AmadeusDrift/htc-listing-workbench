@@ -85,17 +85,18 @@ test('source, current original and normalized selected text remain independent s
   }
 });
 
-test('ordinary unknown and unselected sibling risk preserve the existing default policy',async t=>{
+test('ordinary unknown and unselected sibling risk do not veto explicit negative declarations',async t=>{
   for(const text of ['Plain','供电方式未知']){
-    const f=fixture(t,[text,'电池供电']),draft=await f.create();
+    const f=fixture(t,[text,'电池供电']);f.store.saveProduct({...saveInput(f.product),facts:[...f.product.facts,fact('是否需要电池','否'),fact('危险品法规','not_applicable')]});const draft=await f.create();
     assert.equal(entry(draft,'batteries_required'),false);assert.equal(entry(draft,'supplier_declared_dg_hz_regulation'),'not_applicable');
     assert.deepEqual(safetyIssues(await f.service.validateDraft(draft)),[]);
   }
 });
 
-test('selected chemical risk suppresses only chemical defaults; existing English risk vocabulary is unchanged',async t=>{
-  for(const [text,battery,hazmat] of [['清洁剂',false,undefined],['electric',undefined,'not_applicable'],['rechargeable',undefined,'not_applicable'],['batteries',undefined,'not_applicable']] as const){
-    const f=fixture(t,[text]),draft=await f.create();assert.equal(entry(draft,'batteries_required'),battery,text);assert.equal(entry(draft,'supplier_declared_dg_hz_regulation'),hazmat,text);
+test('selected chemical and battery risk veto the same historical negatives with unchanged vocabulary',async t=>{
+  for(const [text,fields] of [['清洁剂',[declarations[1],declarations[2]]],['electric',[declarations[0]]],['rechargeable',[declarations[0]]],['batteries',[declarations[0]]]] as const){
+    const f=fixture(t,[text]),draft=legacyDraft(f,await f.create());
+    assert.deepEqual(safetyIssues(await f.service.validateDraft(draft)).flatMap(i=>i.attributeNames).sort(),[...fields].sort(),text);
   }
 });
 
@@ -113,7 +114,8 @@ test('every selected mixed recipe component contributes original text even when 
       assert.equal(safetyIssues(await f.service.validateDraft(existing)).length,3);
       const plain=plans.find(p=>p.recipe.components.length===1&&p.recipe.components[0].variantId===product.variants[1-riskIndex].id)!;
       const other=await f.service.prepareDrafts({...f.selection,listingProgram:'haul',items:[{productId:product.id,productRevision:product.revision,variantId:plain.recipe.components[0].variantId,attributes:{}}]},[plain]);
-      assert.equal(entry(other.items[0].draft!,'batteries_required'),false);
+      assert.equal(other.items[0].draft!.attributes.batteries_required,undefined);
+      const ordinary=legacyDraft(f,other.items[0].draft!);assert.deepEqual(safetyIssues(await f.service.validateDraft(ordinary)),[]);
       assert.equal(JSON.stringify(f.product),before);assert.deepEqual(result.items[0].draft!.salesPlan,mixed);
     }finally{naming.close();}
   }

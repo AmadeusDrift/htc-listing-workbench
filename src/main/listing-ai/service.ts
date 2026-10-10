@@ -106,7 +106,9 @@ export class ListingAiService {
       let result=this.colorResult(scope);
       if(!result){
         if(this.ai.listCalls().some(call=>call.sourceColorContext&&listingFingerprint(call.sourceColorContext)===listingFingerprint(scope)))throw new UserFacingError('上次来源颜色请求结果未确认或失败，已保留记录，未自动重发');
-        result=await this.ai.observeSourceColor(scope,check,signal);aiCalls++;check();
+        this.amazon.assertPricingForPaid(reference.draftId);
+        const paidCheck=()=>{check();this.amazon.assertPricingForPaid(reference.draftId);};
+        result=await this.ai.observeSourceColor(scope,check,signal,paidCheck);aiCalls++;check();
       }
       if(result.output.kind!=='source-color'||result.output.verdict!=='DETERMINED')throw new UserFacingError(`来源图中的颜色仍无法确定：${result.output.kind==='source-color'?result.output.reason:'观察结果无效'}`);
     }
@@ -310,8 +312,10 @@ export class ListingAiService {
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining};};
     refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:currentRemaining(operation.remaining)};
     if(!operation.rounds.length){
+      this.amazon.assertPricingForPaid(draft.id);
       aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;
       signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
+      this.amazon.assertPricingForPaid(draft.id);
       draft=this.amazon.applyBusinessDefaults({id:draft.id,revision:draft.revision},operation.id);operation=journal.get(operation.id);checkpoint();
     }
     let reviewIssues:ListingIssue[]=operation.reviewIssues.map(issue=>({code:'CONTENT_REVIEW',message:issue.message,severity:'ERROR',attributeNames:[issue.field],autoFixable:false,source:'local',category:'field'}));

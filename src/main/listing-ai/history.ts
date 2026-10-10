@@ -20,10 +20,14 @@ export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonD
   if (!Object.hasOwn(report, 'pricingDecision')) return;
   const invalid = (): never => { throw new UserFacingError('商品规则快照的定价原因或输入证据无效'); };
   const d = report.pricingDecision;
-  if (!d || !exactKeys(d, ['version','status','code','quoteError','inputs','evidence']) || d.version !== 1
+  if (!d || !exactKeys(d, ['version','status','code','quoteError','inputs','evidence', ...(d.version === 2 ? ['attributeInputs'] : [])]) || ![1,2].includes(d.version)
     || !exactKeys(d.inputs, ['costCny','dimensionsInches','weightPounds'])
     || !exactKeys(d.evidence, ['cost','dimensions','weight','packageScope','saleUnit','sourcePackage'])
     || !exactKeys(d.evidence.sourcePackage, ['dimensionsInches','weightPounds'])) return invalid();
+  if (d.version === 2) {
+    const snapshot = attributesObject(d.attributeInputs);
+    if (Object.keys(snapshot).some(field => !['item_package_dimensions','item_package_weight'].includes(field))) invalid();
+  }
   const positive = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0;
   const dimensions = (value: unknown) => Array.isArray(value) && value.length === 3 && value.every(positive);
   const { inputs, evidence: e } = d;

@@ -29,6 +29,10 @@ import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { OpenAiImageAdapter } from '../src/main/image-generation/adapter.ts';
 import { canResumeImageWorkflow } from '../src/shared/image-workflow-contracts.ts';
 import { currentImageListingSnapshot } from '../src/main/image-workflow/image-facts.ts';
+import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
+import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
+import { ListingRuleStore } from '../src/main/listing-rules.ts';
+import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13,8); png.write('IHDR',12); png.writeUInt32BE(256,16); png.writeUInt32BE(256,20);
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -118,6 +122,38 @@ async function fixture(t: test.TestContext, options: { familyMigration?:boolean;
 
 // Exercise the real listing context builder and image snapshot together with the
 // workflow. Only provider responses and the version-specific card projection vary.
+test('direct image workflow blocks a stale v2 successful quote before color, field, plan or generation calls',async t=>{
+  const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id);
+  const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},defaultListingRules());
+  r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};r.draft.attributes.item_package_weight=null;p.putRecord(r);
+  const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/定价/);assert.deepEqual(f.calls,[]);
+});
+
+test('a paid image plan remains stored when pricing changes during its response and the next generation never starts',async t=>{
+  const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
+  try{
+    const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
+    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};p.putRecord(r);
+    const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot)rules.save(rules.get());return result;};
+    const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/定价/);
+    assert.ok(result.workflow.slots?.[0].attempts[0].planResultId);assert.equal(result.workflow.slots?.[0].attempts[0].state,'READY');assert.ok(!f.calls.includes('generate'));
+  }finally{rules.close();}
+});
+
+
+test('stale v2 pricing permits local UNKNOWN reconciliation but never starts the next paid check',async t=>{
+  const f=await fixture(t,{lostResponse:true}),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
+  try{
+    const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
+    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};p.putRecord(r);
+    const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'UNKNOWN');
+    const count=f.calls.length;rules.save(rules.get());const result=await f.run();
+    assert.equal(result.workflow.id,first.workflow.id);assert.equal(result.workflow.slots![0].attempts[0].state,'GENERATED');
+    assert.equal(result.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].requestId);
+    assert.match(result.workflow.error!,/定价/);assert.equal(f.calls.length,count);
+  }finally{rules.close();}
+});
+
 function currentListingBridge(f:Awaited<ReturnType<typeof fixture>>) {
   const real=new ListingAiService(f.store,f.amazon,f.ai as never);
   const calls=new Map<string,AiCall>();

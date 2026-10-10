@@ -20,6 +20,7 @@ function run(extra: Partial<Parameters<typeof applyBusinessRules>[0]> = {}, rule
   return applyBusinessRules({ product, variant, schema: realAmazonSchema(), target, attributes: {}, measurements: {}, costCny: 2.4, now: new Date('2026-10-07T02:00:00Z'), ...extra }, rules);
 }
 
+const legacyMeasurements:JsonObject={item_dimensions:[{length:{value:1.97,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:target.marketplaceId}],item_package_dimensions:[{length:{value:1.97,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:target.marketplaceId}],item_package_weight:[{value:.22,unit:'pounds',marketplace_id:target.marketplaceId}]};
 const confirmedPackage = { package: { length: { value: 5, unit: 'cm' }, width: { value: 5, unit: 'cm' }, height: { value: 5, unit: 'cm' }, weight: { value: 100, unit: 'g' } } };
 
 test('pricing decisions distinguish confirmed ROI rejection from default and unverified package attempts', () => {
@@ -36,10 +37,10 @@ test('pricing decisions distinguish confirmed ROI rejection from default and unv
   assert.equal(repeated.report.pricingDecision?.evidence.dimensions, 'business_default');
   assert.equal(repeated.report.pricingDecision?.status, 'needs_input');
   const legacy = structuredClone(defaults.report); delete legacy.pricingDecision;
-  const old = run({ costCny: 999, attributes: defaults.attributes, previousBusinessReport: legacy });
+  const old = run({ costCny: 999, attributes: legacyMeasurements, previousBusinessReport: legacy });
   assert.equal(old.report.pricingDecision?.evidence.dimensions, 'unverified');
   assert.equal(old.report.pricingDecision?.status, 'needs_input');
-  const manual = run({ costCny: 999, attributes: defaults.attributes });
+  const manual = run({ costCny: 999, attributes: legacyMeasurements });
   assert.equal(manual.report.pricingDecision?.evidence.weight, 'unverified');
   assert.equal(manual.report.pricingDecision?.status, 'needs_input');
   const proven = run({ costCny: 999, measurements: confirmedPackage, attributes: defaults.attributes, previousBusinessReport: defaults.report });
@@ -177,27 +178,25 @@ test('currency cent precision accepts 19.9 and rejects fractional cents', () => 
   assert.equal(validateFieldValues(schema, target.marketplaceId, 'list_price', [{ value: 19.9, currency: 'USD' }]).length, 0);
   assert.ok(validateFieldValues(schema, target.marketplaceId, 'list_price', [{ value: 19.901, currency: 'USD' }]).some(issue => issue.code === 'LOCAL_multipleOf'));
 });
-test('approved rules fill real schema values, distinguish list price and offer, and label defaults', () => {
+test('seller price rules quote privately and never invent factual declarations', () => {
   const result = run();
-  assert.equal((result.attributes.brand as any)[0].value, 'Generic');
-  assert.equal((result.attributes.manufacturer as any)[0].value, 'Seannel');
-  assert.equal((result.attributes.list_price as any)[0].value, 19.9);
-  assert.equal((result.attributes.gpsr_safety_attestation as any)[0].value, true);
-  assert.equal((result.attributes.supplier_declared_dg_hz_regulation as any)[0].value, 'not_applicable');
-  assert.equal((result.attributes.item_package_dimensions as any)[0].length.value, 1.97);
-  assert.equal((result.attributes.item_package_weight as any)[0].value, 0.22);
-  assert.equal((result.attributes.purchasable_offer as any)[0].audience, 'BZR');
-  assert.ok(result.report.fields.item_package_weight.reason.includes('业务默认'));
-  assert.ok(!Object.hasOwn(result.attributes, 'fulfillment_availability'));
+  for(const field of ['brand','manufacturer','gpsr_safety_attestation','supplier_declared_dg_hz_regulation','item_package_dimensions','item_package_weight'])assert.equal(result.attributes[field],undefined,field);
+  assert.equal((result.attributes.list_price as any)[0].value,19.9);
+  assert.equal((result.attributes.purchasable_offer as any)[0].audience,'BZR');
+  assert.deepEqual(result.report.pricingDecision?.inputs.dimensionsInches,[1.97,1.97,1.97]);
+  assert.equal(result.report.pricingDecision?.inputs.weightPounds,.22);
+  assert.equal(result.report.pricingDecision?.evidence.weight,'business_default');
+  assert.ok(!Object.hasOwn(result.attributes,'fulfillment_availability'));
 });
+
 test('current SKU evidence, existing editable fields and inconsistent facts take precedence over defaults', () => {
   const result = run({ measurements: { item: { length: { value: 11, unit: 'cm' } } }, attributes: { brand: [{ value: 'Existing', marketplace_id: target.marketplaceId }] },
     product: { ...product, facts: [{ id: 'x', name: '是否需要电池', value: '是', state: 'source_confirmed', source: '1688', sourceRef: '' }] } });
-  assert.equal((result.attributes.item_dimensions as any)[0].length.value, 4.33);
+  assert.equal(result.attributes.item_dimensions, undefined, 'incomplete source axes are not padded into actual attributes');
   assert.equal((result.attributes.brand as any)[0].value, 'Existing');
   assert.equal(result.attributes.batteries_required, undefined);
   assert.equal(result.attributes.required_product_compliance_certificate, undefined);
-  assert.ok(result.report.notices.some(message => /电池|特殊/.test(message)));
+  assert.ok(result.report.notices.some(message => /batteries_required/.test(message)));
 });
 test('absent schema fields are omitted, missing procurement costs do not fabricate an offer, parent logistics stay empty', () => {
   const schema = realAmazonSchema(); delete (schema.schema.properties as any).list_price;
@@ -212,10 +211,10 @@ test('absent schema fields are omitted, missing procurement costs do not fabrica
 
 const fact = (name: string, value: string, state: Fact['state'] = 'human_confirmed'): Fact => ({ id: `${name}:${value}`, name, value, state, source: 'manual', sourceRef: '' });
 
-test('a chemical declaration concern does not suppress the independent no-battery default',()=>{
+test('a chemical concern does not erase an independently confirmed no-battery fact',()=>{
   const schema=realAmazonSchema();
   (schema.schema.properties as JsonObject).batteries_required={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}};
-  const cleaner=run({schema,product:{...product,title:'固体马桶清洁剂'}});
+  const cleaner=run({schema,product:{...product,title:'固体马桶清洁剂',facts:[fact('是否需要电池','否')]}});
   assert.equal((cleaner.attributes.batteries_required as JsonObject[])?.[0]?.value,false);
   assert.equal(cleaner.attributes.supplier_declared_dg_hz_regulation,undefined);
   const powered=run({schema,product:{...product,title:'充电清洁刷'}});
@@ -226,7 +225,7 @@ test('a chemical declaration concern does not suppress the independent no-batter
 
 test('US import designation follows declared origin rather than a domestic supplier import label',()=>{
   const schema=realAmazonSchema();(schema.schema.properties as JsonObject).import_designation={type:'array',items:{type:'object',properties:{value:{type:'string'},language_tag:{type:'string'},marketplace_id:{type:'string'}},required:['value','language_tag'],additionalProperties:false}};
-  const result=run({schema,product:{...product,facts:[fact('是否进口','否')]}});
+  const result=run({schema,product:{...product,facts:[fact('是否进口','否'),fact('原产国','CN')]}});
   assert.equal((result.attributes.import_designation as any)?.[0]?.value,'Imported');
   assert.match(result.report.fields.import_designation.reason,/原产国/);
   const manual=[{value:'Imported (China)',language_tag:'en_US',marketplace_id:target.marketplaceId}];
@@ -248,7 +247,7 @@ test('keychain size uses the selected original size and never invents units from
   assert.equal(run({schema,product:p,variant:conflicting}).attributes.size,undefined);
 });
 
-test('real figurine parent applies approved declarations and passes complete schema without child offers or logistics', () => {
+test('real figurine parent maps explicit declarations and passes complete schema without child offers or logistics', () => {
   const schema = realParentAmazonSchema(), market = target.marketplaceId;
   const text = (value: string) => [{ value, marketplace_id: market, language_tag: 'en_US' }];
   const attributes: JsonObject = {
@@ -259,10 +258,10 @@ test('real figurine parent applies approved declarations and passes complete sch
     bullet_point: text('Decorative articulated frog figurine'),
   };
   const before = structuredClone(attributes);
-  const result = run({ schema, attributes, product: { ...product, title: '关节可动青蛙摆件' } });
+  const result = run({ schema, attributes, product: { ...product, title: '关节可动青蛙摆件',facts:[fact('是否需要电池','false'),fact('原产国','CN'),fact('危险品法规','not_applicable')] } });
   for (const [field, value] of Object.entries({ batteries_required: false, country_of_origin: 'CN', supplier_declared_dg_hz_regulation: 'not_applicable' })) {
     assert.deepEqual(result.attributes[field], [{ value, marketplace_id: market }], field);
-    assert.deepEqual(result.report.fields[field]?.value, result.attributes[field], `${field} default provenance`);
+    assert.equal(result.report.fields[field],undefined, `${field} is explicit source evidence`);
   }
   assert.deepEqual(validateAttributes(schema.schema, result.attributes, schema.metaSchema), []);
   for (const field of ['purchasable_offer', 'list_price', 'condition_type', 'item_package_dimensions', 'item_package_weight', 'unit_count', 'number_of_items']) assert.equal(result.attributes[field], undefined, field);
@@ -275,7 +274,7 @@ test('real figurine parent applies approved declarations and passes complete sch
 test('parent declarations respect disabled defaults and explicit origin or battery facts', () => {
   const schema = realParentAmazonSchema(), rules = defaultListingRules(); rules.product.ordinaryDeclarations = false;
   const disabled = run({ schema }, rules);
-  assert.deepEqual(disabled.attributes.country_of_origin, [{ value: 'CN', marketplace_id: target.marketplaceId }]);
+  assert.equal(disabled.attributes.country_of_origin,undefined);
   assert.equal(disabled.attributes.batteries_required, undefined);
   assert.equal(disabled.attributes.supplier_declared_dg_hz_regulation, undefined);
   const explicit = run({ schema, product: { ...product, facts: [fact('原产国', 'Japan'), fact('是否需要电池', 'true')] } });
@@ -293,27 +292,28 @@ test('Haul unbranded source labels use Generic without relabeling genuine brands
     assert.equal((run({ product: selected, attributes }).attributes.brand as any)[0].value, 'Generic');
     assert.equal((run({ product: selected }).attributes.brand as any)[0].value, 'Generic');
     const legacy = {brand:[{value,marketplace_id:target.marketplaceId,language_tag:'en_US'}]};
-    assert.equal((run({product:selected,attributes:legacy}).attributes.brand as any)[0].value,'Generic');
+    assert.deepEqual(run({product:selected,attributes:legacy}).attributes.brand,legacy.brand,'existing stored values are preserved');
     assert.deepEqual(selected, before);
   }
   const branded = { ...product, facts: [fact('品牌', 'Actual Brand', 'source_confirmed')] };
   assert.equal((sourceAttributes(branded, variant, realAmazonSchema(), target, 'haul').brand as any)[0].value, 'Actual Brand');
 });
-test('partial confirmed measurements fill missing axes without losing facts or raw source metadata', () => {
+test('partial confirmed measurements leave incomplete actual fields absent without losing facts or raw source metadata', () => {
   const selected = { ...product, facts: [fact('商品长度', '10 cm'), fact('包装重量', '100 g')] };
   const before = structuredClone(selected);
   const result = run({ product: selected });
-  assert.equal((result.attributes.item_dimensions as any)[0].length.value, 3.94);
-  assert.equal((result.attributes.item_dimensions as any)[0].width.value, 1.97);
+  assert.equal(result.attributes.item_dimensions,undefined);
+  assert.equal(result.report.pricingDecision?.evidence.dimensions,'business_default');
   assert.equal((result.attributes.item_package_weight as any)[0].value, .22);
   assert.deepEqual(selected, before);
 });
 
-test('manual partial attributes are merged by axis and preserve native precision', () => {
+test('manual partial attributes preserve native precision and leave missing axes absent', () => {
   const input = { item_package_dimensions: [{ length: { value: 1.234567891, unit: 'inches' }, marketplace_id: target.marketplaceId }] };
   const result = run({ attributes: input });
   assert.equal((result.attributes.item_package_dimensions as any)[0].length.value, 1.234567891);
-  assert.equal((result.attributes.item_package_dimensions as any)[0].width.value, 1.97);
+  assert.equal((result.attributes.item_package_dimensions as any)[0].width,undefined);
+  assert.deepEqual(result.report.pricingDecision?.inputs.dimensionsInches,[1.234567891,1.97,1.97]);
   assert.deepEqual(input.item_package_dimensions[0].length, { value: 1.234567891, unit: 'inches' });
 });
 
@@ -400,8 +400,9 @@ test('explicit per-piece quotes price the selected pack automatically, missing u
 });
 
 test('default measurement provenance survives reapplying rules so images never treat it as real', () => {
-  const first = run();
-  const again = run({ attributes: first.attributes, previousBusinessReport: first.report });
+  const historical={revision:0,fields:Object.fromEntries(Object.entries(legacyMeasurements).map(([field,value])=>[field,{value,reason:'业务默认；缺少实测'}])),notices:[],quote:null,bundleQuantity:1};
+  const again = run({ attributes:legacyMeasurements, previousBusinessReport:historical });
+  assert.deepEqual(again.attributes.item_dimensions,legacyMeasurements.item_dimensions);
   for (const field of ['item_dimensions','item_package_dimensions','item_package_weight']) {
     assert.match(again.report.fields[field]?.reason ?? '', /业务默认/);
   }
@@ -421,7 +422,7 @@ test('approved depth shape uses defined axes and keeps unknown fields absent', (
   item.properties.depth = item.properties.length; delete item.properties.length;
   item.required = item.required.map((name: string) => name === 'length' ? 'depth' : name);
   properties.unrelated_dimensions = structuredClone(properties.item_depth_width_height);
-  const result = run({ schema, product: { ...product, facts: [fact('商品深度','10 cm')] } });
+  const result = run({ schema, product: { ...product, facts: [fact('商品深度','10 cm'),fact('商品宽度','5 cm'),fact('商品高度','5 cm')] } });
   assert.equal((result.attributes.item_depth_width_height as any)[0].depth.value, 3.94);
   assert.equal((result.attributes.item_depth_width_height as any)[0].width.value, 1.97);
   assert.equal(result.attributes.unrelated_dimensions, undefined);
@@ -431,11 +432,11 @@ test('length-width-height category fields share the confirmed item and package d
   const schema = realAmazonSchema(), properties = schema.schema.properties as any;
   properties.item_length_width_height = structuredClone(properties.item_dimensions);
   delete properties.item_dimensions;
-  const result = run({ schema, product: { ...product, facts: [fact('商品长度', '10 cm')] } });
+  const result = run({ schema, product: { ...product, facts: [fact('商品长度','10 cm'),fact('商品宽度','5 cm'),fact('商品高度','5 cm')] } });
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.length.value, 3.94);
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.width.value, 1.97);
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.height.value, 1.97);
-  assert.equal((result.attributes.item_package_dimensions as any)[0].length.value, 1.97);
+  assert.equal(result.attributes.item_package_dimensions,undefined);
 });
 
 test('dimensions use schema-supported units when inches are unavailable', () => {
@@ -443,7 +444,7 @@ test('dimensions use schema-supported units when inches are unavailable', () => 
   for (const field of ['item_dimensions','item_length_width','item_package_dimensions']) for (const axis of ['length','width','height']) {
     const node = properties[field]?.items?.properties?.[axis]; if (node) node.properties.unit.enum = ['centimeters'];
   }
-  const result = run({ schema });
+  const result = run({ schema,measurements:confirmedPackage });
   assert.deepEqual((result.attributes.item_package_dimensions as any)[0].length, { value: 5, unit: 'centimeters' });
 });
 

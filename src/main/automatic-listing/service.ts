@@ -1,3 +1,5 @@
+import { assertCurrentPricingForPaid } from './outcomes.ts';
+import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -180,7 +182,8 @@ export class AutomaticListingService {
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
       else if(draft){
         const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
-        classification=pricingOutcome(draft,this.deps.rules())??(declarationConflict?{kind:'NEEDS_INPUT',code:DECLARATION_SOURCE_CONFLICT}:classification);
+        const factIssue=draft.listingProgram==='haul'?draft.localIssues.find(issue=>[FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(issue.code)&&issue.severity==='ERROR'&&['fact','compliance'].includes(issue.category)&&issue.source==='local'&&!issue.autoFixable):undefined;
+        classification=pricingOutcome(draft,this.deps.rules())??(declarationConflict?{kind:'NEEDS_INPUT',code:DECLARATION_SOURCE_CONFLICT}:factIssue?{kind:'NEEDS_INPUT',code:factIssue.code}:classification);
         if(classification.kind!=='RULE_FILTERED'&&this.deps.images.getRuleFilterEvidence){
           const image=await this.deps.images.getRuleFilterEvidence(draft.id);
           if(image)classification={kind:'RULE_FILTERED',code:image.kind,image};
@@ -468,6 +471,7 @@ export class AutomaticListingService {
     }
     if (!this.matching(task, row, draft) || draft.productRevision !== row.productRevision) throw new UserFacingError('准备后的草稿范围与任务不一致');
     if(draft.businessRules?.quote&&draft.businessRules.revision!==task.ruleRevision)throw new UserFacingError('上架规则已变化，请核对并重新计算已有草稿报价；未沿用旧报价');
+    assertCurrentPricingForPaid(draft,this.deps.rules());
     const pricingIssue=pricingBlockingReason(draft);
     if(pricingIssue){row.stage='DRAFT';this.save(task);throw new UserFacingError(pricingIssue);}
     if(row.familyTransition)draft=await this.finishFamilyTransition(task,row);
@@ -603,11 +607,13 @@ export class AutomaticListingService {
       row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
     }
     while (repair.phase === 'FIELDS_PENDING') {
+      assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);
       if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
       this.checkpoint(task,row);
       const assertRepairScope=()=>{
         const latest=this.deps.amazon.getDraft(current.id);
+        assertCurrentPricingForPaid(latest,this.deps.rules());
         if(!this.matching(task,row,latest)||submitted(latest)||latest.revision!==repair.draftRevision||imageWorkflowDraftStamp(latest)!==repair.draftStamp)
           throw new UserFacingError('字段修复后草稿发生变化，请核对异常商品');
         if(row.executionTaskIds.some(id=>{const child=this.deps.execution.get(id);return child.items.length!==1||child.items[0].draftId!==current.id||child.items[0].submitStarted;}))
@@ -629,6 +635,7 @@ export class AutomaticListingService {
       }
       row.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
       if(evidenceSha256)row.sourceColorEvidenceSha256=evidenceSha256;
+      assertRepairScope();
       const operationId=this.deps.beginFieldRepair?.(current.id);
       row.repairAttempts++;
       // Grant, evidence and consumed attempt share the durable STARTED checkpoint.
@@ -644,6 +651,7 @@ export class AutomaticListingService {
     }
     if (repair.phase === 'RECHECK_PENDING') {
       if (!this.deps.recheckImage) throw new UserFacingError('现有图片复核服务不可用');
+      assertCurrentPricingForPaid(this.deps.amazon.getDraft(current.id),this.deps.rules());
       current = await this.deps.recheckImage({ draftId: current.id, draftRevision: current.revision, sourceWorkflowId: repair.sourceWorkflowId }, this.controller!.signal);
       row.repair = { ...repair, phase: 'READY', draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);
       this.checkpoint(task, row);

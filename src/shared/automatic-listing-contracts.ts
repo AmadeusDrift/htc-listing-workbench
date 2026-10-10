@@ -10,10 +10,31 @@ export const CATEGORY_FIELD_REPAIR_POLICY_VERSION = 'category-inference/v1' as c
 export const CATEGORY_FIELD_REPAIR_FIELDS = INFERABLE_CATEGORY_FIELDS;
 export type CategoryFieldRepairField = typeof CATEGORY_FIELD_REPAIR_FIELDS[number];
 export interface CategoryFieldRepairGrant { version:typeof CATEGORY_FIELD_REPAIR_POLICY_VERSION; grantedAttempts:1; grantedAt:string; fields:CategoryFieldRepairField[] }
+export type AutomaticOutcomeKind = 'RULE_FILTERED' | 'SYSTEM_REPAIR' | 'NEEDS_INPUT' | 'UNKNOWN' | 'UNCLASSIFIED';
+export interface AutomaticRuleEvidence {
+  kind:'IP_PLAN_BLOCKED'|'IP_IMAGE_BLOCKED'; workflowId:string; resultId:string; callId:string; planResultId:string; candidateId:string|null;
+  contextSha256:string; draftRevision:number; references:{id:string;sha256:string}[]; policyVersion:string; message:string;
+}
+export interface AutomaticListingOutcome {
+  version:1; kind:AutomaticOutcomeKind; code:string; message:string; classifiedAt:string;
+  scope:{mode:'demo'|'live';sellerId:string;marketplaceId:string;productId:string;recipeKey:string;recipeStamp:string;sourceStamp:string;rulesStamp:string;ruleRevision:number};
+  draftId:string|null; draftRevision:number|null;
+  pricingReport?:import('./listing-rules.ts').BusinessRuleReport;
+  image?:AutomaticRuleEvidence;
+}
+export interface AutomaticQueueRow {
+  key:string;productId:string;recipeKey:string;specification:string;sku:string|null;
+  kind:AutomaticOutcomeKind|'PENDING'|'SUBMITTED'|'COMPLETED';eligible:boolean;message:string;reconsideration:string|null;taskId:string|null;
+}
+export interface AutomaticListingQueue {
+  targetId:string; scope:{mode:'demo'|'live';sellerId:string;marketplaceId:string};ruleRevision:number;
+  products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
+}
 export interface AutomaticListingItem {
   key: string; productId: string; productRevision: number; sourceStamp: string; productTitle: string;
   variantId: string; sku: string; stockSets: number; sourcesPrepared: boolean;
-  status: 'PENDING' | 'RUNNING' | 'WAITING' | 'DONE' | 'FAILED';
+  status: 'PENDING' | 'RUNNING' | 'WAITING' | 'DONE' | 'FAILED' | 'SCREENED';
+  outcome?:AutomaticListingOutcome;
   stage: AutomaticListingStage; draftId: string | null; executionTaskIds: string[];
   imageStarted: boolean; imageAttempts: number; repairAttempts: number;
   repairPolicyVersion?: typeof FIELD_REPAIR_POLICY_VERSION;
@@ -42,6 +63,7 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
+  getAutomaticListingQueue(input:{productIds:string[];targetId:string}):Promise<AutomaticListingQueue>;
   startAutomaticListing(input: StartAutomaticListingInput): Promise<AutomaticListingTask | null>;
   listAutomaticListingTasks(): Promise<AutomaticListingTask[]>;
   getAutomaticListingTask(id: string): Promise<AutomaticListingTask>;

@@ -120,6 +120,28 @@ test('copy review switch skips independent copy review while preserving main tex
     const db=openDatabase(f.root);try{assert.equal(approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id))?.length,7);restarted.saveCopyReviewSettings({enabled:true});assert.throws(()=>approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),/文案/);}finally{db.close();}
   }finally{await restarted.close();}
 });
+
+for(const mode of ['plan','generated','uncertain','service-error'] as const)test(`read-only filtering proof requires successful exact BLOCKED evidence: ${mode}`,async t=>{
+  const f=await fixture(t,{ipVerdict:mode==='plan'?'BLOCKED':mode==='uncertain'?'UNCERTAIN':'PASS',generatedRisk:mode==='generated',riskFailure:mode==='service-error'});
+  const calls=new Map<string,AiCall>();
+  const seal=(result:AiResult,context:ProductImageContext,providerId:any)=>{
+    Object.assign(result,{providerId,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,model:'fixture',createdAt:new Date().toISOString(),imageContext:structuredClone(context),sourceSha256:listingFingerprint(context)});
+    calls.set(result.callId,{id:result.callId,providerId,productId:result.productId,productRevision:result.productRevision,model:result.model,status:'SUCCEEDED',finishedAt:result.createdAt} as AiCall);return result;
+  };
+  const plan=f.ai.imagePlan,risk=f.ai.reviewGeneratedImageRisk;
+  f.ai.imagePlan=async context=>seal(await plan(context),context,'deepseek');
+  f.ai.reviewGeneratedImageRisk=async(context,plan,candidate)=>seal(await risk(context,plan,candidate),context as ProductImageContext,'aliyun-image-risk');
+  (f.ai as any).getCall=(id:string)=>calls.get(id);
+  const runResult=await f.run();assert.ok(runResult.workflow.setPlanResultId,runResult.workflow.error??'set plan missing');const before=[...f.calls],proof=await (f.service as any).getRuleFilterEvidence(f.draft.id);
+  assert.equal(Boolean(proof),mode==='plan'||mode==='generated');assert.deepEqual(f.calls,before,'proof never sends a provider call');
+  if(proof){
+    assert.equal(proof.kind,mode==='plan'?'IP_PLAN_BLOCKED':'IP_IMAGE_BLOCKED');
+    const call=calls.get(proof.callId)!;call.status='FAILED';assert.equal(await (f.service as any).getRuleFilterEvidence(f.draft.id),null);call.status='SUCCEEDED';
+    f.service.saveRiskSettings({enabled:false});assert.equal(await (f.service as any).getRuleFilterEvidence(f.draft.id),null);f.service.saveRiskSettings({enabled:true});
+    const asset=f.store.getAssetRecord(f.product.assets[0].id)!;await writeFile(join(f.root,asset.originalPath),Buffer.from('changed bytes'));
+    assert.equal(await (f.service as any).getRuleFilterEvidence(f.draft.id),null,'same metadata cannot preserve a screen after reference bytes change');
+  }
+});
 test('disabling copy review resumes a draft whose two current-copy repairs were exhausted',async t=>{
   const f=await fixture(t),original=f.listing.reviewCurrentForImages;
   f.listing.reviewCurrentForImages=async()=>{const copy=await original();(copy.review.output as any).verdict='NEEDS_CHANGES';return copy;};

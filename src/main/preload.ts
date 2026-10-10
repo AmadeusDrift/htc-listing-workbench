@@ -13,6 +13,7 @@ const api: RedApi = {
   previewSkuNaming: input => invoke('red:sku-naming:preview', input),
   startAutomaticListing: input => invoke('red:automatic-listing:start', input),
   listAutomaticListingTasks: () => invoke('red:automatic-listing:list'),
+  getAutomaticListingQueue: input => invoke('red:automatic-listing:queue',input),
   getAutomaticListingTask: id => invoke('red:automatic-listing:get', id),
   resumeAutomaticListingTask: id => invoke('red:automatic-listing:resume', id),
   pauseAutomaticListingTask: id => invoke('red:automatic-listing:pause', id),

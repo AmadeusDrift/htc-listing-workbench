@@ -15,7 +15,7 @@ const OPTIONAL_REVIEW_POLICY = 'haul-us-copy-2026-10-07-v2';
 function exactKeys(raw: unknown, names: string[]): boolean {
   return !!raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).sort().join() === [...names].sort().join();
 }
-function assertPricingDecision(report: BusinessRuleReport, draft: AmazonDraft): void {
+export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonDraft): void {
   if (!Object.hasOwn(report, 'pricingDecision')) return;
   const invalid = (): never => { throw new UserFacingError('商品规则快照的定价原因或输入证据无效'); };
   const d = report.pricingDecision;
@@ -83,7 +83,7 @@ function assertPricingDecision(report: BusinessRuleReport, draft: AmazonDraft): 
     }
   } else invalid();
 }
-function assertBusinessRules(draft: AmazonDraft): void {
+export function assertBusinessRules(draft: AmazonDraft): void {
   const report = draft.businessRules; if (report === undefined) return;
   const invalid = (): never => { throw new UserFacingError('商品规则快照的字段或报价格式无效'); };
   const boundedText = (value: unknown) => typeof value === 'string' && !!value.trim() && value.length <= 4000 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);

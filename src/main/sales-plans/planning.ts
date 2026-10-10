@@ -9,13 +9,17 @@ import { buildSalesRecipes } from './recipes.ts';
 import { confirmedPurchaseCurrency } from '../amazon/business-currency.ts';
 
 export const salesStoreScope=(target:Pick<AmazonTarget,'mode'|'sellerId'>)=>JSON.stringify([target.mode,target.sellerId]);
+/** Preview uses the exact currency and recipe rules without allocating a SKU. */
+export function previewSalesRecipes(product:ProductDetail,receipt:MiaoshouReceipt|null,rules:ListingRules){
+  const currency=confirmedPurchaseCurrency(product.facts,!!receipt?.snapshot.sources.some(s=>s.source==='1688')||receipt?.mapping.currency==='CNY');
+  return buildSalesRecipes(currency.cny?product:{...product,variants:product.variants.map(v=>({...v,purchasePrice:''}))},currency.cny?receipt:null,rules);
+}
 export function planSalesListings(product:ProductDetail,receipt:MiaoshouReceipt|null,target:AmazonTarget,rules:ListingRules,naming:SkuNamingService):SalesListingPlan[] {
   const settings=naming.getSettings(),binding=settings.bindings.find(b=>b.targetId===target.id);
   const inferred=target.name.match(/(?:^|[^a-z0-9])(U[268])(?:$|[^a-z0-9])/i)?.[1].toUpperCase();
   const storeCode=binding?.storeCode??rules.product.targetShops[target.id]??inferred??(target.mode==='demo'?'U2':null);
   if(!storeCode) throw new UserFacingError('请在设置 → SKU 命名中绑定当前店铺编号，之后自动任务会沿用此模板');
-  const currency=confirmedPurchaseCurrency(product.facts,!!receipt?.snapshot.sources.some(s=>s.source==='1688')||receipt?.mapping.currency==='CNY');
-  const recipes=buildSalesRecipes(currency.cny?product:{...product,variants:product.variants.map(v=>({...v,purchasePrice:''}))},currency.cny?receipt:null,rules);
+  const recipes=previewSalesRecipes(product,receipt,rules);
   const source=receipt?.snapshot.sources.find(s=>s.source==='1688'&&s.sourceItemId);
   const sourceId=source?`1688:${source.sourceItemId}`:receipt?`miaoshou:${receipt.accountScope}:${receipt.snapshot.remoteId}`:`local:${product.id}`;
   const grouped=new Map<string,typeof recipes>(),result:SalesListingPlan[]=[];

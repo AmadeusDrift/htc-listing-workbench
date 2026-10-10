@@ -55,6 +55,17 @@
 - `tests/listing-ai-history.test.ts` 的 `versioned pricing decisions preserve confirmed evidence and reject false reliable outcomes`、`pricing history checks claimed package scope against the persisted sales recipe`、`a v2 unreviewed adoption and business-rule snapshot survive encrypted backup restore`：新证据严格校验、旧记录兼容与隔离加密备份恢复。
 - `tests/deferred-image-fields.test.ts` 的 `pricing blocking display prefers structured causes over legacy notice wording`：显示原因由固定代码决定；旧文字不升级为可信筛选依据。实际任务和队列分流仍待下一分支验收。
 
+## 修复增量：结果分类与待上架队列
+
+`fix/listing-outcome-classification` 增加场景 4、23、24、25、27、31、32、33 的离线证据，类型仍为 S/L；完整命令和最终结果见 `docs/maintenance/2026-10-10-上架结果分类与待上架队列.md`。这些反例不代替下文 G2/G3 的真实服务组合边界。
+
+- `tests/automatic-listing.test.ts`：`confirmed pricing rejection is terminal and excluded only in the same target queue`、`per-recipe queue leaves a mixed recipe and healthy single when only one source single is screened`，覆盖可信拒绝、当前店铺范围、混合/单独销售配方隔离、失效重新评估及持久化；原始商品和历史保留。
+- 同文件的 `pricing text without typed evidence remains unclassified and retained`、`pricing classification retains … without a paid retry` 系列、`legacy unresolved single sale remains check-only when pure sales recipe planning is enabled`、`an unlinked child submit intent takes precedence over a confirmed pricing rejection`：默认/缺失/陈旧资料不升级为可靠拒绝；新旧未知请求及未关联子任务意图不允许重复创建或付费重试。已提交与完成另有独立断言，不能计成 UNKNOWN。
+- `source failure … retains its classification across restart` 与 `tests/automatic-image-sources.test.ts` 的来源准备测试：来源生产者的固定原因贯通消费者与重启；下载/映射链路故障为系统待修复，缺链接/未确认绑定为待补资料，旧无原因码结果保守保留。
+- `readback pause/cancel during outcome proof stops sibling work` 的普通/父体恢复四个组合：分类等待期间撤销任务权限后不再增加兄弟规格备货、标签或提交，也不将暂停/取消状态改回排队。该测试使用边界替身，不代表真实独立回读与标签服务的 G3 已全部验证。
+- `tests/image-workflow-service.test.ts`：`read-only filtering proof requires successful exact BLOCKED evidence: …` 四种模式，核对规划/生成图明确拒绝；不以 UNCERTAIN 或服务异常淘汰，实际参考图字节、开关或关联证据变化使证明失效。`tests/automatic-documents-backup.test.ts` 补充 SCREENED 的加密备份恢复。
+- `scripts/e2e-automatic-listing-ui.mjs`：目标范围、部分/全部淘汰、待修复原因、销售配方计数、原因搜索和清除恢复。`scripts/e2e-automatic-pipeline.mjs`：真实本地 FTP 加演示提交/回读，图片服务为边界替身，真实 Amazon 与 AI 请求被禁止；不属于真实上架验收。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）**：固定 SKU/身份、来源像素及 hash、颜色事实和已完成/未完成七图，仅改变字段目录描述、推断权限或规则元数据。使用真实 `ListingAiService.currentContext` 接入 `ImageWorkflowService`，断言旧图不被归类为颜色变化、不重发既有付费请求，历史快照不被覆盖；另分别改变颜色事实、来源字节、身份，必须拒绝旧结果。源码线索：`src/main/image-workflow/service.ts` 的 `currentContextMatches` 比较整份图片 listing context，`runSeven` 对不匹配统一报“来源颜色证据已变化”。静态阅读是风险线索，尚非运行复现。

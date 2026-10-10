@@ -37,6 +37,8 @@ import { imageApprovalDraftSnapshot, assertApprovalReuseSource, compatibleApprov
 import { readImageRiskSettings, writeImageRiskSettings, riskPolicyCompatible } from './risk-settings.ts';
 import { readCopyReviewSettings, writeCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-ai/review-settings.ts';
 import { hasRecordedRecheckDraft } from './recheck-evidence.ts';
+import type { AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
+import type { AiResult } from '../../shared/ai-contracts.ts';
 
 type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'repairCurrentForImages'|'snapshotCurrentForImages'>> & {
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
@@ -133,6 +135,66 @@ export class ImageWorkflowService {
     return structuredClone(run);
   }
   getProgress(rawId: unknown): ImageWorkflowRun | null { this.ensureOpen(); return workflowRuns(this.db, uuid(rawId))[0] ?? null; }
+  /** Local, bounded proof. A workflow status alone is never a rule rejection. */
+  async getRuleFilterEvidence(rawId:string):Promise<AutomaticRuleEvidence|null> {
+    this.ensureOpen();const draftId=uuid(rawId);
+    try{
+      if(this.active.has(draftId)||!this.getRiskSettings().enabled)return null;
+      const draft=this.amazon.getDraft(draftId),run=this.getProgress(draftId),base=run?.imageContext;
+      if(!run||!base||run.status==='RUNNING'||run.contentPreparation?.state==='STARTED'||run.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts.some(a=>['UNKNOWN','GENERATING'].includes(a.state)))
+        ||run.riskInterceptionEnabled===false||run.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||!this.isRiskPolicyCompatible(run)||draft.submittedAt||!['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)
+        ||run.draftId!==draft.id||run.productId!==draft.productId||run.productRevision!==draft.productRevision||run.variantId!==draft.variantId||run.sku!==draft.sku
+        ||base.listing.draftRevision!==draft.revision||run.draftSha256!==imageWorkflowDraftStamp(draft)||!compatibleApprovalRecipe(run,draft.salesPlan?.recipe??null)||!this.currentContextMatches(run,draft))return null;
+      const product=this.store.getProduct(draft.productId),target=this.amazon.executionTargetScope(draft.targetId);
+      if(product.revision!==run.productRevision||!target.target.configured||target.target.paused||target.generation!==base.listing.targetGeneration
+        ||base.listing.targetId!==draft.targetId||base.listing.marketplaceId!==draft.marketplaceId
+        ||listingFingerprint(imageRiskSourceSnapshot(product,draft.variantId))!==listingFingerprint(base.ipSource)
+        ||listingFingerprint(currentSourceImageMeasurements(this.db,draft))!==listingFingerprint(base.sourceMeasurements??[]))return null;
+      const confirmed=(id:string,variant:string)=>!!this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(id,variant);
+      const saved=this.db.prepare("SELECT record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? LIMIT 1001").all(product.id);
+      if(saved.length>1000)return null;
+      const derived=new Set(saved.map(value=>validateImageWorkflowRun(JSON.parse(String(value.record_json)))).flatMap(value=>value.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(value.approvedAssetId?[value.approvedAssetId]:[])));
+      const variants=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])];
+      const refs=selectImageReferences(product,draft.variantId,derived,confirmed,allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)),variants,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
+      const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
+      if(listingFingerprint(references)!==listingFingerprint(run.referenceAssets)||listingFingerprint(variants)!==listingFingerprint(base.sourceVariantIds??[draft.variantId]))return null;
+      const successful=(result:AiResult|undefined,context:ProductImageContext)=>{
+        const call=result&&this.ai.getCall(result.callId);
+        return !!result&&!!call&&call.id===result.callId&&call.status==='SUCCEEDED'&&call.productId===result.productId&&call.productRevision===result.productRevision
+          &&call.providerId===result.providerId&&call.model===result.model&&call.finishedAt===result.createdAt
+          &&result.productId===run.productId&&result.productRevision===run.productRevision&&result.variantId===run.variantId
+          &&result.createdAt>=run.createdAt&&result.createdAt<=run.updatedAt&&result.sourceSha256===listingFingerprint(context)&&listingFingerprint(result.imageContext)===listingFingerprint(context);
+      };
+      let proof:AutomaticRuleEvidence|null=null;
+      const resultProof=(result:AiResult,context:ProductImageContext,planResultId:string,candidateId:string|null,message:string):AutomaticRuleEvidence=>({kind:candidateId?'IP_IMAGE_BLOCKED':'IP_PLAN_BLOCKED',workflowId:run.id,resultId:result.id,callId:result.callId,planResultId,candidateId,contextSha256:listingFingerprint(context),draftRevision:draft.revision,references,policyVersion:PRODUCT_IMAGE_POLICY_VERSION,message:message.slice(0,2000)});
+      const planProof=(id:string|undefined,context:ProductImageContext)=>{
+        const plan=id?this.ai.getResult(id):undefined;
+        if(!successful(plan,context)||plan?.output.kind!=='image-plan'||plan.output.ipRisk?.verdict!=='BLOCKED')return null;
+        assertImagePlan(plan.output,context);
+        return resultProof(plan,context,plan.id,null,'来源图片触发已启用的 IP 风险规则：'+plan.output.ipRisk.findings.map(f=>f.name+'：'+f.evidence).join('；'));
+      };
+      proof=planProof(run.setPlanResultId,base);
+      for(const slot of run.slots??[]){
+        if(proof)break;
+        const attempt=slot.attempts.at(-1);if(!attempt)continue;
+        const context=validateProductImageContext({...base,...(run.setPlan?{setPlan:run.setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}});
+        if(slot.contextSha256!==listingFingerprint(context))continue;
+        proof=planProof(attempt.planResultId??undefined,context);if(proof)break;
+        const plan=attempt.planResultId?this.ai.getResult(attempt.planResultId):undefined,ip=attempt.ipReviewResultId?this.ai.getResult(attempt.ipReviewResultId):undefined;
+        if(!successful(plan,context)||plan?.output.kind!=='image-plan'||!successful(ip,context)||ip?.output.kind!=='image-ip-review'||ip.output.verdict!=='BLOCKED'
+          ||ip.output.planResultId!==plan.id||ip.output.candidate.id!==attempt.candidateId||!attempt.candidateId)continue;
+        const local=await this.generation.readCandidate(attempt.candidateId),candidate=local.candidate;
+        if(candidate.id!==attempt.candidateId||candidate.productId!==run.productId||candidate.productRevision!==run.productRevision||candidate.mode!=='edit'||listingFingerprint(candidate.sourceAssets)!==listingFingerprint(references)
+          ||digest(local.bytes)!==candidate.sha256||listingFingerprint({id:candidate.id,sha256:candidate.sha256,width:candidate.width,height:candidate.height})!==listingFingerprint(ip.output.candidate))continue;
+        proof=resultProof(ip,context,plan.id,candidate.id,'生成图片触发已启用的 IP 风险规则：'+ip.output.labels.map(label=>label.description||label.label).join('；'));
+      }
+      if(!proof)return null;
+      for(const ref of references){const asset=this.store.getAssetRecord(ref.id);if(!asset||asset.productId!==product.id||asset.sha256!==ref.sha256)return null;await readManagedImage(this.directory,asset,new AbortController().signal);}
+      if(!this.getRiskSettings().enabled||this.active.has(draftId)||listingFingerprint(this.getProgress(draftId))!==listingFingerprint(run)||listingFingerprint(this.amazon.getDraft(draftId))!==listingFingerprint(draft)
+        ||listingFingerprint(this.store.getProduct(product.id))!==listingFingerprint(product)||listingFingerprint(this.amazon.executionTargetScope(draft.targetId))!==listingFingerprint(target))return null;
+      return proof;
+    }catch{return null;}
+  }
   cancel(rawId: unknown): { cancelled: boolean } { this.ensureOpen(); const current = this.active.get(uuid(rawId)); current?.controller.abort(new AiError('CANCELLED')); return { cancelled: Boolean(current) }; }
   cancelSources(rawId: unknown): { cancelled: boolean } { this.ensureOpen(); const current=this.activeSources.get(uuid(rawId));current?.controller.abort(new AiError('CANCELLED'));return {cancelled:Boolean(current)}; }
   cancelAll(): void { for (const operation of [...this.active.values(),...this.activeSources.values()]) operation.controller.abort(new AiError('CANCELLED')); }

@@ -63,6 +63,7 @@ test('unmapped SKU is blocked without borrowing another color, while the mapped 
   const f=await fixture(t,{unmapped:true}),result=await f.run();
   assert.deepEqual(result.missing.map(x=>x.variantId),[f.product.variants[0].id]);assert.equal(f.downloads.length,1);assert.ok(f.downloads[0].endsWith('/blue.png'));
   assert.match(result.missing[0].message,/商品有来源图片.*SKU.*映射为空/);
+  assert.equal(result.missing[0].code,'SOURCE_BINDING_UNCONFIRMED');
   await assert.rejects(f.run([randomUUID()]));assert.equal(f.downloads.length,1);
 });
 
@@ -79,13 +80,18 @@ test('an unmapped SKU recovers only after its source photo is explicitly bound b
 test('source diagnostics distinguish absent links, invalid IDs, download failure and unconfirmed binding',async t=>{
   const absent=await fixture(t);absent.receipt.snapshot.images=[];
   const noLinks=await absent.run([absent.product.variants[0].id]);assert.match(noLinks.missing[0].message,/没有.*来源图片链接/);assert.equal(absent.downloads.length,0);
+  assert.equal(noLinks.missing[0].code,'SOURCE_LINKS_MISSING');
+  const lost=await fixture(t);lost.receipt.skuMappings.shift();const lostMapping=await lost.run([lost.product.variants[0].id]);assert.equal(lostMapping.missing[0].code,'SOURCE_MAPPING_MISSING');
   const invalid=await fixture(t);invalid.receipt.skuMappings[0].imageIds=['missing-id'];
   const invalidIds=await invalid.run([invalid.product.variants[0].id]);assert.match(invalidIds.missing[0].message,/映射.*ID.*无效/);assert.equal(invalid.downloads.length,0);
+  assert.equal(invalidIds.missing[0].code,'SOURCE_MAPPING_INVALID');
   const failed=await fixture(t,{fallback:true});failed.receipt.skuMappings[0].imageIds=['red'];
   const failedDownload=await failed.run([failed.product.variants[0].id]);assert.match(failedDownload.missing[0].message,/来源图片下载失败/);assert.equal(failed.downloads.length,1);
+  assert.equal(failedDownload.missing[0].code,'SOURCE_DOWNLOAD_FAILED');
   const unconfirmed=await fixture(t);await unconfirmed.run([unconfirmed.product.variants[0].id]);
   unconfirmed.db.prepare('UPDATE variant_assets SET confirmed=0 WHERE variant_id=?').run(unconfirmed.product.variants[0].id);
   const unbound=await unconfirmed.run([unconfirmed.product.variants[0].id]);assert.match(unbound.missing[0].message,/绑定.*未确认/);
+  assert.equal(unbound.missing[0].code,'SOURCE_BINDING_UNCONFIRMED');
   assert.equal(unbound.product.assets.length,1);
   assert.equal(unconfirmed.db.prepare('SELECT confirmed FROM variant_assets WHERE variant_id=?').get(unconfirmed.product.variants[0].id)!.confirmed,0,'an existing unconfirmed binding is not silently confirmed');
 });

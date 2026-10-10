@@ -46,6 +46,15 @@
 | 34 | 发布制品哈希与有界真实观察 | 没有对应的专门测试名；`scripts/package.mjs` 将文件 SHA-256 写入 `版本与摘要.json`，属构建逻辑，不是验收结果 | **缺口**。未验证本次隔离制品与源码提交绑定、交付文件摘要复核及获批后的有界真实样本；本次不启动真实观察。 |
 | 35 | 暂停任务与独立回读调度组合和重启 | `tests/followup.test.ts`：`maintenance pause cancels timers and prevents manual due runs until resume`；`restart preserves the remaining delay and resumes readback without any submission API`；`tests/automatic-listing.test.ts`：`pause during images revokes later publishing, and explicit resume reuses completed images` | **缺口；相关证据 S+L**。分别测试独立回读维护暂停、回读重启和自动任务暂停，未同时实例化两套服务验证任务暂停对已排期回读的协议及重启结果。见 G3。 |
 
+## 修复增量：定价原因与证据
+
+`fix/pricing-decision-evidence` 为场景 4、13、33 增加结构化归因的离线证据，未完成队列筛选或真实报价验收。类型仍为 S/H/L，运行结果见 `docs/maintenance/2026-10-10-定价原因与证据.md`。
+
+- `tests/amazon-business-rules.test.ts` 的 `pricing decisions distinguish confirmed ROI rejection from default and unverified package attempts`、`blocked quantity facts and sales-recipe count mismatches cannot prove business rejection`、`present malformed or ambiguous item counts stay unconfirmed instead of inheriting one piece`：可靠规则失败与默认、未确认、冲突、错误件数分开，重复计算不提升默认依据可信程度。
+- 同文件 `bundle or mixed-sale package measurements need explicit matching scope`、`overlapping quantity failures preserve generated history consistency and cause precedence`、`quantity diagnostics tolerate unit-count-only schemas without requiring number-of-items`：整套包装范围、多个数量问题同时存在、仅支持 unit_count 的类目兼容性。
+- `tests/listing-ai-history.test.ts` 的 `versioned pricing decisions preserve confirmed evidence and reject false reliable outcomes`、`pricing history checks claimed package scope against the persisted sales recipe`、`a v2 unreviewed adoption and business-rule snapshot survive encrypted backup restore`：新证据严格校验、旧记录兼容与隔离加密备份恢复。
+- `tests/deferred-image-fields.test.ts` 的 `pricing blocking display prefers structured causes over legacy notice wording`：显示原因由固定代码决定；旧文字不升级为可信筛选依据。实际任务和队列分流仍待下一分支验收。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）**：固定 SKU/身份、来源像素及 hash、颜色事实和已完成/未完成七图，仅改变字段目录描述、推断权限或规则元数据。使用真实 `ListingAiService.currentContext` 接入 `ImageWorkflowService`，断言旧图不被归类为颜色变化、不重发既有付费请求，历史快照不被覆盖；另分别改变颜色事实、来源字节、身份，必须拒绝旧结果。源码线索：`src/main/image-workflow/service.ts` 的 `currentContextMatches` 比较整份图片 listing context，`runSeven` 对不匹配统一报“来源颜色证据已变化”。静态阅读是风险线索，尚非运行复现。

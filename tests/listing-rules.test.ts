@@ -23,6 +23,24 @@ test('all delivery thresholds, fees, divisor, costs and ROI influence pricing; i
   assert.throws(() => quoteListing(input, rules.pricing), /抛重/);
   assert.throws(() => quoteListing({ ...input, costCny: 999 }, defaultListingRules().pricing), /售价上限/);
 });
+
+test('quote failures expose stable typed causes while retaining their existing messages', () => {
+  const input = { costCny: 2.4, dimensionsInches: [1,1,1] as [number,number,number], weightPounds: .2 };
+  const pricing = defaultListingRules().pricing;
+  for (const [changedInput, changedRules, code, message] of [
+    [{ ...input, costCny: 0 }, pricing, 'QUOTE_INVALID_INPUT', /有效采购成本/],
+    [input, { ...pricing, maxDimensionalWeightGrams: 1 }, 'DIMENSIONAL_WEIGHT_LIMIT', /抛重/],
+    [{ ...input, costCny: 999 }, pricing, 'ROI_MAX_PRICE', /售价上限内/],
+    [input, { ...pricing, margin: 10 }, 'ROI_PROMOTION_OR_MARGIN', /加价或促销/],
+  ] as const) {
+    assert.throws(() => quoteListing(changedInput, changedRules), error => {
+      assert.equal((error as Error).name, 'ListingQuoteError');
+      assert.equal((error as any).code, code);
+      assert.match((error as Error).message, message);
+      return true;
+    });
+  }
+});
 test('invalid numbers, unordered tiers and unknown configuration keys cannot enter saved rules', () => {
   const rules = defaultListingRules();
   assert.throws(() => parseListingRules({ ...rules, unsupported: true }));

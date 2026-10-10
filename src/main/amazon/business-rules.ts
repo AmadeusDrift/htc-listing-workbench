@@ -1,7 +1,7 @@
 import type { AmazonSchema, AmazonTarget, JsonObject, JsonValue, SourceFieldMapping } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
-import { bundleQuantity, promotionSchedule, quoteListing } from '../../shared/listing-rules.ts';
-import type { BusinessRuleReport, ListingRules } from '../../shared/listing-rules.ts';
+import { bundleQuantity, ListingQuoteError, promotionSchedule, quoteListing } from '../../shared/listing-rules.ts';
+import type { BusinessRuleReport, ListingRules, PackageInputBasis, PricingDecision, PricingDecisionCode, PricingPackageInputs } from '../../shared/listing-rules.ts';
 import { isObject } from './context.ts';
 import { resolveSchemaNode } from './field-catalog.ts';
 import { convertMeasurement, DIMENSION_FIELDS, mapMeasurementFields, validateFieldValues, wrapCandidateValues } from './field-mapping.ts';
@@ -14,6 +14,8 @@ export interface BusinessRuleInput {
   measurements: ConfirmedMeasurements; costCny: number | null; now: Date;
   previousBusinessReport?: BusinessRuleReport;
   saleUnit?: { totalPieces:number; totalCostCny:number|null };
+  /** Supplied by the sales recipe boundary; component packages do not prove a mixed/bundled package. */
+  packageMatchesSaleUnit?: boolean;
   baseSku?: string;
 }
 
@@ -102,6 +104,21 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   }
 
   const { measurements, blocked } = effectiveSourceMeasurements(product, input.measurements);
+  // Capture source evidence before draft values or business fallbacks can overwrite it.
+  const sourceMapped = mapMeasurementFields(schema, target.marketplaceId, measurements).attributes;
+  const sourceBlocked = { ...blocked };
+  const packageInputs = (record: JsonObject): PricingPackageInputs => {
+    const entry = (field: string) => Array.isArray(record[field]) && isObject(record[field][0]) ? record[field][0] : null;
+    const converted = (value: JsonValue | undefined, kind: 'length' | 'weight'): number | null => {
+      if (!isObject(value)) return null;
+      const result = convertMeasurement(value.value, value.unit, kind);
+      return result.status === 'mapped' ? result.value : null;
+    };
+    const dimensions = entry('item_package_dimensions');
+    const axes = ['length','width','height'].map(axis => converted(dimensions?.[axis], 'length'));
+    return { dimensionsInches: axes.every(value => value !== null) ? axes as [number,number,number] : null, weightPounds: converted(entry('item_package_weight') ?? undefined, 'weight') };
+  };
+  const sourcePackage = packageInputs(sourceMapped);
   const scopeFallback = new Set<string>();
   const scopeConflict = new Set<string>();
   for (const fact of product.facts) if (fact.state === 'conflicting' && /尺寸|长|宽|高|重量|weight|length|width|height|dimension/i.test(fact.name)) scopeConflict.add(/包装|package/i.test(fact.name) ? 'package' : 'item');
@@ -153,6 +170,17 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const existingCount = typeof itemCount === 'number' && Number.isSafeInteger(itemCount) && itemCount > 0 ? itemCount : null;
   const hasCount = Object.hasOwn(attributes, 'unit_count') || Object.hasOwn(attributes, 'number_of_items') || blocked.unitCount !== undefined || explicitFields.has('number_of_items');
   const sourceUnits = input.saleUnit ? sourceQuantity(`${input.saleUnit.totalPieces} pc`) : productSourceQuantity(product,variant);
+  const quantityFacts = product.variants.length === 1 ? product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === 'number_of_items'
+    && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state)) : [];
+  const quantityFactValues = quantityFacts.map(fact => Object.hasOwn(properties, 'number_of_items')
+    ? sourceFactValue(schema, 'number_of_items', fact.value.trim()) : fact.value.trim());
+  // A blocked count cannot be promoted by the quantity parser's default 1 pc.
+  // unit_count itself may describe another unit; compare piece counts only via number_of_items.
+  const quantityUnconfirmed = sourceBlocked.unitCount !== undefined
+    || Object.hasOwn(attributes, 'number_of_items') && (existingCount === null || !Array.isArray(attributes.number_of_items) || attributes.number_of_items.length !== 1)
+    || quantityFacts.some(fact => fact.state === 'conflicting') || new Set(quantityFactValues.map(value => JSON.stringify(value))).size > 1
+    || quantityFactValues.some(value => typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)
+    || input.saleUnit !== undefined && existingCount !== null && existingCount !== input.saleUnit.totalPieces;
   const hasPackClaim = sourceUnits.source === 'explicit' || /随机|咨询|补差/iu.test(variant.originalSpec);
   report.bundleQuantity = existingCount ?? (sourceUnits.conflict ? 1 : sourceUnits.piecesPerPack);
   const previousReport = input.previousBusinessReport, previousBasis = previousReport?.pricingBasis;
@@ -182,25 +210,52 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const countChanged = autoQuantity !== null && ['number_of_items', 'unit_count'].some(field => Object.hasOwn(attributes, field) && first(field)?.value !== autoQuantity);
   if (autoQuantity !== null && !countChanged) report.bundleQuantity = autoQuantity;
   if (legacyQuantity !== null && (countChanged || legacyConflict)) report.bundleQuantity = legacyQuantity;
-  if (!Number.isFinite(input.costCny) || input.costCny === null || input.costCny <= 0) note('采购成本或人民币币种尚未确认，未计算销售报价');
-  else if (target.marketplaceId !== 'ATVPDKIKX0DER') note('定价规则以美元计价，仅用于已确认的美国站');
+  const currentPackage = packageInputs(attributes);
+  const packageBasis = (kind: 'dimensions' | 'weight'): PackageInputBasis => {
+    const key = kind === 'dimensions' ? 'dimensionsInches' : 'weightPounds', value = currentPackage[key];
+    const conflicts = product.facts.some(fact => fact.state === 'conflicting' && /包装|package/i.test(fact.name)
+      && (kind === 'weight' ? /重量|weight/i : /尺寸|长|宽|高|深|length|width|height|depth|dimension/i).test(fact.name));
+    if (conflicts) return 'conflicting';
+    if (value === null) return 'missing';
+    const blockedSource = Object.keys(sourceBlocked).some(name => name.startsWith('package.') && (kind === 'weight' ? name === 'package.weight' : name !== 'package.weight'));
+    if (!blockedSource && sourcePackage[key] !== null && JSON.stringify(sourcePackage[key]) === JSON.stringify(value)) return 'confirmed_source';
+    const previous = previousReport?.pricingDecision;
+    const inheritedDefault = previous?.version === 1 && previous.evidence?.[kind] === 'business_default'
+      && JSON.stringify(previous.inputs?.[key]) === JSON.stringify(value);
+    if (scopeFallback.has(kind === 'weight' ? 'weight' : 'package') || inheritedDefault) return 'business_default';
+    return 'unverified';
+  };
+  const costCny = input.costCny !== null && Number.isFinite(input.costCny) && input.costCny > 0 ? input.costCny : null;
+  const decision: PricingDecision = {
+    version: 1, status: 'needs_input', code: 'COST_CNY_UNCONFIRMED', quoteError: null,
+    inputs: { costCny, ...currentPackage },
+    evidence: { cost: costCny !== null ? 'confirmed_cny' : 'unconfirmed', dimensions: packageBasis('dimensions'), weight: packageBasis('weight'),
+      packageScope: 'unconfirmed', saleUnit: legacyConflict ? 'conflicting' : countChanged ? 'unconfirmed' : sourceUnits.conflict ? 'conflicting' : quantityUnconfirmed ? 'unconfirmed' : 'confirmed', sourcePackage },
+  };
+  report.pricingDecision = decision;
+  const needInput = (code: PricingDecisionCode, message: string) => { decision.code = code; decision.status = 'needs_input'; note(message); };
+  if (costCny === null) needInput('COST_CNY_UNCONFIRMED', '采购成本或人民币币种尚未确认，未计算销售报价');
+  else if (target.marketplaceId !== 'ATVPDKIKX0DER') needInput('MARKETPLACE_UNSUPPORTED', '定价规则以美元计价，仅用于已确认的美国站');
   else {
-    const dimensions = first('item_package_dimensions'), weight = first('item_package_weight');
-    const converted = (value: JsonValue | undefined, kind: 'length' | 'weight'): number | null => { if (!isObject(value)) return null; const result = convertMeasurement(value.value, value.unit, kind); return result.status === 'mapped' ? result.value : null; };
-    const axes = ['length','width','height'].map(axis => converted(dimensions?.[axis], 'length'));
-    const pounds = converted(weight ?? undefined, 'weight');
-    if (axes.some(value => value === null) || pounds === null) note('缺少可用的完整包装尺寸／重量，未计算销售报价');
+    const axes = currentPackage.dimensionsInches, pounds = currentPackage.weightPounds;
+    if (axes === null || pounds === null) needInput('PACKAGE_MEASUREMENTS_MISSING', '缺少可用的完整包装尺寸／重量，未计算销售报价');
     else {
       // A selected pack quote already includes its pieces; explicit per-piece quotes do not.
-      if (autoQuantity === null && !previousBasis && !hasCount && !hasPackClaim) report.bundleQuantity = bundleQuantity(input.costCny, product.variants.length, rules.pricing);
+      if (autoQuantity === null && !previousBasis && !hasCount && !hasPackClaim) report.bundleQuantity = bundleQuantity(costCny, product.variants.length, rules.pricing);
+      const automaticBundle = autoQuantity !== null || !previousBasis && !hasCount && !hasPackClaim && report.bundleQuantity > 1;
+      decision.evidence.packageScope = !automaticBundle && !quantityUnconfirmed && input.packageMatchesSaleUnit !== false
+        && (input.saleUnit ? input.packageMatchesSaleUnit === true : report.bundleQuantity === sourceUnits.piecesPerPack) ? 'source_sale_unit' : 'unconfirmed';
       try {
-        if (legacyConflict) throw new Error('旧组套记录的生成件数存在冲突，请先核实每个销售单元的采购成本');
-        if (countChanged) throw new Error('自动组套件数已变更，请先重新核实每个销售单元的采购成本；未沿用单件成本报价');
-        if (sourceUnits.conflict) throw new Error('当前规格包含互相冲突的件数或计价口径，无法计算该销售单元成本');
-        const automaticBundle = autoQuantity !== null || !previousBasis && !hasCount && !hasPackClaim && report.bundleQuantity > 1;
+        const quantityFailure = legacyConflict ? ['LEGACY_QUANTITY_CONFLICT', '旧组套记录的生成件数存在冲突，请先核实每个销售单元的采购成本'] as const
+          : countChanged ? ['SALE_QUANTITY_CHANGED', '自动组套件数已变更，请先重新核实每个销售单元的采购成本；未沿用单件成本报价'] as const
+          : sourceUnits.conflict ? ['SOURCE_QUANTITY_CONFLICT', '当前规格包含互相冲突的件数或计价口径，无法计算该销售单元成本'] as const : null;
+        if (quantityFailure) { needInput(quantityFailure[0], quantityFailure[1]); }
+        else {
         const quantity = automaticBundle ? report.bundleQuantity : sourceUnits.quoteBasis === 'piece' && sourceUnits.source === 'explicit' ? report.bundleQuantity : previousBasis?.quantity ?? 1;
-        report.pricingBasis = { kind: automaticBundle ? 'auto_bundle' : quantity>1 ? 'source_piece_quote' : 'source_sale_unit', sourceCostCny: input.costCny, quantity, saleUnitCostCny: input.costCny * quantity };
-        report.quote = quoteListing({ costCny: report.pricingBasis.saleUnitCostCny, dimensionsInches: axes as [number,number,number], weightPounds: pounds }, rules.pricing);
+        report.pricingBasis = { kind: automaticBundle ? 'auto_bundle' : quantity>1 ? 'source_piece_quote' : 'source_sale_unit', sourceCostCny: costCny, quantity, saleUnitCostCny: costCny * quantity };
+        decision.inputs.costCny = report.pricingBasis.saleUnitCostCny;
+        report.quote = quoteListing({ costCny: report.pricingBasis.saleUnitCostCny, dimensionsInches: axes, weightPounds: pounds }, rules.pricing);
+        decision.status = 'quoted'; decision.code = 'QUOTE_VALID';
         const existing = first('purchasable_offer');
         if (!existing?.our_price) {
           if (attributes.purchasable_offer && (!Array.isArray(attributes.purchasable_offer) || attributes.purchasable_offer.length !== 1 || !existing)) {
@@ -219,7 +274,21 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
           }
           add('purchasable_offer', offer, '按人民币采购成本、包装参数与已保存费表计算；促销单独校验 ROI', true);
         }
-      } catch (error) { note(error instanceof Error ? error.message : '定价规则未得到可用报价'); }
+        }
+      } catch (error) {
+        // A later offer-application problem does not invalidate a successfully calculated quote.
+        if (report.quote === null) {
+          if (error instanceof ListingQuoteError) {
+            decision.quoteError = error.code;
+            if (error.code === 'QUOTE_INVALID_INPUT') { decision.status = 'needs_input'; decision.code = error.code; }
+            else if (quantityUnconfirmed) { decision.status = 'needs_input'; decision.code = 'SOURCE_QUANTITY_UNCONFIRMED'; }
+            else if (decision.evidence.packageScope !== 'source_sale_unit') { decision.status = 'needs_input'; decision.code = 'PACKAGE_SCOPE_UNCONFIRMED'; }
+            else if (decision.evidence.dimensions !== 'confirmed_source' || decision.evidence.weight !== 'confirmed_source') { decision.status = 'needs_input'; decision.code = 'PACKAGE_INPUT_UNCONFIRMED'; }
+            else { decision.status = 'business_blocked'; decision.code = error.code; }
+          } else { decision.status = 'system_error'; decision.code = 'PRICING_SYSTEM_ERROR'; }
+        }
+        note(error instanceof Error ? error.message : '定价规则未得到可用报价');
+      }
     }
   }
   const count = report.bundleQuantity;

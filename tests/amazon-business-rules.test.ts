@@ -10,6 +10,8 @@ import { sourceAttributes } from '../src/main/amazon/demo.ts';
 import type { Fact } from '../src/shared/contracts.ts';
 import { validateAttributes } from '../src/main/amazon/schema.ts';
 import type { JsonObject } from '../src/shared/amazon-contracts.ts';
+import { assertListingHistory } from '../src/main/listing-ai/history.ts';
+import type { AmazonDraft } from '../src/shared/amazon-contracts.ts';
 
 const variant = { id: 'variant', sku: 'HTC-STABLE-SKU', originalSpec: '', normalizedSpec: '', purchasePrice: '2.40', sourcePurchasePrice: '2.40', sourceSpec: '', inventory: null } as Variant;
 const product = { id: 'product', title: '方形硅胶杯垫', description: '', facts: [], variants: [variant] } as unknown as ProductDetail;
@@ -17,6 +19,159 @@ const target = { id: 'target', name: 'U8', marketplaceId: 'ATVPDKIKX0DER', mode:
 function run(extra: Partial<Parameters<typeof applyBusinessRules>[0]> = {}, rules = defaultListingRules()) {
   return applyBusinessRules({ product, variant, schema: realAmazonSchema(), target, attributes: {}, measurements: {}, costCny: 2.4, now: new Date('2026-10-07T02:00:00Z'), ...extra }, rules);
 }
+
+const confirmedPackage = { package: { length: { value: 5, unit: 'cm' }, width: { value: 5, unit: 'cm' }, height: { value: 5, unit: 'cm' }, weight: { value: 100, unit: 'g' } } };
+
+test('pricing decisions distinguish confirmed ROI rejection from default and unverified package attempts', () => {
+  const confirmed = run({ costCny: 999, measurements: confirmedPackage }).report;
+  assert.equal(confirmed.pricingDecision?.status, 'business_blocked');
+  assert.equal(confirmed.pricingDecision?.code, 'ROI_MAX_PRICE');
+  assert.deepEqual(confirmed.pricingDecision?.inputs, { costCny: 999, dimensionsInches: [1.97,1.97,1.97], weightPounds: .22 });
+  assert.equal(confirmed.pricingDecision?.evidence.dimensions, 'confirmed_source');
+  const defaults = run({ costCny: 999 });
+  assert.equal(defaults.report.pricingDecision?.status, 'needs_input');
+  assert.equal(defaults.report.pricingDecision?.code, 'PACKAGE_INPUT_UNCONFIRMED');
+  assert.equal(defaults.report.pricingDecision?.quoteError, 'ROI_MAX_PRICE');
+  const repeated = run({ costCny: 999, attributes: defaults.attributes, previousBusinessReport: defaults.report });
+  assert.equal(repeated.report.pricingDecision?.evidence.dimensions, 'business_default');
+  assert.equal(repeated.report.pricingDecision?.status, 'needs_input');
+  const legacy = structuredClone(defaults.report); delete legacy.pricingDecision;
+  const old = run({ costCny: 999, attributes: defaults.attributes, previousBusinessReport: legacy });
+  assert.equal(old.report.pricingDecision?.evidence.dimensions, 'unverified');
+  assert.equal(old.report.pricingDecision?.status, 'needs_input');
+  const manual = run({ costCny: 999, attributes: defaults.attributes });
+  assert.equal(manual.report.pricingDecision?.evidence.weight, 'unverified');
+  assert.equal(manual.report.pricingDecision?.status, 'needs_input');
+  const proven = run({ costCny: 999, measurements: confirmedPackage, attributes: defaults.attributes, previousBusinessReport: defaults.report });
+  assert.equal(proven.report.pricingDecision?.status, 'business_blocked');
+});
+
+test('successful pricing stays identical with explicit evidence quality', () => {
+  const defaults = run(), confirmed = run({ measurements: confirmedPackage });
+  assert.deepEqual(defaults.report.quote, confirmed.report.quote);
+  assert.equal(defaults.report.pricingDecision?.status, 'quoted');
+  assert.equal(defaults.report.pricingDecision?.code, 'QUOTE_VALID');
+  assert.equal(defaults.report.pricingDecision?.evidence.dimensions, 'business_default');
+  assert.equal(confirmed.report.pricingDecision?.evidence.dimensions, 'confirmed_source');
+});
+
+test('blocked quantity facts and sales-recipe count mismatches cannot prove business rejection', () => {
+  for (const facts of [
+    [fact('售卖件数','5','conflicting')], [fact('unit_count','5','conflicting')],
+    [fact('每套件数','5'),fact('unit_count','10')], [fact('每套件数','unknown')],
+    [fact('商品数量','5','conflicting')], [fact('number_of_items','5','conflicting')],
+  ]) {
+    const result = run({ costCny: 999, measurements: confirmedPackage, product: { ...product, facts } });
+    assert.equal(result.report.pricingDecision?.status, 'needs_input');
+    assert.equal(result.report.pricingDecision?.code, 'SOURCE_QUANTITY_UNCONFIRMED');
+    assert.equal(result.report.pricingDecision?.evidence.saleUnit, 'unconfirmed');
+    assertListingHistory({ schema: realAmazonSchema(), marketplaceId: target.marketplaceId, businessRules: result.report } as AmazonDraft, new Map(), new Map());
+  }
+  const mismatch = run({ costCny: 999, measurements: confirmedPackage, saleUnit: { totalPieces: 1, totalCostCny: 999 }, packageMatchesSaleUnit: true,
+    attributes: { number_of_items: [{ value: 4, marketplace_id: target.marketplaceId }] } });
+  assert.equal(mismatch.report.pricingDecision?.status, 'needs_input');
+  assert.equal(mismatch.report.pricingDecision?.code, 'SOURCE_QUANTITY_UNCONFIRMED');
+  assert.equal(mismatch.report.pricingDecision?.evidence.saleUnit, 'unconfirmed');
+  assert.equal(mismatch.report.pricingBasis?.saleUnitCostCny, 3996, 'the existing attempt math remains unchanged');
+  const defaults = run({ measurements: confirmedPackage });
+  const successful = run({ measurements: confirmedPackage, product: { ...product, facts: [fact('售卖件数','5','conflicting')] } });
+  assert.deepEqual(successful.report.quote, defaults.report.quote);
+  assert.equal(successful.report.pricingDecision?.status, 'quoted');
+  assert.equal(successful.report.pricingDecision?.evidence.saleUnit, 'unconfirmed');
+  assertListingHistory({ schema: realAmazonSchema(), marketplaceId: target.marketplaceId, businessRules: successful.report } as AmazonDraft, new Map(), new Map());
+});
+
+test('present malformed or ambiguous item counts stay unconfirmed instead of inheriting one piece', () => {
+  const invalidCounts = [[], null, { value: 4 }, [{ value: 0 }], [{ value: -1 }], [{ value: 1.5 }], [{ value: '4' }], [{ value: 4 }, { value: 4 }]];
+  for (const number_of_items of invalidCounts) {
+    for (const saleUnit of [undefined, { totalPieces: 1, totalCostCny: 999 }]) {
+      const result = run({ costCny: 999, measurements: confirmedPackage, saleUnit, packageMatchesSaleUnit: true, attributes: { number_of_items } });
+      assert.equal(result.report.pricingDecision?.status, 'needs_input');
+      assert.equal(result.report.pricingDecision?.code, 'SOURCE_QUANTITY_UNCONFIRMED');
+      assert.equal(result.report.pricingDecision?.evidence.saleUnit, 'unconfirmed');
+      assertListingHistory({ schema: realAmazonSchema(), marketplaceId: target.marketplaceId, businessRules: result.report } as AmazonDraft, new Map(), new Map());
+    }
+  }
+  const confirmed = run({ costCny: 999, measurements: confirmedPackage, saleUnit: { totalPieces: 1, totalCostCny: 999 }, packageMatchesSaleUnit: true,
+    attributes: { number_of_items: [{ value: 1, marketplace_id: target.marketplaceId }] } });
+  assert.equal(confirmed.report.pricingDecision?.status, 'business_blocked');
+});
+
+test('overlapping quantity failures preserve generated history consistency and cause precedence', () => {
+  const first = run({ costCny: .28 }), attributes = structuredClone(first.attributes);
+  (attributes.number_of_items as any)[0].value = 5;
+  delete attributes.purchasable_offer;
+  const selected = { ...variant, originalSpec: '5 pc / 10 pc' };
+  const legacy = structuredClone(first.report); delete legacy.pricingBasis;
+  (legacy.fields.unit_count.value as any)[0].value = 5;
+  for (const [previousBusinessReport, code, saleUnit] of [
+    [first.report, 'SALE_QUANTITY_CHANGED', 'unconfirmed'],
+    [legacy, 'LEGACY_QUANTITY_CONFLICT', 'conflicting'],
+  ] as const) {
+    const result = run({ costCny: .28, attributes, previousBusinessReport, variant: selected, product: { ...product, variants: [selected] } });
+    assert.equal(result.report.pricingDecision?.code, code);
+    assert.equal(result.report.pricingDecision?.status, 'needs_input');
+    assert.equal(result.report.quote, null);
+    const draft = JSON.parse(JSON.stringify({ schema: realAmazonSchema(), marketplaceId: target.marketplaceId, businessRules: result.report })) as AmazonDraft;
+    assert.doesNotThrow(() => assertListingHistory(draft, new Map(), new Map()));
+    assert.equal(result.report.pricingDecision?.evidence.saleUnit, saleUnit);
+  }
+});
+
+test('quantity diagnostics tolerate unit-count-only schemas without requiring number-of-items', () => {
+  const schema = realAmazonSchema(); delete (schema.schema.properties as any).number_of_items;
+  for (const name of ['售卖件数','每套件数','number_of_items']) {
+    const result = run({ schema, measurements: confirmedPackage, product: { ...product, facts: [fact(name, '5')] } });
+    assert.equal(result.attributes.number_of_items, undefined);
+    assert.ok(result.report.quote);
+    assert.ok(Math.abs(result.report.quote!.upfrontCny - 3.7) < 1e-10);
+    assert.equal(result.report.pricingDecision?.evidence.saleUnit, 'unconfirmed', 'missing field shape uses conservative diagnostic evidence');
+    const draft = JSON.parse(JSON.stringify({ schema, marketplaceId: target.marketplaceId, businessRules: result.report })) as AmazonDraft;
+    assert.doesNotThrow(() => assertListingHistory(draft, new Map(), new Map()));
+  }
+});
+
+test('pricing causes separately identify missing costs, measurements, marketplace and source counts', () => {
+  assert.equal(run({ costCny: null }).report.pricingDecision?.code, 'COST_CNY_UNCONFIRMED');
+  const rules = defaultListingRules(); rules.product.dimensionFallback = false; rules.product.weightFallback = false;
+  assert.equal(run({}, rules).report.pricingDecision?.code, 'PACKAGE_MEASUREMENTS_MISSING');
+  assert.equal(run({ target: { ...target, marketplaceId: 'A1F83G8C2ARO7P' } }).report.pricingDecision?.code, 'MARKETPLACE_UNSUPPORTED');
+  const conflicting = { ...variant, originalSpec: '5 pc / 10 pc' };
+  assert.equal(run({ variant: conflicting, product: { ...product, variants: [conflicting] } }).report.pricingDecision?.code, 'SOURCE_QUANTITY_CONFLICT');
+  const first = run({ costCny: .28 }), legacy = structuredClone(first.report);
+  delete legacy.pricingBasis;
+  (legacy.fields.unit_count.value as any)[0].value = 5;
+  assert.equal(run({ costCny: .28, attributes: first.attributes, previousBusinessReport: legacy }).report.pricingDecision?.code, 'LEGACY_QUANTITY_CONFLICT');
+  const changed = structuredClone(first.attributes); (changed.number_of_items as any)[0].value = 5;
+  assert.equal(run({ costCny: .28, attributes: changed, previousBusinessReport: first.report }).report.pricingDecision?.code, 'SALE_QUANTITY_CHANGED');
+});
+
+test('bundle or mixed-sale package measurements need explicit matching scope', () => {
+  const rules = defaultListingRules(); rules.pricing.margin = 10;
+  const bundled = run({ costCny: .28, measurements: confirmedPackage }, rules);
+  assert.equal(bundled.report.pricingDecision?.status, 'needs_input');
+  assert.equal(bundled.report.pricingDecision?.code, 'PACKAGE_SCOPE_UNCONFIRMED');
+  const saleUnit = { totalPieces: 10, totalCostCny: 999 };
+  for (const packageMatchesSaleUnit of [false, undefined]) {
+    const mixed = run({ costCny: 999, measurements: confirmedPackage, saleUnit, packageMatchesSaleUnit });
+    assert.equal(mixed.report.pricingDecision?.code, 'PACKAGE_SCOPE_UNCONFIRMED');
+  }
+  assert.equal(run({ costCny: 999, measurements: confirmedPackage, saleUnit, packageMatchesSaleUnit: true }).report.pricingDecision?.status, 'business_blocked');
+  const facts = [fact('包装长度','5 cm'),fact('包装宽度','5 cm'),fact('包装高度','5 cm'),fact('包装重量','100 g')];
+  const mixedFacts = run({ costCny: 999, product: { ...product, facts }, saleUnit, packageMatchesSaleUnit: false });
+  assert.equal(mixedFacts.report.pricingDecision?.status, 'needs_input');
+});
+
+test('source conflicts and edited source measurements cannot become reliable pricing rejections', () => {
+  const source = run({ measurements: confirmedPackage });
+  const edited = structuredClone(source.attributes); (edited.item_package_weight as any)[0].value = .3;
+  assert.equal(run({ costCny: 999, measurements: confirmedPackage, attributes: edited }).report.pricingDecision?.status, 'needs_input');
+  const conflicts = run({ costCny: 999, measurements: confirmedPackage, attributes: source.attributes, product: { ...product, facts: [fact('包装重量','100 g','conflicting')] } });
+  assert.equal(conflicts.report.pricingDecision?.evidence.weight, 'conflicting');
+  assert.equal(conflicts.report.pricingDecision?.status, 'needs_input');
+  const brokenRules = defaultListingRules(); brokenRules.pricing.deliveryTiers = [];
+  assert.equal(run({ measurements: confirmedPackage }, brokenRules).report.pricingDecision?.code, 'PRICING_SYSTEM_ERROR');
+});
 test('currency cent precision accepts 19.9 and rejects fractional cents', () => {
   const schema = realAmazonSchema();
   assert.equal(validateFieldValues(schema, target.marketplaceId, 'list_price', [{ value: 19.9, currency: 'USD' }]).length, 0);

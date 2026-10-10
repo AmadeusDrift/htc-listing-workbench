@@ -12,6 +12,9 @@ import type { AiCall, AiResult } from '../src/shared/ai-contracts.ts';
 import type { AmazonDraft } from '../src/shared/amazon-contracts.ts';
 import type { BusinessRuleReport } from '../src/shared/listing-rules.ts';
 import type { TestContext } from 'node:test';
+import { createHash, randomUUID } from 'node:crypto';
+import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
+import type { SalesComponent } from '../src/shared/sales-plan-contracts.ts';
 
 const OPTIONAL_REVIEW_POLICY = 'haul-us-copy-2026-10-07-v2';
 async function history(t: TestContext, policy = OPTIONAL_REVIEW_POLICY, reviewed = false) {
@@ -112,6 +115,77 @@ function report(draft: AmazonDraft): BusinessRuleReport {
     quote: { price: 2.6, minimum: 2.5, roi: 1.3, deliveryFee: 0.5, commission: 0.39, upfrontCny: 2.3, dimensionalWeightGrams: 25, billableWeightGrams: 100, promotionPrice: 2.5, promotionRoi: 1.1 } };
 }
 
+function blockedPricingDecision() {
+  return { version: 1, status: 'business_blocked', code: 'ROI_MAX_PRICE', quoteError: 'ROI_MAX_PRICE',
+    inputs: { costCny: 999, dimensionsInches: [1,1,1], weightPounds: .2 },
+    evidence: { cost: 'confirmed_cny', dimensions: 'confirmed_source', weight: 'confirmed_source', packageScope: 'source_sale_unit', saleUnit: 'confirmed',
+      sourcePackage: { dimensionsInches: [1,1,1], weightPounds: .2 } } } as const;
+}
+
+test('versioned pricing decisions preserve confirmed evidence and reject false reliable outcomes', async t => {
+  const h = await history(t), draft = structuredClone(h.draft);
+  draft.businessRules = Object.assign(report(draft), { quote: null, pricingDecision: structuredClone(blockedPricingDecision()),
+    pricingBasis: { kind: 'source_sale_unit', sourceCostCny: 999, quantity: 1, saleUnitCostCny: 999 } }) as BusinessRuleReport;
+  assertListingHistory(JSON.parse(JSON.stringify(draft)), h.results, h.calls);
+  for (const mutate of [
+    (r: any) => { r.pricingDecision.extra = 'hidden'; },
+    (r: any) => { r.pricingDecision.version = 2; },
+    (r: any) => { r.pricingDecision.code = 'QUOTE_VALID'; },
+    (r: any) => { r.pricingDecision.status = 'quoted'; },
+    (r: any) => { r.pricingDecision.code = 'PRICING_SYSTEM_ERROR'; },
+    (r: any) => { r.pricingDecision.quoteError = 'DIMENSIONAL_WEIGHT_LIMIT'; },
+    (r: any) => { r.pricingDecision.evidence.cost = 'unconfirmed'; },
+    (r: any) => { r.pricingDecision.evidence.dimensions = 'business_default'; },
+    (r: any) => { r.pricingDecision.evidence.weight = 'unverified'; },
+    (r: any) => { r.pricingDecision.evidence.packageScope = 'unconfirmed'; },
+    (r: any) => { r.pricingDecision.evidence.saleUnit = 'conflicting'; },
+    (r: any) => { r.pricingDecision.evidence.sourcePackage.weightPounds = .4; },
+    (r: any) => { r.pricingDecision.evidence.sourcePackage.dimensionsInches = null; },
+    (r: any) => { r.pricingDecision.evidence.sourcePackage.extra = true; },
+    (r: any) => { r.pricingDecision.inputs.costCny = 2; },
+    (r: any) => { r.pricingDecision.inputs.weightPounds = Infinity; },
+    (r: any) => { r.pricingDecision.inputs.dimensionsInches = [1,1]; },
+    (r: any) => { r.pricingDecision.inputs.extra = 'hidden'; },
+    (r: any) => { r.quote = report(draft).quote; },
+    (r: any) => { delete r.pricingBasis; },
+  ]) {
+    const invalid = structuredClone(draft); mutate(invalid.businessRules);
+    assert.throws(() => assertListingHistory(invalid, h.results, h.calls));
+  }
+});
+
+test('pricing history checks claimed package scope against the persisted sales recipe', () => {
+  const variantId = randomUUID();
+  const component = (quantity: number, sourcePackPieces: number): SalesComponent => ({ variantId, sourceKey: 'source-1', sourceSku: 'SOURCE-1',
+    specification: 'source package', color: '', quantity, sourcePackPieces, quotedCostCny: 999 / quantity, piecesPerQuote: 1 });
+  for (const components of [
+    [component(10, 1)],
+    [component(1, 1), { ...component(1, 1), variantId: randomUUID(), sourceKey: 'source-2', sourceSku: 'SOURCE-2' }],
+    [component(1, 1)],
+  ]) {
+    const key = createHash('sha256').update(JSON.stringify(components.map(c => [c.sourceKey,c.quantity]))).digest('hex');
+    const totalPieces = components.reduce((sum,c) => sum + c.quantity, 0), totalCostCny = components.reduce((sum,c) => sum + c.quantity * c.quotedCostCny!, 0);
+    const draft = { variantId, sku: 'TEST-SALE', marketplaceId: 'ATVPDKIKX0DER', schema: realAmazonSchema(),
+      salesPlan: { namingGroupId: randomUUID(), sourceGroupKey: 'source:group', collectedAt: '2026-10-10T00:00:00Z', collectionBasis: 'source',
+        sku: 'TEST-SALE', baseSku: 'TEST-SALE', parentage: 'NONE', parentSku: null, variationTheme: null, relationReason: '', familyResolved: true, namingChildKey: null,
+        recipe: { key, groupKey: '0'.repeat(64), specification: 'sales package', color: '', components, totalPieces, totalCostCny } },
+      businessRules: { revision: 0, fields: {}, notices: [], bundleQuantity: totalPieces === 1 ? 4 : totalPieces, quote: null,
+        pricingBasis: { kind: 'source_sale_unit', sourceCostCny: 999, quantity: 1, saleUnitCostCny: 999 } } } as unknown as AmazonDraft;
+    assert.doesNotThrow(() => assertListingHistory(draft, new Map(), new Map()), 'legacy report remains readable');
+    draft.businessRules!.pricingDecision = structuredClone(blockedPricingDecision()) as BusinessRuleReport['pricingDecision'];
+    assert.throws(() => assertListingHistory(draft, new Map(), new Map()), 'a mismatched or mixed recipe cannot claim source-package scope');
+    draft.businessRules!.pricingDecision!.status = 'needs_input';
+    draft.businessRules!.pricingDecision!.code = 'PACKAGE_SCOPE_UNCONFIRMED';
+    draft.businessRules!.pricingDecision!.evidence.packageScope = 'unconfirmed';
+    assert.doesNotThrow(() => assertListingHistory(draft, new Map(), new Map()));
+    if (totalPieces === 1) {
+      draft.businessRules!.bundleQuantity = 1;
+      draft.businessRules!.pricingDecision = structuredClone(blockedPricingDecision()) as BusinessRuleReport['pricingDecision'];
+      assert.doesNotThrow(() => assertListingHistory(draft, new Map(), new Map()), 'a matching source sale package is still accepted');
+    }
+  }
+});
+
 test('business-rule snapshots preserve reasons, notices and quote even after manual field edits', async t => {
   const h = await history(t, OPTIONAL_REVIEW_POLICY, true), draft = structuredClone(h.draft); draft.businessRules = report(draft);
   draft.attributes.material = [{ value: 'Manual change' }];
@@ -176,6 +250,10 @@ test('business-rule snapshots reject unbounded, malformed and hidden metadata be
 test('a v2 unreviewed adoption and business-rule snapshot survive encrypted backup restore', async t => {
   const h = await history(t); h.draft.businessRules = Object.assign(report(h.draft), {
     bundleQuantity: 10, pricingBasis: { kind: 'auto_bundle' as const, sourceCostCny: 0.1, quantity: 10, saleUnitCostCny: 1 },
+    pricingDecision: { version: 1 as const, status: 'quoted' as const, code: 'QUOTE_VALID' as const, quoteError: null,
+      inputs: { costCny: 1, dimensionsInches: [1,1,1] as [number,number,number], weightPounds: .2 },
+      evidence: { cost: 'confirmed_cny' as const, dimensions: 'business_default' as const, weight: 'business_default' as const, packageScope: 'unconfirmed' as const, saleUnit: 'confirmed' as const,
+        sourcePackage: { dimensionsInches: null, weightPounds: null } } },
   });
   const db = openDatabase(h.directory);
   try {

@@ -187,6 +187,20 @@ function installPricingFailure(f:ReturnType<typeof fixture>,change:(draft:Amazon
     change(draft);f.drafts.set(draft.id,structuredClone(draft));return value;
   };
 }
+test('typed declaration conflict stays pending without becoming a rule rejection or a message-based decision',async t=>{
+  const f=fixture(t,'live'),prepare=f.dependencies.amazon.prepareDrafts;f.rules.pricing.bundleEnabled=false;
+  f.dependencies.amazon.prepareDrafts=async (...args)=>{
+    const result=await prepare(...args),draft=result.items[0].draft!;
+    draft.localIssues=[{code:'DECLARATION_SOURCE_CONFLICT',message:'Synthetic wording unrelated to classification',severity:'ERROR',source:'local',category:'compliance',autoFixable:false,attributeNames:['batteries_required']}];
+    f.drafts.set(draft.id,structuredClone(draft));return result;
+  };
+  f.dependencies.images.complete=async input=>{f.workflow.set((input as {draftId:string}).draftId,{status:'BLOCKED',slots:[]});throw new UserFacingError('Unrelated display text');};
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0];assert.equal(row.status,'FAILED');assert.equal(row.outcome?.kind,'NEEDS_INPUT');assert.equal(row.outcome?.code,'DECLARATION_SOURCE_CONFLICT');
+  assert.equal(f.calls.submissions,0);assert.doesNotThrow(()=>validateAutomaticListingTask(f.service.get(task.id)));
+  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].pendingCount,1);assert.equal(queue.products[0].filteredCount,0);
+  await f.service.close();const reopened=new AutomaticListingService(f.directory,f.dependencies);try{assert.equal(reopened.get(task.id).items[0].outcome?.kind,'NEEDS_INPUT');}finally{await reopened.close();}
+});
 for(const cause of ['default-package','missing-cost','system','edited-draft','unknown-image','started-fields','submit-started'] as const)test(`pricing classification retains ${cause} without a paid retry`,async t=>{
   const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;
   installPricingFailure(f,draft=>{

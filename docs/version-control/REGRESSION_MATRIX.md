@@ -152,6 +152,15 @@
 - `tests/source-attribute-credentials.test.ts` 使用公开服务、合成凭据和模拟 HTTP 复现转换后秘密重建。手动导入、同步入库、缓存预览、缓存复用及重启继续共用写入前守卫，name/value 与完整追溯均检查；拒绝时六类业务表不留下部分导入，普通规范化、既有 ASCII 清洗和旧重复记录保留。
 - 审查探针额外覆盖并发首次导入、最大属性数/文本扩展边界、最终 audit 失败回滚及历史身份/事实编辑。snapshot 测量投影、冻结 v3 材质多来源选择的既有边界未改变；不宣称所有单位、真实供应方数据或字段非空率已验收。
 
+## 修复增量：所选规格安全声明
+
+`fix/variant-safety-evidence` 为场景 4、10–13、23、32 增加离线证据，类型为 S/L。新增 18 项正式测试，相关回归 244/244，规格与质量复审通过；父任务最终全量 1965 项，1964 通过、0 失败、0 取消、1 项同 Windows 文件符号链接权限跳过，184413.6623 ms。类型检查及隔离流水线 3 项通过。完整根因与命令见 `docs/maintenance/2026-10-10-规格安全声明.md`。
+
+- `tests/variant-safety-evidence.test.ts` 使用实际 SQLite 和显式 demo + haul，覆盖所选 sourceSpec/originalSpec/normalizedSpec 独立输入、每个实际 recipe 组件、PARENT 与兄弟 SKU 隔离。有限风险词典保持；确认的电池否定不因字段名而自我冲突，也不能消除独立风险。
+- 旧属性、business report、来源、采用及交换历史保留；REUSED 持久化 BLOCKED 并撤销预览，save 清错误后 preview 仍重算；旧有效预览直接 submit 在 beginWrite 前阻断，零 listing outbound、不制造 UNKNOWN。独立探针还验证发送 guard、批量事务回滚与原未知锁。
+- 固定结构化原因归 NEEDS_INPUT 并保留待处理；独立可靠 ROI/IP 可继续淘汰，UNKNOWN 优先。实际重开、加密备份及独立新进程读取保留 sourceStamp、采用 contextSha256 和模拟 AI 调用/结果/用量行，恢复后当前校验仍阻断。
+- SPEC 独立正式 118 项通过证据、7 项反例及跨进程恢复；QUALITY 正式 193 项通过证据、4 项独立反例。各轮备份 sandbox 权限失败均以同一隔离用例正常权限复跑通过，没有放宽守卫。未执行真实付费或店铺提交；此项未撤销所有无依据默认事实，也不把 standard 自动演示流水线当作 Haul 根因验收。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）：离线反例已补齐。** 修复前 5 项定向测试中 4 项准确失败，包含仅字段说明变化使已有候选 UNKNOWN 被阻断；修复后相同测试通过。兼容范围明确为字段卡 `title/description`，推断权限和其他规则仍是严格语义边界。真实上下文构造、图片服务及本地持久机制已组合验证，外部提供方与真实业务验收仍未覆盖。

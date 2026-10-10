@@ -31,6 +31,7 @@ import { miaoshouMeasurementsForVariant } from '../miaoshou/measurements.ts';
 import { getReceipt } from '../miaoshou/persistence.ts';
 import { readListingRules } from '../listing-rules.ts';
 import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
+import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
 import { isMissingOnlyPreview } from './preview-validation.ts';
@@ -435,10 +436,18 @@ export class AmazonService {
     const costCny = currency.cny ? salesPlan ? salesPlan.recipe.totalCostCny : sourceQuotedCost(variant,validReceipt?receipt:null) : null;
     const matchingPackage=!salesPlan || salesPlan.recipe.components.length===1 && salesPlan.recipe.components[0].quantity===salesPlan.recipe.components[0].sourcePackPieces;
     const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, now: new Date(this.now()),
+      declarationScope:selectedDeclarationScope(salesPlan?this.getProduct(product.id):product,variant.id,salesPlan?.recipe.components),
       ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
       measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
     if (currency.notice) result.report.notices.push(currency.notice);
     return result;
+  }
+  private declarationIssues(draft: AmazonDraft): ListingIssue[] {
+    if(draft.listingProgram!=='haul')return [];
+    const source=this.getProduct(draft.productId);
+    // Validate identities against raw source SKUs, then read their original text.
+    projectSalesProduct(source,draft.salesPlan,draft.variantId);
+    return declarationSafetyIssues(source,selectedDeclarationScope(source,draft.variantId,draft.salesPlan?.recipe.components),draft.attributes);
   }
   private newDraftRecord(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram = 'standard', businessRules?: BusinessRuleReport): DraftRecord {
     const now = this.at();
@@ -547,7 +556,12 @@ export class AmazonService {
         }
         if (existing.length) {
           const draft = existing[0].draft;
-          const issues = [...listingProgramIssues(program, schema, draft.attributes), ...validateAttributes(schema.schema, draft.attributes, schema.metaSchema), ...imageIssues(draft.attributes), ...copyPolicyIssues(draft)];
+          const declarationIssues=this.declarationIssues(draft);
+          const issues = [...listingProgramIssues(program, schema, draft.attributes), ...validateAttributes(schema.schema, draft.attributes, schema.metaSchema), ...imageIssues(draft.attributes), ...copyPolicyIssues(draft), ...declarationIssues];
+          if(declarationIssues.length){
+            draft.localIssues=issues;draft.state='BLOCKED';draft.previewedAt=null;existing[0].preview=null;
+            this.persistence.putRecord(existing[0]);
+          }
           result.items.push({ productId: item.productId, variantId: item.variantId, sku, disposition: 'REUSED', draft: clone(draft), issues, error: null }); continue;
         }
         const record = this.newDraftRecord(product, variant, currentTarget, schema, attributes, program, businessRules);
@@ -618,7 +632,7 @@ export class AmazonService {
   }
   private validate(record: DraftRecord): boolean {
     record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
-    try { this.currentProduct(record); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
+    try { this.currentProduct(record); record.draft.localIssues.push(...this.declarationIssues(record.draft)); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
     const valid = !record.draft.localIssues.some(issue => issue.severity === 'ERROR');
     record.draft.state = valid ? 'LOCAL_VALIDATED' : 'BLOCKED'; record.preview = null; record.draft.previewedAt = null; record.draft.previewIssues = [];
     this.event(record, 'local_validation', valid ? '当前 Schema 的本地校验通过' : '本地校验未通过，请补全或核对问题字段'); this.persistence.putRecord(record); return valid;
@@ -675,12 +689,19 @@ export class AmazonService {
         throw new UserFacingError('Amazon Schema 版本或校验和已变化，请建立新草稿并重新校验和预览');
       }
       taskGuard?.(); this.currentProduct(record); this.requirePreview(this.persistence.record(record.draft.id), target); this.active(target.id);
-      record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
+      const declarationIssues=this.declarationIssues(record.draft);
+      record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft), ...declarationIssues];
+      if(declarationIssues.length){
+        record.draft.state='BLOCKED';record.preview=null;record.draft.previewedAt=null;
+        this.persistence.putRecord(record);
+      }
       if (record.draft.localIssues.some(issue => issue.severity === 'ERROR')) throw new UserFacingError('本地校验未通过，不能正式提交');
       const guard = () => {
         try { taskGuard?.(); } catch { throw new TaskWriteNotSentError(); }
         this.currentProduct(record); this.active(target.id); this.requirePreview(this.persistence.record(record.draft.id), target, true);
         assertListingProgram(record.draft.listingProgram, current, record.draft.attributes);
+        const issues=this.declarationIssues(record.draft);
+        if(issues.length){record.draft.localIssues.push(...issues);throw new UserFacingError('本地校验未通过，安全声明须核对后再提交');}
       };
       record.draft.state = 'SUBMITTING'; record.draft.requestId = null; record.request = this.request(record); this.event(record, 'submit', '已记录提交意图；本次写入不会自动重试'); this.persistence.beginWrite(hash, record); begun = true;
       let result: ApiResult;

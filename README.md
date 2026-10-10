@@ -6,6 +6,9 @@ Windows / Electron / React / TypeScript 批量上架工作台的源码归档基�
 
 ## 文档导航
 
+- [工作区导航与更新流程](docs/version-control/WORKSPACE_GUIDE.md)
+- [每次更新必须提交的工作约定](AGENTS.md)
+- [2026-10-10 合并与验证记录](docs/maintenance/2026-10-10-工作区合并与提交约定.md)
 - [上传范围与排除清单](docs/version-control/REPOSITORY_INVENTORY.md)
 - [不含真实运行数据的稳定化计划及回归清单](docs/version-control/STABILITY_PLAN.md)
 - [逐文件清单与哈希](docs/version-control/repository-files.csv)
@@ -39,9 +42,9 @@ npm run build
 
 首次接手先阅读代码与计划，不要直接启动旧任务或覆盖 AppData。测试中的 fixture/e2e/fake 凭据为合成占位值，不可用于真实服务。
 
-本次只归档，没有新增运行上述测试。此前同日审计记录为1572项：1571通过、1项符号链接权限相关跳过、0失败；不是GitHub CI或真实可售证明。
+初次归档时的历史审计记录为1572项：1571通过、1项符号链接权限相关跳过、0失败；不是当前版本、GitHub CI或真实可售证明。2026-10-10 已合入外出开发的 8 个提交至 3e2c652；本机类型检查及 31 项相关测试通过，具体范围见合并记录。
 
-当前 npm run check 尚未覆盖稳定化计划要求的全部历史组合场景。scripts/package.mjs 会读取本机历史说明文档，本次出于数据隔离没有上传这些原件，因此新克隆仓库直接运行 npm run package 前，需另行批准并准备已净化的发布说明。未宣称新克隆环境的完整打包验收已通过。
+当前 npm run check 尚未覆盖稳定化计划要求的全部历史组合场景。新克隆缺少本机历史说明文档时的打包失败已由 1ada421 修复，缺失的可选文档会跳过。本轮未重新构建或打包；启动脚本优先使用 release 中的旧程序，源码更新不等于应用已部署。
 
 ## 后续修复约束
 

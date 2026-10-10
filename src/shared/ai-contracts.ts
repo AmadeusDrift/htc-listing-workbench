@@ -5,6 +5,7 @@ import type { AiConnectionApi } from './ai-connection-contracts.ts';
 import type { ListingAiApi, ListingAiContext, ListingFieldsOutput, ListingFieldsReviewOutput, ListingEvidenceContractVersion } from './listing-ai-contracts.ts';
 import type { GeneratedImageOcrOutput, ImagePlanOutput, ImageTextReviewOutput, ImageIpReviewOutput, ListingCurrentReviewOutput, ProductImageContext } from './image-ai-contracts.ts';
 import type { SourceColorContext, SourceColorOutput } from './source-color-contracts.ts';
+import type { ListingNormalization } from './listing-normalization-contracts.ts';
 
 export const AI_PROVIDER_IDS = ['aliyun-ocr', 'aidge-segmentation', 'deepseek', 'deepseek-review', 'aliyun-image-risk'] as const;
 export type AiProviderId = typeof AI_PROVIDER_IDS[number];
@@ -79,6 +80,8 @@ export interface AiResult {
   listingContext?: ListingAiContext;
   /** Main-process contract marker; never part of provider output or context fingerprints. */
   listingEvidenceContractVersion?: ListingEvidenceContractVersion;
+  /** Optional ingestion provenance; excluded from source context and candidate output. */
+  listingNormalization?: ListingNormalization;
   listingRequestBytes?: number;
   imageContext?: ProductImageContext;
   imageRequestBytes?: number;

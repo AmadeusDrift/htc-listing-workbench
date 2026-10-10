@@ -2,6 +2,7 @@ import { LISTING_EVIDENCE_CONTRACT_VERSIONS } from '../../shared/listing-ai-cont
 import type { ListingEvidenceContractVersion } from '../../shared/listing-ai-contracts.ts';
 import { assertListingEvidence } from '../listing-ai/validation.ts';
 import { assertStoredListingEvidence } from '../listing-ai/stored-evidence.ts';
+import { validateListingNormalizationV1 } from '../listing-ai/normalization-v1.ts';
 import { AI_PROVIDER_IDS, TEXT_REVIEW_POLICY_VERSION } from '../../shared/ai-contracts.ts';
 import { AI_VENDOR_IDS } from '../../shared/ai-connection-contracts.ts';
 import type { AiVendorId } from '../../shared/ai-connection-contracts.ts';
@@ -182,7 +183,7 @@ export function validateOutput(raw: unknown): AiOutput {
   return invalid();
 }
 export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): AiResult {
-  const o = keys(raw, ['id', 'callId', 'providerId', 'productId', 'productRevision', 'variantId', 'assetId', 'assetSha256', 'sourceResultIds', 'model', 'createdAt', 'reviewState', 'output'], ['listingEvidenceContractVersion', 'sourceSha256', 'listingContext', 'listingRequestBytes', 'imageContext', 'imageRequestBytes', 'sourceColorContext', 'sourceColorRequestBytes']), id = providerId(o.providerId), output = validateOutput(o.output);
+  const o = keys(raw, ['id', 'callId', 'providerId', 'productId', 'productRevision', 'variantId', 'assetId', 'assetSha256', 'sourceResultIds', 'model', 'createdAt', 'reviewState', 'output'], ['listingEvidenceContractVersion', 'listingNormalization', 'sourceSha256', 'listingContext', 'listingRequestBytes', 'imageContext', 'imageRequestBytes', 'sourceColorContext', 'sourceColorRequestBytes']), id = providerId(o.providerId), output = validateOutput(o.output);
   const variantId = o.variantId === null ? null : uuid(o.variantId), assetId = o.assetId === null ? null : uuid(o.assetId), sourceResultIds = uuidList(o.sourceResultIds, 10);
   const assetSha256 = o.assetSha256 === null ? null : boundedText(o.assetSha256, 64);
   const listingKind = output.kind === 'amazon-fields' || output.kind === 'amazon-fields-review' || output.kind === 'listing-current-review';
@@ -199,6 +200,8 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   if (listingContext && (listingContext.productId !== o.productId || listingContext.productRevision !== o.productRevision || listingContext.variantId !== variantId || listingFingerprint(listingContext) !== o.sourceSha256 || sourceResultIds.length !== (output.kind === 'amazon-fields-review' ? 1 : 0))) invalid();
   if (listingContext && output.kind === 'listing-current-review') assertCurrentListingReview({ kind: 'amazon-fields-review', verdict: output.verdict, checks: output.checks, issues: output.issues }, output.currentListingCopy, listingContext,options.stored?{storedVersion:o.listingEvidenceContractVersion as string??null}:{});
   if(listingContext&&output.kind==='amazon-fields'){if(options.stored)assertStoredListingEvidence(output,listingContext,o.listingEvidenceContractVersion as string|undefined);else assertListingEvidence(output,listingContext);}
+  if (o.listingNormalization !== undefined && (output.kind !== 'amazon-fields' || !listingContext || o.listingEvidenceContractVersion !== 'listing-evidence/v3')) invalid();
+  const listingNormalization = o.listingNormalization === undefined ? undefined : validateListingNormalizationV1(o.listingNormalization, output as import('../../shared/listing-ai-contracts.ts').ListingFieldsOutput, listingContext!);
   const imageContext = imageKind ? validateProductImageContext(o.imageContext,evidenceOptions) : undefined;
   if (!imageKind && (o.imageContext !== undefined || o.imageRequestBytes !== undefined)) invalid();
   if (imageContext) {
@@ -216,7 +219,7 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
     if(o.model!=='deepseek-flash'||sourceResultIds.length||sourceColorContext.productId!==o.productId||sourceColorContext.productRevision!==o.productRevision||sourceColorContext.variantId!==variantId||listingFingerprint(sourceColorContext)!==o.sourceSha256)invalid();
     assertSourceColorOutput(output,sourceColorContext);
   }
-  return { id: uuid(o.id), callId: uuid(o.callId), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), variantId, assetId, assetSha256, sourceResultIds, model: modelFor(id, o.model), createdAt: date(o.createdAt), reviewState: 'unreviewed', output, ...(o.sourceSha256 === undefined ? {} : { sourceSha256: sha256(o.sourceSha256) }), ...(listingContext ? { listingContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), ...(o.listingRequestBytes===undefined?{}:{listingRequestBytes:integer(o.listingRequestBytes,1,1024*1024)}) } : {}), ...(imageContext ? { imageContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), imageRequestBytes: integer(o.imageRequestBytes, 1, MAX_VISION_REQUEST_BYTES) } : {}), ...(sourceColorContext?{sourceColorContext,sourceColorRequestBytes:integer(o.sourceColorRequestBytes,1,MAX_VISION_REQUEST_BYTES)}:{}) };
+  return { id: uuid(o.id), callId: uuid(o.callId), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), variantId, assetId, assetSha256, sourceResultIds, model: modelFor(id, o.model), createdAt: date(o.createdAt), reviewState: 'unreviewed', output, ...(o.sourceSha256 === undefined ? {} : { sourceSha256: sha256(o.sourceSha256) }), ...(listingContext ? { listingContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), ...(o.listingRequestBytes===undefined?{}:{listingRequestBytes:integer(o.listingRequestBytes,1,1024*1024)}) } : {}), ...(listingNormalization ? { listingNormalization } : {}), ...(imageContext ? { imageContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), imageRequestBytes: integer(o.imageRequestBytes, 1, MAX_VISION_REQUEST_BYTES) } : {}), ...(sourceColorContext?{sourceColorContext,sourceColorRequestBytes:integer(o.sourceColorRequestBytes,1,MAX_VISION_REQUEST_BYTES)}:{}) };
 }
 function parseInput<T>(operation: () => T): T { try { return operation(); } catch { throw new AiError('INVALID_INPUT'); } }
 export function parseRecognizeInput(raw: unknown): RecognizeImageInput { return parseInput(() => { const o = keys(raw, ['productId', 'productRevision', 'assetId']); return { productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), assetId: uuid(o.assetId) }; }); }

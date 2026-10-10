@@ -5,7 +5,7 @@ import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ImageSelection, ImageVersion } from '../../shared/image-version-contracts.ts';
 import type { ImageWriteRecoveryStatus } from '../../shared/image-write-contracts.ts';
 import { AiError, abortable, throwIfAborted } from '../ai/errors.ts';
-import { integer, keys, uuid, validateAiResult } from '../ai/validation.ts';
+import { integer, keys, uuid, validateStoredAiResult } from '../ai/validation.ts';
 import { readManagedImage } from '../ai/source.ts';
 import { openDatabase } from '../database.ts';
 import { RecordReader } from '../record-query.ts';
@@ -62,7 +62,7 @@ export class ImageVersionService {
   }
   private result(productId: string, revision: number, id: string): AiResult {
     const raw = this.ai.getResult ? this.ai.getResult(id) : this.ai.listResults(productId).find(r => r.id === id); if (!raw) throw new AiError('SOURCE_CHANGED');
-    const result = validateAiResult(raw);
+    const result = validateStoredAiResult(raw);
     if (result.id !== id || result.productId !== productId || result.productRevision !== revision || result.providerId !== 'aidge-segmentation' || result.output.kind !== 'segmentation' || !result.assetId) throw new AiError('SOURCE_CHANGED');
     const asset = this.source(productId, revision, result.assetId);
     if (asset.sha256 !== result.assetSha256 || result.output.width !== asset.width || result.output.height !== asset.height) throw new AiError('SOURCE_CHANGED');

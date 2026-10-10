@@ -95,6 +95,22 @@
 - 父体使用同商品真实命名 ledger、prepareDrafts 和 familyParentPlan，阶段检查点配合模拟既有 parent grant；暂停/取消下一准备入口 0 次，继续对照到达入口 1 次后由安全哨兵停止。晚 ACCEPTED 组合使用关联真实 Execution 的所有权检查点，公共启动和真实 transport 返回，继续对照完成回读/备货/标签。生产 Automatic 等待 Execution 返回后仍可安排已 accepted 的独立 Followup，测试中零 GET 仅限指定检查点，不代表全部晚返回路径。
 - 付费边界 fail-closed，所有用例付费 provider 调用为 0；没有执行实际七图、字段采用、真实店铺或打印。已有图片/字段阶段的暂停证据仍由原测试提供，不将本组扩大为所有 await 验收。
 
+## 修复增量：字段证据契约
+
+`fix/evidence-contract` 为场景 10–13、20、23、30、32 增加离线证据，类型为 S/L。测试轨迹、独立审查与最终验证结果记录在 `docs/maintenance/2026-10-10-字段证据契约.md`；以下证据不扩大为所有类目、任意化学翻译或真实模型验收。
+
+新增正式回归 49 项。规格与质量复审通过；最终全量 1771 项，1770 通过、0 失败、0 取消，唯一跳过仍是 Windows 文件符号链接权限用例；88.937 秒。父任务类型检查及隔离流水线 3 项通过。
+
+- `tests/listing-evidence-contract.test.ts`：同义年龄/人群及明确手动操作、canonical audience 冲突、有限成分翻译和无序集合；存在但无法解析的来源不能通配或借 infer/审核 PASS 放行。结合 `tests/listing-nail-fields.test.ts` 保留旧 intended-user 来源“通用 → Unisex”的有限许可，不合并 General/Unisex，不推出年龄或绕过来源冲突。严格枚举、真实引用和部分字段隔离继续有效。
+- 同文件的 blocker 和 selected SKU 系列：冲突事实以非正向引用的独立依据保留；按销售配方及多 SKU 范围处理，当前 Child/Hard 覆盖共通 Adult/Soft，兄弟 SKU 不能解除未知。age 卡未激活时仍保留真正用于覆盖冲突的 sourceSpec；无冲突上下文保持原表示/hash。柠檬酸冲突阻止相应英文文案，无关材质文案仍可使用。
+- 首次 complete 与 DONE 都检查当前证据：首次正常两次候选/审核调用仍可采用合法颜色，不能把不受支持的年龄标记为已解决；明确成人来源的正例通过。再次读取 DONE 零新增调用，journal JSON 不改。幂等采用在新增 schema await 后仍核对取消与审核开关。
+- 可保存但格式错误的已有字段返回字段级 remaining，不使 operation 卡在 ACTIVE；missing-only 保留 1 次调用，合法颜色部分采用保留原 3 次调用。原值和 schema/missing 原因保留，DONE 复读零调用且 journal 不改；图片审核入口仍严格拒绝相同坏格式。
+- 明确操作方式保留既有 Manual 许可及动力来源冲突检查；既有四项形状翻译在中英文文案里按整词阻断，Round 不误命中 Surround。新增 v1 词典仅查自身条目，来源中的原型属性名称不会造成类型异常或被当成翻译值。
+- `tests/image-ai-service.test.ts` 的旧 PASS、exact-hash 缓存、COMPLETED/interrupted 继续和嵌套图历史用例：历史结果、单图/七图规划、workflow 和加密备份保持原 bytes/hash，当前错误不能借旧审核或缓存放行，也不能转成付费重生成。合成记录模拟旧语义与旧格式，不是实际历史业务库回放。
+- 旧七图重新复核及旧无上下文流程继续：新建当前上下文时写当前契约版本，保留原 run 和旧 AI 结果原始 JSON，七图不重生成。纯审核复用保持原 marker；再次复核零调用。升级仿真从首轮保留原冲突事实和 IP 来源，仅模拟旧 context builder 曾遗漏 blocker。
+- 同文件的真实来源颜色组合使用本地 AiService、ListingAiService、ImageWorkflowService、生成服务、SQLite 和替身 transport，覆盖 source_image 颜色采用，以及材质加 source_image 共同引用的普通年龄推断。已有七图与审核复用不新增调用；替换原图字节后拒绝。简化 records 检查不宣称具备完整像素新鲜度输入。
+- 共通来源存在但无法解析时，自由标题中的有限类别声明仍有旧缺口：`适用年龄=三岁以上` 与只引用材质的 `Adult Cleaner` 在冻结 v0 和当前版本均通过。独立后续 `fix/prose-evidence-boundary` 处理，不能把本轮 typed 字段及明确 blocker 覆盖扩大为全部自由文案。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）：离线反例已补齐。** 修复前 5 项定向测试中 4 项准确失败，包含仅字段说明变化使已有候选 UNKNOWN 被阻断；修复后相同测试通过。兼容范围明确为字段卡 `title/description`，推断权限和其他规则仍是严格语义边界。真实上下文构造、图片服务及本地持久机制已组合验证，外部提供方与真实业务验收仍未覆盖。

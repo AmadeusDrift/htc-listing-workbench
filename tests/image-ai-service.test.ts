@@ -1,5 +1,5 @@
 import { sceneSet } from './fixtures/image-set.ts';
-import { referenceMeasurementEvidence } from '../src/main/image-workflow/image-facts.ts';
+import { currentImageListingSnapshot, referenceMeasurementEvidence } from '../src/main/image-workflow/image-facts.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -11,15 +11,15 @@ import { AmazonService } from '../src/main/amazon/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
-import { assertImageTextReview, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
-import { validateAiResult } from '../src/main/ai/validation.ts';
+import { assertImagePlan, assertImageTextReview, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
+import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
 import type { AiResult } from '../src/shared/ai-contracts.ts';
 import type { CandidateImageIdentity, ImageTextReviewOutput, ProductImageContext } from '../src/shared/image-ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
-import { approvedWorkflowAsset, imageWorkflowDraftStamp, workflowRuns } from '../src/main/image-workflow/records.ts';
+import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, workflowRuns } from '../src/main/image-workflow/records.ts';
 import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
 import { ImageGenerationService } from '../src/main/image-generation/service.ts';
 import { AiError } from '../src/main/ai/errors.ts';
@@ -38,11 +38,12 @@ function currentReview(payload: any) {
     return { field: item.field, index, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.', claims: [{ text: value.value, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.' }] };
   })), issues: [] };
 }
-async function fixture(t: test.TestContext, extraReference=false) {
+async function fixture(t: test.TestContext, extraReference=false, withAge=false) {
   mkdirSync(resolve('.test-data'), { recursive: true });
   const directory = mkdtempSync(resolve('.test-data/image-ai-')), store = new WorkspaceStore(directory);
   let product = store.createProduct();
   product = store.saveProduct({ ...saveInput(product), title: 'Coaster', description:'Original brand illustration on the packaging.', variants: saveInput(product).variants.map(variant => ({ ...variant, originalSpec:'库洛米 蓝色', normalizedSpec: 'Blue' })), facts: [{ id: randomUUID(), name: 'Material', value: 'Silicone', source: 'manual', sourceRef: 'fixture', state: 'human_confirmed' }, {id:randomUUID(),name:'品牌',value:'三丽鸥',source:'1688',sourceRef:'fixture',state:'source_confirmed'}] });
+  if(withAge)product=store.saveProduct({...saveInput(product),facts:[...product.facts,{id:randomUUID(),name:'适用年龄',value:'成人',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   const bytes = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes); bytes.writeUInt32BE(13, 8); bytes.write('IHDR', 12); bytes.writeUInt32BE(256, 16); bytes.writeUInt32BE(256, 20);
   const source = join(directory, 'source.png'); writeFileSync(source, bytes);
   product = await importImageFiles(store, directory, { productId: product.id, revision: product.revision }, [source], value => value);
@@ -54,8 +55,10 @@ async function fixture(t: test.TestContext, extraReference=false) {
     product=store.updateAsset({productId:product.id,revision:product.revision,assetId:asset.id,role:'gallery',variantIds:[product.variants[0].id]});
   }
   const hosting = new HostingService(directory, store, mockStorage), amazon = new AmazonService(directory, id => store.getProduct(id), mockStorage), target = amazon.enableDemo();
+  if(withAge){const getSchema=amazon.getSchema.bind(amazon);amazon.getSchema=async input=>{const schema=await getSchema(input);(schema.schema.properties as any).age_range_description={type:'array',items:{type:'object',properties:{value:{type:'string'}}}};return schema;};}
   let draft = await amazon.createDraft({ productId: product.id, variantId: product.variants[0].id, targetId: target.id, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
   draft = amazon.saveDraft({ id: draft.id, revision: draft.revision, attributes: { item_name: [{ value: 'Blue Silicone Coaster' }], material: [{ value: 'Silicone' }], color: [{ value: 'Blue' }] } });
+  if(withAge)draft=amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,age_range_description:[{value:'Adult'}]}});
   const requests: { operation: string; payload: any; body: any }[] = [];
   let respond: ((operation: string, payload: any) => Response | Promise<Response> | undefined) | undefined;
   const ai = new AiService(directory, store, hosting, mockStorage, { fetch: async (url,options) => {
@@ -100,9 +103,172 @@ test('image plan, candidate OCR and independent text review persist source-bound
   assert.ok(!JSON.stringify(f.requests[1].payload).includes(f.draft.targetId));
 });
 
+test('legacy PASS remains readable but cannot authorize a new image request with an unparsed direct source',async t=>{
+  const f=await fixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const evidence={id:randomUUID(),name:'适用年龄',value:'三岁以上',meaning:'general' as const,source:'source_confirmed' as const};
+  context.listing.fields=[{name:'age_range_description',title:'Age',requirement:'required',closedEnum:false,allowedValues:[],suggestedValues:[]}];
+  context.listing.evidence=[evidence];context.currentListingCopy=[{field:'age_range_description',values:['Adult']}];
+  review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);delete review.listingEvidenceContractVersion;
+  review.output={kind:'listing-current-review',verdict:'PASS',currentListingCopy:context.currentListingCopy,copySha256:listingFingerprint(context.currentListingCopy),checks:[{field:'age_range_description',index:0,verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Legacy source interpretation.',claims:[{text:'Adult',verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Legacy source interpretation.'}]}],issues:[]};
+  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
+  assert.deepEqual(f.ai.getResult(review.id),review);
+  const before=f.requests.length;await assert.rejects(f.ai.imagePlan(context,()=>{}),error=>{assert.equal((error as AiError).code,'OUTPUT_INVALID');return true;});assert.equal(f.requests.length,before);
+});
+
 function withoutCopyReview(context: ProductImageContext): ProductImageContext {
   return { ...context, listingReviewResultId: null, copyReviewBypass: { policy: 'copy-review-disabled/v1', at: '2026-10-09T00:00:00.000Z', contextSha256: listingFingerprint(context.listing), copySha256: listingFingerprint(context.currentListingCopy) } };
 }
+
+function productionWorkflow(f:Awaited<ReturnType<typeof fixture>>,failAfter?:number){
+  let posts=0;
+  f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
+  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{
+    posts++;if(failAfter!==undefined&&posts>failAfter)throw new Error('Fixture lost generation response');
+    const bytes=Buffer.from(f.bytes);bytes[32]=posts;return Response.json({data:[{b64_json:bytes.toString('base64')}]});
+  }});
+  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation);
+  f.cleanup(async()=>{await workflow.close();await generation.close();});
+  return {workflow,posts:()=>posts};
+}
+
+test('a cached legacy PASS with exact context and copy hashes cannot bypass current source parsing',async t=>{
+  const f=await fixture(t,false,true),review=structuredClone(f.ai.getResult(f.context.listingReviewResultId!)!);
+  const evidence=review.listingContext!.evidence.find(e=>e.name==='适用年龄')!;
+  evidence.value='三岁以上';review.sourceSha256=listingFingerprint(review.listingContext);delete review.listingEvidenceContractVersion;
+  const db=openDatabase(f.directory);try{
+    db.prepare('UPDATE facts SET value=? WHERE id=?').run(evidence.value,evidence.id);
+    db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);
+  }finally{db.close();}
+  const draft=f.amazon.getDraft(f.draft.id),snapshot=currentImageListingSnapshot(draft,f.listing.currentContext(draft,f.store.getProduct(f.product.id),f.amazon.executionTargetScope(draft.targetId).generation));
+  assert.equal(listingFingerprint(snapshot.context),review.sourceSha256);assert.deepEqual(f.ai.getResult(review.id),review);
+  const {workflow,posts}=productionWorkflow(f),before=f.requests.length,result=await workflow.complete({draftId:draft.id,draftRevision:draft.revision});
+  assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(f.requests.length,before);assert.equal(posts(),0);assert.equal(result.workflow.imageContext,undefined);
+});
+
+test('legacy caption and nested set-plan evidence remains readable and backup-stable but cannot authorize continuation',async t=>{
+  const f=await fixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
+  const saved=await f.ai.imagePlan(context,()=>{}),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const evidence={id:context.listing.variantId+':audience',name:'适用对象',value:'儿童',meaning:'general' as const,source:'selected_sku' as const};
+  context.listing.evidence.push(evidence);
+  review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);delete review.listingEvidenceContractVersion;
+  const plan=structuredClone(saved);plan.imageContext=context;plan.sourceSha256=listingFingerprint(context);delete plan.listingEvidenceContractVersion;
+  assert.equal(plan.output.kind,'image-plan');if(plan.output.kind!=='image-plan')throw Error('plan');
+  const set=plan.output.setPlan!;set.slots[1].textMode='planned';set.slots[1].evidenceIds=[evidence.id];set.slots[1].expectedText=[{text:'Adult Coaster',evidenceIds:[evidence.id]}];
+  const planOutput=plan.output;assert.throws(()=>assertImagePlan(planOutput,context));
+  assert.deepEqual(validateStoredAiResult(plan),plan);
+  assert.throws(()=>validateStoredAiResult({...plan,listingEvidenceContractVersion:'listing-evidence/v1'}));
+  const slotContext=validateProductImageContext({...context,purpose:'detail',slot:{index:2,total:7,provisional:true},setPlan:set},{storedVersion:null});
+  const nested={...structuredClone(plan),id:randomUUID(),imageContext:slotContext,sourceSha256:listingFingerprint(slotContext),output:{...plan.output,setPlan:undefined,textMode:'planned',expectedText:set.slots[1].expectedText}};
+  delete nested.output.setPlan;
+  assert.equal(listingFingerprint(validateProductImageContext(slotContext,{storedVersion:null})),nested.sourceSha256);
+  assert.deepEqual(validateStoredAiResult(nested),nested);assert.throws(()=>validateAiResult(nested));
+  const at=new Date().toISOString(),run={id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'BLOCKED',stage:'planning',attempt:0,maxAttempts:3,contextSha256:listingFingerprint(context),draftSha256:imageWorkflowDraftStamp(f.draft),referenceAssets:context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})),planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:at,updatedAt:at,error:'Historical blocked plan',imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:'seven-product-v2',imageContext:context,setPlan:set,setPlanResultId:plan.id,slots:Array.from({length:7},(_,i)=>({index:i+1,purpose:i===0?'main':'detail',status:'PENDING',contextSha256:null,attempts:[],approvedAssetId:null,approvedSha256:null,error:null}))};
+  const rawPlan=JSON.stringify(plan),rawRun=JSON.stringify(run),db=openDatabase(f.directory);try{
+    db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);
+    db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawPlan,plan.id);
+    db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(run.id,rawRun);
+    assert.equal(workflowRuns(db)[0].contextSha256,run.contextSha256);
+  }finally{db.close();}
+  const backup=join(f.directory,'legacy-caption.htcbackup'),target=join(f.directory,'legacy-caption-restored');
+  await createWorkspaceBackup(f.directory,backup,'historical caption evidence passphrase');await commitWorkspaceRestore(target,await prepareWorkspaceRestore(target,backup,'historical caption evidence passphrase'));
+  const restored=openDatabase(target);try{assert.equal(restored.prepare('SELECT record_json FROM ai_results WHERE id=?').get(plan.id)!.record_json,rawPlan);assert.equal(restored.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json,rawRun);}finally{restored.close();}
+  const {workflow,posts}=productionWorkflow(f),before=f.requests.length;
+  await assert.rejects(async()=>workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}));assert.equal(f.requests.length,before);assert.equal(posts(),0);
+});
+
+for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} legacy recheck versions its new context without rewriting old paid evidence`,async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),material=f.context.listing.evidence.find(e=>e.meaning==='material')!;
+  const sourceDb=openDatabase(f.directory);
+  try{sourceDb.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','成人','manual','upgrade-era omitted conflict','conflicting',99);}finally{sourceDb.close();}
+  // Recreate only the historical builder omission; source/IP facts stay identical.
+  const legacyListing=(workflow as any).listing as ListingAiService,strictContext=legacyListing.currentContext.bind(legacyListing);
+  legacyListing.currentContext=(...args)=>{const context=strictContext(...args);delete context.evidenceBlockers;return context;};
+  const set=sceneSet();set.slots[1]={...set.slots[1],role:'selling_point',focus:'Silicone material',evidenceIds:[material.id],textMode:'planned',expectedText:[{text:'Silicone Coaster',evidenceIds:[material.id]}]};
+  f.respond((operation,payload)=>{
+    if(operation==='ip-upload')return new Response(null,{status:200});
+    if(operation==='image-plan')return chat({...(payload.setPolicy&&!payload.slot?{setPlan:set}:{}),kind:'image-plan',prompt:'Preserve the selected SKU in supplied references on white.',textMode:payload.slot?.index===2?'planned':'none',expectedText:payload.slot?.index===2?set.slots[1].expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)});
+  });
+  const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+  assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+  const prior=structuredClone(first.workflow);delete prior.listingEvidenceContractVersion;
+  const oldRun=JSON.stringify(prior),oldResults=new Map<string,string>(),db=openDatabase(f.directory);
+  try{
+    for(const row of db.prepare('SELECT id,record_json FROM ai_results').all()){
+      const value=JSON.parse(String(row.record_json));delete value.listingEvidenceContractVersion;
+      const raw=JSON.stringify(value);oldResults.set(String(row.id),raw);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,row.id);
+    }
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(oldRun,prior.id);
+    const input={draftId:f.draft.id,draftRevision:first.draft.revision,sourceWorkflowId:prior.id},beforeReuse=f.requests.length;
+    const reused=await workflow.recheck(input);
+    assert.equal(reused.workflow.approvalReuse?.sourceRunId,prior.id);assert.equal(reused.workflow.listingEvidenceContractVersion,undefined);
+    assert.equal(f.requests.length,beforeReuse);assert.equal(reused.workflow.contextSha256,prior.contextSha256);
+    legacyListing.currentContext=strictContext;
+    assert.deepEqual(prior.imageContext?.ipSource,imageRiskSourceSnapshot(f.store.getProduct(f.product.id),prior.variantId));
+    let pendingId:string|undefined;
+    if(resumeEmpty){
+      const now=new Date(Date.now()+1).toISOString(),pending={...structuredClone(prior),id:randomUUID(),status:'INTERRUPTED' as const,stage:'content' as const,attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ipReviewResultIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:'Interrupted before current context',recheckedFromRunId:prior.id};
+      pending.slots=pending.slots!.map(slot=>({...slot,status:'PENDING',contextSha256:null,attempts:[],approvedAssetId:null,approvedSha256:null,error:null}));
+      delete pending.imageContext;delete pending.activeSlot;delete pending.copyRepairAttempts;delete pending.approvalReuse;delete pending.contentPreparation;delete pending.copyReviewResultId;delete pending.categoryFieldRepair;
+      db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(pending.id,JSON.stringify(pending));pendingId=pending.id;
+    }
+    const before=f.requests.length,result=await workflow.recheck(input);
+    assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),7);
+    assert.equal(result.workflow.listingEvidenceContractVersion,'listing-evidence/v1');assert.equal(result.workflow.imageContext?.listing.evidenceBlockers?.[0].field,'age_range_description');
+    if(pendingId)assert.equal(result.workflow.id,pendingId);
+    assert.ok(f.requests.length>before);assert.deepEqual(result.workflow.slots!.map(slot=>slot.approvedAssetId),prior.slots!.map(slot=>slot.approvedAssetId));
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,oldRun);
+    for(const [id,raw] of oldResults)assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json,raw);
+    const calls=f.requests.length,repeat=await workflow.recheck(input);
+    assert.equal(repeat.workflow.id,result.workflow.id);assert.equal(repeat.aiCalls,0);assert.equal(f.requests.length,calls);assert.equal(posts(),7);
+  }finally{db.close();}
+});
+
+test('real source-image color adoption keeps its citations through approved images and zero-call reuse',async t=>{
+  const f=await fixture(t,false,true),product=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.filter(fact=>fact.name!=='适用年龄'),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:'型号: 602Q',normalizedSpec:'602Q'}))});
+  let draft=await f.amazon.createDraft({productId:product.id,variantId:product.variants[0].id,targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
+  const market=draft.marketplaceId;
+  draft=f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{item_name:[{value:'Silicone Coaster',marketplace_id:market,language_tag:'en_US'}],material:[{value:'Silicone',marketplace_id:market}],age_range_description:[{value:'Adult'}],brand:[{value:'Generic',marketplace_id:market}],purchasable_offer:[{marketplace_id:market,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:10}]}]}]}});
+  f.respond((operation,payload)=>{
+    if(operation==='source-color')return chat({kind:'source-color',verdict:'DETERMINED',colors:['Silver'],reason:'Visible product body.',referenceAssetIds:payload.referenceImages.map((image:any)=>image.assetId)});
+    if(!operation&&!payload.candidate){const image=payload.evidence.find((e:any)=>e.source==='source_image'),material=payload.evidence.find((e:any)=>e.meaning==='material');return chat({kind:'amazon-fields',candidates:[{field:'color',items:[{value:'Silver',evidenceIds:[image.id],transformation:'copy'}]},{field:'age_range_description',items:[{value:'Adult',evidenceIds:[material.id,image.id],transformation:'infer',inferenceReason:'Ordinary product judgment from the actual coaster category and silicone material.'}]}],missing:payload.fields.filter((field:any)=>!['color','age_range_description'].includes(field.name)).map((field:any)=>({field:field.name,reason:'Existing copy is retained.'}))});}
+    if(!operation&&payload.candidate)return chat(currentReview(payload));
+  });
+  const reference={draftId:draft.id,draftRevision:draft.revision};await f.listing.prepareSourceColors(reference);
+  const suggestion=await f.listing.suggest(reference),review=await f.listing.review({...reference,suggestionResultId:suggestion.id});
+  draft=await f.listing.adopt({...reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['color','age_range_description']});
+  assert.equal(draft.fieldAdoptions!.at(-1)!.changes[0].evidence[0].source,'source_image');
+  await f.listing.reviewCurrentForImages({draftId:draft.id,draftRevision:draft.revision});
+  const {workflow,posts}=productionWorkflow(f),request={draftId:draft.id,draftRevision:draft.revision},first=await workflow.complete(request);
+  assert.equal(first.workflow.status,'COMPLETED',JSON.stringify({error:first.workflow.error,stage:first.workflow.stage,requests:f.requests.map(r=>r.operation)}));assert.equal(posts(),7);
+  const before=f.requests.length,original=JSON.stringify(first.workflow.imageContext),hash=first.workflow.contextSha256;
+  const db=openDatabase(f.directory);try{assert.equal(approvedWorkflowAssets(db,f.amazon.getDraft(draft.id),f.store.getProduct(product.id))!.length,7);}finally{db.close();}
+  assert.equal((await workflow.complete(request)).workflow.id,first.workflow.id);
+  const reused=await workflow.recheck({...request,sourceWorkflowId:first.workflow.id});assert.equal(reused.workflow.approvalReuse?.sourceRunId,first.workflow.id);
+  assert.equal(f.requests.length,before);assert.equal(posts(),7);assert.equal(JSON.stringify(workflow.getProgress(draft.id)!.imageContext),original);assert.equal(workflow.getProgress(draft.id)!.contextSha256,hash);
+  const source=f.store.getAssetRecord(product.assets[0].id)!;writeFileSync(join(f.directory,source.originalPath),Buffer.from('changed source pixels'));
+  await assert.rejects(f.listing.snapshotCurrentForImages(request));assert.equal(f.requests.length,before);
+});
+
+for(const incomplete of [false,true])test(`current conflicts block ${incomplete?'interrupted':'completed'} image continuation while preserving paid history`,async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f,incomplete?1:undefined);
+  const reference={draftId:f.draft.id,draftRevision:f.draft.revision},first=await workflow.complete(reference);
+  assert.equal(first.workflow.status,incomplete?'FAILED':'COMPLETED',first.workflow.error??'');
+  const db=openDatabase(f.directory);try{
+    // Recreate an upgrade-era source conflict that the old context omitted.
+    db.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'Material','Silicone','manual','fixture','conflicting',99);
+    const before=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json),requests=f.requests.length,images=posts(),assets=f.store.getProduct(f.product.id).assets.length;
+    await assert.rejects(async()=>workflow.complete(reference),/冲突/);
+    if(!incomplete){
+      await assert.rejects(workflow.recheck({...reference,sourceWorkflowId:first.workflow.id}),/冲突/);
+      await assert.rejects(async()=>(workflow as any).recheckWithFreshEvidence({...reference,sourceWorkflowId:first.workflow.id}),/冲突/);
+      assert.throws(()=>approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),/冲突/);
+    }
+    assert.equal(f.requests.length,requests);assert.equal(posts(),images);assert.equal(f.store.getProduct(f.product.id).assets.length,assets);
+    assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json),before);
+    assert.equal(workflowRuns(db,f.draft.id).length,1);assert.equal(workflow.getProgress(f.draft.id)!.id,first.workflow.id);
+  }finally{db.close();}
+});
 
 test('image contexts accept only an explicit copy-review skip bound to the current listing and copy', async t => {
   const f = await fixture(t), context = withoutCopyReview(f.context);

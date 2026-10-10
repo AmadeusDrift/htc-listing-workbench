@@ -77,6 +77,8 @@ export interface AiResult {
   /** Generation-time evidence snapshot hash. Legacy text is readable but needs regeneration before review. */
   sourceSha256?: string;
   listingContext?: ListingAiContext;
+  /** Main-process contract marker; never part of provider output or context fingerprints. */
+  listingEvidenceContractVersion?: 'listing-evidence/v1';
   listingRequestBytes?: number;
   imageContext?: ProductImageContext;
   imageRequestBytes?: number;

@@ -1,3 +1,4 @@
+import { assertStoredImageEvidence, assertStoredListingReview } from '../listing-ai/stored-evidence.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { ImageRiskSourceSnapshot } from '../../shared/image-ai-contracts.ts';
@@ -12,6 +13,8 @@ import { boundedText, date, integer, keys, sha256, uuid, validateOutput } from '
 import { assertImageMeasurements, assertImagePromptMeasurements, imageEvidence, imageMeasurements, sourceDimensionEvidence, withoutImageMeasurements } from '../image-workflow/image-facts.ts';
 
 function fail(): never { throw new AiError('OUTPUT_INVALID'); }
+/** Omission is current authorization; an explicit null selects unmarked stored v0 evidence. */
+export type ImageEvidenceOptions={storedVersion?:string|null};
 function list<T>(raw: unknown, max: number, parse: (raw: unknown) => T): T[] { return Array.isArray(raw) && raw.length <= max ? raw.map(parse) : fail(); }
 function ids(raw: unknown): string[] { const values = list(raw, 200, value => boundedText(value, 150)); if (new Set(values).size !== values.length) fail(); return values; }
 function flag(raw: unknown): boolean { return typeof raw === 'boolean' ? raw : fail(); }
@@ -42,7 +45,7 @@ export function imageRiskSourceSnapshot(product:ProductDetail,variantId:string):
   const variant=product.variants.find(variant=>variant.id===variantId); if(!variant)throw new AiError('SOURCE_CHANGED');
   return validateIpSource({description:product.description,originalSpec:variant.originalSpec,sourceSpec:variant.sourceSpec,normalizedSpec:variant.normalizedSpec,facts:product.facts.map(({id,name,value,source,state})=>({id,name,value,source,state}))});
 }
-export function validateProductImageContext(raw: unknown): ProductImageContext {
+export function validateProductImageContext(raw: unknown,options:ImageEvidenceOptions={}): ProductImageContext {
   const value = keys(raw, ['listing','currentListingCopy','listingReviewResultId','referenceAssets','purpose','policyVersion'], ['ipSource','sourceVariantIds','slot','setPolicy','setPlan','referenceMeasurements','sourceMeasurements','copyReviewBypass']);
   const listing = validateListingContext(value.listing), currentListingCopy = validateCurrentListingCopy(value.currentListingCopy);
   if (listing.repairRequest || !['product-image/v1','product-image/vision-v2',PRODUCT_IMAGE_POLICY_VERSION].includes(String(value.policyVersion)) || !['main','detail'].includes(String(value.purpose))) fail();
@@ -84,7 +87,7 @@ export function validateProductImageContext(raw: unknown): ProductImageContext {
   const setPlan=value.setPlan===undefined?undefined:validateImageSetPlan(value.setPlan);
   if(value.setPolicy&&Boolean(slot)!==Boolean(setPlan))fail();
   const parsed:ProductImageContext={ listing, currentListingCopy, listingReviewResultId: value.listingReviewResultId === null ? null : uuid(value.listingReviewResultId), referenceAssets, purpose: value.purpose as 'main' | 'detail', policyVersion: value.policyVersion as ProductImageContext['policyVersion'],...(copyReviewBypass?{copyReviewBypass}:{}),...(ipSource?{ipSource}:{}),...(sourceVariantIds?{sourceVariantIds}:{}),...(slot?{slot}:{}),...(value.setPolicy?{setPolicy:IMAGE_SET_POLICY,referenceMeasurements}:{}),...(sourceMeasurements?{sourceMeasurements}:{}),...(setPlan?{setPlan}:{}) };
-  if(setPlan)assertImageSetPlan(setPlan,parsed);
+  if(setPlan)assertImageSetPlan(setPlan,parsed,options);
   return parsed;
 }
 export function validateCandidateImageIdentity(raw: unknown): CandidateImageIdentity {
@@ -155,7 +158,7 @@ export function validateImageSetPlan(raw:unknown):ImageSetPlan{
   if(slots.length!==7||slots.some((slot,index)=>slot.index!==index+1))fail();
   return {style:boundedText(value.style,1000),dimensionEvidenceIds:ids(value.dimensionEvidenceIds),dimensionReason:boundedText(value.dimensionReason,1000),slots};
 }
-export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext):void{
+export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext,options:ImageEvidenceOptions={}):void{
   const sourceSizes=sourceDimensionEvidence(context),available=[...sourceSizes.map(item=>item.id),...(context.referenceMeasurements??[]).map(item=>item.id)];
   if(plan.dimensionEvidenceIds.some(id=>!available.includes(id))||sourceSizes.length&&!plan.dimensionEvidenceIds.length)fail();
   const dimensions=plan.slots.filter(slot=>slot.role==='dimensions');
@@ -177,7 +180,7 @@ export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext
     for(const line of slot.expectedText){
       if(['selling_point','dimensions'].includes(slot.role)&&!line.evidenceIds.length)fail();
       if(line.evidenceIds.some(id=>!slot.evidenceIds.includes(id)))fail();
-      assertTextEvidence(line.text,line.evidenceIds,effective);
+      assertTextEvidence(line.text,line.evidenceIds,effective,options);
     }
     assertImagePromptMeasurements(slot.prompt,{evidence});
     assertImageMeasurements([slot.focus,slot.scene,...slot.expectedText.map(line=>line.text)].join('\n'),{evidence});
@@ -291,7 +294,7 @@ export function validateListingCurrentReview(raw: unknown): ListingCurrentReview
   const review = validateListingReviewOutput({ kind: 'amazon-fields-review', verdict: value.verdict, checks: value.checks, issues: value.issues });
   return { ...review, kind: 'listing-current-review', currentListingCopy, copySha256: String(value.copySha256) };
 }
-export function assertCurrentListingReview(review: ListingFieldsReviewOutput, copy: CurrentListingCopy[], context: ListingAiContext,options:{historical?:boolean}={}): void {
+export function assertCurrentListingReview(review: ListingFieldsReviewOutput, copy: CurrentListingCopy[], context: ListingAiContext,options:{storedVersion?:string|null}={}): void {
   if (review.checks.length !== copy.reduce((sum,item) => sum + item.values.length, 0)) fail();
   for (const item of copy) for (const [index,value] of item.values.entries()) {
     const check = review.checks.find(check => check.field === item.field && check.index === index) ?? fail();
@@ -303,26 +306,33 @@ export function assertCurrentListingReview(review: ListingFieldsReviewOutput, co
     }
     if (/[\p{L}\p{N}]/u.test(value.split('').map((char,index) => covered[index] ? ' ' : char).join('').replace(/\b(?:a|an|the|and|or|of|for|in|with|to|on|at|is|are)\b/gi, ''))) fail();
   }
-  if (review.verdict === 'PASS') assertListingReview(review, { kind: 'amazon-fields', candidates: copy.map(item => ({ field: item.field, items: item.values.map((value,index) => {
-    const check=review.checks.find(check=>check.field===item.field&&check.index===index)!;
-    return {value,evidenceIds:check.evidenceIds,...((INFERABLE_CATEGORY_FIELDS as readonly string[]).includes(item.field)?{transformation:'infer' as const,inferenceReason:check.reason}:{transformation:'compose' as const})};
-  }) })), missing: [] }, context,options);
+  if (review.verdict === 'PASS') {
+    const candidate={kind:'amazon-fields' as const,candidates:copy.map(item=>({field:item.field,items:item.values.map((value,index)=>{
+      const check=review.checks.find(check=>check.field===item.field&&check.index===index)!;
+      return {value,evidenceIds:check.evidenceIds,...((INFERABLE_CATEGORY_FIELDS as readonly string[]).includes(item.field)?{transformation:'infer' as const,inferenceReason:check.reason}:{transformation:'compose' as const})};
+    })})),missing:[]};
+    if(Object.hasOwn(options,'storedVersion'))assertStoredListingReview(review,candidate,context,options.storedVersion??undefined);
+    else assertListingReview(review,candidate,context);
+  }
 }
-function assertTextEvidence(text: string, evidenceIds: string[], context: ProductImageContext): void {
+function assertTextEvidence(text: string, evidenceIds: string[], context: ProductImageContext,options:ImageEvidenceOptions={}): void {
   englishText(text);
   if(!context.setPolicy&&!evidenceIds.length)fail();
   const evidence=context.setPolicy?imageEvidence(context):context.listing.evidence;
   if(context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
   const fields = [{ name: 'product_description' as const, title: 'Image text', requirement: 'optional' as const, closedEnum: false, allowedValues: [], suggestedValues: [] }];
-  assertListingEvidence({ kind: 'amazon-fields', candidates: [{ field: 'product_description', items: [{ value: context.setPolicy?withoutImageMeasurements(text):text, evidenceIds, transformation: 'compose' }] }], missing: [] }, { fields, evidence, variantId:context.listing.variantId });
+  const output={ kind: 'amazon-fields' as const, candidates: [{ field: 'product_description' as const, items: [{ value: context.setPolicy?withoutImageMeasurements(text):text, evidenceIds, transformation: 'compose' as const }] }], missing: [] };
+  const scope={fields,evidence,variantId:context.listing.variantId,...(context.listing.evidenceBlockers?{evidenceBlockers:context.listing.evidenceBlockers}:{})};
+  if(Object.hasOwn(options,'storedVersion'))assertStoredImageEvidence(output,scope,options.storedVersion??undefined);
+  else assertListingEvidence(output,scope);
 }
-export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageContext): void {
+export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageContext,options:ImageEvidenceOptions={}): void {
   if (context.policyVersion !== 'product-image/v1' && (!plan.productUnderstanding || listingFingerprint(plan.productUnderstanding.referenceAssetIds) !== listingFingerprint(context.referenceAssets.map(asset=>asset.assetId)))) fail();
   if(context.policyVersion===PRODUCT_IMAGE_POLICY_VERSION && !plan.ipRisk)fail();
   if(plan.ipRisk?.findings.some(item=>item.referenceAssetIds.some(id=>!context.referenceAssets.some(asset=>asset.assetId===id))))fail();
   if (context.purpose === 'main' && plan.textMode !== 'none') fail();
   if(context.setPolicy){
-    if(!context.slot){if(!plan.setPlan)fail();assertImageSetPlan(plan.setPlan,context);}
+    if(!context.slot){if(!plan.setPlan)fail();assertImageSetPlan(plan.setPlan,context,options);}
     else{
       if(plan.setPlan||!context.setPlan)fail();
       const slot=context.setPlan.slots[context.slot.index-1];
@@ -335,7 +345,7 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
     assertImagePromptMeasurements(plan.prompt,{evidence});
     assertImageMeasurements([plan.productUnderstanding?.summary??'',...(plan.productUnderstanding?.uncertainties??[]),...plan.expectedText.map(line=>line.text)].join('\n'),{evidence});
   }
-  for (const line of plan.expectedText) assertTextEvidence(line.text, line.evidenceIds, evidenceContext);
+  for (const line of plan.expectedText) assertTextEvidence(line.text, line.evidenceIds, evidenceContext,options);
 }
 /** Deterministic handoff keeps the product understanding alongside the original reference images. */
 export function imageGenerationPrompt(plan: ImagePlanOutput,context?:ProductImageContext,riskInterceptionEnabled=true): string {
@@ -354,9 +364,9 @@ function imagePromptText(plan:ImagePlanOutput):string{
   return `Selected SKU visual observations (not verified specifications):\n${plan.productUnderstanding?.summary??''}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}`;
 }
 const normalizeText = (value: string): string => value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-export function assertImageTextReview(review: ImageTextReviewOutput, context: ProductImageContext, plan: AiResult, ocr: AiResult, candidate: CandidateImageIdentity): void {
+export function assertImageTextReview(review: ImageTextReviewOutput, context: ProductImageContext, plan: AiResult, ocr: AiResult, candidate: CandidateImageIdentity,options:ImageEvidenceOptions={}): void {
   if (plan.output.kind !== 'image-plan' || ocr.output.kind !== 'generated-image-ocr' || listingFingerprint(review.candidate) !== listingFingerprint(candidate) || listingFingerprint(ocr.output.candidate) !== listingFingerprint(candidate) || review.planResultId !== plan.id || review.ocrResultId !== ocr.id) fail();
-  assertImagePlan(plan.output, context);
+  assertImagePlan(plan.output, context,options);
   const expected = [...(ocr.output.text.trim() ? [{ source: 'summary' as const, index: 0, text: ocr.output.text }] : []), ...ocr.output.lines.flatMap((line,index) => line.text.trim() ? [{ source: 'line' as const, index, text: line.text }] : [])];
   if (review.checks.length !== expected.length || review.expectedTextChecks.length !== plan.output.expectedText.length) fail();
   for (const line of expected) {

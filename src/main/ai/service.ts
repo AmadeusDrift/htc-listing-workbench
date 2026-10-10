@@ -1,4 +1,6 @@
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
+import { assertCurrentCopyEvidence } from '../listing-ai/current-evidence.ts';
+import { assertCurrentListingReview } from './image-validation.ts';
 import type { CompletionRequest } from '../listing-ai/completion-journal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -25,7 +27,7 @@ import type { AdapterContext, ProviderMetadata } from './transport.ts';
 import { AiVault } from './vault.ts';
 import { assertCandidateEvidence, assertReviewEvidence, reviewWithDeepSeek, sourceFingerprint, suggestionFingerprint } from './review.ts';
 import type { ReviewPayload } from './review.ts';
-import { CAPABILITIES, MAX_OCR_TEXT, MODELS, boundedText, integer, isDeepSeek, keys, modelFor, object, parseConnectionInput, parseProfileImport, parseRecognizeInput, parseReviewInput, parseSegmentInput, parseSuggestInput, protectedAttribute, providerId, uuid, validateAiCall, validateAiProfile, validateAiResult, vendorId } from './validation.ts';
+import { CAPABILITIES, MAX_OCR_TEXT, MODELS, boundedText, integer, isDeepSeek, keys, modelFor, object, parseConnectionInput, parseProfileImport, parseRecognizeInput, parseReviewInput, parseSegmentInput, parseSuggestInput, protectedAttribute, providerId, uuid, validateAiCall, validateAiProfile, validateAiResult, validateStoredAiResult, vendorId } from './validation.ts';
 import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from './validation.ts';
 import type { ListingAiContext, ListingFieldsOutput } from '../../shared/listing-ai-contracts.ts';
 import { reviewListingFields, suggestListingFields } from './listing-adapters.ts';
@@ -263,11 +265,11 @@ export class AiService {
     if (!profile.configured) throw new AiError('NOT_CONFIGURED'); if (!profile.enabled) throw new AiError('DISABLED'); return profile;
   }
   listCalls(): AiCall[] { this.ensureOpen(); return this.records.list('ai_calls', {}, validateAiCall); }
-  listResults(rawProductId: string): AiResult[] { this.ensureOpen(); return this.records.list('ai_results', { productId: uuid(rawProductId) }, validateAiResult); }
+  listResults(rawProductId: string): AiResult[] { this.ensureOpen(); return this.records.list('ai_results', { productId: uuid(rawProductId) }, validateStoredAiResult); }
   getCall(id: string): AiCall | undefined { this.ensureOpen(); return this.records.get('ai_calls', id, validateAiCall); }
-  getResult(id: string): AiResult | undefined { this.ensureOpen(); return this.records.get('ai_results', id, validateAiResult); }
+  getResult(id: string): AiResult | undefined { this.ensureOpen(); return this.records.get('ai_results', id, validateStoredAiResult); }
   queryCalls(raw: unknown) { this.ensureOpen(); return this.records.query('ai_calls', raw, validateAiCall); }
-  queryResults(raw: unknown) { this.ensureOpen(); return this.records.query('ai_results', raw, validateAiResult); }
+  queryResults(raw: unknown) { this.ensureOpen(); return this.records.query('ai_results', raw, validateStoredAiResult); }
   private product(productId: string, revision: number): ProductDetail {
     try { const product = this.store.getProduct(productId); if (product.revision !== revision) throw new AiError('SOURCE_CHANGED'); return product; }
     catch { throw new AiError('SOURCE_CHANGED'); }
@@ -429,10 +431,12 @@ export class AiService {
     if (context.copyReviewBypass) {
       validateProductImageContext(context);
       if (readCopyReviewSettings(this.db).enabled) throw new AiError('SOURCE_CHANGED');
+      assertCurrentCopyEvidence(context.currentListingCopy,context.listing);
     } else {
       const review = context.listingReviewResultId === null ? undefined : this.getResult(context.listingReviewResultId);
       if (!review || review.output.kind !== 'listing-current-review' || review.output.verdict !== 'PASS' || review.providerId !== 'deepseek-review' || !review.listingContext || review.sourceSha256 !== listingFingerprint(context.listing) || listingFingerprint(review.listingContext) !== listingFingerprint(context.listing) || listingFingerprint(review.output.currentListingCopy) !== listingFingerprint(context.currentListingCopy)) throw new AiError('SOURCE_CHANGED');
       this.successfulResult(review);
+      assertCurrentListingReview({...review.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing);
       const latest = this.listResults(product.id).filter(result => result.output.kind === 'listing-current-review' && result.sourceSha256 === review.sourceSha256 && result.output.copySha256 === listingFingerprint(context.currentListingCopy)).at(-1);
       if (latest?.id !== review.id) throw new AiError('SOURCE_CHANGED');
     }
@@ -606,7 +610,7 @@ export class AiService {
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}) });
+        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:'listing-evidence/v1', listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:'listing-evidence/v1', imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
           this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id, JSON.stringify(result));

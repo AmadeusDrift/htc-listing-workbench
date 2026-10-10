@@ -9,7 +9,8 @@ import type { ProductDetail } from '../../shared/contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import type { ProductImageContext } from '../../shared/image-ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY, IMAGE_TEXT_REVIEW_POLICY_VERSION } from '../../shared/image-ai-contracts.ts';
-import { assertImagePlan, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../ai/image-validation.ts';
+import { assertCurrentListingReview, assertImageSetPlan, assertImagePlan, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../ai/image-validation.ts';
+import { assertCurrentCopyEvidence, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 import type { CompleteAutomaticProductResult, ImageWorkflowRun, ImageWorkflowSlot, ImageSlotAttempt } from '../../shared/image-workflow-contracts.ts';
 import { hasSevenApprovedImages, needsImageTextPolicyReview } from '../../shared/image-workflow-contracts.ts';
 import type { GeneratedImageCandidate } from '../../shared/image-generation-contracts.ts';
@@ -30,7 +31,7 @@ import { integer, keys, uuid } from '../ai/validation.ts';
 import { privateDirectory } from '../image-generation/vault.ts';
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
-import { approvedWorkflowAsset, imageWorkflowDraftStamp, selectImageReferences, validateImageWorkflowRun, workflowRuns } from './records.ts';
+import { approvedWorkflowAsset, imageWorkflowDraftStamp, selectImageReferences, validateStoredImageWorkflowRun, workflowRuns } from './records.ts';
 import { allowUnboundSingleSku, parseAutomaticSources, prepareImageWorkflowSources } from './sources.ts';
 import type { AutomaticImageSources, AutomaticSourcesResult } from './sources.ts';
 import { currentSourceImageMeasurements } from './source-measurements.ts';
@@ -81,6 +82,21 @@ export class ImageWorkflowService {
     const context=this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
     return imageListingContextsMatch(run.imageContext.listing,{...currentImageListingSnapshot(draft,context).context,draftRevision:run.imageContext.listing.draftRevision});
   }
+  /** Current authorization only; never called by list/history/backup readers. */
+  private assertCurrentEvidence(draft:AmazonDraft,base?:ProductImageContext,setPlan?:ImageWorkflowRun['setPlan']):void {
+    const context=this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
+    const issues=currentDraftEvidenceIssues(draft,context,this.listing.currentContext?id=>this.ai.getResult(id):undefined);
+    if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
+    if(!base)return;
+    if(setPlan)assertImageSetPlan(setPlan,base);
+    validateProductImageContext(base);
+    assertCurrentCopyEvidence(base.currentListingCopy,context);
+    assertCurrentCopyEvidence(base.currentListingCopy,base.listing);
+    if(base.copyReviewBypass)return;
+    const review=base.listingReviewResultId?this.ai.getResult(base.listingReviewResultId):undefined;
+    if(review?.output.kind!=='listing-current-review'||review.output.verdict!=='PASS')throw new UserFacingError('原文案复核记录不完整，已保留图片');
+    assertCurrentListingReview({...review.output,kind:'amazon-fields-review'},base.currentListingCopy,base.listing);
+  }
   private canRecheckImageContent(run:ImageWorkflowRun,draft:AmazonDraft,remaining:string[]=run.contentPreparation?.remaining??[]):boolean {
     return !run.categoryFieldPolicyVersion&&!run.categoryFieldRepair&&run.contentPreparation?.state!=='STARTED'
       &&categoryRepairFields(draft,remaining).length>0&&!workflowRuns(this.db,draft.id).some(saved=>saved.productRevision===draft.productRevision&&saved.categoryFieldRepair);
@@ -91,7 +107,7 @@ export class ImageWorkflowService {
       run.approvedAssetId=run.slots[0].approvedAssetId;run.approvedSha256=run.slots[0].approvedSha256;
     }
     run.updatedAt = new Date(Math.max(Date.now(), Date.parse(run.createdAt))).toISOString();
-    const valid = validateImageWorkflowRun(run);
+    const valid = validateStoredImageWorkflowRun(run);
     this.db.prepare('INSERT INTO image_workflow_runs VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(valid.id, JSON.stringify(valid));
   }
   get busy(): boolean { return this.active.size > 0 || this.activeSources.size > 0; }
@@ -155,7 +171,7 @@ export class ImageWorkflowService {
       const confirmed=(id:string,variant:string)=>!!this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(id,variant);
       const saved=this.db.prepare("SELECT record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? LIMIT 1001").all(product.id);
       if(saved.length>1000)return null;
-      const derived=new Set(saved.map(value=>validateImageWorkflowRun(JSON.parse(String(value.record_json)))).flatMap(value=>value.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(value.approvedAssetId?[value.approvedAssetId]:[])));
+      const derived=new Set(saved.map(value=>validateStoredImageWorkflowRun(JSON.parse(String(value.record_json)))).flatMap(value=>value.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(value.approvedAssetId?[value.approvedAssetId]:[])));
       const variants=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])];
       const refs=selectImageReferences(product,draft.variantId,derived,confirmed,allowUnboundSingleSku(product,this.sources?.getReceipt(product.id)),variants,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
@@ -221,6 +237,7 @@ export class ImageWorkflowService {
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     const prior = this.getProgress(draftId);
+    if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan);
     if(hasSevenApprovedImages(prior)&&this.canRecheckImageContent(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
     if(hasSevenApprovedImages(prior)&&this.listing.prepareSourceColors
       &&(nonDeferredImageIssues(draft).some(issue=>issue.attributeNames.includes('color'))||!this.currentContextMatches(prior!,draft)))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
@@ -233,7 +250,7 @@ export class ImageWorkflowService {
     }
     const now = new Date().toISOString();
     const reusable=prior?.slots&&prior.status!=='COMPLETED'&&prior.productId===draft.productId&&prior.productRevision===draft.productRevision&&prior.variantId===draft.variantId&&prior.sku===draft.sku&&(!prior.draftSha256||prior.draftSha256===imageWorkflowDraftStamp(draft));
-    const run: ImageWorkflowRun = reusable?structuredClone(prior!):{ id:randomUUID(),draftId,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
+    const run: ImageWorkflowRun = reusable?structuredClone(prior!):{ listingEvidenceContractVersion:'listing-evidence/v1',id:randomUUID(),draftId,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
       status:'RUNNING',stage:'content',attempt:0,maxAttempts:integer(options.maxImageAttempts??3,1,3),contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:IMAGE_SET_POLICY,slots:newSlots(),categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION };
     if(!this.getRiskSettings().enabled)run.riskInterceptionEnabled=false;
     if(!this.getCopyReviewSettings().enabled)run.copyReviewEnabled=false;
@@ -264,6 +281,7 @@ export class ImageWorkflowService {
   private async tryReuseApproval(draftId:string,revision:number,sourceId:string,signal:AbortSignal):Promise<CompleteAutomaticProductResult|undefined> {
     const runs=workflowRuns(this.db,draftId),requested=runs.find(run=>run.id===sourceId),prior=requested?.approvalReuse?runs.find(run=>run.id===requested.approvalReuse!.sourceRunId):requested;
     const draft=this.amazon.getDraft(draftId),base=prior?.imageContext;
+    if(base)this.assertCurrentEvidence(draft,base,prior?.setPlan);
     if(prior&&this.canRecheckImageContent(prior,draft))return undefined;
     if(this.listing.prepareSourceColors&&nonDeferredImageIssues(draft).some(issue=>issue.attributeNames.includes('color')))return undefined;
     if(!prior||!base||!hasSevenApprovedImages(prior)||!this.isRiskPolicyCompatible(prior)||!this.isCopyReviewPolicyCompatible(prior)||prior.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||prior.approvalReuse
@@ -334,6 +352,7 @@ export class ImageWorkflowService {
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId),revision=integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
     if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
     const runs=workflowRuns(this.db,draftId),prior=runs.find(value=>value.id===uuid(input.sourceWorkflowId)),draft=this.amazon.getDraft(draftId);
+    if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan);
     if(!prior||prior.status!=='COMPLETED'||prior.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||!prior.approvedAssetId||!prior.approvedSha256
       ||prior.productId!==draft.productId||prior.productRevision!==draft.productRevision||prior.variantId!==draft.variantId||prior.sku!==draft.sku
       ||draft.revision!==revision||draft.submittedAt||!['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state))throw new UserFacingError('原图片审核或当前草稿范围无法用于重新复核');
@@ -364,6 +383,7 @@ export class ImageWorkflowService {
     const stage=(value:ImageWorkflowRun['stage'])=>{throwIfAborted(signal);run.stage=value;this.save(run);};
     try{
       throwIfAborted(signal);
+      if(run.imageContext)this.assertCurrentEvidence(initial,run.imageContext,run.setPlan);
       const pricing=pricingBlockingReason(initial);if(pricing)throw new UserFacingError(pricing);
       const connection=reuse?null:this.generation.getConnection();
       if(!reuse&&(!connection?.configured||!connection.enabled))throw new UserFacingError('请在设置中配置并启用生图服务，然后继续自动准备');
@@ -392,6 +412,7 @@ export class ImageWorkflowService {
           const draft=this.amazon.getDraft(run.draftId),snapshot=currentImageListingSnapshot(draft,this.currentContext(draft,this.store.getProduct(run.productId),this.amazon.executionTargetScope(draft.targetId).generation));
           const candidates=this.ai.listResults(run.productId).filter(value=>value.output.kind==='listing-current-review'&&value.listingContext&&listingFingerprint(value.listingContext)===listingFingerprint(snapshot.context)&&listingFingerprint(value.output.currentListingCopy)===listingFingerprint(snapshot.currentListingCopy)&&this.ai.getCall(value.callId)?.status==='SUCCEEDED');
           const saved=candidates.at(-1);
+          if(saved?.output.kind==='listing-current-review')assertCurrentListingReview({...saved.output,kind:'amazon-fields-review'},snapshot.currentListingCopy,snapshot.context);
           return saved?{context:snapshot.context,currentListingCopy:snapshot.currentListingCopy,review:saved}:undefined;
         };
         let copy=copyReviewEnabled?cachedCopy():undefined;
@@ -455,10 +476,12 @@ export class ImageWorkflowService {
           }
         }
         run.imageContext=validateProductImageContext(base);
+        run.listingEvidenceContractVersion='listing-evidence/v1';
         run.imageRecipeSha256=listingFingerprint(result.draft.salesPlan?.recipe??null);
         run.contextSha256=listingFingerprint(run.imageContext);run.draftSha256=imageWorkflowDraftStamp(result.draft);this.save(run);
       }
       const base=run.imageContext,operationRevision=result.draft.revision;
+      this.assertCurrentEvidence(result.draft,base,run.setPlan);
       const assertEquivalentDraft=(draft:AmazonDraft,targetGeneration:number)=>{
         if(draft.revision!==operationRevision)throw new AiError('SOURCE_CHANGED');
         if(draft.revision===base.listing.draftRevision&&!this.listing.currentContext)return;
@@ -487,7 +510,7 @@ export class ImageWorkflowService {
         if(!run.setPlanResultId){
           stage('planning');const plan=await this.ai.imagePlan(base,fresh,undefined,signal);result.aiCalls++;
           if(plan.output.kind!=='image-plan'||!plan.output.setPlan)throw new AiError('OUTPUT_INVALID');
-          assertImagePlan(plan.output,base);run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
+          assertImagePlan(plan.output,base);run.listingEvidenceContractVersion='listing-evidence/v1';run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
         }
         const planned=this.ai.getResult(run.setPlanResultId);
         if(!planned||planned.output.kind!=='image-plan'||listingFingerprint(planned.output.setPlan)!==listingFingerprint(run.setPlan))throw new AiError('SOURCE_CHANGED');
@@ -640,6 +663,7 @@ export class ImageWorkflowService {
     try {
       throwIfAborted(signal);
       const connection = reuse ? null : this.generation.getConnection();
+      if(reuse?.imageContext)this.assertCurrentEvidence(initial,reuse.imageContext,reuse.setPlan);
       if (!reuse && (!connection?.configured || !connection.enabled)) throw new UserFacingError('请在设置中配置并启用生图服务，然后重新开始自动准备');
       const generationScope=reuse ? null : this.generation.configurationScope(), configStamp=listingFingerprint(connection);
       for (const [id,label] of [['deepseek','DeepSeek 内容生成'],['deepseek-review','DeepSeek 独立复核'],['aliyun-ocr','阿里云 OCR'],['aliyun-image-risk','阿里云图片侵权风险检测']] as const) {
@@ -660,6 +684,7 @@ export class ImageWorkflowService {
       throwIfAborted(signal);
       const copy = await this.listing.reviewCurrentForImages({draftId:run.draftId,draftRevision:result.draft.revision},signal); result.aiCalls++;
       if (copy.review.output.kind !== 'listing-current-review' || copy.review.output.verdict !== 'PASS') throw new UserFacingError('商品文案复核未通过，已停止后续生图');
+      assertCurrentListingReview({...copy.review.output,kind:'amazon-fields-review'},copy.currentListingCopy,copy.context);
       const context: ProductImageContext = validateProductImageContext({ listing:copy.context,currentListingCopy:copy.currentListingCopy,listingReviewResultId:copy.review.id,ipSource:imageRiskSourceSnapshot(product,run.variantId),
         referenceAssets:run.referenceAssets.map(ref=>({assetId:ref.id,sha256:ref.sha256,variantId:refs.find(a=>a.id===ref.id)!.variantIds.includes(run.variantId)?run.variantId:null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION });
       if(reuse){

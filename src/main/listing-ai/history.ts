@@ -1,10 +1,11 @@
+import { assertStoredListingEvidence, assertStoredListingReview } from './stored-evidence.ts';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { LISTING_CANDIDATE_FIELDS } from '../../shared/listing-ai-contracts.ts';
 import { attributesObject } from '../amazon/context.ts';
 import { wrapCandidateValues } from '../amazon/field-mapping.ts';
-import { assertListingEvidence, assertListingReview, listingFingerprint } from './validation.ts';
+import { listingFingerprint } from './validation.ts';
 import { validateSalesPlan } from '../sales-plans/records.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { adoptionSchema } from './schema-lineage.ts';
@@ -145,12 +146,12 @@ export function assertListingHistory(draft: AmazonDraft, results: Map<string,AiR
     if (a.reviewResultId === null) { if (!hasDisposition && c.policyVersion !== OPTIONAL_REVIEW_POLICY) invalid(); }
     else {
       if (!review || review.output.kind !== 'amazon-fields-review' || review.output.verdict !== 'PASS' || review.sourceResultIds[0] !== suggestion.id || review.sourceSha256 !== a.contextSha256) return invalid();
-      assertListingReview(review.output,suggestion.output,c,{historical:true});
+      assertStoredListingReview(review.output,suggestion.output,c,suggestion.listingEvidenceContractVersion);
     }
     const schema=adoptionSchema(draft,c,a,database);
     if (!schema || c.draftId !== draft.id || c.draftRevision !== a.fromRevision || c.productId !== draft.productId || c.productRevision !== draft.productRevision || c.variantId !== draft.variantId || c.sku !== draft.sku || c.targetId !== draft.targetId || c.listingProgram !== (draft.listingProgram ?? 'standard') || a.contextSha256 !== listingFingerprint(c) || suggestion.sourceSha256 !== a.contextSha256) return invalid();
     for (const result of review ? [suggestion,review] : [suggestion]) {const call=calls.get(result.callId);if(!call||call.status!=='SUCCEEDED'||call.productId!==result.productId||call.productRevision!==result.productRevision||call.providerId!==result.providerId||call.model!==result.model||call.finishedAt!==result.createdAt)invalid();}
-    assertListingEvidence(suggestion.output,c,{historical:true});
+    assertStoredListingEvidence(suggestion.output,c,suggestion.listingEvidenceContractVersion);
     const expectedId=listingFingerprint({draftId:draft.id,revision:a.fromRevision,suggestion:suggestion.id,review:review?.id??null,fields:[...a.fields].sort(),...(hasDisposition?{reviewDisposition:a.reviewDisposition}:{})});if(a.id!==expectedId)invalid();
     if(a.changes.some(change=>!exactKeys(change,['field','before','after','evidence'])))invalid();
     if(new Set(a.changes.map(change=>change.field)).size!==a.fields.length)invalid();

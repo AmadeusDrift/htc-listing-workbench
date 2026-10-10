@@ -1,5 +1,6 @@
-import { categoryAttributeValues, categoryAttributeField, categoryAttributeSourceOptions } from '../listing-ai/evidence-category-v1.ts';
-export { categoryAttributeValues, categoryAttributeField, categoryAttributeSourceOptions } from '../listing-ai/evidence-category-v1.ts';
+import { categoryAttributeValues, categoryAttributeField, categoryAttributeSourceOptions, parseCategorySource, SCOPED_CATEGORY_FIELDS } from '../listing-ai/evidence-category-v2.ts';
+import type { CategorySourceValue } from '../listing-ai/evidence-category-v2.ts';
+export { categoryAttributeValues, categoryAttributeField, categoryAttributeSourceOptions } from '../listing-ai/evidence-category-v2.ts';
 import { createHash } from 'node:crypto';
 import type { AmazonSchema, AmazonTarget, JsonObject, JsonValue, ListingProgram, SchemaSelection, SourceFieldMapping } from '../../shared/amazon-contracts.ts';
 import type { Fact, ProductDetail, Variant } from '../../shared/contracts.ts';
@@ -74,17 +75,20 @@ export function sourceAttributes(product: ProductDetail, variant: Variant, snaps
   const knownNames = new Set(['brand', 'color', 'material', 'manufacturer', 'country_of_origin', 'batteries_required', 'battery_type', 'size', 'model_name', 'model_number', ...CATEGORY_ATTRIBUTE_FIELDS]);
   if (program === 'haul') for (const name of ['item_name','product_description','item_shape','care_instructions','is_dishwasher_safe','number_of_items','item_package_quantity','number_of_packs',
     'part_number','condition_type','gpsr_safety_attestation','supplier_declared_dg_hz_regulation','required_product_compliance_certificate']) knownNames.add(name);
-  const selected=selectedSkuCategoryAttributes(variant),confirmed = new Map<string, Set<string>>();
+  const selected=selectedSkuCategoryAttributes(variant),selectedSources=selectedSkuCategoryEvidence(variant),confirmed = new Map<string, Set<string>>();
   for (const fact of product.facts) if (['source_confirmed', 'human_confirmed'].includes(fact.state) && fact.value.trim()) {
     const name = categoryAttributeField(fact.name,fact.value) ?? sourceFieldName(fact.name, program);
     if (!knownNames.has(name)) continue;
-    if(Object.hasOwn(selected,name))continue;
+    if(Object.hasOwn(selectedSources,name))continue;
     if (program === 'haul' && product.variants.length > 1 && SKU_DEPENDENT_SOURCE_FIELDS.has(name)) continue;
     const values = confirmed.get(name) ?? new Set<string>(); values.add(fact.value.trim()); confirmed.set(name, values);
   }
   for (const [name, values] of confirmed) if (values.size === 1) {
     if (program === 'haul' && product.facts.some(fact => fact.state === 'conflicting' && (categoryAttributeField(fact.name,fact.value)??sourceFieldName(fact.name, program)) === name)) continue;
     const fact = [...values][0];
+    // These bounded roles cannot seed either an excluded value or unparsed raw
+    // text into a canonical attribute. Other free-text source mappings are unchanged.
+    if((SCOPED_CATEGORY_FIELDS as readonly string[]).includes(name)&&categoryAttributeValues(name,fact).length!==1)continue;
     const value = (program === 'haul'||(CATEGORY_ATTRIBUTE_FIELDS as readonly string[]).includes(name)) && Object.hasOwn(fields, name) ? sourceFactValue(snapshot, name, fact)
       : ['batteries_required','is_dishwasher_safe'].includes(name) && ['true', 'false'].includes(fact) ? fact === 'true'
       : ['number_of_items','item_package_quantity','number_of_packs'].includes(name) && /^\d+$/u.test(fact) && Number(fact) > 0 ? Number(fact) : fact;
@@ -121,10 +125,18 @@ export function sourceFieldName(name: string, program: ListingProgram): string {
 /** A supplier's selected SKU is more specific than a product-wide Adult/Soft label. */
 export function selectedSkuCategoryAttributes(variant:Variant):Record<string,string>{
   const result:Record<string,string>={};
-  for(const field of ['age_range_description','item_firmness_description','power_source_type']){
+  for(const [field,{parsed}] of Object.entries(selectedSkuCategoryEvidence(variant))){
+    if(!parsed.unparsed&&parsed.values.length===1&&!parsed.excluded.includes(parsed.values[0]))result[field]=parsed.values[0];
+  }
+  return result;
+}
+/** First relevant supplier source wins even when it only excludes or cannot be parsed. */
+export function selectedSkuCategoryEvidence(variant:Variant):Record<string,{raw:string;parsed:CategorySourceValue}>{
+  const result:Record<string,{raw:string;parsed:CategorySourceValue}>={};
+  for(const field of SCOPED_CATEGORY_FIELDS){
     for(const spec of [variant.sourceSpec,variant.originalSpec,variant.normalizedSpec]){
-      if(!spec?.trim())continue;const values=categoryAttributeValues(field,spec);
-      if(values.length){if(values.length===1)result[field]=values[0];break;}
+      if(!spec?.trim())continue;const parsed=parseCategorySource(field,spec);
+      if(parsed.present){result[field]={raw:spec,parsed};break;}
     }
   }
   return result;
@@ -210,7 +222,7 @@ export function effectiveSourceMeasurements(product: ProductDetail, receipt: Con
 /** Explain current source mapping without promoting missing or uncertain facts. */
 export function sourceMappingReport(product: ProductDetail, variant: Variant, snapshot: AmazonSchema, target: AmazonTarget, program: ListingProgram = 'standard', attributes?: JsonObject, skuMeasurements: ConfirmedMeasurements = {}): SourceFieldMapping[] {
   const source = sourceAttributes(product, variant, snapshot, target, program, skuMeasurements); const current = attributes ?? source;
-  const selected=selectedSkuCategoryAttributes(variant);
+  const selected=selectedSkuCategoryAttributes(variant),selectedSources=selectedSkuCategoryEvidence(variant);
   const facts = new Map<string,Fact[]>(); const measurements = new Map<string,Fact[]>();
   const add = (groups: Map<string,Fact[]>, name: string, fact: Fact) => { const values = groups.get(name) ?? []; values.push(fact); groups.set(name,values); };
   for (const fact of product.facts) if (['source_confirmed','human_confirmed','conflicting'].includes(fact.state) && fact.value.trim()) {
@@ -232,6 +244,7 @@ export function sourceMappingReport(product: ProductDetail, variant: Variant, sn
     }
     if (groups.some(group => group.some(fact=>fact.state==='conflicting') || new Set(group.map(fact=>fact.value.trim())).size > 1)) return entry('conflicting',`${field} 的来源事实存在冲突，请确认后再填入`);
     const requirement = card.requirement === 'required' ? 'Schema 必填' : card.requirement === 'conditional' ? 'Schema 条件必填，适用性由完整条件校验决定' : 'Schema 可选';
+    if(Object.hasOwn(selectedSources,field)&&!Object.hasOwn(selected,field))return entry('needs_input',`${requirement}；所选 SKU 的来源仅排除某些值或尚无法解析，不能据此填入 ${field}`,[]);
     if (program === 'haul' && product.variants.length > 1 && SKU_DEPENDENT_SOURCE_FIELDS.has(field)) return entry('needs_input',`${requirement}；商品包含多个 SKU，商品级 ${field} 尚未绑定所选 SKU，请确认该 SKU 的专属值后填入`);
     const problems: string[] = [];
     for (const name of measurementNames) {

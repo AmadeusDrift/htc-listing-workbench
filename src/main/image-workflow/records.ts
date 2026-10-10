@@ -8,14 +8,15 @@ import type { ImageTextReviewPolicyVersion } from '../../shared/image-ai-contrac
 import type { ImageWorkflowRun, ImageWorkflowSlot, ImageSlotAttempt } from '../../shared/image-workflow-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { boundedText, date, integer, keys, sha256, uuid, uuidList, validateStoredAiResult } from '../ai/validation.ts';
-import { LISTING_EVIDENCE_CONTRACT_VERSION } from '../../shared/listing-ai-contracts.ts';
+import { LISTING_EVIDENCE_CONTRACT_VERSIONS } from '../../shared/listing-ai-contracts.ts';
+import type { ListingEvidenceContractVersion } from '../../shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { validateProductImageContext, validateImageSetPlan, assertImageSetPlan, validateCandidateImageIdentity } from '../ai/image-validation.ts';
 import { readImageRiskSettings, riskPolicyCompatible } from './risk-settings.ts';
 import { readCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-ai/review-settings.ts';
 import { imageApprovalDraftSnapshot, validateApprovalReuse } from './approval-reuse.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
-import { assertCurrentCopyEvidence, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
+import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
 export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = true, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
   if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
@@ -33,13 +34,15 @@ export function selectImageReferences(product: ProductDetail, variantId: string,
 
 function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
   const o = keys(raw, ['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets',
-    'planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error'], ['imagePolicyVersion','ipReviewResultIds','recheckedFromRunId']);
+    'planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error'], ['imagePolicyVersion','ipReviewResultIds','recheckedFromRunId','listingEvidenceContractVersion']);
+  if(o.listingEvidenceContractVersion!==undefined&&!(LISTING_EVIDENCE_CONTRACT_VERSIONS as readonly unknown[]).includes(o.listingEvidenceContractVersion))throw new UserFacingError('图片证据契约版本无效');
   if (o.imagePolicyVersion !== undefined && !['product-image/v1','product-image/vision-v2',PRODUCT_IMAGE_POLICY_VERSION].includes(String(o.imagePolicyVersion))) throw new UserFacingError('图片规划版本无效');
   if(o.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION && o.ipReviewResultIds===undefined)throw new UserFacingError('缺少侵权风险检测记录');
   if (!['RUNNING','COMPLETED','BLOCKED','FAILED','CANCELLED','INTERRUPTED'].includes(String(o.status)) || !IMAGE_WORKFLOW_STAGES.includes(o.stage as ImageWorkflowRun['stage']) || ![1,2].includes(Number(o.maxAttempts))) throw new UserFacingError('图片流程记录无效');
   if (!Array.isArray(o.referenceAssets) || o.referenceAssets.length > 3) throw new UserFacingError('图片参考记录无效');
   const referenceAssets = o.referenceAssets.map(raw => { const a = keys(raw, ['id','sha256']); return { id: uuid(a.id), sha256: sha256(a.sha256) }; });
   const run: ImageWorkflowRun = {
+    ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}),
     id: uuid(o.id), draftId: uuid(o.draftId), productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), variantId: uuid(o.variantId), sku: boundedText(o.sku, 100),
     status: o.status as ImageWorkflowRun['status'], stage: o.stage as ImageWorkflowRun['stage'], attempt: integer(o.attempt, 0, Number(o.maxAttempts)), maxAttempts: integer(o.maxAttempts,1,2),
     contextSha256: o.contextSha256 === null ? null : sha256(o.contextSha256), draftSha256: o.draftSha256 === null ? null : sha256(o.draftSha256), referenceAssets,
@@ -87,7 +90,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
     if(Boolean(parsed.approvedAssetId)!==Boolean(parsed.approvedSha256)||(parsed.status==='PASSED')!==Boolean(parsed.approvedAssetId)||parsed.status==='PASSED'&&(attempts.at(-1)?.state!=='PASSED'||!parsed.contextSha256||parsed.error)||attempts.length&&!parsed.contextSha256)invalid();
     return parsed;
   });
-  if(o.listingEvidenceContractVersion!==undefined&&o.listingEvidenceContractVersion!==LISTING_EVIDENCE_CONTRACT_VERSION)invalid();
+  if(o.listingEvidenceContractVersion!==undefined&&!(LISTING_EVIDENCE_CONTRACT_VERSIONS as readonly unknown[]).includes(o.listingEvidenceContractVersion))invalid();
   const evidenceOptions=options.stored?{storedVersion:o.listingEvidenceContractVersion as string??null}:{};
   const imageContext=o.imageContext===undefined?undefined:validateProductImageContext(o.imageContext,evidenceOptions);
   if(imageContext?.copyReviewBypass&&o.copyReviewEnabled!==false)invalid();
@@ -95,7 +98,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   if(Boolean(setPlan)!==Boolean(setPlanResultId)||setPlan&&o.slotPolicy!==IMAGE_SET_POLICY||imageContext&&(imageContext.setPolicy===IMAGE_SET_POLICY)!==(o.slotPolicy===IMAGE_SET_POLICY))invalid();
   if(setPlan&&imageContext)assertImageSetPlan(setPlan,imageContext,evidenceOptions);
   const refs=(o.referenceAssets as unknown[]).map(value=>{const ref=keys(value,['id','sha256']);return{id:uuid(ref.id),sha256:sha256(ref.sha256)};});
-  const run:ImageWorkflowRun={...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION}),...(o.copyRepairAttempts===undefined?{}:{copyRepairAttempts:integer(o.copyRepairAttempts,0,2)}),id:uuid(o.id),draftId:uuid(o.draftId),productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),sku:boundedText(o.sku,100),status:o.status as ImageWorkflowRun['status'],stage:o.stage as ImageWorkflowRun['stage'],attempt:integer(o.attempt,0,21),maxAttempts,contextSha256:maybeHash(o.contextSha256),draftSha256:maybeHash(o.draftSha256),referenceAssets:refs,planResultIds:uuidList(o.planResultIds,21),candidateIds:uuidList(o.candidateIds,21),ipReviewResultIds:uuidList(o.ipReviewResultIds,21),ocrResultIds:uuidList(o.ocrResultIds,21),reviewResultIds:uuidList(o.reviewResultIds,21),approvedAssetId:maybeId(o.approvedAssetId),approvedSha256:maybeHash(o.approvedSha256),createdAt:date(o.createdAt),updatedAt:date(o.updatedAt),error:message(o.error),imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:o.slotPolicy as ImageWorkflowRun['slotPolicy'],slots,...(setPlan?{setPlan,setPlanResultId}:{}),...(imageContext?{imageContext}:{}),...(o.activeSlot===undefined?{}:{activeSlot:integer(o.activeSlot,1,7)}),...(o.recheckedFromRunId===undefined?{}:{recheckedFromRunId:uuid(o.recheckedFromRunId)})};
+  const run:ImageWorkflowRun={...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}),...(o.copyRepairAttempts===undefined?{}:{copyRepairAttempts:integer(o.copyRepairAttempts,0,2)}),id:uuid(o.id),draftId:uuid(o.draftId),productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),sku:boundedText(o.sku,100),status:o.status as ImageWorkflowRun['status'],stage:o.stage as ImageWorkflowRun['stage'],attempt:integer(o.attempt,0,21),maxAttempts,contextSha256:maybeHash(o.contextSha256),draftSha256:maybeHash(o.draftSha256),referenceAssets:refs,planResultIds:uuidList(o.planResultIds,21),candidateIds:uuidList(o.candidateIds,21),ipReviewResultIds:uuidList(o.ipReviewResultIds,21),ocrResultIds:uuidList(o.ocrResultIds,21),reviewResultIds:uuidList(o.reviewResultIds,21),approvedAssetId:maybeId(o.approvedAssetId),approvedSha256:maybeHash(o.approvedSha256),createdAt:date(o.createdAt),updatedAt:date(o.updatedAt),error:message(o.error),imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:o.slotPolicy as ImageWorkflowRun['slotPolicy'],slots,...(setPlan?{setPlan,setPlanResultId}:{}),...(imageContext?{imageContext}:{}),...(o.activeSlot===undefined?{}:{activeSlot:integer(o.activeSlot,1,7)}),...(o.recheckedFromRunId===undefined?{}:{recheckedFromRunId:uuid(o.recheckedFromRunId)})};
   const attempts=slots.flatMap(slot=>slot.attempts);
   for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)if(listingFingerprint(run[plural])!==listingFingerprint(attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]]:[])))invalid();
   if(run.attempt!==attempts.length||new Set(attempts.map(a=>a.requestId)).size!==attempts.length||new Set(refs.map(ref=>ref.id)).size!==refs.length||run.updatedAt<run.createdAt||run.approvedAssetId!==slots[0].approvedAssetId||run.approvedSha256!==slots[0].approvedSha256||new Set(slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])).size!==slots.filter(slot=>slot.status==='PASSED').length)invalid();
@@ -120,6 +123,11 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
 }
 
 export const validateStoredImageWorkflowRun=(raw:unknown)=>validateImageWorkflowRun(raw,{stored:true});
+/** Validated PASSED slots bind their asset to the last PASSED attempt. Legacy
+ * completed runs likewise have aligned plan/candidate/review attempt arrays. */
+export function currentWorkflowPlanIds(run:ImageWorkflowRun):string[]{
+  return run.slots?run.slots.flatMap(slot=>{const id=slot.attempts.at(-1)?.planResultId;return id?[id]:[];}):run.planResultIds.slice(-1);
+}
 /** Image URLs are filled by execution after adoption; all other listing changes invalidate the selection. */
 export function imageWorkflowDraftStamp(draft: AmazonDraft): string {
   return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
@@ -143,11 +151,13 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.
-  const issues=currentDraftEvidenceIssues(draft,current,id=>{
+  const getResult=(id:string)=>{
     const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
     const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
-  },{adoptionFields:CONTRACT_ADOPTION_FIELDS,adoptionContext:'stored'});
+  };
+  const issues=currentDraftEvidenceIssues(draft,current,getResult,{adoptionFields:CONTRACT_ADOPTION_FIELDS,adoptionContext:'stored'});
   if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
+  assertCurrentImageCategoryExclusions(current,{base:run.imageContext,setPlan:run.setPlan,plans:currentWorkflowPlanIds(run).flatMap(id=>{const result=getResult(id);return result?[result]:[];})});
   if(run.imageContext){if(run.setPlan)assertImageSetPlan(run.setPlan,run.imageContext);validateProductImageContext(run.imageContext);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,current);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,run.imageContext.listing);}
   const selected=run.slots?run.slots.map(slot=>({id:slot.approvedAssetId!,sha256:slot.approvedSha256!})):[{id:run.approvedAssetId!,sha256:run.approvedSha256!}];
   for(const item of selected){const asset = db.prepare('SELECT product_id,sha256 FROM assets WHERE id=?').get(item.id);

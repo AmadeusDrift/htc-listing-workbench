@@ -19,7 +19,7 @@ import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.t
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
-import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, workflowRuns } from '../src/main/image-workflow/records.ts';
+import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, workflowRuns, validateImageWorkflowRun, validateStoredImageWorkflowRun } from '../src/main/image-workflow/records.ts';
 import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
 import { ImageGenerationService } from '../src/main/image-generation/service.ts';
 import { AiError } from '../src/main/ai/errors.ts';
@@ -177,7 +177,66 @@ test('legacy caption and nested set-plan evidence remains readable and backup-st
   await assert.rejects(async()=>workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}));assert.equal(f.requests.length,before);assert.equal(posts(),0);
 });
 
-for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} legacy recheck versions its new context without rewriting old paid evidence`,async t=>{
+for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)test(`${version??'v0'} negative-caption history preserves nested plans, run literals and backup bytes`,async t=>{
+  const f=await fixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
+  const saved=await f.ai.imagePlan(context,()=>{}),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const evidence={id:context.listing.variantId+':age',name:'适用年龄',value:version==='listing-evidence/v2'?'儿童':'不适合儿童',meaning:'general' as const,source:'selected_sku' as const};
+  context.listing.evidence.push(evidence);
+  review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);
+  if(version)review.listingEvidenceContractVersion=version;else delete review.listingEvidenceContractVersion;
+  const plan=structuredClone(saved);plan.imageContext=context;plan.sourceSha256=listingFingerprint(context);
+  if(version)plan.listingEvidenceContractVersion=version;else delete plan.listingEvidenceContractVersion;
+  if(plan.output.kind!=='image-plan')throw Error('plan');
+  const set=plan.output.setPlan!;set.slots[1].textMode='planned';set.slots[1].evidenceIds=[evidence.id];set.slots[1].expectedText=[{text:'Child Coaster',evidenceIds:[evidence.id]}];
+  assert.deepEqual(validateStoredAiResult(plan),plan);assert.deepEqual(validateStoredAiResult(review),review);
+  if(version==='listing-evidence/v2')assert.doesNotThrow(()=>validateAiResult(plan));else assert.throws(()=>validateAiResult(plan));
+  const slotContext=validateProductImageContext({...context,purpose:'detail',slot:{index:2,total:7,provisional:true},setPlan:set},{storedVersion:version??null});
+  const nested={...structuredClone(plan),id:randomUUID(),imageContext:slotContext,sourceSha256:listingFingerprint(slotContext),output:{...plan.output,textMode:'planned',expectedText:set.slots[1].expectedText}};
+  delete nested.output.setPlan;
+  assert.deepEqual(validateStoredAiResult(nested),nested);
+  const negative=structuredClone(nested);negative.imageContext.listing.evidence.find(e=>e.id===evidence.id)!.value='不适合儿童';negative.sourceSha256=listingFingerprint(negative.imageContext);
+  for(const marker of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const){
+    if(marker)negative.listingEvidenceContractVersion=marker;else delete negative.listingEvidenceContractVersion;
+    assert.throws(()=>validateAiResult(negative));
+    if(marker==='listing-evidence/v2')assert.throws(()=>validateStoredAiResult(negative));else assert.doesNotThrow(()=>validateStoredAiResult(negative));
+  }
+  const at=new Date().toISOString(),run={...(version?{listingEvidenceContractVersion:version}:{}),id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'BLOCKED',stage:'planning',attempt:0,maxAttempts:3,contextSha256:listingFingerprint(context),draftSha256:imageWorkflowDraftStamp(f.draft),referenceAssets:context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})),planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:at,updatedAt:at,error:'Historical negative-caption plan',imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:'seven-product-v2',imageContext:context,setPlan:set,setPlanResultId:plan.id,slots:Array.from({length:7},(_,i)=>({index:i+1,purpose:i===0?'main':'detail',status:'PENDING',contextSha256:null,attempts:[],approvedAssetId:null,approvedSha256:null,error:null}))};
+  assert.deepEqual(validateStoredImageWorkflowRun(run),run);
+  if(version==='listing-evidence/v2')assert.doesNotThrow(()=>validateImageWorkflowRun(run));else assert.throws(()=>validateImageWorkflowRun(run));
+  const rawPlan=JSON.stringify(plan),rawRun=JSON.stringify(run),rawReview=JSON.stringify(review),db=openDatabase(f.directory);try{
+    db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawReview,review.id);
+    db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(rawPlan,plan.id);
+    db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(run.id,rawRun);
+    assert.deepEqual(workflowRuns(db)[0],run);
+  }finally{db.close();}
+  assert.deepEqual(f.ai.getResult(plan.id),plan);assert.ok(f.ai.listResults(f.product.id).some(result=>result.id===plan.id));
+  const backup=join(f.directory,'versioned-caption.htcbackup'),target=join(f.directory,'versioned-caption-restored');
+  await createWorkspaceBackup(f.directory,backup,'versioned caption passphrase');await commitWorkspaceRestore(target,await prepareWorkspaceRestore(target,backup,'versioned caption passphrase'));
+  const restored=openDatabase(target);try{
+    assert.equal(restored.prepare('SELECT record_json FROM ai_results WHERE id=?').get(plan.id)!.record_json,rawPlan);
+    assert.equal(restored.prepare('SELECT record_json FROM ai_results WHERE id=?').get(review.id)!.record_json,rawReview);
+    assert.equal(restored.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json,rawRun);
+  }finally{restored.close();}
+  if(version!=='listing-evidence/v2'){
+    const {workflow,posts}=productionWorkflow(f),before=f.requests.length;
+    await assert.rejects(async()=>workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}));assert.equal(f.requests.length,before);assert.equal(posts(),0);
+  }
+});
+
+for(const version of [undefined,'listing-evidence/v1'] as const)test(`${version??'v0'} PASS review of an excluded category remains readable but authorizes no image calls`,async t=>{
+  const f=await fixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const evidence={id:randomUUID(),name:'适用年龄',value:'不适合儿童',meaning:'general' as const,source:'source_confirmed' as const};
+  context.listing.fields=[{name:'age_range_description',title:'Age',requirement:'required',closedEnum:false,allowedValues:[],suggestedValues:[]}];
+  context.listing.evidence=[evidence];context.currentListingCopy=[{field:'age_range_description',values:['Child']}];
+  review.listingContext=context.listing;review.sourceSha256=listingFingerprint(context.listing);
+  if(version)review.listingEvidenceContractVersion=version;else delete review.listingEvidenceContractVersion;
+  review.output={kind:'listing-current-review',verdict:'PASS',currentListingCopy:context.currentListingCopy,copySha256:listingFingerprint(context.currentListingCopy),checks:[{field:'age_range_description',index:0,verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Historical keyword match.',claims:[{text:'Child',verdict:'SUPPORTED',evidenceIds:[evidence.id],reason:'Historical keyword match.'}]}],issues:[]};
+  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(review),review.id);}finally{db.close();}
+  assert.deepEqual(f.ai.getResult(review.id),review);assert.throws(()=>validateAiResult(review));assert.throws(()=>validateStoredAiResult({...review,listingEvidenceContractVersion:'listing-evidence/v2'}));
+  const before=f.requests.length;await assert.rejects(f.ai.imagePlan(context,()=>{}));assert.equal(f.requests.length,before);
+});
+
+for(const version of [undefined,'listing-evidence/v1'] as const)for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} ${version??'unmarked'} recheck versions its new context without rewriting old paid evidence`,async t=>{
   const f=await fixture(t),{workflow,posts}=productionWorkflow(f),material=f.context.listing.evidence.find(e=>e.meaning==='material')!;
   const sourceDb=openDatabase(f.directory);
   try{sourceDb.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','成人','manual','upgrade-era omitted conflict','conflicting',99);}finally{sourceDb.close();}
@@ -191,17 +250,18 @@ for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fre
   });
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
   assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
-  const prior=structuredClone(first.workflow);delete prior.listingEvidenceContractVersion;
+  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+  const prior=structuredClone(first.workflow);if(version)prior.listingEvidenceContractVersion=version;else delete prior.listingEvidenceContractVersion;
   const oldRun=JSON.stringify(prior),oldResults=new Map<string,string>(),db=openDatabase(f.directory);
   try{
     for(const row of db.prepare('SELECT id,record_json FROM ai_results').all()){
-      const value=JSON.parse(String(row.record_json));delete value.listingEvidenceContractVersion;
+      const value=JSON.parse(String(row.record_json));if(version&&(value.listingContext||value.imageContext))value.listingEvidenceContractVersion=version;else delete value.listingEvidenceContractVersion;
       const raw=JSON.stringify(value);oldResults.set(String(row.id),raw);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,row.id);
     }
     db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(oldRun,prior.id);
     const input={draftId:f.draft.id,draftRevision:first.draft.revision,sourceWorkflowId:prior.id},beforeReuse=f.requests.length;
     const reused=await workflow.recheck(input);
-    assert.equal(reused.workflow.approvalReuse?.sourceRunId,prior.id);assert.equal(reused.workflow.listingEvidenceContractVersion,undefined);
+    assert.equal(reused.workflow.approvalReuse?.sourceRunId,prior.id);assert.equal(reused.workflow.listingEvidenceContractVersion,version);
     assert.equal(f.requests.length,beforeReuse);assert.equal(reused.workflow.contextSha256,prior.contextSha256);
     legacyListing.currentContext=strictContext;
     assert.deepEqual(prior.imageContext?.ipSource,imageRiskSourceSnapshot(f.store.getProduct(f.product.id),prior.variantId));
@@ -212,15 +272,135 @@ for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fre
       delete pending.imageContext;delete pending.activeSlot;delete pending.copyRepairAttempts;delete pending.approvalReuse;delete pending.contentPreparation;delete pending.copyReviewResultId;delete pending.categoryFieldRepair;
       db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(pending.id,JSON.stringify(pending));pendingId=pending.id;
     }
+    const beforeCancel=f.requests.length;
+    const starting=(workflow as any).recheckWithFreshEvidence(input);
+    const created=workflow.getProgress(f.draft.id)!;
+    workflow.cancel(f.draft.id);const cancelled=await starting;
+    assert.equal(created.imageContext,undefined);assert.equal(created.status,'RUNNING');
+    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');
+    assert.equal(cancelled.workflow.status,'CANCELLED');assert.equal(cancelled.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+    assert.equal(f.requests.length,beforeCancel);assert.equal(posts(),7);
+    if(pendingId)assert.equal(created.id,pendingId);else assert.notEqual(created.id,prior.id);
     const before=f.requests.length,result=await workflow.recheck(input);
     assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),7);
-    assert.equal(result.workflow.listingEvidenceContractVersion,'listing-evidence/v1');assert.equal(result.workflow.imageContext?.listing.evidenceBlockers?.[0].field,'age_range_description');
+    assert.equal(result.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(result.workflow.imageContext?.listing.evidenceBlockers?.[0].field,'age_range_description');
     if(pendingId)assert.equal(result.workflow.id,pendingId);
     assert.ok(f.requests.length>before);assert.deepEqual(result.workflow.slots!.map(slot=>slot.approvedAssetId),prior.slots!.map(slot=>slot.approvedAssetId));
     assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,oldRun);
     for(const [id,raw] of oldResults)assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json,raw);
     const calls=f.requests.length,repeat=await workflow.recheck(input);
     assert.equal(repeat.workflow.id,result.workflow.id);assert.equal(repeat.aiCalls,0);assert.equal(f.requests.length,calls);assert.equal(posts(),7);
+  }finally{db.close();}
+});
+
+for(const version of [undefined,'listing-evidence/v1'] as const)test(`an empty ${version??'unmarked'} run stamps current evidence before a configuration failure`,async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),input={draftId:f.draft.id,draftRevision:f.draft.revision};
+  const starting=workflow.complete(input);workflow.cancel(f.draft.id);const stopped=await starting;
+  const old=structuredClone(stopped.workflow);if(version)old.listingEvidenceContractVersion=version;else delete old.listingEvidenceContractVersion;
+  assert.equal(old.imageContext,undefined);const db=openDatabase(f.directory);
+  try{db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(old),old.id);}finally{db.close();}
+  f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:false});
+  const before=f.requests.length,pending=workflow.complete(input),created=workflow.getProgress(f.draft.id)!;
+  const failed=await pending;
+  assert.equal(created.id,old.id);assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');
+  assert.equal(failed.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(failed.workflow.imageContext,undefined);
+  assert.notEqual(failed.workflow.status,'COMPLETED');assert.match(failed.workflow.error??'',/配置并启用/);
+  assert.equal(f.requests.length,before);assert.equal(posts(),0);
+});
+
+test('the legacy single-image path stamps a new current context and fresh recheck while preserving the old run',async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),now=new Date().toISOString();
+  (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+  const seed=validateStoredImageWorkflowRun({id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'RUNNING',stage:'content',attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION});
+  const first=await (workflow as any).run(seed,f.draft,new AbortController().signal);
+  assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
+  assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v2');assert.equal(posts(),1);
+  const prior=structuredClone(first.workflow);delete prior.listingEvidenceContractVersion;
+  const raw=JSON.stringify(prior),db=openDatabase(f.directory);
+  try{
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,prior.id);
+    const pending=(workflow as any).recheckWithFreshEvidence({draftId:f.draft.id,draftRevision:first.draft.revision,sourceWorkflowId:prior.id});
+    const created=workflow.getProgress(f.draft.id)!,completed=await pending;
+    assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v2');assert.notEqual(created.id,prior.id);
+    assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(completed.workflow.listingEvidenceContractVersion,'listing-evidence/v2');
+    assert.equal(completed.workflow.approvedAssetId,prior.approvedAssetId);assert.equal(posts(),1);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,raw);
+    db.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','不适合儿童','manual','current exclusion fixture','human_confirmed',99);
+    const current=f.amazon.getDraft(f.draft.id),changed=f.amazon.saveDraft({id:current.id,revision:current.revision,attributes:{...current.attributes,item_name:[{value:'Child Coaster'}]}}),before=f.requests.length;
+    for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const){
+      const old={...prior,...(version?{listingEvidenceContractVersion:version}:{})},bytes=JSON.stringify(old);
+      db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(bytes,prior.id);
+      await assert.rejects(workflow.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:prior.id}));
+      assert.equal(f.requests.length,before);assert.equal(posts(),1);
+      assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json,bytes);
+    }
+  }finally{db.close();}
+});
+
+test('current image authorization checks the approved slot plan and preserves superseded rejected captions',async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f);let detailPlans=0,generations=0;
+  (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+  const db=openDatabase(f.directory),input={draftId:f.draft.id,draftRevision:f.draft.revision};
+  db.prepare('UPDATE variants SET normalized_spec=? WHERE id=?').run('Children Blue',f.product.variants[0].id);
+  const pending=workflow.complete(input);workflow.cancel(f.draft.id);const stopped=await pending;
+  const seed={...stopped.workflow,slotPolicy:'seven-provisional-v1'};
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(seed),seed.id);
+  const generator=(workflow as any).generation as ImageGenerationService,generate=generator.generateForWorkflow.bind(generator);
+  generator.generateForWorkflow=async(...args)=>{if(++generations===2)throw Object.assign(new AiError('PROVIDER_ERROR'),{definitive:true});return generate(...args);};
+  f.respond((operation,payload)=>{
+    if(operation==='ip-upload')return new Response(null,{status:200});
+    if(operation==='image-plan'&&payload.slot?.index===2&&++detailPlans===1)return chat({kind:'image-plan',prompt:'Preserve the selected SKU.',textMode:'planned',expectedText:[{text:'Child Coaster',evidenceIds:[`${f.product.variants[0].id}:spec`]}],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)});
+  });
+  try{
+    const first=await workflow.complete(input);
+    assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+    assert.equal(first.workflow.slots![1].attempts[0].state,'RETRYABLE_FAILURE');assert.equal(first.workflow.slots![1].attempts.at(-1)!.state,'PASSED');
+    const old=structuredClone(first.workflow);delete old.listingEvidenceContractVersion;
+    const raw=JSON.stringify(old),oldPlan=old.slots![1].attempts[0].planResultId!,oldPlanBytes=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(oldPlan)!.record_json;
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,old.id);
+    db.prepare('UPDATE variants SET source_spec=? WHERE id=?').run('不适合儿童',f.product.variants[0].id);
+    const before=f.requests.length;
+    assert.deepEqual(approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),old.slots!.map(slot=>({id:slot.approvedAssetId,sha256:slot.approvedSha256})));
+    assert.equal(f.requests.length,before);
+    const rechecked=await workflow.recheck({...input,sourceWorkflowId:old.id});assert.equal(rechecked.workflow.status,'COMPLETED',rechecked.workflow.error??'');assert.equal(posts(),7);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(old.id)!.record_json,raw);
+    assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(oldPlan)!.record_json,oldPlanBytes);
+  }finally{db.close();}
+});
+
+for(const version of [undefined,'listing-evidence/v1'] as const)test(`old ${version??'unmarked'} captions contradicted by current selected exclusions authorize no images or paid recheck`,async t=>{
+  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),db=openDatabase(f.directory);
+  try{
+    db.prepare('UPDATE variants SET source_spec=?,normalized_spec=? WHERE id=?').run('不适合儿童','Children Blue',f.product.variants[0].id);
+    const listing=(workflow as any).listing as ListingAiService,strictContext=listing.currentContext.bind(listing);
+    listing.currentContext=(...args)=>{const context=strictContext(...args);context.evidence=context.evidence.filter(e=>e.id!==`${f.product.variants[0].id}:age_range_description`);return context;};
+    const specId=`${f.product.variants[0].id}:spec`,set=sceneSet();
+    set.slots[1]={...set.slots[1],role:'selling_point',focus:'Child Coaster',evidenceIds:[specId],textMode:'planned',expectedText:[{text:'Child Coaster',evidenceIds:[specId]}]};
+    f.respond((operation,payload)=>{
+      if(operation==='ip-upload')return new Response(null,{status:200});
+      if(operation==='image-plan')return chat({...(payload.setPolicy&&!payload.slot?{setPlan:set}:{}),kind:'image-plan',prompt:'Preserve the selected SKU.',textMode:payload.slot?.index===2?'planned':'none',expectedText:payload.slot?.index===2?set.slots[1].expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)});
+    });
+    await listing.reviewCurrentForImages({draftId:f.draft.id,draftRevision:f.draft.revision});
+    const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+    assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+    const old=structuredClone(first.workflow);if(version)old.listingEvidenceContractVersion=version;else delete old.listingEvidenceContractVersion;
+    const raw=JSON.stringify(old),oldResults=new Map<string,string>();
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,old.id);
+    for(const row of db.prepare('SELECT id,record_json FROM ai_results').all()){
+      const value=JSON.parse(String(row.record_json));if(version&&(value.listingContext||value.imageContext))value.listingEvidenceContractVersion=version;else delete value.listingEvidenceContractVersion;
+      const bytes=JSON.stringify(value);oldResults.set(String(row.id),bytes);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(bytes,row.id);
+    }
+    listing.currentContext=strictContext;
+    assert.deepEqual(workflow.getProgress(f.draft.id),old);
+    assert.equal(strictContext(first.draft,f.store.getProduct(f.product.id),f.amazon.executionTargetScope(first.draft.targetId).generation).fields.some(field=>field.name==='age_range_description'),false);
+    let authorized=false;
+    try{authorized=!!approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id));}catch{}
+    const before=f.requests.length;
+    try{await workflow.recheck({draftId:f.draft.id,draftRevision:first.draft.revision,sourceWorkflowId:old.id});}catch{}
+    assert.deepEqual({newCalls:f.requests.length-before,authorized},{newCalls:0,authorized:false},'current exclusions must reject both image authorization and paid recheck');
+    assert.equal(posts(),7);assert.equal(workflowRuns(db,f.draft.id).length,1);
+    assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(old.id)!.record_json,raw);
+    for(const [id,bytes] of oldResults)assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json,bytes);
   }finally{db.close();}
 });
 

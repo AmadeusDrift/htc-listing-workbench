@@ -2,7 +2,7 @@ import type { ProductRecordQuery, RecordPage, RecordPageOptions } from './record
 import type { CategoryDecision } from './category-ai-contracts.ts';
 import type { AiProviderConfigInput } from './connection-inputs.ts';
 import type { AiConnectionApi } from './ai-connection-contracts.ts';
-import type { ListingAiApi, ListingAiContext, ListingFieldsOutput, ListingFieldsReviewOutput } from './listing-ai-contracts.ts';
+import type { ListingAiApi, ListingAiContext, ListingFieldsOutput, ListingFieldsReviewOutput, ListingEvidenceContractVersion } from './listing-ai-contracts.ts';
 import type { GeneratedImageOcrOutput, ImagePlanOutput, ImageTextReviewOutput, ImageIpReviewOutput, ListingCurrentReviewOutput, ProductImageContext } from './image-ai-contracts.ts';
 import type { SourceColorContext, SourceColorOutput } from './source-color-contracts.ts';
 
@@ -78,7 +78,7 @@ export interface AiResult {
   sourceSha256?: string;
   listingContext?: ListingAiContext;
   /** Main-process contract marker; never part of provider output or context fingerprints. */
-  listingEvidenceContractVersion?: 'listing-evidence/v1';
+  listingEvidenceContractVersion?: ListingEvidenceContractVersion;
   listingRequestBytes?: number;
   imageContext?: ProductImageContext;
   imageRequestBytes?: number;

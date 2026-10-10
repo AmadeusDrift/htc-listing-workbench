@@ -7,7 +7,9 @@ export const INFERABLE_CATEGORY_FIELDS = ['item_firmness_description','age_range
 export const CATEGORY_ATTRIBUTE_FIELDS = [...INFERABLE_CATEGORY_FIELDS,'ingredients'] as const;
 export const LISTING_BOOLEAN_FIELDS = ['is_heat_sensitive','is_expiration_dated_product','contains_liquid_contents'] as const;
 export const CATEGORY_INFERENCE_POLICY_VERSION = 'category-attributes-2026-10-09-v1' as const;
-export const LISTING_EVIDENCE_CONTRACT_VERSION = 'listing-evidence/v1' as const;
+export const LISTING_EVIDENCE_CONTRACT_VERSION = 'listing-evidence/v2' as const;
+export const LISTING_EVIDENCE_CONTRACT_VERSIONS = ['listing-evidence/v1','listing-evidence/v2'] as const;
+export type ListingEvidenceContractVersion = typeof LISTING_EVIDENCE_CONTRACT_VERSIONS[number];
 export const LISTING_CANDIDATE_FIELDS = ['item_name', 'bullet_point', 'product_description', 'generic_keyword', 'material', 'color', 'item_shape', 'care_instructions',
   'operation_mode', 'included_components', 'special_feature', 'fabric_type', 'theme', 'subject_character', 'blade', 'target_audience', ...CATEGORY_ATTRIBUTE_FIELDS] as const;
 export type CandidateField = typeof LISTING_CANDIDATE_FIELDS[number];

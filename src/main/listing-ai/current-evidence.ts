@@ -1,10 +1,10 @@
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
-import type { CurrentListingCopy } from '../../shared/image-ai-contracts.ts';
+import type { CurrentListingCopy, ProductImageContext, ImageSetPlan } from '../../shared/image-ai-contracts.ts';
 import { CATEGORY_ATTRIBUTE_FIELDS } from '../../shared/listing-ai-contracts.ts';
 import type { CandidateField, ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { currentCopyEvidenceIssues } from './evidence-contract-v1.ts';
+import { currentCopyEvidenceIssues } from './evidence-contract-v2.ts';
 import { assertListingEvidence, ListingValidationError, listingFingerprint, selectedSkuCategoryConflicts } from './validation.ts';
 import { candidateTextValues } from '../amazon/field-mapping.ts';
 import { imageListingSnapshot } from '../image-workflow/image-facts.ts';
@@ -14,6 +14,14 @@ export function currentCopyIssues(copy:CurrentListingCopy[],context:ListingAiCon
 }
 export function assertCurrentCopyEvidence(copy:CurrentListingCopy[],context:ListingAiContext):void{
   const issues=currentCopyIssues(copy,context);if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
+}
+/** Current authorization only: compare old caption text with finite current
+ * exclusions without transplanting historical citations into a different scope. */
+export function assertCurrentImageCategoryExclusions(context:ListingAiContext,input:{base?:ProductImageContext;setPlan?:ImageSetPlan;plans:AiResult[]}):void{
+  const plans=input.plans.flatMap(result=>result.output.kind==='image-plan'?[result.output]:[]);
+  const sets=[input.base?.setPlan,input.setPlan,...plans.map(plan=>plan.setPlan)];
+  const texts=[...plans.flatMap(plan=>plan.expectedText.map(item=>item.text)),...sets.flatMap(set=>set?.slots.flatMap(slot=>slot.expectedText.map(item=>item.text))??[])];
+  if(texts.some(text=>selectedSkuCategoryConflicts(text,context.evidence,'item_name',{exclusionsOnly:true}).length))throw new UserFacingError('当前来源明确排除了旧图片文案中的分类声明，已保留原图片与审核记录');
 }
 /** Known adopted AI candidates retain their original infer/citation obligations on current reuse. */
 export const CONTRACT_ADOPTION_FIELDS:readonly CandidateField[]=[...CATEGORY_ATTRIBUTE_FIELDS,'target_audience','operation_mode'];

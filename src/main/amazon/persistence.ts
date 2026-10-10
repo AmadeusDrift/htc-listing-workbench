@@ -1,3 +1,4 @@
+import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonCallEvent, AmazonDataPolicy, AmazonDraft, AmazonSchema, AmazonTarget, CleanupResult, JsonObject } from '../../shared/amazon-contracts.ts';
 import { openDatabase } from '../database.ts';
@@ -126,6 +127,7 @@ export class AmazonPersistence {
       }
       this.db.prepare('DELETE FROM amazon_exchanges WHERE created_at < ?').run(cutoff);
       this.db.prepare('DELETE FROM issues WHERE draft_id IN (SELECT id FROM listing_drafts WHERE created_at < ?)').run(cutoff);
+      retireCompletionDrafts(this.db,cutoff);
       const removedDrafts = Number(this.db.prepare('DELETE FROM listing_drafts WHERE created_at < ?').run(cutoff).changes);
       const removedSchemas = Number(this.db.prepare('DELETE FROM schema_cache WHERE fetched_at < ?').run(cutoff).changes);
       const removedCalls = Number(this.db.prepare('DELETE FROM amazon_calls WHERE created_at < ?').run(logCutoff).changes);

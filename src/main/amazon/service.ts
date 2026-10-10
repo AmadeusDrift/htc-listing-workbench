@@ -1,3 +1,4 @@
+import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
 import type { ListingObservation } from '../../shared/followup-contracts.ts';
@@ -563,9 +564,9 @@ export class AmazonService {
     if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode)), record.draft.businessRules, record.draft.attributes);
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
-  applyBusinessDefaults(input: DraftReference): AmazonDraft {
+  applyBusinessDefaults(input: DraftReference, completionId?:string): AmazonDraft {
     const record = this.checked(input); this.enter(record.draft.id);
-    try {
+    try { return this.persistence.transaction(() => {
       this.mutable(record); this.currentProduct(record);
       if (record.draft.listingProgram !== 'haul') return clone(record.draft);
       const target = this.active(record.draft.targetId), product = this.currentProduct(record);
@@ -582,8 +583,10 @@ export class AmazonService {
         const retained = Object.fromEntries(Object.entries(record.draft.businessRules?.fields ?? {}).filter(([field,entry]) => JSON.stringify(record.draft.attributes[field]) === JSON.stringify(entry.value)));
         record.draft.businessRules = { ...resolved.report, fields: { ...retained, ...resolved.report.fields } };
       }
-      this.updateSourceMapping(record); this.persistence.putRecord(record); return clone(record.draft);
-    } finally { this.busy.delete(record.draft.id); }
+      this.updateSourceMapping(record); this.persistence.putRecord(record);
+      if(completionId){const journal=new CompletionJournal(this.persistence.db),operation=journal.get(completionId);operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal.save(operation);}
+      return clone(record.draft);
+    }); } finally { this.busy.delete(record.draft.id); }
   }
   /** Only the trusted listing AI coordinator calls this; it has no renderer IPC. */
   adoptFields(input: DraftReference, attributes: JsonObject, adoption: ListingFieldAdoption, assertFresh: () => void): AmazonDraft {

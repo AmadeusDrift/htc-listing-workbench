@@ -58,7 +58,7 @@ test('v1 migration retains products, stable variants, assets and joins', t => {
     CREATE TABLE issues(id TEXT PRIMARY KEY, draft_id TEXT REFERENCES listing_drafts(id), code TEXT, severity TEXT, category TEXT, field TEXT, message TEXT, status TEXT);
     INSERT INTO products VALUES('p','原始商品','2026-01-01T00:00:00.000Z'); INSERT INTO variants VALUES('v','p','SKU-ORIGINAL','0.0350'); INSERT INTO assets VALUES('a','p','assets/source.png'); INSERT INTO variant_assets VALUES('a','v'); PRAGMA user_version=1;`);
   old.close(); const db = openDatabase(directory); t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
-  assert.equal(SCHEMA_VERSION, 17); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 17);
+  assert.equal(SCHEMA_VERSION, 18); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 18);
   assert.equal(db.prepare('SELECT title FROM products').get()!.title, '原始商品');
   assert.equal(db.prepare('SELECT purchase_price FROM variants').get()!.purchase_price, '0.0350');
   assert.equal(db.prepare('SELECT original_path FROM assets').get()!.original_path, 'assets/source.png');

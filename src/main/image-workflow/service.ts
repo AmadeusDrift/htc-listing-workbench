@@ -19,6 +19,7 @@ import type { AiService } from '../ai/service.ts';
 import type { ImageGenerationService } from '../image-generation/service.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { openDatabase } from '../database.ts';
+import { CompletionJournal } from '../listing-ai/completion-journal.ts';
 import { ListingAiService } from '../listing-ai/service.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
@@ -41,7 +42,7 @@ import { imageListingContextsMatch } from './context-compatibility.ts';
 import type { AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 
-type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'repairCurrentForImages'|'snapshotCurrentForImages'>> & {
+type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'>> & {
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
@@ -377,7 +378,7 @@ export class ImageWorkflowService {
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
-      if(!run.imageContext&&run.contentPreparation?.state==='STARTED')throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
+      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||new CompletionJournal(this.db).unknown(run.contentPreparation.operationId)))throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
       let sourceColorEvidenceSha256:string|undefined;
       if(this.listing.prepareSourceColors){
         const prepared=await this.listing.prepareSourceColors({draftId:run.draftId,draftRevision:initial.revision},signal);
@@ -402,19 +403,20 @@ export class ImageWorkflowService {
         const categoryUpgrade=categoryFields.length>0&&this.canRecheckImageContent(reuse??run,initial,run.contentPreparation?.remaining??reuse?.contentPreparation?.remaining)
           &&(!!reuse||run.contentPreparation?.state==='DONE'&&run.contentPreparation.draftRevision===initial.revision);
         if(copyReviewEnabled&&!copy&&(run.copyRepairAttempts??0)>=2&&!categoryUpgrade)throw new UserFacingError('当前文案已用完两轮自动修复，保留失败原因与进度，请检查文案事实后再处理');
-        if((!reuse||changedColorEvidence||categoryUpgrade)&&(!copyReviewEnabled||!(run.copyRepairAttempts??0)||categoryUpgrade)&&(!copy||withoutDeferredImageRemaining(result.draft,result.remaining).length)){
+        if(run.contentPreparation?.state==='STARTED'||(!reuse||changedColorEvidence||categoryUpgrade)&&(!copyReviewEnabled||!(run.copyRepairAttempts??0)||categoryUpgrade)&&(!copy||withoutDeferredImageRemaining(result.draft,result.remaining).length)){
           const migratedFields=legacyContentRepairFields(run.contentPreparation,initial,product);
           const changedCopyPolicy=!copyReviewEnabled&&run.contentPreparation?.copyReviewEnabled!==false&&!!run.contentPreparation?.remaining.length;
-          if(run.contentPreparation?.draftRevision===initial.revision&&!migratedFields.length&&!changedCopyPolicy&&!changedColorEvidence&&!categoryUpgrade){result.remaining=run.contentPreparation.remaining;}
+          if(run.contentPreparation?.state!=='STARTED'&&run.contentPreparation?.draftRevision===initial.revision&&!migratedFields.length&&!changedCopyPolicy&&!changedColorEvidence&&!categoryUpgrade){result.remaining=run.contentPreparation.remaining;}
           else{
             const colorEvidence=sourceColorEvidenceSha256??run.contentPreparation?.sourceColorEvidenceSha256;
             run.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
             if(categoryUpgrade)run.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,grantedAttempts:1,grantedAt:new Date().toISOString(),fields:categoryFields};
-            run.contentPreparation={state:'STARTED',draftRevision:initial.revision,remaining:[],repairPolicyVersion:FIELD_REPAIR_POLICY_VERSION,...(colorEvidence?{sourceColorEvidenceSha256:colorEvidence}:{}),...(!copyReviewEnabled?{copyReviewEnabled:false}:{})};this.save(run);
+            const operationId=run.contentPreparation?.state==='STARTED'?run.contentPreparation.operationId:this.listing.beginCompletion?.({draftId:run.draftId,draftRevision:initial.revision}).id;
+            run.contentPreparation={...(operationId?{operationId}:{}),state:'STARTED',draftRevision:initial.revision,remaining:[],repairPolicyVersion:FIELD_REPAIR_POLICY_VERSION,...(colorEvidence?{sourceColorEvidenceSha256:colorEvidence}:{}),...(!copyReviewEnabled?{copyReviewEnabled:false}:{})};this.save(run);
             if(migratedFields.length)this.store.recordWorkspaceEvent('image.content-repair.policy-migrated',`${run.sku} 使用新增字段支持再修复一次`,{workflowId:run.id,fields:migratedFields,version:FIELD_REPAIR_POLICY_VERSION});
-            const prepared=await this.listing.complete({draftId:run.draftId,draftRevision:initial.revision},signal);
+            const prepared=await this.listing.complete({draftId:run.draftId,draftRevision:initial.revision},signal,operationId);
             result={...prepared,aiCalls:result.aiCalls+prepared.aiCalls};
-            run.contentPreparation={state:'DONE',draftRevision:result.draft.revision,draftSha256:imageWorkflowDraftStamp(result.draft),remaining:result.remaining.slice(0,100).map(value=>value.slice(0,2000)),repairPolicyVersion:FIELD_REPAIR_POLICY_VERSION,...(colorEvidence?{sourceColorEvidenceSha256:colorEvidence}:{}),...(!copyReviewEnabled?{copyReviewEnabled:false}:{})};this.save(run);
+            run.contentPreparation={...(operationId?{operationId}:{}),state:'DONE',draftRevision:result.draft.revision,draftSha256:imageWorkflowDraftStamp(result.draft),remaining:result.remaining.slice(0,100).map(value=>value.slice(0,2000)),repairPolicyVersion:FIELD_REPAIR_POLICY_VERSION,...(colorEvidence?{sourceColorEvidenceSha256:colorEvidence}:{}),...(!copyReviewEnabled?{copyReviewEnabled:false}:{})};this.save(run);
             copy=copyReviewEnabled?cachedCopy():undefined;
           }
         }

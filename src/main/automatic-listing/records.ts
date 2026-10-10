@@ -78,9 +78,10 @@ function item(raw: unknown): AutomaticListingItem {
     if(change.phase!=='BIND'&&fingerprint(plan)!==fingerprint(salesPlan))fail();
   }
   if (value.repair !== null) {
-    const repair = record(value.repair, '字段修复进度', ['phase','sourceWorkflowId','draftRevision','draftStamp','remaining']);
-    if (![4,5].includes(Object.keys(repair).length) || !['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING','READY'].includes(String(repair.phase))) fail();
+    const repair = record(value.repair, '字段修复进度', ['phase','sourceWorkflowId','draftRevision','draftStamp','remaining','operationId']);
+    if (![4,5,6].includes(Object.keys(repair).length) || !['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING','READY'].includes(String(repair.phase))) fail();
     result.repair = { phase: repair.phase as NonNullable<AutomaticListingItem['repair']>['phase'], sourceWorkflowId: identifier(repair.sourceWorkflowId), draftRevision: counter(repair.draftRevision), draftStamp: hash(repair.draftStamp) };
+    if(repair.operationId!==undefined)result.repair.operationId=identifier(repair.operationId);
     if (repair.remaining !== undefined) {
       if (!Array.isArray(repair.remaining) || repair.remaining.length > 100 || repair.remaining.some(message => typeof message !== 'string' || !message || message.length > 2000)) fail();
       result.repair.remaining = repair.remaining as string[];
@@ -129,7 +130,7 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     result.image={kind:image.kind as 'IP_PLAN_BLOCKED'|'IP_IMAGE_BLOCKED',workflowId:identifier(image.workflowId),resultId:identifier(image.resultId),callId:identifier(image.callId),planResultId:identifier(image.planResultId),candidateId:image.candidateId===null?null:identifier(image.candidateId),contextSha256:hash(image.contextSha256),draftRevision:counter(image.draftRevision),references,policyVersion:text(image.policyVersion,'图片规则版本',100,true),message:text(image.message,'图片规则原因',2000,true)};
     if((result.image.kind==='IP_IMAGE_BLOCKED')!==Boolean(result.image.candidateId))fail();
   }
-  if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
+  if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
   if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
     if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
   }else if(!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();

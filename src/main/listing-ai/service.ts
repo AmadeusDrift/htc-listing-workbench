@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
+import type { CompletionOperation, CompletionRound } from './completion-journal.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { SourceColorContext } from '../../shared/source-color-contracts.ts';
 import { hasSkuColorEvidence } from './sku-colors.ts';
 import type { AmazonDraft, JsonObject, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { AdoptAmazonFieldsInput, CandidateField, ListingAiContext, ListingFieldAdoption, ListingFieldsOutput, ReviewAmazonFieldsInput, SuggestAmazonFieldsInput } from '../../shared/listing-ai-contracts.ts';
-import { LISTING_CANDIDATE_FIELDS } from '../../shared/listing-ai-contracts.ts';
+import { LISTING_CANDIDATE_FIELDS, CATEGORY_INFERENCE_POLICY_VERSION } from '../../shared/listing-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import type { WorkspaceStore } from '../store.ts';
 import type { AiService } from '../ai/service.ts';
@@ -157,8 +160,8 @@ export class ListingAiService {
     const candidate = this.candidates(this.result(reference.suggestionResultId, context), draft, context);
     return this.ai.listingFields(context, async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); this.candidates(this.result(reference.suggestionResultId, context), this.current(reference).draft, context); }, { suggestionId: reference.suggestionResultId, candidate }, signal);
   }
-  async adopt(raw: unknown): Promise<AmazonDraft> {
-    const reference = input(raw, 'adopt'), reviewEnabled = this.copyReviewEnabled();
+  async adopt(raw: unknown, signal?:AbortSignal): Promise<AmazonDraft> {
+    signal?.throwIfAborted();const reference = input(raw, 'adopt'), reviewEnabled = this.copyReviewEnabled();
     const disposition = !reviewEnabled && reference.reviewResultId === null ? { reviewDisposition: 'SKIPPED_DISABLED' as const } : {};
     const adoptionId = listingFingerprint({ draftId: reference.draftId, revision: reference.draftRevision, suggestion: reference.suggestionResultId, review: reference.reviewResultId, fields: [...reference.fields].sort(), ...disposition });
     const existing = this.amazon.getDraft(reference.draftId);
@@ -183,7 +186,7 @@ export class ListingAiService {
       return { field, before, after, evidence: context.evidence.filter(e => evidenceIds.has(e.id)) };
     });
     const adoption: ListingFieldAdoption = { id: adoptionId, at: new Date().toISOString(), suggestionResultId: suggestion.id, reviewResultId: review?.id ?? null, contextSha256: listingFingerprint(context), fromRevision: draft.revision, toRevision: draft.revision + 1, fields: [...reference.fields].sort(), changes, ...disposition };
-    return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { this.assertReviewSetting(reviewEnabled); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); });
+    signal?.throwIfAborted();return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); });
   }
 
   /** A fresh copy snapshot for image generation when independent copy review is disabled. */
@@ -255,63 +258,95 @@ export class ListingAiService {
     return { draft, aiCalls:3, review, remaining:review.review.output.kind === 'listing-current-review' ? review.review.output.issues.map(issue => `${issue.field}：${issue.message}`) : ['文案审核结果无效'], blocked:review.review.output.kind !== 'listing-current-review' || review.review.output.verdict === 'BLOCKED' };
   }
 
-  /** Validation previews never publish. Only reported copy/semantic fields can enter the model. */
-  async complete(raw: unknown, signal?: AbortSignal): Promise<{ draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[] }> {
-    const initial = input(raw, 'suggest'), reviewEnabled = this.copyReviewEnabled(); this.current(initial); signal?.throwIfAborted();
-    const colors=await this.prepareSourceColors(initial,signal);
-    const rejectedIssues=this.amazon.wasSubmissionRejected(initial.draftId)?this.amazon.getDraft(initial.draftId).listingIssues.filter(issue=>issue.severity==='ERROR'):[];
-    let draft = this.amazon.applyBusinessDefaults({ id: initial.draftId, revision: initial.draftRevision });
-    let aiCalls = colors.aiCalls, previewAttempts = 0, repairAttempts = 0;
-    let reviewIssues: ListingIssue[] = rejectedIssues.filter(issue => reviewEnabled || issue.code !== 'CONTENT_REVIEW');
-    const errors = (value: AmazonDraft): ListingIssue[] => (value.previewIssues.some(i => i.severity === 'ERROR') ? value.previewIssues : value.localIssues).filter(i => i.severity === 'ERROR');
-    for (;;) {
-      signal?.throwIfAborted(); this.assertReviewSetting(reviewEnabled); previewAttempts++;
-      try { draft = await this.amazon.previewDraft({ id: draft.id, revision: draft.revision }); }
-      catch (error) {
-        draft = this.amazon.getDraft(draft.id);
-        // Authentication, transport and stale-scope failures require their own resolution.
-        if (!(error instanceof UserFacingError) || !error.message.startsWith('本地校验未通过')) throw error;
+  private completionScope(draft:AmazonDraft):string {
+    const context=buildListingContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
+    const {fields: _fields,evidence: _evidence,draftRevision: _revision,repairRequest: _repair,categoryInferencePolicyVersion: _categoryPolicy,...identity}=context;
+    const product=this.store.getProduct(draft.productId);
+    return listingFingerprint({identity,categoryInferencePolicyVersion:CATEGORY_INFERENCE_POLICY_VERSION,source:{id:product.id,revision:product.revision,facts:product.facts,variants:product.variants,assets:product.assets},sellerId:draft.sellerId,salesPlan:draft.salesPlan??null});
+  }
+  /** Main-only stable operation reference shared by automatic owners. */
+  beginCompletion(raw:unknown,operationId?:string):CompletionOperation {
+    const reference=input(raw,'suggest'),{draft}=this.current(reference);
+    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId);
+  }
+  getCompletion(id:string):CompletionOperation{return this.ai.completionJournal.get(id);}
+  completionUnknown(id:string):boolean{return this.ai.completionJournal.unknown(id);}
+  completionOperations(draftId:string):CompletionOperation[]{return this.ai.completionJournal.list(draftId);}
+  private completionDraft(operation:CompletionOperation):AmazonDraft {
+    const draft=this.amazon.getDraft(operation.draftId);
+    if(this.completionScope(draft)!==operation.scopeHash||this.copyReviewEnabled()!==operation.copyReviewEnabled)throw new UserFacingError('字段操作来源、店铺或审核策略已变化，未自动重发');
+    if(draft.revision===operation.draftRevision&&completionDraftStamp(draft)===operation.draftStamp)return draft;
+    const round=operation.rounds.at(-1),adoption=round?.adoptionId&&draft.fieldAdoptions?.find(a=>a.id===round.adoptionId);
+    if(adoption&&adoption.fromRevision===operation.draftRevision&&adoption.toRevision===draft.revision&&adoption.contextSha256===round!.contextHash&&adoption.suggestionResultId===round!.candidate.resultId&&adoption.reviewResultId===(round!.review?.resultId??null)&&adoption.changes.every(change=>listingFingerprint(draft.attributes[change.field])===listingFingerprint(change.after))){
+      round!.resolved=true;operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);this.ai.completionJournal.save(operation);return draft;
+    }
+    throw new UserFacingError('字段操作对应的草稿已修改，保留进度，未自动重发');
+  }
+  /** Validation previews never publish. Only reported copy/semantic fields enter this journal. */
+  async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[]}> {
+    signal?.throwIfAborted();const initial=input(raw,'suggest'),journal=this.ai.completionJournal;
+    let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
+    const reviewEnabled=operation.copyReviewEnabled;
+    const refresh=()=>{operation=journal.get(operation.id);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);if(journal.unknown(operation.id))unknownCompletion();draft=this.completionDraft(operation);};
+    const checkpoint=()=>{operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);journal.save(operation);};
+    const finish=(remaining:string[])=>{operation.state='DONE';operation.remaining=remaining.slice(0,100).map(v=>v.slice(0,2000));checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining};};
+    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:operation.remaining};
+    if(!operation.rounds.length){
+      aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;
+      signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
+      draft=this.amazon.applyBusinessDefaults({id:draft.id,revision:draft.revision},operation.id);operation=journal.get(operation.id);checkpoint();
+    }
+    let reviewIssues:ListingIssue[]=operation.reviewIssues.map(issue=>({code:'CONTENT_REVIEW',message:issue.message,severity:'ERROR',attributeNames:[issue.field],autoFixable:false,source:'local',category:'field'}));
+    if(!operation.rounds.length&&this.amazon.wasSubmissionRejected(draft.id))reviewIssues.push(...this.amazon.getDraft(draft.id).listingIssues.filter(issue=>issue.severity==='ERROR'&&(reviewEnabled||issue.code!=='CONTENT_REVIEW')));
+    const errors=(value:AmazonDraft)=>(value.previewIssues.some(i=>i.severity==='ERROR')?value.previewIssues:value.localIssues).filter(i=>i.severity==='ERROR');
+    for(;;){
+      refresh();let round:CompletionRound|undefined=operation.rounds.at(-1);if(round?.resolved)round=undefined;
+      let remaining=operation.remaining;
+      if(!round){
+        previewAttempts++;
+        try{draft=await this.amazon.previewDraft({id:draft.id,revision:draft.revision});}
+        catch(error){draft=this.amazon.getDraft(draft.id);if(!(error instanceof UserFacingError)||!error.message.startsWith('本地校验未通过'))throw error;}
+        signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);checkpoint();
+        const currentScope=this.current({draftId:draft.id,draftRevision:draft.revision}).context;
+        const sourceIssues:ListingIssue[]=currentScope.fields.flatMap(field=>{
+          const values=candidateTextValues(field.name,draft.attributes[field.name])??[],conflicts=values.flatMap(value=>selectedSkuCategoryConflicts(value,currentScope.evidence,field.name));
+          return conflicts.length?[{code:'SKU_ATTRIBUTE_CONFLICT',severity:'ERROR',category:'field',source:'local',autoFixable:false,attributeNames:[field.name],message:'当前字段与所选 SKU 的明确属性矛盾：'+conflicts.map(c=>c.field+' 应为 '+c.expected.join(' / ')+'，现有 '+c.actual.join(' / ')).join('；')}]:[];
+        });
+        if(draft.state==='AMAZON_VALIDATED'&&!reviewIssues.length&&!sourceIssues.length)return finish([]);
+        const issues=[...errors(draft),...reviewIssues,...sourceIssues];remaining=issues.map(i=>(i.attributeNames.join('、')||i.code)+'：'+i.message);
+        if(operation.rounds.length>=2)return finish(remaining);
+        const reference={draftId:draft.id,draftRevision:draft.revision};
+        const repairs=issues.filter(issue=>issue.category==='field').flatMap(issue=>issue.attributeNames.filter((field):field is CandidateField=>LISTING_CANDIDATE_FIELDS.includes(field as CandidateField)).map(field=>({field,code:issue.code.slice(0,100),message:issue.message.slice(0,2000)}))).slice(0,50);
+        if(repairs.some(issue=>issue.field==='color'))aiCalls+=(await this.prepareSourceColors(reference,signal,issues)).aiCalls;
+        const {context}=this.current(reference);context.fields=context.fields.filter(field=>repairs.some(issue=>issue.field===field.name));
+        if(!context.fields.length)return finish(remaining.length?remaining:['预览未通过，但没有可自动补写的字段。']);
+        context.repairRequest={issues:repairs.filter(issue=>context.fields.some(field=>field.name===issue.field)),currentValues:Object.fromEntries(context.fields.map(field=>[field.name,draft.attributes[field.name]??null]))};validateListingContext(context);
+        await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
+        round={context,contextHash:listingFingerprint(context),candidate:{id:randomUUID(),sent:false,resultId:null},review:reviewEnabled?{id:randomUUID(),sent:false,resultId:null}:null,resolved:false,adoptionId:null};
+        operation.rounds.push(round);operation.remaining=remaining.slice(0,100).map(v=>v.slice(0,2000));checkpoint();round=operation.rounds.at(-1)!;
       }
-      signal?.throwIfAborted(); this.assertReviewSetting(reviewEnabled);
-      const currentScope=this.current({draftId:draft.id,draftRevision:draft.revision}).context;
-      const sourceIssues:ListingIssue[]=currentScope.fields.flatMap(field=>{
-        const values=candidateTextValues(field.name,draft.attributes[field.name])??[];
-        const conflicts=values.flatMap(value=>selectedSkuCategoryConflicts(value,currentScope.evidence,field.name));
-        return conflicts.length?[{code:'SKU_ATTRIBUTE_CONFLICT',severity:'ERROR',category:'field',source:'local',autoFixable:false,attributeNames:[field.name],
-          message:`当前字段与所选 SKU 的明确属性矛盾：${conflicts.map(conflict=>`${conflict.field} 应为 ${conflict.expected.join(' / ')}，现有 ${conflict.actual.join(' / ')}`).join('；')}`}]:[];
-      });
-      if (draft.state === 'AMAZON_VALIDATED' && !reviewIssues.length&&!sourceIssues.length) return { draft, aiCalls, previewAttempts, remaining: [] };
-      const issues = [...errors(draft), ...reviewIssues,...sourceIssues], remaining = issues.map(i => `${i.attributeNames.join('、') || i.code}：${i.message}`);
-      if (repairAttempts >= 2) return { draft, aiCalls, previewAttempts, remaining };
-      const reference = { draftId: draft.id, draftRevision: draft.revision };
-      const repairs = issues.filter(issue => issue.category === 'field').flatMap(issue => issue.attributeNames.filter((field): field is CandidateField => LISTING_CANDIDATE_FIELDS.includes(field as CandidateField)).map(field => ({field,code:issue.code.slice(0,100),message:issue.message.slice(0,2000)}))).slice(0,50);
-      if(repairs.some(issue=>issue.field==='color'))aiCalls+=(await this.prepareSourceColors(reference,signal,issues)).aiCalls;
-      const { context } = this.current(reference);
-      context.fields = context.fields.filter(field => repairs.some(issue => issue.field === field.name));
-      if (!context.fields.length) return { draft, aiCalls, previewAttempts, remaining: remaining.length ? remaining : ['预览未通过，但没有可自动补写的字段。'] };
-      context.repairRequest = { issues: repairs.filter(issue => context.fields.some(field => field.name === issue.field)), currentValues: Object.fromEntries(context.fields.map(field => [field.name, draft.attributes[field.name] ?? null])) };
-      validateListingContext(context);
-      await this.fresh(reference, context); signal?.throwIfAborted(); this.assertReviewSetting(reviewEnabled);
-      const suggestion = await this.ai.listingFields(context, async () => { this.assertReviewSetting(reviewEnabled); await this.fresh(reference, context); this.assertReviewSetting(reviewEnabled); }, undefined, signal); aiCalls++; repairAttempts++;
-      signal?.throwIfAborted(); this.assertReviewSetting(reviewEnabled);
-      const candidate = this.candidates(suggestion, draft, context);
-      const fields = candidate.candidates.filter(c => JSON.stringify(wrapCandidateValues(draft.schema, draft.marketplaceId, c.field, c.items.map(i => i.value),draft.attributes[c.field])) !== JSON.stringify(draft.attributes[c.field])).map(c => c.field);
-      if (!fields.length) return { draft, aiCalls, previewAttempts, remaining: [...remaining,...candidate.missing.map(m => `${m.field}：${m.reason}`)] };
-      if (!reviewEnabled) {
-        reviewIssues = [];
-        draft = await this.adopt({ ...reference, suggestionResultId: suggestion.id, reviewResultId: null, fields });
-        continue;
+      const context=round.context,reference={draftId:draft.id,draftRevision:context.draftRevision};
+      await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
+      const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
+        const entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;if(entry.sent)unknownCompletion();
+        const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
+        aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
+      };
+      const suggestion=await request('candidate'),candidate=this.candidates(suggestion,draft,context);
+      const fields=candidate.candidates.filter(c=>JSON.stringify(wrapCandidateValues(draft.schema,draft.marketplaceId,c.field,c.items.map(i=>i.value),draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field])).map(c=>c.field);
+      if(!fields.length)return finish([...remaining,...candidate.missing.map(m=>m.field+'：'+m.reason)]);
+      let review:AiResult|null=null;
+      if(reviewEnabled){
+        review=await request('review',candidate);if(review.output.kind!=='amazon-fields-review')throw new UserFacingError('文案审核结果无效');
+        if(review.output.verdict!=='PASS'){
+          operation.reviewIssues=review.output.issues.map(issue=>({field:issue.field,message:issue.message}));reviewIssues=operation.reviewIssues.map(issue=>({code:'CONTENT_REVIEW',message:issue.message,severity:'ERROR',attributeNames:[issue.field],autoFixable:false,source:'local',category:'field'}));
+          round!.resolved=true;checkpoint();if(review.output.verdict==='BLOCKED')return finish(reviewIssues.map(issue=>issue.attributeNames.join('、')+'：'+issue.message));continue;
+        }
       }
-      const review = await this.review({ ...reference, suggestionResultId: suggestion.id }, signal); aiCalls++;
-      signal?.throwIfAborted();
-      if (review.output.kind !== 'amazon-fields-review') throw new UserFacingError('文案审核结果无效');
-      if (review.output.verdict !== 'PASS') {
-        reviewIssues = review.output.issues.map(issue => ({ code: 'CONTENT_REVIEW', message: issue.message, severity: 'ERROR', attributeNames: [issue.field], autoFixable: false, source: 'local', category: 'field' }));
-        if (review.output.verdict === 'BLOCKED') return { draft, aiCalls, previewAttempts, remaining: reviewIssues.map(issue => `${issue.attributeNames.join('、')}：${issue.message}`) };
-        continue;
-      }
-      reviewIssues = [];
-      draft = await this.adopt({ ...reference, suggestionResultId: suggestion.id, reviewResultId: review.id, fields });
+      operation.reviewIssues=[];reviewIssues=[];
+      round!.adoptionId=listingFingerprint({draftId:reference.draftId,revision:reference.draftRevision,suggestion:suggestion.id,review:review?.id??null,fields:[...fields].sort(),...(!reviewEnabled?{reviewDisposition:'SKIPPED_DISABLED'}:{})});checkpoint();
+      signal?.throwIfAborted();draft=await this.adopt({...reference,suggestionResultId:suggestion.id,reviewResultId:review?.id??null,fields},signal);
+      round!.resolved=true;checkpoint();
     }
   }
 }

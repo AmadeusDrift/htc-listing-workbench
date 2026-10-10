@@ -1,3 +1,4 @@
+import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AutomaticListingItem, AutomaticListingTask } from '../../shared/automatic-listing-contracts.ts';
@@ -54,7 +55,8 @@ export interface AutomaticListingDependencies {
   labels: Pick<ItemLabelService, 'syncBatch' | 'list'> & Partial<Pick<ItemLabelService, 'pauseJob' | 'resumeJob' | 'cancelJob'>>;
   labelFormat?(): ItemLabelFormat;
   /** Main-only final field repair + re-review of the existing image; never generates another image. */
-  repairFields?: (draftId: string, signal: AbortSignal) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
+  beginFieldRepair?: (draftId:string)=>string;
+  repairFields?: (draftId: string, signal: AbortSignal, operationId?:string) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
   prepareSourceColors?: (draftId: string, signal: AbortSignal) => Promise<{ aiCalls: number; evidenceChanged: boolean; evidenceSha256?: string }>;
   recheckImage?: (input: { draftId: string; draftRevision: number; sourceWorkflowId: string }, signal: AbortSignal) => Promise<AmazonDraft>;
   preflight?: () => void;
@@ -153,13 +155,18 @@ export class AutomaticListingService {
       if (!variant || variant.sku !== item.sku || sourceStamp(source) !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
     }
   }
-  private unknownCode(row:AutomaticListingItem):string|null {
-    if(row.repair?.phase==='FIELDS_STARTED')return 'FIELD_RESULT_UNKNOWN';
+  private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
+    const journal=new CompletionJournal(this.db);
+    // A retained guard without its old draft uses the same source sale identity as begin().
+    const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
+    const identity=completionSafetyIdentity(draft??{mode:task.mode,productId:row.productId,productRevision:row.productRevision,variantId:row.variantId,sku:row.sku,sellerId:task.sellerId,marketplaceId:task.marketplaceId,listingProgram:task.mode==='live'?'haul':'standard',salesPlan:row.salesPlan});
+    if(journal.saleOperations(identity).some(op=>journal.unknown(op.id)))return 'FIELD_RESULT_UNKNOWN';
+    if(row.repair?.phase==='FIELDS_STARTED'&&(!row.repair.operationId||journal.unknown(row.repair.operationId)))return 'FIELD_RESULT_UNKNOWN';
     if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':null;
-    const draft=this.deps.amazon.getDraft(row.draftId);
+    if(!draft)throw new UserFacingError('字段草稿记录缺失');
     if(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))return 'SUBMISSION_UNKNOWN';
     const run=this.deps.images.getProgress(row.draftId);
-    if(run?.contentPreparation?.state==='STARTED')return 'FIELD_RESULT_UNKNOWN';
+    if(run?.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||journal.unknown(run.contentPreparation.operationId)))return 'FIELD_RESULT_UNKNOWN';
     if(run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
     return null;
@@ -168,7 +175,7 @@ export class AutomaticListingService {
     let draft:AmazonDraft|undefined, classification:Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'|'image'>={kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'};
     try {
       if(row.draftId)draft=this.deps.amazon.getDraft(row.draftId);
-      const unknown=this.unknownCode(row);
+      const unknown=this.unknownCode(row,task);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
       else if(draft){
         classification=pricingOutcome(draft,this.deps.rules())??classification;
@@ -179,7 +186,7 @@ export class AutomaticListingService {
         if(!this.matching(task,row,draft)||draft.productRevision!==row.productRevision||sourceStamp(this.deps.store.getProduct(row.productId))!==row.sourceStamp||fingerprint(this.deps.rules())!==task.rulesStamp)
           classification={kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
         const after=this.deps.amazon.getDraft(draft.id);
-        if(after.revision!==draft.revision||this.unknownCode(row))classification={kind:'UNKNOWN',code:this.unknownCode(row)??'EVIDENCE_READ_FAILED'};
+        if(after.revision!==draft.revision||this.unknownCode(row,task))classification={kind:'UNKNOWN',code:this.unknownCode(row,task)??'EVIDENCE_READ_FAILED'};
       }else if(row.stage==='SOURCES'&&row.outcome&&Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code))classification={kind:row.outcome.kind,code:row.outcome.code};
       else if(row.stage==='PLAN'||row.outcome?.code==='SOURCE_INPUT_REQUIRED')classification={kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED'};
     }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
@@ -196,8 +203,8 @@ export class AutomaticListingService {
     const revisions=()=>relevantTasks().map(t=>[t.id,t.revision]);
     const evidenceState=()=>{
       const draftIds=[...new Set(relevantTasks().flatMap(t=>t.items.filter(row=>ids.includes(row.productId)&&row.draftId).map(row=>row.draftId!)))];
-      if(!draftIds.length)return null;
-      return {risk:this.deps.images.getRiskSettings?.()??null,drafts:draftIds.map(id=>{try{return {id,draft:this.deps.amazon.getDraft(id),workflow:this.deps.images.getProgress(id)};}catch{return {id,unavailable:true};}}),
+
+      return {fieldOperations:ids.flatMap(id=>this.db.prepare("SELECT id,record_json FROM listing_completion_operations WHERE json_extract(record_json,'$.safetyIdentity.productId')=?").all(id)),risk:this.deps.images.getRiskSettings?.()??null,drafts:draftIds.map(id=>{try{return {id,draft:this.deps.amazon.getDraft(id),workflow:this.deps.images.getProgress(id),fieldOperations:new CompletionJournal(this.db).list(id)};}catch{return {id,unavailable:true};}}),
         execution:this.deps.execution.list().flatMap(child=>child.items.filter(item=>draftIds.includes(item.draftId)).map(item=>({id:child.id,status:child.status,item})))};
     };
     const taskRevisions=fingerprint(revisions()),evidenceStamp=fingerprint(evidenceState()),receipts=new Map(ids.map(id=>[id,this.deps.sourceReceipt?.(id)??null]));
@@ -213,7 +220,7 @@ export class AutomaticListingService {
           .flatMap(task=>task.items.filter(item=>item.productId===product.id&&(item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)).map(item=>({task,item}))).reverse();
         const latest=histories[0],view:AutomaticQueueRow={key:product.id+':'+recipe.key,productId:product.id,recipeKey:recipe.key,specification:recipe.specification,sku:latest?.item.sku??null,kind:'PENDING',eligible:true,message:'',reconsideration:null,taskId:latest?.task.id??null};
         try{
-          const unsafe=histories.find(h=>this.unknownCode(h.item));
+          const unsafe=histories.find(h=>this.unknownCode(h.item,h.task));
           if(unsafe){view.kind='UNKNOWN';view.eligible=false;view.taskId=unsafe.task.id;view.message=unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务';}
           else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读或标签';}
           else if(latest){
@@ -322,7 +329,7 @@ export class AutomaticListingService {
     for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
     for(const row of task.items)this.migrateRepairPolicy(task,row);
     for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
-      if(row.outcome?.kind==='UNKNOWN'&&this.unknownCode(row))continue;
+      if(row.outcome?.kind==='UNKNOWN'&&this.unknownCode(row,task))continue;
       row.status = 'PENDING';
       delete row.outcome;
       // Retain the precise source failure if a ready sibling has frozen this product's revision.
@@ -380,7 +387,7 @@ export class AutomaticListingService {
   private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
   private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
-    const unknown=this.unknownCode(row);
+    const unknown=this.unknownCode(row,task);
     if(unknown&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
     this.checkpoint(task, row);
     let draft = row.draftId ? this.deps.amazon.getDraft(row.draftId) : undefined;
@@ -566,6 +573,16 @@ export class AutomaticListingService {
   }
   private async finishRepair(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
     let repair = row.repair!;
+    if(repair.phase==='FIELDS_STARTED'&&repair.operationId&&this.deps.repairFields){
+      this.checkpoint(task,row);
+      const current=this.deps.amazon.getDraft(row.draftId!);
+      if(!this.matching(task,row,current)||submitted(current)||row.executionTaskIds.some(id=>{const child=this.deps.execution.get(id);return child.items.length!==1||child.items[0].draftId!==current.id||child.items[0].submitStarted;}))throw new UserFacingError('字段修复范围或提交记录已变化，未继续字段请求');
+      const op=new CompletionJournal(this.db).get(repair.operationId);
+      if(op.draftId!==row.draftId)throw new UserFacingError('字段操作身份不一致，未自动重发');
+      const result=await this.deps.repairFields(row.draftId!,this.controller!.signal,repair.operationId),draft='draft' in result?result.draft:result;
+      const remaining=fieldRepairRemaining(draft,'draft' in result?result.remaining:[]);
+      row.repair=repair={...repair,phase:remaining.length?'FIELDS_PENDING':'RECHECK_PENDING',remaining,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);this.checkpoint(task,row);
+    }
     if (repair.phase === 'FIELDS_STARTED') {
       const message = '上次字段修复结果尚未确认，请先核对异常草稿；未自动重发';
       throw new UserFacingError(row.error?.startsWith(message) ? row.error : `${message}${row.error ? `。上次错误：${row.error}` : ''}${repair.remaining?.length ? `。此前待处理：${repair.remaining.join('；')}` : ''}`);
@@ -610,15 +627,16 @@ export class AutomaticListingService {
       }
       row.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
       if(evidenceSha256)row.sourceColorEvidenceSha256=evidenceSha256;
+      const operationId=this.deps.beginFieldRepair?.(current.id);
       row.repairAttempts++;
       // Grant, evidence and consumed attempt share the durable STARTED checkpoint.
       // A cached preparation can resume safely; an unknown field result cannot replay.
-      row.repair = { ...repair, phase: 'FIELDS_STARTED' }; this.save(task);
-      const result = await this.deps.repairFields(current.id,this.controller!.signal);
+      row.repair = { ...repair, phase: 'FIELDS_STARTED',...(operationId?{operationId}:{}) }; this.save(task);
+      const result = await this.deps.repairFields(current.id,this.controller!.signal,operationId);
       current = 'draft' in result ? result.draft : result;
       const remaining = fieldRepairRemaining(current,'draft' in result ? result.remaining : []);
       // A known incomplete result is safe to retry; an interrupted unknown result is not.
-      row.repair = repair = { ...repair, phase: remaining.length ? 'FIELDS_PENDING' : 'RECHECK_PENDING', remaining,
+      row.repair = repair = { ...row.repair!, phase: remaining.length ? 'FIELDS_PENDING' : 'RECHECK_PENDING', remaining,
         draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);
       this.checkpoint(task,row);
     }

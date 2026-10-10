@@ -153,9 +153,10 @@ async function start() {
       const current=amazonService.getDraft(id);
       return listingService.prepareSourceColors({draftId:id,draftRevision:current.revision},signal);
     },
-    repairFields: async (id, signal) => {
+    beginFieldRepair: id => {const current=amazonService.getDraft(id);return listingService.beginCompletion({draftId:id,draftRevision:current.revision}).id;},
+    repairFields: async (id, signal, operationId) => {
       const current = amazonService.getDraft(id);
-      return await listingService.complete({ draftId: id, draftRevision: current.revision }, signal);
+      return await listingService.complete({ draftId: id, draftRevision: current.revision }, signal, operationId);
     },
     recheckImage: async (input, signal) => {
       if (signal.aborted) throw new UserFacingError('自动任务已暂停');

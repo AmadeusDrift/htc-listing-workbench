@@ -10,10 +10,10 @@ test('new workspace includes the Miaoshou receipt table and migration preserves 
   const directory = mkdtempSync(join(tmpdir(), 'htc-miaoshou-migration-'));
   let db = openDatabase(directory);
   try {
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 17);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 18);
     assert.deepEqual(db.prepare('PRAGMA table_info(miaoshou_receipts)').all().map(row => row.name), ['id', 'record_json']);
     db.exec("INSERT INTO products VALUES ('existing','Keep me','','','draft','manual',1,'2026-10-06','2026-10-06')");
-    db.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; PRAGMA user_version=10');
+    db.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; PRAGMA user_version=10');
     db.close(); db = openDatabase(directory);
     assert.equal(db.prepare('SELECT title FROM products WHERE id=?').get('existing')?.title, 'Keep me');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM miaoshou_receipts').get()?.count, 0);
@@ -30,7 +30,7 @@ test('version 11 workspace can be backed up and restored through the existing en
     const prepared = await prepareWorkspaceRestore(target, path, 'miaoshou-backup-test-password');
     await commitWorkspaceRestore(target, prepared);
     const restored = openDatabase(target);
-    try { assert.equal(restored.prepare('PRAGMA user_version').get()?.user_version, 17); }
+    try { assert.equal(restored.prepare('PRAGMA user_version').get()?.user_version, 18); }
     finally { restored.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); rmSync(target, { recursive: true, force: true }); }
 });

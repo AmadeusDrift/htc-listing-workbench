@@ -50,7 +50,7 @@ export interface ImageWorkflowRun {
   copyReviewResultId?:string;
   categoryFieldPolicyVersion?:typeof CATEGORY_FIELD_REPAIR_POLICY_VERSION;
   categoryFieldRepair?:CategoryFieldRepairGrant;
-  contentPreparation?:{state:'STARTED'|'DONE';draftRevision:number;remaining:string[];repairPolicyVersion?:'field-evidence/v2';copyReviewEnabled?:boolean;sourceColorEvidenceSha256?:string;draftSha256?:string};
+  contentPreparation?:{operationId?:string;state:'STARTED'|'DONE';draftRevision:number;remaining:string[];repairPolicyVersion?:'field-evidence/v2';copyReviewEnabled?:boolean;sourceColorEvidenceSha256?:string;draftSha256?:string};
   /** Missing on old records means risk interception was enabled. */
   riskInterceptionEnabled?:boolean;
   /** Absent on existing runs means independent listing-copy review was enabled. */

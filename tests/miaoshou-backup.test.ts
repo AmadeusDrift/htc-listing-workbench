@@ -45,11 +45,11 @@ test('genuine v10 backup restores and upgrades without altering original product
   const root = mkdtempSync(join(tmpdir(), 'htc-ms-legacy-')), source = join(root, 'source'), target = join(root, 'target');
   try {
     const store = new WorkspaceStore(source), product = store.createProduct(); store.close();
-    const db = openDatabase(source); db.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; PRAGMA user_version=10'); db.close();
+    const db = openDatabase(source); db.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; PRAGMA user_version=10'); db.close();
     const archive = join(root, 'legacy.htcbackup'); await createWorkspaceBackup(source, archive, 'test-backup-password');
     const prepared = await prepareWorkspaceRestore(target, archive, 'test-backup-password'); await commitWorkspaceRestore(target, prepared);
     const restored = new WorkspaceStore(target);
-    try { assert.deepEqual(restored.getProduct(product.id), product); assert.equal(restored.getStats().schemaVersion, 17); }
+    try { assert.deepEqual(restored.getProduct(product.id), product); assert.equal(restored.getStats().schemaVersion, 18); }
     finally { restored.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

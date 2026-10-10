@@ -10,7 +10,7 @@ import { MIAOSHOU_INDEXES } from './miaoshou/indexes.ts';
 import { MIAOSHOU_SYNC_INDEXES } from './miaoshou/sync-records.ts';
 import { SKU_NAMING_SCHEMA } from './sku-naming/schema.ts';
 
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 export function openDatabase(directory: string): DatabaseSync {
   mkdirSync(directory, { recursive: true });
   const db = new DatabaseSync(join(directory, 'red.sqlite'));
@@ -219,6 +219,10 @@ export function openDatabase(directory: string): DatabaseSync {
       for (const sql of SKU_NAMING_SCHEMA) db.exec(sql);
       db.exec('PRAGMA user_version=17; COMMIT;');
     } catch (error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
+  }
+  if (version < 18) {
+    try { db.exec('BEGIN IMMEDIATE; CREATE TABLE listing_completion_operations (id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); PRAGMA user_version=18; COMMIT;'); }
+    catch (error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
   }
   // Idempotent for databases created during development of schema version 2.
   db.exec(`CREATE TABLE IF NOT EXISTS amazon_exchanges (

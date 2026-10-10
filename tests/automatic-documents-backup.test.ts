@@ -21,7 +21,7 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const amazon={getTarget:()=>target,executionTargetScope:()=>({target,generation:1}),getDraft:()=>draft,listDrafts:()=>[draft],getListingObservation:()=>({...draft,draftId:draft.id,asin:'B012345678',fnsku:null,statuses:[],issues:[]}),
     createMarketplaceItemLabels:async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/a.pdf'}]},status:200,requestId:'test'}),downloadItemLabel:async()=>simplePdf()};
   const procurement=new ProcurementService(source,store,amazon as never),labels=new ItemLabelService(source,amazon as never,procurement),docs=new ShipmentDocumentService(source,procurement);
-  const automatic=new AutomaticListingService(source,{store,amazon,hosting:{getProfile:()=>({id:'alpha',name:'Alpha',configured:true,enabled:true,generation:1})},rules:defaultListingRules,labels,procurement} as never);
+  const automatic=new AutomaticListingService(source,{store,amazon,images:{getProgress:()=>null},execution:{list:()=>[]},hosting:{getProfile:()=>({id:'alpha',name:'Alpha',configured:true,enabled:true,generation:1})},rules:defaultListingRules,labels,procurement} as never);
   t.after(async()=>{await automatic.close();await labels.close();docs.close();procurement.close();store.close();await rm(root,{recursive:true,force:true});});
   const task=await automatic.create({productIds:[product.id],targetId:target.id,productType:'BOX',profileId:'alpha'});
   const screened=structuredClone(task);screened.id=randomUUID();screened.status='COMPLETED';

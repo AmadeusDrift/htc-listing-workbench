@@ -7,6 +7,11 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { fingerprint } from '../execution/records.ts';
 import { validateItemLabelFormat } from '../item-labels/adapter.ts';
 import { validateSalesPlan } from '../sales-plans/records.ts';
+import { outcomeScope } from './outcomes.ts';
+import { assertBusinessRules } from '../listing-ai/history.ts';
+import { AUTOMATIC_SOURCE_ISSUES, type AutomaticSourceIssueCode } from '../../shared/image-workflow-contracts.ts';
+import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import type { AutomaticListingOutcome } from '../../shared/automatic-listing-contracts.ts';
 
 export const sourceStamp = (product: ProductDetail): string => fingerprint({
   id: product.id, title: product.title, sourceUrl: product.sourceUrl, description: product.description,
@@ -21,8 +26,8 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair']);
-  if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED'].includes(String(value.status))
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','outcome']);
+  if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
   const productId = identifier(value.productId), variantId = identifier(value.variantId);
@@ -94,7 +99,40 @@ function item(raw: unknown): AutomaticListingItem {
   if (!result.productRevision || !result.stockSets || new Set(result.executionTaskIds).size !== result.executionTaskIds.length) fail();
   if (['EXECUTION','READBACK','LABELS','COMPLETE'].includes(result.stage) && !result.draftId) fail();
   if (result.status === 'DONE' && result.stage !== 'COMPLETE') fail();
+  if(value.outcome!==undefined)result.outcome=validateOutcome(value.outcome,result);
+  if(result.status==='SCREENED'&&result.outcome?.kind!=='RULE_FILTERED'||result.outcome?.kind==='RULE_FILTERED'&&result.status!=='SCREENED')fail();
   if(result.stage==='PLAN'&&(result.status!=='FAILED'||!result.error||result.draftId||result.salesPlan||result.executionTaskIds.length||result.imageStarted))fail();
+  return result;
+}
+function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingOutcome {
+  const value=record(raw,'结果分类',['version','kind','code','message','classifiedAt','scope','draftId','draftRevision','pricingReport','image']);
+  if(value.version!==1||!['RULE_FILTERED','SYSTEM_REPAIR','NEEDS_INPUT','UNKNOWN','UNCLASSIFIED'].includes(String(value.kind)))fail();
+  const scope=record(value.scope,'结果范围',['mode','sellerId','marketplaceId','productId','recipeKey','recipeStamp','sourceStamp','rulesStamp','ruleRevision']);
+  if(Object.keys(scope).length!==9||!['demo','live'].includes(String(scope.mode)))fail();
+  const result:AutomaticListingOutcome={version:1,kind:value.kind as AutomaticListingOutcome['kind'],code:text(value.code,'结果代码',100,true),message:text(value.message,'结果原因',2000,true),classifiedAt:date(value.classifiedAt),
+    scope:{mode:scope.mode as 'demo'|'live',sellerId:text(scope.sellerId,'卖家',100,true),marketplaceId:text(scope.marketplaceId,'站点',100,true),productId:identifier(scope.productId),recipeKey:text(scope.recipeKey,'配方',200,true),recipeStamp:hash(scope.recipeStamp),sourceStamp:hash(scope.sourceStamp),rulesStamp:hash(scope.rulesStamp),ruleRevision:counter(scope.ruleRevision)},
+    draftId:value.draftId===null?null:identifier(value.draftId),draftRevision:value.draftRevision===null?null:counter(value.draftRevision)};
+  if(result.draftId!==row.draftId||!result.draftId&&result.draftRevision!==null||result.kind==='RULE_FILTERED'&&!result.draftRevision)fail();
+  if(value.pricingReport!==undefined){
+    const p=record(value.pricingReport,'定价证据',['revision','fields','notices','quote','bundleQuantity','pricingBasis','pricingDecision']);
+    if(p.revision!==scope.ruleRevision||p.quote!==null||JSON.stringify(p.fields)!=='{}'||JSON.stringify(p.notices)!=='[]'||!Number.isSafeInteger(p.bundleQuantity)||Number(p.bundleQuantity)<1||!p.pricingDecision||!result.draftId)fail();
+    const report=p as unknown as NonNullable<AutomaticListingOutcome['pricingReport']>;
+    assertBusinessRules({businessRules:report,marketplaceId:result.scope.marketplaceId,salesPlan:row.salesPlan,schema:{schema:{properties:{}}}} as unknown as AmazonDraft);
+    if(report.pricingDecision!.code!==result.code||result.kind!==(report.pricingDecision!.status==='business_blocked'?'RULE_FILTERED':report.pricingDecision!.status==='system_error'?'SYSTEM_REPAIR':'NEEDS_INPUT'))fail();
+    result.pricingReport=structuredClone(report);
+  }
+  if(value.image!==undefined){
+    const image=record(value.image,'图片淘汰证据',['kind','workflowId','resultId','callId','planResultId','candidateId','contextSha256','draftRevision','references','policyVersion','message']);
+    if(Object.keys(image).length!==11||!['IP_PLAN_BLOCKED','IP_IMAGE_BLOCKED'].includes(String(image.kind))||image.kind!==result.code||result.kind!=='RULE_FILTERED'||!result.draftId||image.draftRevision!==result.draftRevision||!Array.isArray(image.references)||!image.references.length||image.references.length>10)fail();
+    const references=(image.references as unknown[]).map(raw=>{const r=record(raw,'参考图',['id','sha256']);if(Object.keys(r).length!==2)fail();return {id:identifier(r.id),sha256:hash(r.sha256)};});
+    if(new Set(references.map(r=>r.id)).size!==references.length)fail();
+    result.image={kind:image.kind as 'IP_PLAN_BLOCKED'|'IP_IMAGE_BLOCKED',workflowId:identifier(image.workflowId),resultId:identifier(image.resultId),callId:identifier(image.callId),planResultId:identifier(image.planResultId),candidateId:image.candidateId===null?null:identifier(image.candidateId),contextSha256:hash(image.contextSha256),draftRevision:counter(image.draftRevision),references,policyVersion:text(image.policyVersion,'图片规则版本',100,true),message:text(image.message,'图片规则原因',2000,true)};
+    if((result.image.kind==='IP_IMAGE_BLOCKED')!==Boolean(result.image.candidateId))fail();
+  }
+  if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
+  if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
+    if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
+  }else if(!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();
   return result;
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];
@@ -105,11 +143,13 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
   const items = (value.items as unknown[]).map(item);
   const planned=items.filter(row=>row.stage!=='PLAN');
   if (new Set(items.map(row => row.key)).size !== items.length || new Set(planned.map(row => row.sku)).size !== planned.length) fail();
-  if (value.status === 'COMPLETED' && items.some(row => row.status !== 'DONE')) fail();
-  return { id: identifier(value.id), revision: counter(value.revision), status: value.status as AutomaticListingTask['status'],
+  if (value.status === 'COMPLETED' && items.some(row => !['DONE','SCREENED'].includes(row.status))) fail();
+  const result:AutomaticListingTask={ id: identifier(value.id), revision: counter(value.revision), status: value.status as AutomaticListingTask['status'],
     targetId: text(value.targetId, '目标店铺', 100, true), targetName: text(value.targetName, '目标店铺', 200, true),
     sellerId: text(value.sellerId, '卖家', 100, true), marketplaceId: text(value.marketplaceId, '站点', 100, true), mode: value.mode as 'demo' | 'live',
     targetStamp: hash(value.targetStamp), profileId: text(value.profileId, '图床', 30, true), profileStamp: hash(value.profileStamp), rulesStamp: hash(value.rulesStamp),
     ruleRevision: counter(value.ruleRevision), productType: text(value.productType, '商品类型', 100, true), locale: text(value.locale, '语言', 30, true), items,
     labelFormat: validateItemLabelFormat(value.labelFormat), createdAt: date(value.createdAt), updatedAt: date(value.updatedAt), error: optional(value.error, 2000) };
+  for(const row of items)if(row.outcome&&fingerprint(row.outcome.scope)!==fingerprint(outcomeScope(result,row)))fail();
+  return result;
 }

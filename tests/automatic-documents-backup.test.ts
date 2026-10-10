@@ -9,6 +9,7 @@ import { ProcurementService } from '../src/main/procurement/service.ts';
 import { ShipmentDocumentService } from '../src/main/procurement/shipment-documents.ts';
 import { ItemLabelService } from '../src/main/item-labels/service.ts';
 import { AutomaticListingService } from '../src/main/automatic-listing/service.ts';
+import { outcomeScope } from '../src/main/automatic-listing/outcomes.ts';
 import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { simplePdf } from './fixtures/simple-pdf.ts';
@@ -22,7 +23,13 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const procurement=new ProcurementService(source,store,amazon as never),labels=new ItemLabelService(source,amazon as never,procurement),docs=new ShipmentDocumentService(source,procurement);
   const automatic=new AutomaticListingService(source,{store,amazon,hosting:{getProfile:()=>({id:'alpha',name:'Alpha',configured:true,enabled:true,generation:1})},rules:defaultListingRules,labels,procurement} as never);
   t.after(async()=>{await automatic.close();await labels.close();docs.close();procurement.close();store.close();await rm(root,{recursive:true,force:true});});
-  const task=automatic.create({productIds:[product.id],targetId:target.id,productType:'BOX',profileId:'alpha'});
+  const task=await automatic.create({productIds:[product.id],targetId:target.id,productType:'BOX',profileId:'alpha'});
+  const screened=structuredClone(task);screened.id=randomUUID();screened.status='COMPLETED';
+  const screenRow=screened.items[0];screenRow.status='SCREENED';screenRow.stage='DRAFT';screenRow.draftId=draft.id;screenRow.error='Confirmed ROI rule';
+  screenRow.outcome={version:1,kind:'RULE_FILTERED',code:'ROI_MAX_PRICE',message:screenRow.error,classifiedAt:screened.updatedAt,scope:outcomeScope(screened,screenRow),draftId:draft.id,draftRevision:1,
+    pricingReport:{revision:screened.ruleRevision,fields:{},notices:[],quote:null,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:100,quantity:1,saleUnitCostCny:100},
+      pricingDecision:{version:1,status:'business_blocked',code:'ROI_MAX_PRICE',quoteError:'ROI_MAX_PRICE',inputs:{costCny:100,dimensionsInches:[1,1,1],weightPounds:1},evidence:{cost:'confirmed_cny',dimensions:'confirmed_source',weight:'confirmed_source',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:[1,1,1],weightPounds:1}}}}};
+  const history=openDatabase(source);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(screened.id,JSON.stringify(screened));history.close();
   const [batch]=procurement.ensureAutomaticBatch(task.id,[draft.id],{[draft.id]:5});
   const [label]=labels.syncBatch(batch.id,{jobId:task.id});await labels.runDue();const ready=labels.get(label.id);assert.equal(ready.status,'READY',JSON.stringify(ready));
   const current=procurement.get(batch.id);procurement.update({id:batch.id,revision:current.revision,lines:current.lines.map(({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})),shipmentConfirmationId:'FBA12345678'});
@@ -33,7 +40,7 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const db=openDatabase(source);const queued={...ready,status:'REQUESTING',files:[]};db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(queued),ready.id);db.close();
   const archive=join(root,'backup.htcbackup');await createWorkspaceBackup(source,archive,'automatic-backup-test-2026');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'automatic-backup-test-2026'));
   const restored=openDatabase(destination);
-  try {const job=JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks').get()!.record_json));assert.equal(job.status,'PAUSED');const interrupted=JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels').get()!.record_json));assert.equal(interrupted.status,'FAILED');assert.equal(interrupted.errorCode,'INTERRUPTED');assert.equal(interrupted.paused,true);}
+  try {const job=JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.equal(job.status,'PAUSED');assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(screened.id)!.record_json)),screened);const interrupted=JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels').get()!.record_json));assert.equal(interrupted.status,'FAILED');assert.equal(interrupted.errorCode,'INTERRUPTED');assert.equal(interrupted.paused,true);}
   finally {restored.close();}
   assert.deepEqual(await readFile(join(destination,document.relativePath)),simplePdf());
   await writeFile(join(source,document.relativePath),Buffer.from('corrupt'));

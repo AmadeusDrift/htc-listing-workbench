@@ -66,6 +66,11 @@ export interface CompleteAutomaticProductResult {
   draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[]; workflow: ImageWorkflowRun;
 }
 export interface AutomaticImageCandidatePreview { candidateId:string; previewUrl:string; width:number; height:number }
+export const AUTOMATIC_SOURCE_ISSUES = {
+  SOURCE_LINKS_MISSING:'NEEDS_INPUT', SOURCE_BINDING_UNCONFIRMED:'NEEDS_INPUT', SOURCE_REFERENCE_UNUSABLE:'NEEDS_INPUT',
+  SOURCE_DOWNLOAD_FAILED:'SYSTEM_REPAIR', SOURCE_MAPPING_MISSING:'SYSTEM_REPAIR', SOURCE_MAPPING_INVALID:'SYSTEM_REPAIR',
+} as const;
+export type AutomaticSourceIssueCode = keyof typeof AUTOMATIC_SOURCE_ISSUES;
 export interface ImageWorkflowApi {
   getAutomaticImageCandidatePreview(input:{draftId:string;slot:number;candidateId:string}):Promise<AutomaticImageCandidatePreview>;
   approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowRun>;
@@ -73,7 +78,7 @@ export interface ImageWorkflowApi {
   saveImageRiskSettings(input:ImageRiskSettings):Promise<ImageRiskSettings>;
   getCopyReviewSettings():Promise<CopyReviewSettings>;
   saveCopyReviewSettings(input:CopyReviewSettings):Promise<CopyReviewSettings>;
-  prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string }[] }>;
+  prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string; code?:AutomaticSourceIssueCode }[] }>;
   cancelAutomaticProductSources(productId: string): Promise<{ cancelled: boolean }>;
   completeAutomaticProduct(input: CompleteAutomaticProductInput): Promise<CompleteAutomaticProductResult>;
   getAutomaticProductProgress(draftId: string): Promise<ImageWorkflowRun | null>;

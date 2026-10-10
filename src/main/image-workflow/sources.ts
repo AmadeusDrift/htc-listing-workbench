@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { ProductDetail } from '../../shared/contracts.ts';
-import type { ImageWorkflowApi } from '../../shared/image-workflow-contracts.ts';
+import type { ImageWorkflowApi, AutomaticSourceIssueCode } from '../../shared/image-workflow-contracts.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import type { WorkspaceStore } from '../store.ts';
 import type { MiaoshouImageService } from '../miaoshou/images.ts';
@@ -18,17 +18,20 @@ export function allowUnboundSingleSku(product: ProductDetail,receipt: MiaoshouRe
 }
 /** Read-only receipt diagnosis; never changes a mapping or downloads sibling images. */
 export function sourceMappingIssue(product: ProductDetail, variantId: string, receipt: MiaoshouReceipt | null | undefined): string | null {
+  return sourceMappingDiagnosis(product,variantId,receipt)?.message??null;
+}
+export function sourceMappingDiagnosis(product:ProductDetail,variantId:string,receipt:MiaoshouReceipt|null|undefined):{code:AutomaticSourceIssueCode;message:string}|null {
   const images=receipt?.snapshot.images.filter(image=>image.url.trim())??[];
-  if(!images.length)return '没有可用的来源图片链接，请补充来源图片后重新准备';
+  if(!images.length)return {code:'SOURCE_LINKS_MISSING',message:'没有可用的来源图片链接，请补充来源图片后重新准备'};
   if(allowUnboundSingleSku(product,receipt))return null;
   const mapping=receipt?.skuMappings.find(row=>row.localVariantId===variantId);
-  if(!mapping)return '商品有来源图片，但所选 SKU 没有来源图片映射记录，请核对来源 SKU 对应关系';
+  if(!mapping)return {code:'SOURCE_MAPPING_MISSING',message:'商品有来源图片，但所选 SKU 没有来源图片映射记录，请核对来源 SKU 对应关系'};
   if(!mapping.imageIds.length){
     const variant=product.variants.find(row=>row.id===variantId),spec=variant?.sourceSpec||variant?.originalSpec||'';
     const uncertain=/可备注颜色|随机|混色/.test(spec)?`；规格“${spec.slice(0,160)}”不能证明确定颜色，请核实实际供货外观后再关联`:'';
-    return `商品有来源图片，但所选 SKU 的图片映射为空。请在“来源图片”下载实际对应图片，再到“图片工作区 → 关联 SKU”确认本 SKU；不会借用其他 SKU 的颜色图片${uncertain}`;
+    return {code:'SOURCE_BINDING_UNCONFIRMED',message:`商品有来源图片，但所选 SKU 的图片映射为空。请在“来源图片”下载实际对应图片，再到“图片工作区 → 关联 SKU”确认本 SKU；不会借用其他 SKU 的颜色图片${uncertain}`};
   }
-  if(!mapping.imageIds.some(id=>images.some(image=>image.id===id)))return '所选 SKU 的来源图片映射 ID 无效或对应链接为空，请核对来源记录';
+  if(!mapping.imageIds.some(id=>images.some(image=>image.id===id)))return {code:'SOURCE_MAPPING_INVALID',message:'所选 SKU 的来源图片映射 ID 无效或对应链接为空，请核对来源记录'};
   return null;
 }
 export function parseAutomaticSources(raw: unknown) {
@@ -80,8 +83,10 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   fresh();
   return {product,missing:input.variantIds.filter(id=>!ready(id)).map(variantId=>{
     const failure=candidates.get(variantId)?.map(id=>failures.get(id)).find(Boolean);
-    const mappingIssue=sourceMappingIssue(product,variantId,receipt);
+    const mappingIssue=sourceMappingDiagnosis(product,variantId,receipt);
     const localUnconfirmed=product.assets.some(asset=>!derived.has(asset.id)&&asset.variantIds.includes(variantId)&&!db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(asset.id,variantId));
-    return {variantId,message:localUnconfirmed?'该 SKU 的来源图片绑定尚未确认，请确认图片与 SKU 的对应关系':mappingIssue || (failure?`来源图片下载失败：${failure}`:'来源图片已处理，但该 SKU 的图片绑定仍未确认，或参考图超出可用大小限制，请核对来源图片')};
+    const issue:{code:AutomaticSourceIssueCode;message:string}=localUnconfirmed?{code:'SOURCE_BINDING_UNCONFIRMED',message:'该 SKU 的来源图片绑定尚未确认，请确认图片与 SKU 的对应关系'}
+      :mappingIssue??(failure?{code:'SOURCE_DOWNLOAD_FAILED',message:`来源图片下载失败：${failure}`}:{code:'SOURCE_REFERENCE_UNUSABLE',message:'来源图片已处理，但该 SKU 的图片绑定仍未确认，或参考图超出可用大小限制，请核对来源图片'});
+    return {variantId,...issue};
   })};
 }

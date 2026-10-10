@@ -13,11 +13,12 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
     return task;
   };
   handle('red:automatic-listing:start', 1, async raw => {
-    const task = service.create(raw);
+    const task = await service.create(raw);
     try { const started = await start(task.id); if (!started) service.cancel(task.id); return started; }
     catch (error) { service.cancel(task.id); throw error; }
   });
   handle('red:automatic-listing:list', 0, () => service.list());
+  handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));
   handle('red:automatic-listing:resume', 1, id => start(identifier(id)));
   handle('red:automatic-listing:pause', 1, id => service.pause(identifier(id)));

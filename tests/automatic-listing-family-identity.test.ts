@@ -40,6 +40,7 @@ function fixture(t: test.TestContext) {
     rules: () => defaultListingRules(), hosting: { getProfile: () => ({ id: 'alpha', enabled: true, configured: true }) },
     amazon: { executionTargetScope: () => ({ target, generation: 1 }) }, labels: {},
     planSales: () => [structuredClone(selected)], existingSale: () => existing ? structuredClone(existing) : undefined,
+    previewSales: () => [structuredClone(selected.recipe)],
   } as unknown as AutomaticListingDependencies;
   const service = new AutomaticListingService(directory, dependencies);
   t.after(async () => { await service.close(); assert.ok(resolve(directory).startsWith(root + sep)); rmSync(directory, { recursive: true, force: true, maxRetries: 5 }); });
@@ -48,48 +49,48 @@ function fixture(t: test.TestContext) {
     select(next: SalesListingPlan, draft: AmazonDraft | undefined = oldDraft) { selected = next; existing = draft; } };
 }
 
-test('changed grouping cannot evade an existing automatic task by allocating a new SKU for the same unsent sale', t => {
-  const f = fixture(t), originalTask = f.create();
+test('changed grouping cannot evade an existing automatic task by allocating a new SKU for the same unsent sale', async t => {
+  const f = fixture(t), originalTask = await f.create();
   f.select(plan(f.oldSource, true));
-  assert.throws(() => f.create(), /已在自动任务|继续.*原任务/);
+  await assert.rejects(() => f.create(), /已在自动任务|继续.*原任务/);
   assert.equal(f.service.list().length, 1);
   assert.deepEqual(f.service.get(originalTask.id), originalTask);
 });
 
-test('a reimport with new local IDs still conflicts with the canonical old unsent task', t => {
-  const f = fixture(t), originalTask = f.create();
+test('a reimport with new local IDs still conflicts with the canonical old unsent task', async t => {
+  const f = fixture(t), originalTask = await f.create();
   f.select(plan(f.imported, true));
-  assert.throws(() => f.create(f.imported), /已在自动任务|继续.*原任务/);
+  await assert.rejects(() => f.create(f.imported), /已在自动任务|继续.*原任务/);
   assert.equal(f.service.list().length, 1);
   assert.deepEqual(f.service.get(originalTask.id), originalTask);
   assert.equal(f.reads.at(-1), f.oldSource.id, 'canonical old plan must resolve against the old source, never the reimported variant');
 });
 
-test('an orphaned unsent old-family draft blocks new-task takeover rather than discarding its existing images', t => {
+test('an orphaned unsent old-family draft blocks new-task takeover rather than discarding its existing images', async t => {
   const f = fixture(t);
   f.select(plan(f.imported, true));
-  assert.throws(() => f.create(f.imported), /OLD-SKU.*原草稿|原草稿.*OLD-SKU/);
+  await assert.rejects(() => f.create(f.imported), /OLD-SKU.*原草稿|原草稿.*OLD-SKU/);
   assert.equal(f.service.list().length, 0);
   assert.equal(f.reads.at(-1), f.oldSource.id);
 });
 
-test('same-group unsent source refresh keeps its allocated SKU while refreshing component IDs and cost', t => {
+test('same-group unsent source refresh keeps its allocated SKU while refreshing component IDs and cost', async t => {
   const f = fixture(t), refreshed = plan(f.imported);
   refreshed.sku = 'UNUSED-FRESH-SKU'; refreshed.baseSku = 'UNUSED-FRESH-SKU';
   refreshed.recipe.components[0].quotedCostCny = 2; refreshed.recipe.totalCostCny = 2;
   f.select(refreshed);
-  const created = f.create(f.imported), item = created.items[0];
+  const created = await f.create(f.imported), item = created.items[0];
   assert.equal(item.productId, f.imported.id); assert.equal(item.variantId, f.imported.variants[0].id);
   assert.equal(item.sku, f.oldPlan.sku); assert.equal(item.salesPlan!.namingGroupId, f.oldPlan.namingGroupId);
   assert.equal(item.salesPlan!.recipe.totalCostCny, 2);
   assert.equal(item.salesPlan!.recipe.components[0].variantId, f.imported.variants[0].id);
 });
 
-test('already submitted and UNKNOWN canonical sales retain the original product, variant, SKU and frozen recipe', t => {
+test('already submitted and UNKNOWN canonical sales retain the original product, variant, SKU and frozen recipe', async t => {
   for (const state of ['SUBMITTED', 'UNKNOWN'] as const) {
     const f = fixture(t), submitted = { ...f.oldDraft, state, submittedAt: state === 'SUBMITTED' ? at : null };
     f.select(plan(f.imported, true), submitted);
-    const item = f.create(f.imported).items[0];
+    const item = (await f.create(f.imported)).items[0];
     assert.equal(item.productId, f.oldSource.id); assert.equal(item.variantId, f.oldSource.variants[0].id);
     assert.equal(item.sku, f.oldPlan.sku); assert.deepEqual(item.salesPlan, f.oldPlan);
   }

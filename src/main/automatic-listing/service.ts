@@ -23,14 +23,17 @@ import { sourceStamp, validateAutomaticListingTask } from './records.ts';
 import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
 import type { ProductClassification } from '../../shared/category-ai-contracts.ts';
 import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
-import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.ts';
+import { projectSalesProduct, validateSalesPlan, validateSalesRecipe } from '../sales-plans/records.ts';
 import { reconcileSalesIdentity } from '../sales-plans/reconciliation.ts';
 import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/service.ts';
-import { canResumeImageWorkflow, hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
+import { canResumeImageWorkflow, hasSevenApprovedImages, AUTOMATIC_SOURCE_ISSUES } from '../../shared/image-workflow-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
-import { sourceMappingIssue } from '../image-workflow/sources.ts';
+import { sourceMappingDiagnosis } from '../image-workflow/sources.ts';
 import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
+import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow, AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
+import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, recipeKey } from './outcomes.ts';
+import { previewSalesRecipes } from '../sales-plans/planning.ts';
 
 export interface AutomaticListingDependencies {
   store: Pick<WorkspaceStore, 'getProduct'>;
@@ -43,6 +46,7 @@ export interface AutomaticListingDependencies {
     getCopyReviewSettings?: () => {enabled:boolean};
     isCopyReviewPolicyCompatible?: (run:ImageWorkflowRun) => boolean;
     canResumeRecheckDraft?: ImageWorkflowService['canResumeRecheckDraft'];
+    getRuleFilterEvidence?: (draftId:string)=>Promise<AutomaticRuleEvidence|null>;
   };
   execution: Pick<ExecutionService, 'create' | 'prepareStart' | 'startAuthorized' | 'get' | 'list' | 'pause' | 'cancel' | 'waitForIdle'>;
   followup: Pick<FollowupService, 'get' | 'schedule'>;
@@ -57,6 +61,7 @@ export interface AutomaticListingDependencies {
   sourceReceipt?: (productId: string) => MiaoshouReceipt | null;
   classify?: (input: { productId: string; productRevision: number; targetId: string }, signal: AbortSignal) => Promise<ProductClassification>;
   planSales?: (productId:string,targetId:string) => SalesListingPlan[];
+  previewSales?: (productId:string) => SalesListingPlan['recipe'][];
   existingSale?: (productId:string,plan:SalesListingPlan,targetId:string) => AmazonDraft|undefined;
   resolveFamily?: (input:{plans:SalesListingPlan[];targetId:string;productType:string;locale:string},signal:AbortSignal) => Promise<SalesListingPlan[]>;
   ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
@@ -135,12 +140,12 @@ export class AutomaticListingService {
     if (fingerprint(this.deps.rules()) !== task.rulesStamp) throw new UserFacingError('上架规则发生变化，请重新建立任务');
   }
   private canRebaseSources(task: AutomaticListingTask,row: AutomaticListingItem): boolean {
-    if(row.sourcesPrepared||row.stage!=='SOURCES'||row.draftId||row.imageStarted||row.executionTaskIds.length)return false;
+    if(row.status==='SCREENED'||row.sourcesPrepared||row.stage!=='SOURCES'||row.draftId||row.imageStarted||row.executionTaskIds.length)return false;
     return task.items.filter(sibling=>sibling.productId===row.productId&&sibling.sourcesPrepared).every(sibling=>
       ['READBACK','LABELS','COMPLETE'].includes(sibling.stage)&&!!sibling.draftId&&submitted(this.deps.amazon.getDraft(sibling.draftId)));
   }
   private assertScope(task: AutomaticListingTask, row?: AutomaticListingItem, allowSourceRecovery=false): void {
-    const rows = row ? [row] : task.items.filter(value => !['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
+    const rows = row ? [row] : task.items.filter(value => value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
     if (!rows.length) return;
     this.assertConnections(task);
     for (const item of rows) {
@@ -148,7 +153,97 @@ export class AutomaticListingService {
       if (!variant || variant.sku !== item.sku || sourceStamp(source) !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
     }
   }
-  create(raw: unknown): AutomaticListingTask {
+  private unknownCode(row:AutomaticListingItem):string|null {
+    if(row.repair?.phase==='FIELDS_STARTED')return 'FIELD_RESULT_UNKNOWN';
+    if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':null;
+    const draft=this.deps.amazon.getDraft(row.draftId);
+    if(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))return 'SUBMISSION_UNKNOWN';
+    const run=this.deps.images.getProgress(row.draftId);
+    if(run?.contentPreparation?.state==='STARTED')return 'FIELD_RESULT_UNKNOWN';
+    if(run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
+    if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
+    return null;
+  }
+  private async classifyFailure(task:AutomaticListingTask,row:AutomaticListingItem):Promise<void> {
+    let draft:AmazonDraft|undefined, classification:Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'|'image'>={kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'};
+    try {
+      if(row.draftId)draft=this.deps.amazon.getDraft(row.draftId);
+      const unknown=this.unknownCode(row);
+      if(unknown)classification={kind:'UNKNOWN',code:unknown};
+      else if(draft){
+        classification=pricingOutcome(draft,this.deps.rules())??classification;
+        if(classification.kind!=='RULE_FILTERED'&&this.deps.images.getRuleFilterEvidence){
+          const image=await this.deps.images.getRuleFilterEvidence(draft.id);
+          if(image)classification={kind:'RULE_FILTERED',code:image.kind,image};
+        }
+        if(!this.matching(task,row,draft)||draft.productRevision!==row.productRevision||sourceStamp(this.deps.store.getProduct(row.productId))!==row.sourceStamp||fingerprint(this.deps.rules())!==task.rulesStamp)
+          classification={kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
+        const after=this.deps.amazon.getDraft(draft.id);
+        if(after.revision!==draft.revision||this.unknownCode(row))classification={kind:'UNKNOWN',code:this.unknownCode(row)??'EVIDENCE_READ_FAILED'};
+      }else if(row.stage==='SOURCES'&&row.outcome&&Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code))classification={kind:row.outcome.kind,code:row.outcome.code};
+      else if(row.stage==='PLAN'||row.outcome?.code==='SOURCE_INPUT_REQUIRED')classification={kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED'};
+    }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
+    if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=('上次结果尚未确认，未自动重发。上次错误：'+(row.error??'请核对已有记录')).slice(0,2000);
+    row.outcome={version:1,...classification,message:(classification.image?.message??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
+    if(classification.kind==='RULE_FILTERED')row.status='SCREENED';
+  }
+  async queue(raw:unknown):Promise<AutomaticListingQueue> {
+    this.ensureOpen();const input=record(raw,'待上架范围',['productIds','targetId']);
+    if(!Array.isArray(input.productIds)||input.productIds.length>1000)throw new UserFacingError('最多读取 1000 个来源商品');
+    const ids=input.productIds.map(identifier);if(new Set(ids).size!==ids.length)throw new UserFacingError('商品范围不能重复');
+    const targetId=text(input.targetId,'店铺',100,true),target=this.deps.amazon.executionTargetScope(targetId),rules=this.deps.rules();
+    const relevantTasks=()=>[...this.tasks.values()].filter(t=>t.mode===target.target.mode&&t.sellerId===target.target.sellerId&&t.marketplaceId===target.target.marketplaceId&&t.items.some(row=>ids.includes(row.productId)));
+    const revisions=()=>relevantTasks().map(t=>[t.id,t.revision]);
+    const evidenceState=()=>{
+      const draftIds=[...new Set(relevantTasks().flatMap(t=>t.items.filter(row=>ids.includes(row.productId)&&row.draftId).map(row=>row.draftId!)))];
+      if(!draftIds.length)return null;
+      return {risk:this.deps.images.getRiskSettings?.()??null,drafts:draftIds.map(id=>{try{return {id,draft:this.deps.amazon.getDraft(id),workflow:this.deps.images.getProgress(id)};}catch{return {id,unavailable:true};}}),
+        execution:this.deps.execution.list().flatMap(child=>child.items.filter(item=>draftIds.includes(item.draftId)).map(item=>({id:child.id,status:child.status,item})))};
+    };
+    const taskRevisions=fingerprint(revisions()),evidenceStamp=fingerprint(evidenceState()),receipts=new Map(ids.map(id=>[id,this.deps.sourceReceipt?.(id)??null]));
+    const snapshots=ids.map(id=>this.deps.store.getProduct(id)),products:AutomaticListingQueue['products']=[];
+    for(const product of snapshots){
+      let recipes:{key:string;specification:string;stamp:string;legacyVariantId:string|null}[],planningError:string|null=null;
+      try{recipes=this.deps.planSales?(this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules)).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
+        :product.variants.slice(0,rules.product.variantLimit).map(v=>({key:v.id,specification:v.normalizedSpec||v.originalSpec,stamp:fingerprint({variantId:v.id}),legacyVariantId:v.id}));}
+      catch(error){planningError=errorMessage(error);recipes=[];}
+      const rows:AutomaticQueueRow[]=[];
+      for(const recipe of recipes){
+        const histories=[...this.tasks.values()].filter(t=>t.mode===target.target.mode&&t.sellerId===target.target.sellerId&&t.marketplaceId===target.target.marketplaceId)
+          .flatMap(task=>task.items.filter(item=>item.productId===product.id&&(item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)).map(item=>({task,item}))).reverse();
+        const latest=histories[0],view:AutomaticQueueRow={key:product.id+':'+recipe.key,productId:product.id,recipeKey:recipe.key,specification:recipe.specification,sku:latest?.item.sku??null,kind:'PENDING',eligible:true,message:'',reconsideration:null,taskId:latest?.task.id??null};
+        try{
+          const unsafe=histories.find(h=>this.unknownCode(h.item));
+          if(unsafe){view.kind='UNKNOWN';view.eligible=false;view.taskId=unsafe.task.id;view.message=unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务';}
+          else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读或标签';}
+          else if(latest){
+            const {task,item}=latest,outcome=item.outcome;
+            if(outcome?.kind==='RULE_FILTERED'){
+              let stale=outcome.scope.rulesStamp!==fingerprint(rules)?'上架规则已变化，重新评估':outcome.scope.sourceStamp!==sourceStamp(product)?'来源资料已变化，重新评估':outcome.scope.recipeStamp!==recipe.stamp?'销售配方已变化，重新评估':null;
+              if(!stale&&item.draftId){
+                const draft=this.deps.amazon.getDraft(item.draftId);
+                if(draft.revision!==outcome.draftRevision||!this.matching(task,item,draft))stale='草稿资料已变化，重新评估';
+                else if(outcome.pricingReport&&!pricingEvidenceCurrent(draft,rules))stale='定价输入已变化，重新评估';
+                else if(outcome.image){const proof=await this.deps.images.getRuleFilterEvidence?.(draft.id);if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='图片证据或风险设置已变化，重新评估';}
+              }
+              if(stale){view.reconsideration=stale;view.message=stale+'；原淘汰记录保留，旧任务不会自动重启';}
+              else {view.kind='RULE_FILTERED';view.eligible=false;view.message=outcome.message;}
+            }else if(outcome?.kind==='UNKNOWN'){
+              // Live request/submit markers were checked above. Keep the old outcome as audit only.
+              view.kind='SYSTEM_REPAIR';view.reconsideration='原未知结果已核对，可重新准备';view.message=view.reconsideration+'；历史未知记录保留，不会自动重试';
+            }else if(outcome){view.kind=outcome.kind;view.message=outcome.message;}
+            else if(item.status==='FAILED'){view.kind='UNCLASSIFIED';view.message=item.error||'历史失败未分类';}
+            if(!final(task)&&view.kind!=='RULE_FILTERED'){view.eligible=false;view.message=(view.message?view.message+'；':'')+'请继续或取消原任务';}
+          }
+        }catch{view.kind='SYSTEM_REPAIR';view.message='暂无法核对已保存证据，记录保留待修复';view.eligible=false;}
+        rows.push(view);
+      }
+      products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
+    }
+    if(fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(revisions())!==taskRevisions||fingerprint(evidenceState())!==evidenceStamp||snapshots.some(p=>fingerprint(this.deps.store.getProduct(p.id))!==fingerprint(p)||fingerprint(this.deps.sourceReceipt?.(p.id)??null)!==fingerprint(receipts.get(p.id))))throw new UserFacingError('读取期间范围已变化，请刷新');
+    return {targetId,scope:{mode:target.target.mode,sellerId:target.target.sellerId,marketplaceId:target.target.marketplaceId},ruleRevision:rules.revision,products};
+  }
+  async create(raw: unknown): Promise<AutomaticListingTask> {
     this.ensureOpen();
     const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId']);
     if (!Array.isArray(input.productIds) || !input.productIds.length || input.productIds.length > 1000) throw new UserFacingError('请选择 1–1000 个商品');
@@ -158,18 +253,23 @@ export class AutomaticListingService {
     const profileId = text(input.profileId, '图床', 30, true), profile = this.deps.hosting.getProfile(profileId), rules = this.deps.rules();
     if (!target.target.configured || target.target.paused) throw new UserFacingError('请选择已配置且启用的目标店铺');
     if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用图片托管');
+    const queue=await this.queue({productIds:ids,targetId}),eligible=new Set(queue.products.flatMap(p=>p.rows.filter(r=>r.eligible).map(r=>r.key)));
+    if(!eligible.size)throw new UserFacingError(queue.products.find(p=>p.inputIssue)?.inputIssue??'所选商品没有可启动的销售 SKU；请查看规则淘汰或待核对原因，已在自动任务中的销售 SKU 请继续原任务');
+    if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile))throw new UserFacingError('创建期间范围已变化，请刷新');
     this.deps.preflight?.();
     const regroupedSkus=new Set<string>();
     const items: AutomaticListingItem[] = ids.flatMap(id => {
+      const projection=queue.products.find(p=>p.productId===id);
+      if(!projection?.eligibleCount&&!projection?.inputIssue)return [];
       const product = this.deps.store.getProduct(id);
       let plans:SalesListingPlan[]|undefined;
-      try{plans=this.deps.planSales?.(id,targetId);}catch(error){
+      try{if(projection?.inputIssue)throw new UserFacingError(projection.inputIssue);plans=this.deps.planSales?.(id,targetId);}catch(error){
         const variant=product.variants[0];if(!variant)throw error;
         return [{key:product.id+':'+variant.id,productId:product.id,productRevision:product.revision,sourceStamp:sourceStamp(product),productTitle:product.title,
           variantId:variant.id,sku:variant.sku,stockSets:rules.product.stockSets,sourcesPrepared:false,status:'FAILED',stage:'PLAN',draftId:null,executionTaskIds:[],imageStarted:false,imageAttempts:0,repairAttempts:0,repair:null,batchId:null,error:errorMessage(error)} as AutomaticListingItem];
       }
       const selected=plans?plans.map(salesPlan=>({variant:product.variants.find(v=>v.id===salesPlan.recipe.components[0].variantId)!,salesPlan})):product.variants.slice(0,rules.product.variantLimit).map(variant=>({variant,salesPlan:undefined}));
-      return selected.map(({variant,salesPlan}) => {
+      return selected.filter(({variant,salesPlan})=>eligible.has(product.id+':'+(salesPlan?.recipe.key??variant.id))).map(({variant,salesPlan}) => {
         const existing=salesPlan?this.deps.existingSale?.(product.id,salesPlan,targetId):undefined;
         const frozen=existing&&submitted(existing)?existing:undefined;
         const regrouped=!frozen&&existing?.salesPlan&&salesPlan&&existing.salesPlan.recipe.key===salesPlan.recipe.key
@@ -205,6 +305,7 @@ export class AutomaticListingService {
       marketplaceId: target.target.marketplaceId, mode: target.target.mode, targetStamp: fingerprint(target), profileId, profileStamp: fingerprint(profile),
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
+    for(const row of items)if(row.stage==='PLAN')row.outcome={version:1,kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED',message:row.error!,classifiedAt:now,scope:outcomeScope(task,row),draftId:null,draftRevision:null};
     this.save(task); this.tasks.set(task.id, task); return structuredClone(task);
   }
   prepareStart(id: string): AutomaticListingTask {
@@ -221,7 +322,9 @@ export class AutomaticListingService {
     for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
     for(const row of task.items)this.migrateRepairPolicy(task,row);
     for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
+      if(row.outcome?.kind==='UNKNOWN'&&this.unknownCode(row))continue;
       row.status = 'PENDING';
+      delete row.outcome;
       // Retain the precise source failure if a ready sibling has frozen this product's revision.
       if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
     }
@@ -248,11 +351,14 @@ export class AutomaticListingService {
         try {
           for (const row of task.items) {
             if (!this.running(task)) break;
-            if (['DONE','FAILED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
+            if (['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
             try { await this.prepareItem(task, row); }
             catch (error) {
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
-              row.status = 'FAILED'; row.error = errorMessage(error); this.save(task);
+              row.status = 'FAILED'; row.error = errorMessage(error);
+              const classified=structuredClone(row);await this.classifyFailure(task,classified);
+              if(!this.running(task))break;
+              Object.assign(row,classified);this.save(task);
               try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.save(task); break; }
             }
           }
@@ -274,6 +380,8 @@ export class AutomaticListingService {
   private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
   private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
+    const unknown=this.unknownCode(row);
+    if(unknown&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
     this.checkpoint(task, row);
     let draft = row.draftId ? this.deps.amazon.getDraft(row.draftId) : undefined;
     if (!draft) {
@@ -290,11 +398,12 @@ export class AutomaticListingService {
       if (task.items.some(value => value.productId === row.productId && value.sourcesPrepared) && !confirmedRecovery) {
         const product=this.deps.store.getProduct(row.productId);
         const receipt=this.deps.sourceReceipt?.(row.productId);
-        const mappingReason=this.deps.sourceReceipt && (row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceMappingIssue(product,id,receipt)).find(Boolean);
-        const reason = mappingReason || row.error || '该 SKU 的来源图片尚未准备完成';
+        const issue=this.deps.sourceReceipt && (row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceMappingDiagnosis(product,id,receipt)).find(Boolean);
+        if(issue)row.outcome={version:1,kind:AUTOMATIC_SOURCE_ISSUES[issue.code],code:issue.code,message:issue.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:null,draftRevision:null};
+        const reason = issue?.message || row.error || '该 SKU 的来源图片尚未准备完成';
         throw new UserFacingError(reason.includes(frozenSourcesMessage) ? reason : `${reason}；${frozenSourcesMessage}`);
       }
-      const siblings = task.items.filter(value => value.productId === row.productId && !value.sourcesPrepared && value.stage === 'SOURCES');
+      const siblings = task.items.filter(value => value.status!=='SCREENED'&&value.productId === row.productId && !value.sourcesPrepared && value.stage === 'SOURCES');
       row.status = 'RUNNING'; row.stage = 'SOURCES'; this.save(task);
       const result = await this.deps.images.prepareSources({ productId: row.productId, productRevision: row.productRevision, variantIds: [...new Set(siblings.flatMap(value => value.salesPlan?.recipe.components.map(c=>c.variantId)??[value.variantId]))] });
       if (sourceStamp(result.product) !== row.sourceStamp) throw new UserFacingError('准备来源图期间商品资料变化');
@@ -304,6 +413,8 @@ export class AutomaticListingService {
         // Finish the group download first, then require every component of this sales SKU.
         sibling.sourcesPrepared = !missing; sibling.stage = missing ? 'SOURCES' : 'DRAFT';
         sibling.status = missing ? 'FAILED' : 'PENDING'; sibling.error = missing?.message ?? null;
+        if(missing)sibling.outcome={version:1,kind:missing.code?AUTOMATIC_SOURCE_ISSUES[missing.code]:'NEEDS_INPUT',code:missing.code??'SOURCE_INPUT_REQUIRED',message:missing.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,sibling),draftId:null,draftRevision:null};
+        else delete sibling.outcome;
       }
       if (siblings.some(sibling => sibling.sourcesPrepared)) {
         for (const sibling of siblings) if (!sibling.sourcesPrepared) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));
@@ -347,6 +458,7 @@ export class AutomaticListingService {
       draft = prepared.draft; row.draftId = draft.id; this.save(task); this.checkpoint(task, row);
     }
     if (!this.matching(task, row, draft) || draft.productRevision !== row.productRevision) throw new UserFacingError('准备后的草稿范围与任务不一致');
+    if(draft.businessRules?.quote&&draft.businessRules.revision!==task.ruleRevision)throw new UserFacingError('上架规则已变化，请核对并重新计算已有草稿报价；未沿用旧报价');
     const pricingIssue=pricingBlockingReason(draft);
     if(pricingIssue){row.stage='DRAFT';this.save(task);throw new UserFacingError(pricingIssue);}
     if(row.familyTransition)draft=await this.finishFamilyTransition(task,row);
@@ -537,7 +649,7 @@ export class AutomaticListingService {
   }
   private summarize(task: AutomaticListingTask): void {
     if (['PAUSED','CANCELLED'].includes(task.status)) return;
-    task.status = task.items.every(row => row.status === 'DONE') ? 'COMPLETED'
+    task.status = task.items.every(row => ['DONE','SCREENED'].includes(row.status)) ? 'COMPLETED'
       : task.items.some(row => row.status === 'WAITING') ? 'WAITING' : 'NEEDS_ATTENTION';
     task.error = task.items.find(row => row.status === 'FAILED')?.error ?? null; this.save(task);
   }
@@ -547,9 +659,11 @@ export class AutomaticListingService {
     this.observing = Promise.resolve().then(async () => {
       const candidates = new Map(this.deps.procurement.candidates().map(value => [value.draftId, value]));
       for (const task of this.tasks.values()) {
-        if (!['WAITING','NEEDS_ATTENTION'].includes(task.status)) continue;
-        let resumeParents=false;
+        const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
+        if (!canObserve()) continue;
+        let resumeParents=false,interrupted=false;
         for (const row of task.items) {
+          if(!canObserve())break;
           if(row.stage==='PARENT'&&row.parentDraftId&&row.status==='WAITING'){
             const parent=this.deps.followup.get(row.parentDraftId);
             if(parent.status==='NEEDS_ATTENTION'){row.status='FAILED';row.error=parent.error||'父体建档失败，保留子体图片和进度';}
@@ -577,9 +691,15 @@ export class AutomaticListingService {
             if (relevant.length && relevant.every(label => label.status === 'READY')) { row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; }
             else if (relevant.some(label => label.status === 'FAILED')) throw new UserFacingError(relevant.find(label => label.status === 'FAILED')?.message || '商品标签获取失败');
             else { row.status = 'WAITING'; row.error = null; }
-          } catch (error) { row.status = 'FAILED'; row.error = errorMessage(error); }
+          } catch (error) {
+            row.status = 'FAILED'; row.error = errorMessage(error);
+            const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
+            if(!canObserve()||task.revision!==revision){interrupted=true;break;}
+            Object.assign(row,classified);
+          }
         }
-        if(resumeParents){task.status='QUEUED';this.save(task);queueMicrotask(()=>this.pump());}
+        if(interrupted||!canObserve())continue;
+        if(resumeParents&&this.grants.has(task.id)){task.status='QUEUED';this.save(task);queueMicrotask(()=>this.pump());}
         else this.summarize(task);
       }
     }).finally(() => { this.observing = null; });

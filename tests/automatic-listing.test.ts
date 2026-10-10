@@ -35,6 +35,7 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   const dependencies: AutomaticListingDependencies = {
     store: { getProduct: () => structuredClone(product) },
     rules: () => structuredClone(rules),
+    previewSales: () => buildSalesRecipes(product,null,rules),
     hosting: { getProfile: () => structuredClone(profile) },
     amazon: {
       executionTargetScope: () => ({ target: structuredClone(target), generation: 1 }),
@@ -105,12 +106,159 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
     holdImages: (callback: () => void) => { started = callback; }, releaseImages: () => release?.() };
 }
 
+test('confirmed pricing rejection is terminal and excluded only in the same target queue', async t => {
+  const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;
+  const prepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async input=>{
+    const value=await prepare(input),draft=value.items[0].draft!;
+    draft.attributes={item_package_dimensions:[{length:{value:1,unit:'inches'},width:{value:1,unit:'inches'},height:{value:1,unit:'inches'}}],item_package_weight:[{value:1,unit:'pounds'}],number_of_items:[{value:1}]};
+    draft.businessRules={revision:f.rules.revision,fields:{},notices:['confirmed ROI rejection'],quote:null,bundleQuantity:1,
+      pricingBasis:{kind:'source_sale_unit',sourceCostCny:100,quantity:1,saleUnitCostCny:100},
+      pricingDecision:{version:1,status:'business_blocked',code:'ROI_MAX_PRICE',quoteError:'ROI_MAX_PRICE',inputs:{costCny:100,dimensionsInches:[1,1,1],weightPounds:1},
+        evidence:{cost:'confirmed_cny',dimensions:'confirmed_source',weight:'confirmed_source',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:[1,1,1],weightPounds:1}}}};
+    f.drafts.set(draft.id,structuredClone(draft));return value;
+  };
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const saved=f.service.get(task.id);
+  assert.equal(saved.items[0].status,'SCREENED');assert.equal((saved.items[0] as any).outcome.kind,'RULE_FILTERED');
+  assert.equal(saved.status,'COMPLETED');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+  assert.deepEqual(validateAutomaticListingTask(saved),saved);
+  for(const tamper of ['shop','source','recipe','proof-key','proof-basis','missing-proof','unknown-phase'] as const){
+    const bad=structuredClone(saved),row=bad.items[0],outcome=row.outcome!;
+    if(tamper==='shop')outcome.scope.sellerId='another-seller';
+    if(tamper==='source')outcome.scope.sourceStamp='d'.repeat(64);
+    if(tamper==='recipe')outcome.scope.recipeKey='another-recipe';
+    if(tamper==='proof-key')(outcome.pricingReport!.pricingDecision as any).extra=true;
+    if(tamper==='proof-basis')(outcome.pricingReport!.pricingBasis as any).extra=true;
+    if(tamper==='missing-proof')delete outcome.pricingReport;
+    if(tamper==='unknown-phase'){row.repairAttempts=1;row.executionTaskIds=[randomUUID()];row.repair={phase:'FIELDS_STARTED',sourceWorkflowId:randomUUID(),draftRevision:1,draftStamp:'a'.repeat(64)};}
+    assert.throws(()=>validateAutomaticListingTask(bad),tamper);
+  }
+  const queue=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});
+  assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');
+  await assert.rejects(async()=>f.create(),/没有可启动/);
+  f.target.sellerId='other-seller';
+  assert.equal((await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,1);
+  f.target.sellerId='seller';f.rules.revision++;
+  const changed=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});
+  assert.equal(changed.products[0].eligibleCount,1);assert.match(changed.products[0].rows[0].reconsideration,/规则/);
+  assert.equal(f.service.get(task.id).items[0].status,'SCREENED','read projection preserves audit');
+  f.rules.revision--;
+  const oldTitle=f.product.title;f.product.title='Updated source facts';
+  const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,1);assert.match(sourceChanged.products[0].rows[0].reconsideration!,/来源/);f.product.title=oldTitle;
+  await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
+  try{assert.deepEqual(restored.get(task.id),saved);assert.equal((await restored.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].filteredCount,1);assert.throws(()=>restored.prepareStart(task.id),/已经结束/);}finally{await restored.close();}
+});
+
+test('pricing text without typed evidence remains unclassified and retained',async t=>{
+  const f=fixture(t),prepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async input=>{const result=await prepare(input),draft=result.items[0].draft!;draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};f.drafts.set(draft.id,structuredClone(draft));return result;};
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0];assert.equal(row.status,'FAILED');assert.equal((row as any).outcome.kind,'UNCLASSIFIED');
+  const queue=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].pendingCount,1);assert.equal(queue.products[0].eligibleCount,0);
+});
+
+test('legacy unresolved single sale remains check-only when pure sales recipe planning is enabled',async t=>{
+  const f=fixture(t);f.rules.pricing.bundleEnabled=false;f.failImages();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();f.service.cancel(task.id);
+  f.dependencies.planSales=()=>{throw Error('queue must never allocate identities');};
+  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+  assert.equal(queue.products[0].rows[0].kind,'UNKNOWN');assert.equal(queue.products[0].eligibleCount,0);
+  await assert.rejects(f.create(),/没有可启动/);
+});
+
+test('an unlinked child submit intent takes precedence over a confirmed pricing rejection',async t=>{
+  const f=fixture(t);installPricingFailure(f,draft=>{
+    const child=f.dependencies.execution.create({draftIds:[draft.id],profileId:'alpha'});f.executions.get(child.id)!.items[0].submitStarted=true;
+  });
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0];assert.equal(row.outcome?.kind,'UNKNOWN');assert.equal(row.status,'FAILED');
+  f.service.cancel(task.id);assert.equal((await f.service.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,0);
+});
+
+function installPricingFailure(f:ReturnType<typeof fixture>,change:(draft:AmazonDraft)=>void=()=>{}){
+  const prepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async (input,plans)=>{
+    const value=await prepare(input,plans),draft=value.items[0].draft!;
+    if(plans?.[0]){draft.sku=plans[0].sku;draft.salesPlan=plans[0];}
+    draft.attributes={item_package_dimensions:[{length:{value:1,unit:'inches'},width:{value:1,unit:'inches'},height:{value:1,unit:'inches'}}],item_package_weight:[{value:1,unit:'pounds'}],number_of_items:[{value:1}]};
+    draft.businessRules={revision:f.rules.revision,fields:{},notices:['ROI rule'],quote:null,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:100,quantity:1,saleUnitCostCny:100},
+      pricingDecision:{version:1,status:'business_blocked',code:'ROI_MAX_PRICE',quoteError:'ROI_MAX_PRICE',inputs:{costCny:100,dimensionsInches:[1,1,1],weightPounds:1},evidence:{cost:'confirmed_cny',dimensions:'confirmed_source',weight:'confirmed_source',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:[1,1,1],weightPounds:1}}}};
+    change(draft);f.drafts.set(draft.id,structuredClone(draft));return value;
+  };
+}
+for(const cause of ['default-package','missing-cost','system','edited-draft','unknown-image','started-fields','submit-started'] as const)test(`pricing classification retains ${cause} without a paid retry`,async t=>{
+  const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;
+  installPricingFailure(f,draft=>{
+    const d=draft.businessRules!.pricingDecision!;
+    if(cause==='default-package'){d.status='needs_input';d.code='PACKAGE_INPUT_UNCONFIRMED';d.evidence.dimensions='business_default';}
+    if(cause==='missing-cost'){d.status='needs_input';d.code='COST_CNY_UNCONFIRMED';d.quoteError=null;d.inputs.costCny=null;d.evidence.cost='unconfirmed';}
+    if(cause==='system'){d.status='system_error';d.code='PRICING_SYSTEM_ERROR';d.quoteError=null;}
+    if(cause==='edited-draft')draft.attributes.item_package_weight=[{value:2,unit:'pounds'}];
+    if(cause==='unknown-image')f.workflow.set(draft.id,{status:'INTERRUPTED',slots:[{status:'UNKNOWN',attempts:[{state:'UNKNOWN'}]}]});
+    if(cause==='started-fields')f.workflow.set(draft.id,{status:'INTERRUPTED',contentPreparation:{state:'STARTED'},slots:[]});
+    if(cause==='submit-started'){draft.state='SUBMITTING';}
+  });
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  let row=f.service.get(task.id).items[0];assert.equal(row.status,'FAILED');assert.equal(row.outcome?.kind,['unknown-image','started-fields','submit-started'].includes(cause)?'UNKNOWN':cause==='system'?'SYSTEM_REPAIR':'NEEDS_INPUT');
+  const before=structuredClone(f.calls);f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.deepEqual(f.calls,before);
+  await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);try{row=restored.get(task.id).items[0];assert.ok(row.outcome);const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].filteredCount,0);assert.equal(queue.products[0].pendingCount,1);}finally{await restored.close();}
+});
+test('per-recipe queue leaves a mixed recipe and healthy single when only one source single is screened',async t=>{
+  const f=fixture(t,'live');f.product.variants[0].purchasePrice='0.1';f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO',originalSpec:'blue',sourceSpec:'blue',normalizedSpec:'blue'});
+  const recipes=buildSalesRecipes(f.product,null,f.rules);assert.equal(recipes.length,3);
+  // A verified image rule can reject one sales recipe without making a claim about shared components.
+  let allocations=0;f.dependencies.planSales=()=>{allocations++;return recipes.map((recipe,i):SalesListingPlan=>({namingGroupId:randomUUID(),sourceGroupKey:'source-'+recipe.groupKey,collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE-'+i,baseSku:'SALE-'+i,recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));};
+  const prepare=f.dependencies.amazon.prepareDrafts;f.dependencies.amazon.prepareDrafts=async(input,plans)=>{const result=await prepare(input,plans),draft=result.items[0].draft!;draft.sku=plans![0].sku;draft.salesPlan=plans![0];f.drafts.set(draft.id,structuredClone(draft));return result;};
+  f.dependencies.images.complete=async()=>{throw new UserFacingError('image review stopped');};
+  f.dependencies.images.getRuleFilterEvidence=async id=>{const draft=f.drafts.get(id)!;return draft.sku==='SALE-0'?{kind:'IP_PLAN_BLOCKED',workflowId:randomUUID(),resultId:randomUUID(),callId:randomUUID(),planResultId:randomUUID(),candidateId:null,contextSha256:'b'.repeat(64),draftRevision:draft.revision,references:[{id:randomUUID(),sha256:'c'.repeat(64)}],policyVersion:'product-image/vision-v3',message:'Confirmed IP rule'}:null;};
+  const proofs=new Map<string,any>(),proof=f.dependencies.images.getRuleFilterEvidence;f.dependencies.images.getRuleFilterEvidence=async id=>{if(!proofs.has(id))proofs.set(id,await proof(id));return proofs.get(id);};
+  f.dependencies.images.getProgress=()=>({status:'BLOCKED',slots:[]} as any);
+  const before=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(before.products[0].rows.length,3);assert.equal(allocations,0);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  assert.equal(f.service.get(task.id).items.filter(row=>row.status==='SCREENED').length,1);f.service.cancel(task.id);
+  const snapshot=f.service.get(task.id),queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+  assert.equal(queue.products[0].eligibleCount,2);assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.find(row=>row.recipeKey===recipes[2].key)?.eligible,true);assert.equal(allocations,1);assert.deepEqual(f.service.get(task.id),snapshot);
+  const beforeRecipe=recipes[0].specification;recipes[0].specification+=' updated';f.dependencies.previewSales=()=>recipes;
+  const recipeChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(recipeChanged.products[0].eligibleCount,3);assert.match(recipeChanged.products[0].rows[0].reconsideration!,/配方/);recipes[0].specification=beforeRecipe;
+  // A saved draft can change while the last recipe's local image bytes are checked.
+  const goodDraft=[...f.drafts.values()].find(draft=>draft.sku==='SALE-1')!,oldState=goodDraft.state,currentProof=f.dependencies.images.getRuleFilterEvidence;
+  f.dependencies.previewSales=()=>[recipes[1],recipes[2],recipes[0]];
+  f.dependencies.images.getRuleFilterEvidence=async id=>{goodDraft.state='UNKNOWN';return currentProof!(id);};
+  await assert.rejects(f.service.queue({productIds:[f.product.id],targetId:f.target.id}),/范围已变化/);assert.equal(allocations,1);
+  goodDraft.state=oldState;f.dependencies.images.getRuleFilterEvidence=currentProof;f.dependencies.previewSales=()=>recipes;
+  const next=await f.create();assert.deepEqual(next.items.map(row=>row.salesPlan!.recipe.key),recipes.slice(1).map(recipe=>recipe.key));assert.equal(allocations,2);
+});
+test('completed and confirmed submitted rows are not described as unknown and cannot create duplicates',async t=>{
+  for(const mode of ['demo','live'] as const){const f=fixture(t,mode),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].rows[0].kind,mode==='demo'?'COMPLETED':'SUBMITTED');assert.equal(queue.products[0].eligibleCount,0);}
+});
+
+for(const cancelled of [false,true])test(`reconciled image UNKNOWN has a safe queue disposition for ${cancelled?'cancelled':'active'} tasks without rewriting audit`,async t=>{
+  const f=fixture(t,'live');f.failImages();const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  if(cancelled)f.service.cancel(task.id);
+  const audit=f.service.get(task.id),draftId=audit.items[0].draftId!;assert.equal(audit.items[0].outcome?.kind,'UNKNOWN');
+  const unresolved=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(unresolved.products[0].rows[0].kind,'UNKNOWN');assert.equal(unresolved.products[0].eligibleCount,0);await assert.rejects(f.create(),/没有可启动/);
+  // The dedicated reconciliation operation recovered the candidate: its durable attempt is GENERATED, slot PENDING.
+  f.workflow.set(draftId,{status:'INTERRUPTED',slots:[{status:'PENDING',attempts:[{state:'GENERATED',candidateId:randomUUID()}]}]});
+  const resolved=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(resolved.products[0].rows[0].kind,'SYSTEM_REPAIR');assert.equal(resolved.products[0].eligibleCount,cancelled?1:0);assert.match(resolved.products[0].rows[0].message,/已核对/);assert.deepEqual(f.service.get(task.id),audit);
+  await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
+  try{
+    assert.deepEqual(restored.get(task.id),audit);assert.equal((await restored.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,cancelled?1:0);
+    const input={productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'};
+    if(cancelled)assert.equal((await restored.create(input)).items.length,1);else await assert.rejects(restored.create(input),/没有可启动/);
+    const draft=f.drafts.get(draftId)!;draft.state='SUBMITTED';draft.submittedAt=new Date().toISOString();
+    const submitted=await restored.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(submitted.products[0].rows[0].kind,'SUBMITTED');assert.equal(submitted.products[0].eligibleCount,0);await assert.rejects(restored.create(input),/没有可启动/);
+    assert.deepEqual(restored.get(task.id),audit);
+  }finally{await restored.close();}
+  assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,0);
+});
+
 for(const interruption of [null,'after-bind','recheck'] as const)test(`legacy standalone family conversion keeps SKU/images across ${interruption??'normal execution'}`,async t=>{
  const f=fixture(t);const source=f.product.variants[0];
  f.product.variants.push({...source,id:randomUUID(),sku:'SKU-TWO',originalSpec:'blue',normalizedSpec:'blue',sourceSpec:'blue'});
  const recipes=buildSalesRecipes(f.product,null,f.rules),old=recipes.map((recipe,index):SalesListingPlan=>({namingGroupId:randomUUID(),sourceGroupKey:'local:'+f.product.id+':'+String(index+1).repeat(64),collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:f.product.variants[index].sku,baseSku:f.product.variants[index].sku,recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'legacy independent',familyResolved:true,namingChildKey:null}));
  const parentId=randomUUID(),fresh=old.map(p=>({...p,namingGroupId:parentId,sourceGroupKey:'local:'+f.product.id+':'+'a'.repeat(64),sku:'PARENT-'+p.sku,baseSku:'PARENT',namingChildKey:p.recipe.key}));
- f.dependencies.planSales=()=>structuredClone(old);const task=f.create();f.dependencies.planSales=()=>structuredClone(fresh);
+ f.dependencies.planSales=()=>structuredClone(old);const task=await f.create();f.dependencies.planSales=()=>structuredClone(fresh);
  f.dependencies.resolveFamily=async input=>input.plans.map(p=>({...p,parentage:'CHILD',parentSku:p.baseSku,variationTheme:'COLOR',familyResolved:true}));
  let binds=0,rechecks=0,parents=0,interrupted=false;
  f.dependencies.rebindFamily=async ({id,revision,plan})=>{const d=f.drafts.get(id)!;assert.equal(d.revision,revision);d.salesPlan=structuredClone(plan);d.schema.parentageLevel='CHILD';d.revision++;d.events=[{at:d.updatedAt,operation:'save',summary:FAMILY_REBIND_EVENT_SUMMARY,state:'DRAFT',requestId:null}];binds++;if(interruption==='after-bind'&&!interrupted){interrupted=true;throw Error('interrupted after saved bind');}return structuredClone(d);};
@@ -131,7 +279,7 @@ for(const interruption of [null,'after-bind','recheck'] as const)test(`legacy st
 });
 
 test('one authorized start connects a missing-image draft through submission and real downstream readiness', async t => {
-  const f = fixture(t); const task = f.create();
+  const f = fixture(t); const task =await f.create();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle(); await f.service.refreshWaiting();
   assert.equal(f.calls.submissions, 1, 'BLOCKED only for missing public images must reach the uploader');
   assert.equal(f.calls.images, 1);
@@ -149,7 +297,7 @@ test('automatic category is decided once per product after sources and saved bef
   };
   const prepare = f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts = async input => { assert.equal((input as any).productType,'BOX'); return prepare(input); };
-  const task = f.service.create({productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'});
+  const task =await f.service.create({productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'});
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   assert.equal(classifications,1); assert.equal(f.service.get(task.id).items.length,2);
   assert.ok(f.service.get(task.id).items.every(item=>item.classification?.productType==='BOX'));
@@ -167,7 +315,7 @@ test('child sales SKUs keep images while waiting for their parent and resume aut
     const draft=result.items[0].draft!;draft.sku=plans![0].sku;draft.salesPlan=plans![0];draft.schema.parentageLevel='CHILD';f.drafts.set(draft.id,structuredClone(draft));return result;
   };
   f.dependencies.ensureParent=async child=>{assert.equal(f.workflow.get(child.id)?.status,'COMPLETED');return {draftId:parentDraftId,ready:parentReady};};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.calls.images,3);assert.equal(f.calls.submissions,0);assert.ok(f.service.get(task.id).items.every(row=>row.stage==='PARENT'&&row.status==='WAITING'));
   parentReady=true;f.setReady();await f.service.refreshWaiting();
   for(let i=0;i<6;i++){await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();}
@@ -175,7 +323,7 @@ test('child sales SKUs keep images while waiting for their parent and resume aut
 });
 
 test('accepted submission waits for platform readiness and does not submit again while observing labels', async t => {
-  const f = fixture(t, 'live'); const task = f.create();
+  const f = fixture(t, 'live'); const task =await f.create();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle(); await f.service.refreshWaiting();
   assert.equal(f.service.get(task.id).status, 'WAITING'); assert.equal(f.calls.batches, 0);
   f.setReady(); await f.service.refreshWaiting(); await f.service.refreshWaiting();
@@ -183,15 +331,33 @@ test('accepted submission waits for platform readiness and does not submit again
   assert.equal(f.calls.submissions, 1); assert.equal(f.calls.batches, 1);
 });
 
+for(const action of ['pause','cancel'] as const)for(const resumeParents of [false,true])test(`readback ${action} during outcome proof stops sibling work${resumeParents?' and pending parent resume':''}`,async t=>{
+  const f=fixture(t,'live');f.rules.product.variantLimit=3;
+  const count=resumeParents?3:2;for(let index=1;index<count;index++)f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-'+index});
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  if(resumeParents){
+    const saved=(f.service as any).tasks.get(task.id),parent=saved.items[0];parent.stage='PARENT';parent.parentDraftId=randomUUID();
+    (f.service as any).grants.add(task.id);
+  }
+  let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>entered=resolve),held=new Promise<null>(resolve=>release=()=>resolve(null));
+  f.dependencies.images.getRuleFilterEvidence=async()=>{entered();return held;};
+  f.dependencies.labels.syncBatch=()=>{f.calls.labels++;throw new UserFacingError('Local label fixture failure');};
+  f.setReady();const pending=f.service.refreshWaiting();await started;
+  f.service[action](task.id);const stopped=f.service.get(task.id),calls=structuredClone(f.calls);release();await pending;await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
+  const saved=f.service.get(task.id);assert.equal(saved.status,action==='pause'?'PAUSED':'CANCELLED');
+  assert.equal(f.calls.batches,calls.batches);assert.equal(f.calls.labels,calls.labels);assert.equal(f.calls.submissions,calls.submissions);
+  assert.deepEqual(saved.items.at(-1),stopped.items.at(-1),'the later readback row stays untouched');
+});
+
 test('changed scope after native confirmation blocks before paid or remote work', async t => {
-  const f = fixture(t); const task = f.create(), approved = f.service.prepareStart(task.id);
+  const f = fixture(t); const task =await f.create(), approved = f.service.prepareStart(task.id);
   f.target.marketplaceId = 'different-site';
   assert.throws(() => f.service.startAuthorized(approved), /变化|范围|目标/);
   assert.equal(f.calls.images, 0); assert.equal(f.calls.submissions, 0);
 });
 
 test('pause during images revokes later publishing, and explicit resume reuses completed images', async t => {
-  const f = fixture(t), task = f.create();
+  const f = fixture(t), task =await f.create();
   let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
   f.holdImages(entered); f.service.startAuthorized(f.service.prepareStart(task.id)); await started;
   f.service.pause(task.id); f.releaseImages(); await f.service.waitForIdle();
@@ -201,7 +367,7 @@ test('pause during images revokes later publishing, and explicit resume reuses c
 });
 
 test('unknown paid response remains exceptional across resume instead of repeating generation', async t => {
-  const f = fixture(t), task = f.create(); f.failImages();
+  const f = fixture(t), task =await f.create(); f.failImages();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   assert.equal(f.calls.images, 1); assert.equal(f.calls.submissions, 0);
@@ -215,7 +381,7 @@ test('disabling risk interception lets a blocked image workflow resume through i
     if(enabled){const draft=f.dependencies.amazon.getDraft((input as any).draftId),workflow={id:randomUUID(),draftId:draft.id,status:'BLOCKED',attempt:0,error:'商品 IP 初筛未通过',slots:[{status:'BLOCKED',attempts:[]}]};f.workflow.set(draft.id,workflow);return {draft,workflow} as any;}
     return complete(input);
   };
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.submissions,0);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.submissions,0);
   enabled=false;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
 });
@@ -227,7 +393,7 @@ test('disabling copy review resumes a blocked workflow while risk interception r
     if(enabled){const draft=f.dependencies.amazon.getDraft((input as any).draftId),workflow={id:randomUUID(),draftId:draft.id,status:'BLOCKED',attempt:0,error:'当前文案已用完两轮自动修复',slots:[{status:'BLOCKED',attempts:[]}]};f.workflow.set(draft.id,workflow);return {draft,workflow} as any;}
     return complete(input);
   };
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.submissions,0);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.submissions,0);
   enabled=false;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
 });
@@ -236,7 +402,7 @@ test('an execution retry cannot publish completed images incompatible with curre
   const f=fixture(t);let compatible=true,starts=0;
   f.dependencies.images.isCopyReviewPolicyCompatible=()=>compatible;
   f.dependencies.execution.startAuthorized=approved=>{starts++;const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing field'}];return structuredClone(child);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(starts,1);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(starts,1);
   compatible=false;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(starts,1);assert.match(f.service.get(task.id).items[0].error!,/复核/);assert.equal(f.calls.submissions,0);
 });
@@ -245,7 +411,7 @@ test('an execution retry cannot publish completed images incompatible with the c
   const f=fixture(t);let compatible=true,starts=0;
   f.dependencies.images.isRiskPolicyCompatible=()=>compatible;
   f.dependencies.execution.startAuthorized=approved=>{starts++;const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing field'}];return structuredClone(child);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(starts,1);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(starts,1);
   compatible=false;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(starts,1);assert.match(f.service.get(task.id).items[0].error!,/风险.*复核/);assert.equal(f.calls.submissions,0);
 });
@@ -257,7 +423,7 @@ test('an infeasible saved price quote blocks before image generation and shows i
     draft.businessRules={revision:1,fields:{},notices:[reason],quote:null,bundleQuantity:1};
     draft.localIssues=[{code:'LOCAL_required',message:'our_price: missing',severity:'ERROR',attributeNames:['purchasable_offer'],category:'field',source:'local',autoFixable:false}];
     f.drafts.set(draft.id,structuredClone(draft));return result;};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const saved=f.service.get(task.id);assert.match(saved.items[0].error!,/定价.*售价上限内无法满足目标 ROI/);
   assert.equal(saved.items[0].stage,'DRAFT');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.deepEqual(f.rules,originalRules);
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.images,0);
@@ -268,13 +434,13 @@ test('a definitive pricing constraint discovered during field repair is not sent
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'our_price missing'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{repairs++;const draft=f.drafts.get(id)!;draft.revision++;draft.businessRules={revision:1,fields:{},quote:null,bundleQuantity:1,notices:['售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置']};return {draft:structuredClone(draft),remaining:['our_price missing']};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(repairs,1);assert.equal(rechecks,0);assert.match(f.service.get(task.id).items[0].error!,/定价.*售价上限内无法满足目标 ROI/);
   assert.equal(f.service.get(task.id).items[0].repair?.phase,'FIELDS_PENDING');
 });
 
 test('restart never silently resumes queued publishing authority', async t => {
-  const f = fixture(t), task = f.create(); await f.service.close();
+  const f = fixture(t), task =await f.create(); await f.service.close();
   const db = openDatabase(f.directory);
   const record = JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
   record.status = 'RUNNING'; db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(record), task.id); db.close();
@@ -284,7 +450,7 @@ test('restart never silently resumes queued publishing authority', async t => {
 });
 
 test('readback-only continuation survives unrelated FTP and rule changes', async t => {
-  const f = fixture(t, 'live'), task = f.create();
+  const f = fixture(t, 'live'), task =await f.create();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   f.service.pause(task.id); f.profile.generation++; f.rules.revision++;
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle(); f.setReady(); await f.service.refreshWaiting();
@@ -292,7 +458,7 @@ test('readback-only continuation survives unrelated FTP and rule changes', async
 });
 
 test('restore dialog suspension prevents background labels until cancellation resumes scheduling', async t => {
-  const f=fixture(t,'live'),task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   f.service.suspendScheduling();f.setReady();await f.service.refreshWaiting();assert.equal(f.calls.batches,0);assert.equal(f.calls.labels,0);
   f.service.start();await f.service.refreshWaiting();assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(f.calls.submissions,1);
 });
@@ -304,7 +470,7 @@ test('already edited current draft is reused after source preparation', async t 
   const draft = [...f.drafts.values()][0]; draft.attributes = { item_name: [{ value: 'Reviewed title' }] }; draft.state = 'LOCAL_VALIDATED';
   f.dependencies.images.prepareSources = async () => ({product:structuredClone(f.product),missing:[]}) as any;
   f.dependencies.amazon.prepareDrafts = async () => { throw Error('Must reuse existing edited draft'); };
-  const task = f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task =await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).items[0].draftId, draft.id); assert.equal(f.calls.submissions,1);
 });
 
@@ -312,7 +478,7 @@ test('submitted sibling stays in readback while remaining variants prepare sourc
   const f = fixture(t, 'live'); f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'}); f.rules.product.variantLimit = 2;
   await f.dependencies.amazon.prepareDrafts({items:[{variantId:f.product.variants[0].id}]} as any);
   const sent = [...f.drafts.values()][0]; sent.submittedAt = new Date().toISOString(); sent.state = 'SUBMITTED';
-  const task = f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task =await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   const rows = f.service.get(task.id).items; assert.equal(rows[0].stage,'READBACK'); assert.equal(rows[0].draftId,sent.id);
   assert.equal(rows[1].stage,'READBACK'); assert.equal(f.calls.submissions,1); assert.equal(f.calls.sources,1);
 });
@@ -321,10 +487,20 @@ test('source preparation stays retryable while every selected SKU is missing ima
   const f = fixture(t); f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'}); f.rules.product.variantLimit=2;
   let attempts=0;
   f.dependencies.images.prepareSources = async () => { f.product.revision++; return {product:structuredClone(f.product),missing:attempts++===0?f.product.variants.map(variant=>({variantId:variant.id,message:'Source download temporarily unavailable'})):[]}; };
-  const task=f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task=await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   assert.ok(f.service.get(task.id).items.every(row=>row.status==='FAILED'&&row.stage==='SOURCES'&&!row.sourcesPrepared));assert.equal(f.calls.images,0);
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(attempts,2);assert.equal(f.calls.submissions,2);assert.equal(f.calls.images,2);assert.equal(f.service.get(task.id).status,'COMPLETED');
+});
+
+for(const code of ['SOURCE_DOWNLOAD_FAILED','SOURCE_MAPPING_MISSING','SOURCE_MAPPING_INVALID','SOURCE_LINKS_MISSING','SOURCE_BINDING_UNCONFIRMED',undefined] as const)test(`source failure ${code??'legacy'} retains its classification across restart`,async t=>{
+  const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'});
+  f.dependencies.images.prepareSources=async()=>({product:structuredClone(f.product),missing:f.product.variants.map(variant=>({variantId:variant.id,message:'Synthetic source diagnostic',...(code?{code}:{})}))});
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const kind=['SOURCE_DOWNLOAD_FAILED','SOURCE_MAPPING_MISSING','SOURCE_MAPPING_INVALID'].includes(code??'')?'SYSTEM_REPAIR':'NEEDS_INPUT';
+  const saved=f.service.get(task.id);for(const row of saved.items){assert.equal(row.outcome?.kind,kind);assert.equal(row.outcome?.code,code??'SOURCE_INPUT_REQUIRED');assert.equal(row.status,'FAILED');}
+  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
+  try{assert.deepEqual(restored.get(task.id),saved);const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});assert.ok(queue.products[0].rows.every(row=>row.kind===kind));}finally{await restored.close();}
 });
 
 for (const missingIndex of [0, 1]) test(`source preparation releases ready SKUs when row ${missingIndex + 1} is missing its own reference`, async t => {
@@ -337,7 +513,7 @@ for (const missingIndex of [0, 1]) test(`source preparation releases ready SKUs 
     f.product.revision++;
     return {product:structuredClone(f.product),missing:[{variantId:missingVariant.id,message:`No mapped image for ${missingVariant.sku}`}]};
   };
-  const task=f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task=await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   const rows=f.service.get(task.id).items, missing=rows[missingIndex], ready=rows[1-missingIndex];
   assert.equal(ready.status,'DONE', 'a sibling source failure must not be attributed to a ready SKU');
   assert.equal(ready.sourcesPrepared,true); assert.equal(ready.error,null);
@@ -353,7 +529,7 @@ test('resuming missing sources after restart preserves ready sibling image and s
     f.calls.sources++; f.product.revision++;
     return {product:structuredClone(f.product),missing:f.calls.sources===1?[{variantId:f.product.variants[1].id,message:'Source download temporarily unavailable'}]:[]};
   };
-  const task=f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task=await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   const frozenRevision=f.product.revision;
   await f.service.close();
   const restored=new AutomaticListingService(f.directory,f.dependencies);
@@ -372,18 +548,19 @@ test('resuming missing sources after restart preserves ready sibling image and s
 test('frozen legacy source error is refined from receipt mappings without downloading or changing siblings', async t => {
   const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'});f.rules.product.variantLimit=2;
   f.dependencies.images.prepareSources=async()=>{f.calls.sources++;return {product:structuredClone(f.product),missing:[{variantId:f.product.variants[1].id,message:'缺少可确定属于该 SKU 的可用来源图片'}]};};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   f.dependencies.sourceReceipt=()=>({snapshot:{skus:f.product.variants,images:[{id:'source',url:'https://example.test/source.png'}]},skuMappings:[{localVariantId:f.product.variants[1].id,imageIds:[]}]} as any);
   const revision=f.product.revision;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const rows=f.service.get(task.id).items;
   assert.match(rows[1].error!,/商品有来源图片.*映射为空/);assert.match(rows[1].error!,/来源版本已冻结/);
+  assert.equal(rows[1].outcome?.kind,'NEEDS_INPUT');assert.equal(rows[1].outcome?.code,'SOURCE_BINDING_UNCONFIRMED');
   assert.equal(f.calls.sources,1);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);assert.equal(f.product.revision,revision);assert.equal(rows[0].status,'DONE');
 });
 
 test('confirmed source binding can recover an untouched SKU after its sibling submitted, preserving that submitted revision',async t=>{
   const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'});f.rules.product.variantLimit=2;
   f.dependencies.images.prepareSources=async()=>{f.calls.sources++;return {product:structuredClone(f.product),missing:f.calls.sources===1?[{variantId:f.product.variants[1].id,message:'SKU 图片映射为空'}]:[]};};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const first=f.service.get(task.id).items[0],submittedRevision=f.drafts.get(first.draftId!)!.productRevision;
   f.product.revision++;f.product.assets.push({id:randomUUID(),variantIds:[f.product.variants[1].id]} as any);
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
@@ -394,7 +571,7 @@ test('confirmed source binding can recover an untouched SKU after its sibling su
 test('a new source binding cannot rebase a sibling whose paid images are unfinished',async t=>{
   const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'});f.rules.product.variantLimit=2;f.failImages();
   f.dependencies.images.prepareSources=async()=>({product:structuredClone(f.product),missing:[{variantId:f.product.variants[1].id,message:'SKU 图片映射为空'}]});
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   f.product.revision++;f.product.assets.push({id:randomUUID(),variantIds:[f.product.variants[1].id]} as any);
   assert.throws(()=>f.service.prepareStart(task.id),/变化|冻结/);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,0);
 });
@@ -407,7 +584,7 @@ test('a saved legacy task with twenty blocked source rows resumes the seventeen 
     f.calls.sources++;
     return {product:structuredClone(f.product),missing:missingIds.map(variantId=>({variantId,message:'No source mapping for this SKU'}))};
   };
-  const task=f.create(); await f.service.close();
+  const task=await f.create(); await f.service.close();
   task.status='PAUSED';
   for(const [index,row] of task.items.entries()){
     row.status='FAILED'; row.error=index===0||missingIds.includes(row.variantId)?'No source mapping for this SKU':'Waiting for sibling sources';
@@ -443,7 +620,7 @@ test('a missing component blocks its mixed sales SKU while a ready sibling retai
     assert.deepEqual(new Set((input as any).variantIds),new Set(f.product.variants.map(variant=>variant.id)));
     return {product:structuredClone(f.product),missing:[{variantId:f.product.variants[1].id,message:'Blue has no source mapping'}]};
   };
-  const task=f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const task=await f.create(); f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   const rows=f.service.get(task.id).items;
   assert.equal(rows[0].status,'DONE'); assert.equal(familySize,3); assert.equal(parents,1);
   assert.equal(rows.length,3); assert.equal(f.calls.images,1); assert.equal(f.calls.submissions,1);
@@ -453,9 +630,16 @@ test('a missing component blocks its mixed sales SKU while a ready sibling retai
 test('one invalid sales plan is persisted as an exception while other selected products continue',async t=>{
   const f=fixture(t),bad=structuredClone(f.product);bad.id=randomUUID();bad.variants[0].id=randomUUID();bad.title='Conflicting pack';bad.variants[0].sku='BAD-SOURCE';
   f.dependencies.store.getProduct=id=>structuredClone(id===bad.id?bad:f.product);
-  // An empty plan is not expected in production. Use the legacy single-row branch for the healthy fixture.
-  f.dependencies.planSales=((id:string)=>{if(id===bad.id)throw Error('10个装与20个装冲突');return undefined;}) as any;
-  const task=f.service.create({productIds:[bad.id,f.product.id],targetId:f.target.id,profileId:'alpha',productType:'BOX'});
+  const recipe=buildSalesRecipes(f.product,null,f.rules)[0];
+  const plan:SalesListingPlan={namingGroupId:randomUUID(),sourceGroupKey:'source',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE-ONE',baseSku:'SALE-ONE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null};
+  f.dependencies.planSales=id=>{if(id===bad.id)throw new UserFacingError('10个装与20个装冲突');return [plan];};
+  f.dependencies.previewSales=id=>{if(id===bad.id)throw new UserFacingError('10个装与20个装冲突');return [recipe];};
+  const prepare=f.dependencies.amazon.prepareDrafts;f.dependencies.amazon.prepareDrafts=async(input,plans)=>{const result=await prepare(input,plans),draft=result.items[0].draft!;draft.salesPlan=plans![0];draft.sku=plans![0].sku;f.drafts.set(draft.id,structuredClone(draft));return result;};
+  const queue=await f.service.queue({productIds:[bad.id,f.product.id],targetId:f.target.id});
+  assert.deepEqual(queue.products[0].rows,[],'an unresolved recipe must not become a guessed sales SKU');
+  assert.equal(queue.products[0].eligibleCount,0);assert.match(queue.products[0].inputIssue!,/10个装/);
+  await assert.rejects(f.service.create({productIds:[bad.id],targetId:f.target.id,profileId:'alpha'}),/销售配方待补资料.*10个装/);
+  const task=await f.service.create({productIds:[bad.id,f.product.id],targetId:f.target.id,profileId:'alpha',productType:'BOX'});
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.calls.submissions,1);assert.equal(f.service.get(task.id).items[0].stage,'PLAN');assert.equal(f.service.get(task.id).items[0].status,'FAILED');
   assert.equal(f.service.get(task.id).items[1].status,'DONE');
@@ -469,7 +653,7 @@ test('field repair may defer a required planned main URL after color is repaired
   };
   f.dependencies.repairFields=async id=>{const draft=f.drafts.get(id)!;draft.revision++;draft.attributes.color=[{value:'Red'}];draft.localIssues=[missing('main_product_image_locator')];return {draft:structuredClone(draft),remaining:[`main_product_image_locator：${draft.localIssues[0].message}`]};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(rechecks,1);assert.equal(f.calls.submissions,1);
 });
 
@@ -480,7 +664,7 @@ test('definitively rejected submission repairs only that child and rechecks exis
   };
   f.dependencies.repairFields=async id=>{repairs++;const draft=f.drafts.get(id)!;draft.revision++;draft.attributes={item_name:[{value:'Corrected'}]};return structuredClone(draft);};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(repairs,1);assert.equal(rechecks,1);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
 });
 
@@ -495,7 +679,7 @@ for (const source of ['local', 'preview', 'remaining'] as const) test(`unresolve
     return source==='remaining'?{draft:structuredClone(draft),remaining:['color: evidence insufficient']}:structuredClone(draft);
   };
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const saved=f.service.get(task.id);
   assert.equal(saved.status,'NEEDS_ATTENTION');assert.match(saved.items[0].error!,/color/);
   assert.equal(rechecks,0);assert.equal(f.executions.size,1);assert.equal(f.calls.submissions,0);
@@ -507,7 +691,7 @@ test('an incomplete first repair continues fields alone and rechecks images only
   f.dependencies.execution.startAuthorized=approved=>{if(starts++>0)return start(approved);const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing color'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;const draft=f.drafts.get(id)!;draft.revision++;return {draft:structuredClone(draft),remaining:fields===1?['color: missing']:[]};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(fields,2);assert.equal(rechecks,1);assert.equal(f.executions.size,2);assert.equal(f.calls.images,1);
 });
 
@@ -516,7 +700,7 @@ test('known incomplete repair survives pause and restart with its remaining reas
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing fields'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;if(fields===1)f.service.pause(taskId);return {draft:f.dependencies.amazon.getDraft(id),remaining:['subject_character: evidence missing']};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.deepEqual(f.service.get(task.id).items[0].repair?.remaining,['subject_character: evidence missing']);
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try {
@@ -536,7 +720,7 @@ for(const {field,spec,eligible} of [
   f.dependencies.repairFields=async id=>{fields++;const draft=f.drafts.get(id)!;draft.revision++;
     draft.localIssues=[{code:'LOCAL_required',message:`${field}: missing`,severity:'ERROR',attributeNames:[field],category:'field',source:'local',autoFixable:false}];return structuredClone(draft);};
   f.dependencies.recheckImage=async input=>f.dependencies.amazon.getDraft(input.draftId);
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(fields,2);
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(fields,2);
   await f.service.close();const db=openDatabase(f.directory),legacy=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
   delete legacy.items[0].repairPolicyVersion;delete legacy.items[0].repairPolicyMigration;
   db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(legacy),task.id);db.close();
@@ -556,7 +740,7 @@ test('unknown repair failure retains its original cause without replaying the fi
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing color'}];return structuredClone(child);};
   f.dependencies.repairFields=async()=>{fields++;throw new Error('Network fetch failed');};
   f.dependencies.recheckImage=async input=>f.dependencies.amazon.getDraft(input.draftId);
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const original=f.service.get(task.id).items[0].error!;
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.ok(f.service.get(task.id).items[0].error!.includes(original));assert.equal(fields,1);
@@ -567,7 +751,7 @@ async function exhaustedColorFixture(t:test.TestContext) {
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing color'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;return {draft:f.dependencies.amazon.getDraft(id),remaining:['color: source evidence insufficient']};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(fields,2);assert.equal(f.service.get(task.id).items[0].repair?.phase,'FIELDS_PENDING');
   return {...f,task,originalStart,get fields(){return fields;},get rechecks(){return rechecks;}};
 }
@@ -661,7 +845,7 @@ test('color evidence already used within the original two repairs does not exten
   f.dependencies.prepareSourceColors=async()=>({aiCalls:0,evidenceChanged:false,evidenceSha256:hash});
   f.dependencies.repairFields=async id=>{fields++;return {draft:f.dependencies.amazon.getDraft(id),remaining:['color: missing']};};
   f.dependencies.recheckImage=async input=>f.dependencies.amazon.getDraft(input.draftId);
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const row=f.service.get(task.id).items[0];assert.equal(fields,2);assert.equal(row.repairAttempts,2);assert.equal(row.sourceColorEvidenceSha256,hash);assert.equal(row.sourceColorRepair,undefined);
 });
 
@@ -739,7 +923,7 @@ test('new tasks keep allocated SKU identity but refresh stale unsent recipe cost
   f.product.revision++;f.product.variants[0].purchasePrice='2';
   f.dependencies.planSales=()=>[{...oldPlan,recipe:buildSalesRecipes(f.product,null,f.rules)[0]}];
   f.dependencies.existingSale=()=>structuredClone(saved);
-  const task=f.create(),row=task.items[0];
+  const task=await f.create(),row=task.items[0];
   assert.equal(row.sku,sku);assert.equal(row.productRevision,2);assert.equal(row.salesPlan!.recipe.totalCostCny,2);assert.equal(saved.salesPlan.recipe.totalCostCny,1);
 });
 
@@ -752,7 +936,7 @@ test('pause after field repair checkpoints recheck and rebuilds the child withou
   };
   f.dependencies.repairFields=async id=>{fields++; const draft=f.drafts.get(id)!;draft.revision++;draft.attributes={item_name:[{value:'Repaired'}]};f.service.pause(taskId);return structuredClone(draft);};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.service.get(task.id).items[0].repair?.phase,'RECHECK_PENDING');assert.equal(f.calls.submissions,0);
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(fields,1);assert.equal(rechecks,1);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
@@ -762,7 +946,7 @@ test('pause after field repair checkpoints recheck and rebuilds the child withou
 test('unlinked persisted child is reconciled after restart, without duplicate writes', async t => {
   const f=fixture(t),originalCreate=f.dependencies.execution.create;
   f.dependencies.execution.create=input=>{const child=originalCreate(input);throw Error('Simulated crash after child persisted '+child.id);};
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.equal(f.executions.size,1);assert.equal(f.service.get(task.id).items[0].executionTaskIds.length,0);
   await f.service.close();f.dependencies.execution.create=originalCreate;
   const restored=new AutomaticListingService(f.directory,f.dependencies);
@@ -775,7 +959,7 @@ test('legacy pending image recheck with unresolved fields is blocked after resta
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing fields'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;const draft=f.drafts.get(id)!;draft.revision++;f.service.pause(taskId);return structuredClone(draft);};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
-  const task=f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();taskId=task.id;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const row=f.service.get(task.id).items[0];assert.equal(row.repair?.phase,'RECHECK_PENDING');
   // Reproduce an older checkpoint whose revision/stamp are valid but fields remain missing.
   f.drafts.get(row.draftId!)!.localIssues=[{code:'LOCAL_required',message:'color: missing',severity:'ERROR',attributeNames:['color'],category:'field',source:'local',autoFixable:false}];
@@ -807,7 +991,7 @@ for (const externalEdit of [false,true]) test(`interrupted recheck copy repair $
     const draft=f.drafts.get(input.draftId)!;
     return !!recorded&&recorded.sourceWorkflowId===input.sourceWorkflowId&&recorded.revision===input.draftRevision&&recorded.stamp===imageWorkflowDraftStamp(draft);
   };
-  const task=f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   assert.match(f.service.get(task.id).items[0].error!,/Independent copy review needs changes/);assert.equal(f.calls.submissions,0);
   if(externalEdit){const draft=f.drafts.get(f.service.get(task.id).items[0].draftId!)!;draft.revision++;draft.attributes.item_name=[{value:'Later manual edit'}];}
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);

@@ -1,12 +1,10 @@
 import type { AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
 import type { ProductDetail, ProductSummary, Variant } from '../shared/contracts.ts';
 
-export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'pricingSkipped' | 'sourceReview' | 'failed';
+export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
-  if (item.status === 'FAILED') {
-    if (item.stage === 'DRAFT' && /^定价未通过[：:]/.test(item.error ?? '')) return 'pricingSkipped';
-    if (item.stage === 'SOURCES') return 'sourceReview';
-    return 'failed';
+  if (item.status === 'FAILED'||item.status==='SCREENED') {
+    return item.outcome?({RULE_FILTERED:'ruleFiltered',SYSTEM_REPAIR:'systemRepair',NEEDS_INPUT:'needsInput',UNKNOWN:'unknown',UNCLASSIFIED:'unclassified'} as const)[item.outcome.kind]:'unclassified';
   }
   if (item.status === 'DONE') return 'completed';
   if (item.stage === 'READBACK') return 'submittedAwaitingReadback';
@@ -14,7 +12,7 @@ export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemO
   return item.status === 'RUNNING' ? 'running' : item.status === 'WAITING' ? 'waiting' : 'pending';
 }
 export function summarizeAutomaticItems(items: AutomaticListingItem[]): Record<AutomaticItemOutcome, number> {
-  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, pricingSkipped: 0, sourceReview: 0, failed: 0 };
+  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, ruleFiltered: 0, needsInput: 0, systemRepair: 0, unknown:0,unclassified:0 };
   for (const item of items) counts[automaticItemOutcome(item)]++;
   return counts;
 }
@@ -48,7 +46,7 @@ export function buildAutomaticProductGroups(items: AutomaticListingItem[], produ
   return [...grouped].map(([productId, rows]) => {
     const detail = details.get(productId), summary = summaryById.get(productId);
     const byVariant = new Map<string, AutomaticListingItem[]>();
-    const statusCounts: AutomaticProductGroup['statusCounts'] = { PENDING: 0, RUNNING: 0, WAITING: 0, DONE: 0, FAILED: 0 };
+    const statusCounts: AutomaticProductGroup['statusCounts'] = { PENDING: 0, RUNNING: 0, WAITING: 0, DONE: 0, FAILED: 0, SCREENED:0 };
     const stageCounts: AutomaticProductGroup['stageCounts'] = {};
     const families = new Map<string, AutomaticProductGroup['families'][number]>();
     for (const item of rows) {

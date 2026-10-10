@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutomaticListingItem } from '../src/shared/automatic-listing-contracts.ts';
 import type { ProductDetail } from '../src/shared/contracts.ts';
-import { buildAutomaticProductGroups, filterAutomaticProductGroups } from '../src/renderer/automatic-product-groups.ts';
+import { automaticItemOutcome, buildAutomaticProductGroups, filterAutomaticProductGroups } from '../src/renderer/automatic-product-groups.ts';
 
 function product(id: string, count: number): ProductDetail {
   return { id, title: `商品 ${id}`, sourceUrl: `https://detail.1688.com/offer/${id}.html`, description: '', status: 'draft', origin: 'import', revision: 1, createdAt: '', updatedAt: '', facts: [], assets: [],
@@ -40,7 +40,7 @@ test('combined recipes include each source component once and retain distinct sa
   assert.equal(group.excludedCount, 1);
   assert.deepEqual(group.sourceVariants.map(row => row.items.map(value => value.key)), [[combined.key], [combined.key], [pending.key], []]);
   assert.deepEqual(group.parentSkus, ['PARENT-RED-BLUE']);
-  assert.deepEqual(group.statusCounts, { PENDING: 0, RUNNING: 1, WAITING: 0, DONE: 0, FAILED: 1 });
+  assert.deepEqual(group.statusCounts, { PENDING: 0, RUNNING: 1, WAITING: 0, DONE: 0, FAILED: 1, SCREENED:0 });
   assert.equal(group.stageCounts.IMAGES, 1);
   assert.equal(group.stageCounts.DRAFT, 1);
 });
@@ -65,7 +65,7 @@ test('search finds an excluded source SKU and a renamed sales SKU without losing
   assert.equal(filterAutomaticProductGroups(groups, 'not found').length, 0);
 });
 
-test('pricing skips and source confirmation remain distinct from workflow failures and submissions are not counted as complete', () => {
+test('legacy error wording never classifies rule rejection and submissions are not counted as complete', () => {
   const source = product('outcomes', 7);
   const items = [
     item(source, 0, { status: 'FAILED', stage: 'DRAFT', error: '定价未通过：售价上限内无法满足目标 ROI' }),
@@ -78,6 +78,13 @@ test('pricing skips and source confirmation remain distinct from workflow failur
   ];
   const before = structuredClone(items);
   const [group] = buildAutomaticProductGroups(items, [source]);
-  assert.deepEqual(group.outcomeCounts, { completed: 1, submittedAwaitingReadback: 1, labels: 1, running: 0, waiting: 0, pending: 1, pricingSkipped: 1, sourceReview: 1, failed: 1 });
+  assert.equal((group.outcomeCounts as any).unclassified,3);assert.equal((group.outcomeCounts as any).ruleFiltered,0);assert.equal(group.outcomeCounts.completed,1);assert.equal(group.outcomeCounts.submittedAwaitingReadback,1);
   assert.deepEqual(items, before, 'presentation classification never changes persisted status or errors');
+});
+test('structured rule, repair, input and unknown results remain separate in task summaries',()=>{
+  const source=product('typed',5);
+  for(const [kind,expected] of [['RULE_FILTERED','ruleFiltered'],['SYSTEM_REPAIR','systemRepair'],['NEEDS_INPUT','needsInput'],['UNKNOWN','unknown'],['UNCLASSIFIED','unclassified']] as const){
+    const row=item(source,0,{status:kind==='RULE_FILTERED'?'SCREENED':'FAILED',outcome:{kind} as any,error:'same display text'});
+    assert.equal(automaticItemOutcome(row),expected);
+  }
 });

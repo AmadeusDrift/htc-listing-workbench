@@ -32,6 +32,12 @@ const label = { id:'label-1',batchId:'batch-1',lineId:'line-1',draftId:'draft-1'
 const state = window.fixture = { calls:[], tasks:[], products:[product], labels:[label,{...label,id:'label-old',version:1,current:false,status:'STALE',quantity:3,files:[{index:0,relativePath:'old.pdf'}]}], profiles, format:label.format, consent:true, documents:[], polls:0 };
 const record = (name,input) => { state.calls.push({name,input:copy(input)}); };
 window.red = {
+ getAutomaticListingQueue:async input=>{state.queueReads=(state.queueReads??0)+1;return ({targetId:input.targetId,scope:{mode:'live',sellerId:input.targetId==='target-1'?'seller':'other-seller',marketplaceId:'ATVPDKIKX0DER'},ruleRevision:7,products:state.products.filter(p=>input.productIds.includes(p.id)).map(p=>{
+  const scoped=input.targetId==='target-1',inputIssue=scoped&&state.queueMode==='input'?'销售配方待补资料：包装件数冲突':undefined;
+  const rows=inputIssue?[]:p.variants.slice(0,scoped&&['mixed','reasons'].includes(state.queueMode)?3:2).map((v,index)=>{
+   const kind=scoped&&state.queueMode==='unknown'?'UNKNOWN':scoped&&(state.queueMode==='all'||['partial','mixed'].includes(state.queueMode)&&index===0||state.queueMode==='reasons'&&index<2)?'RULE_FILTERED':scoped&&['mixed','reasons'].includes(state.queueMode)&&index===2?'SYSTEM_REPAIR':'PENDING';
+   return {key:p.id+':'+v.id,productId:p.id,recipeKey:v.id,specification:v.sku,sku:v.sku,kind,eligible:kind==='PENDING',message:state.queueMode==='reasons'?['已确认 ROI 规则未通过','来源图片触发 IP 风险规则','来源图片下载失败，保留原任务待修复'][index]:kind==='RULE_FILTERED'?'已确认 ROI 规则未通过':kind==='SYSTEM_REPAIR'?'图片服务响应异常，保留原任务待修复':'',reconsideration:null,taskId:null};
+  });return {productId:p.id,title:p.title,inputIssue,rows,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>r.kind!=='RULE_FILTERED').length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length};})});},
  getListingRules:async()=>({revision:7,product:{variantLimit:2,stockSets:5}}),
  listAiCapabilities:async()=>['text','text-review','image-generation','ocr','image-risk'].map(capability=>({capability,available:true})),
  getImageRiskSettings:async()=>({enabled:true}), getCopyReviewSettings:async()=>({enabled:true}),
@@ -54,7 +60,7 @@ window.red = {
  importProcurementShipmentDocument:async batchId=>{record('importShipment',batchId);const value={id:'doc-1',batchId,shipmentId:'FBA001',fileName:'箱唛.pdf',relativePath:'shipment/a.pdf',byteSize:1000,createdAt:'2026-10-08T00:00:00Z',status:'LINKED_UNVERIFIED'};state.documents.push(value);return copy(value)},
  openProcurementShipmentDocument:async id=>record('openShipment',id),
 };
-function Fixture(){const [screen,setScreen]=useState('auto'),[batch,setBatch]=useState(initialBatch),[dirty,setDirty]=useState(false);return <main style={{padding:24}}><nav><button onClick={()=>setScreen('auto')}>查看自动任务</button><button onClick={()=>setScreen('away')}>离开测试页面</button><button onClick={()=>setScreen('labels')}>查看标签</button><button onClick={()=>setScreen('hosting')}>配置图片托管</button></nav>{screen==='auto'?<AutomaticPage products={[product]} targets={[target]} busy={false} onExamples={()=>{}} onInbox={()=>{}} onSettings={value=>record('settings',value)} onManual={(productId,draftId)=>record('manual',{productId,draftId})}/>:screen==='labels'?<div className="operations-page"><ShippingPanel batch={batch} busy={false} dirty={dirty} run={async(_label,task)=>task()} onChange={value=>{setBatch(value);setDirty(true)}} onSave={async()=>{setDirty(false);return true}}/></div>:screen==='hosting'?<HostingSettings busy={false}/>:<p>其他工作区</p>}</main>}
+function Fixture(){const [screen,setScreen]=useState('auto'),[batch,setBatch]=useState(initialBatch),[dirty,setDirty]=useState(false);return <main style={{padding:24}}><nav><button onClick={()=>setScreen('auto')}>查看自动任务</button><button onClick={()=>setScreen('away')}>离开测试页面</button><button onClick={()=>setScreen('labels')}>查看标签</button><button onClick={()=>setScreen('hosting')}>配置图片托管</button></nav>{screen==='auto'?<AutomaticPage products={[product]} targets={[target,{...target,id:"target-2",name:"第二店铺",sellerId:"seller-2"}]} busy={false} onExamples={()=>{}} onInbox={()=>{}} onSettings={value=>record('settings',value)} onManual={(productId,draftId)=>record('manual',{productId,draftId})}/>:screen==='labels'?<div className="operations-page"><ShippingPanel batch={batch} busy={false} dirty={dirty} run={async(_label,task)=>task()} onChange={value=>{setBatch(value);setDirty(true)}} onSave={async()=>{setDirty(false);return true}}/></div>:screen==='hosting'?<HostingSettings busy={false}/>:<p>其他工作区</p>}</main>}
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `;
 await writeFile(join(root, 'fixture.tsx'), renderer);
@@ -86,9 +92,31 @@ try {
  const page=await app.firstWindow();page.setDefaultTimeout(7000);page.on('pageerror',error=>errors.push(error.message));
  await page.getByTestId('automatic-select-product-1').check();
  await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');
+ await expect(page.getByText(/本次可启动 2 个销售 SKU/)).toBeVisible();
 
 
  const start=page.getByRole('button',{name:'启动并自动发布',exact:true});
+ await page.evaluate(()=>window.fixture.queueMode='input');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
+ await expect(page.getByTestId('automatic-select-product-1')).toBeDisabled();await expect(start).toBeDisabled();await page.getByRole('tab',{name:'待修复与核对 1',exact:true}).click();await page.getByTestId('automatic-product-1').locator('summary').click();
+ await expect(page.getByTestId('automatic-product-1').getByText('销售配方待补资料：包装件数冲突',{exact:true})).toHaveCount(1);
+ await page.evaluate(()=>window.fixture.queueMode='mixed');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
+ await expect(page.getByText(/本次可启动 1 个销售 SKU/)).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('图片服务响应异常，保留原任务待修复');
+ await mkdir(resolve('artifacts'),{recursive:true});await page.screenshot({path:resolve('artifacts/automatic-outcome-queue.png'),fullPage:true});
+ await page.evaluate(()=>window.fixture.queueMode='reasons');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
+ const reasonSearch=page.getByRole('searchbox',{name:'搜索原因',exact:true});await reasonSearch.fill('ROI');await page.getByRole('tab',{name:'规则淘汰 1',exact:true}).click();
+ await expect(page.getByText('原因匹配：1 个来源商品 · 1 个销售配方',{exact:true})).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
+ await reasonSearch.fill('IP');await expect(page.getByTestId('automatic-product-1')).toContainText('IP 风险');await expect(page.getByTestId('automatic-product-1')).not.toContainText('已确认 ROI');
+ await reasonSearch.fill('下载');await page.getByRole('tab',{name:'待修复与核对 1',exact:true}).click();await expect(page.getByTestId('automatic-product-1')).toContainText('来源图片下载失败');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
+ await page.getByRole('button',{name:'清除原因搜索',exact:true}).click();await expect(reasonSearch).toHaveValue('');await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI');await expect(page.getByTestId('automatic-product-1')).toContainText('IP 风险');
+ await page.getByRole('tab',{name:'待上架 1',exact:true}).click();
+ await page.evaluate(()=>window.fixture.queueMode='partial');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
+ await expect(page.getByText(/本次可启动 1 个销售 SKU/)).toBeVisible();await expect(page.getByTestId('automatic-select-product-1')).toBeEnabled();
+ await page.getByRole('tab',{name:'规则淘汰 1',exact:true}).click();await page.getByTestId('automatic-product-1').locator('summary').click();await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI 规则未通过');
+ await page.evaluate(()=>window.fixture.queueMode='all');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await page.getByRole('tab',{name:'待上架 0',exact:true}).click();
+ await expect(page.getByTestId('automatic-product-1')).toHaveCount(0);await expect(page.getByTestId('automatic-select-product-1')).toHaveCount(0);await expect(start).toBeDisabled();
+ await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-2');await expect(page.getByTestId('automatic-select-product-1')).toBeEnabled();await expect(page.getByText(/本次可启动 2 个销售 SKU/)).toBeVisible();
+ await page.evaluate(()=>window.fixture.queueMode=null);await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(start).toBeEnabled();
+ pass('selected target drives recipe counts, partial filters retain healthy recipes, all filtered products leave pending and remain in the reason tab');
  await expect(start).toBeEnabled();
  await expect(page.getByText(/每件商品按来源顺序取前 2 个来源规格/)).toBeVisible();
  await page.evaluate(()=>window.fixture.consent=false);await start.click();
@@ -119,11 +147,33 @@ try {
  await expect(page.getByTestId('automatic-task-task-1')).toContainText('已取消');
  assert.deepEqual(await page.evaluate(()=>window.fixture.calls.filter(call=>['pause','resume','cancel'].includes(call.name)).map(call=>call.name)),['pause','resume','cancel']);
  pass('navigation stops only polling; saved tasks return and explicit pause, resume and cancel use the task API');
+ await page.evaluate(()=>{
+  const task=window.fixture.tasks[0];task.revision++;task.status='NEEDS_ATTENTION';
+  Object.assign(task.items[0],{status:'FAILED',stage:'LABELS',error:null,outcome:{kind:'SYSTEM_REPAIR',message:'历史标签失败测试原因'}});
+  Object.assign(task.items[1],{status:'DONE',stage:'COMPLETE',error:null});
+ });
+ await expect(page.getByTestId('automatic-task-task-1')).toContainText('需要处理');
+ await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();await expect(page.getByTestId('automatic-result-v-z')).toContainText('历史标签失败测试原因');
+ await page.evaluate(()=>{const task=window.fixture.tasks[0];task.revision++;task.status='COMPLETED';Object.assign(task.items[0],{status:'DONE',stage:'COMPLETE',error:null});});
+ await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史标签失败测试原因');
+ assert.equal(await page.evaluate(()=>window.fixture.tasks[0].items[0].outcome.message),'历史标签失败测试原因');
+ pass('completed sales rows retain failure audit without displaying an old fault as the current result');
+ await page.evaluate(()=>{const fixture=window.fixture,background=structuredClone(fixture.tasks[0]);background.id='task-background';background.revision=1;background.status='RUNNING';background.items=background.items.map(row=>({...row,status:'PENDING',stage:'DRAFT',outcome:undefined}));fixture.tasks.push(background);fixture.queueMode=null;});
+ await expect(page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).locator('option')).toHaveCount(2);
+ await page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).selectOption('task-1');await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(page.getByRole('tab',{name:'待上架 1',exact:true})).toBeVisible();
+ await page.waitForTimeout(2400);
+ await page.evaluate(()=>{const fixture=window.fixture,task=fixture.tasks.find(task=>task.id==='task-background');task.revision++;task.status='COMPLETED';task.items.forEach(row=>{row.status='SCREENED';row.outcome={kind:'RULE_FILTERED',message:'已确认 ROI 规则未通过'};});fixture.queueMode='all';});
+ await expect(page.getByRole('tab',{name:'待上架 0',exact:true})).toBeVisible();await expect(page.getByRole('tab',{name:'规则淘汰 1',exact:true})).toBeVisible();await expect(page.getByTestId('automatic-task-task-1')).toBeVisible();
+ await page.evaluate(()=>{const fixture=window.fixture,task=fixture.tasks.find(task=>task.id==='task-background');task.revision++;task.status='NEEDS_ATTENTION';task.items.forEach(row=>{row.status='FAILED';row.outcome={kind:'UNKNOWN',message:'结果待核对'};});fixture.queueMode='unknown';});
+ await expect(page.getByRole('tab',{name:'待修复与核对 1',exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'启动并自动发布',exact:true})).toBeDisabled();
+ const queueReads=await page.evaluate(()=>window.fixture.queueReads);await page.waitForTimeout(2400);assert.equal(await page.evaluate(()=>window.fixture.queueReads),queueReads,'unchanged task-list polls must not recheck queue evidence');
+ await page.evaluate(()=>{window.fixture.tasks=window.fixture.tasks.filter(task=>task.id==='task-1');window.fixture.queueMode=null;});
+ pass('background task revisions refresh the queue while a completed task is selected; unchanged polls do not reread evidence');
  await page.getByRole('button',{name:'离开测试页面',exact:true}).click();
  await page.evaluate(()=>{
    const fixture=window.fixture, template=fixture.products[0];
    const products=[1,54,56,1,7,12,7,1,7,39,5,2].map((count,index)=>({...template,id:'bulk-'+index,title:'来源商品 '+(index+1),variantCount:count,sourceUrl:'https://detail.1688.com/offer/'+(1000+index)+'.html',variants:Array.from({length:count},(_,variant)=>({id:'bulk-'+index+'-v-'+variant,sku:'SOURCE-'+index+'-'+variant,originalSpec:'颜色 '+variant,normalizedSpec:'',sourceSpec:'',purchasePrice:'',inventory:null}))}));
-   const seed=fixture.tasks[0].items[0];
+   const seed={...fixture.tasks[0].items[0],outcome:undefined};
    const items=products.flatMap((product,productIndex)=>product.variants.slice(0,20).map((variant,index)=>({...seed,key:variant.id,productId:product.id,productTitle:product.title,variantId:variant.id,sku:'SALE-'+productIndex+'-'+index,status:productIndex===1&&index===0?'FAILED':'PENDING',stage:'DRAFT',draftId:'draft-'+variant.id,error:productIndex===1&&index===0?'需要补充来源事实':null,salesPlan:productIndex===1?{sourceGroupKey:'family-source-'+productIndex,parentSku:index<4?'PARENT-COLOR-A':null,parentage:index<4?'CHILD':'NONE',familyResolved:true,relationReason:index<4?'颜色变体':'独立销售',recipe:{specification:'颜色 '+index,color:'颜色 '+index,totalPieces:1,components:[{variantId:variant.id}]}}:undefined})));
    Object.assign(items.find(item=>item.sku==='SALE-2-0'),{status:'FAILED',stage:'DRAFT',error:'定价未通过：售价上限内无法满足目标 ROI'});
    Object.assign(items.find(item=>item.sku==='SALE-3-0'),{status:'FAILED',stage:'SOURCES',error:'来源图片映射为空'});
@@ -134,7 +184,7 @@ try {
  const bulk=page.getByTestId('automatic-task-task-bulk');
  await expect(bulk.locator('[data-testid^="automatic-product-group-"]')).toHaveCount(12);
  await expect(bulk.getByLabel('当前任务范围')).toHaveText('来源商品链接12来源规格192本次销售 SKU103');
- await expect(bulk.getByLabel('任务待确认分类')).toContainText('定价跳过 1 · 来源待确认 1 · 流程异常 1');
+ await expect(bulk.getByLabel('任务待确认分类')).toContainText('规则淘汰 0');await expect(bulk.getByLabel('任务待确认分类')).toContainText('历史未分类 3');
  await expect(bulk.getByRole('status')).toContainText('已提交待回读 1 · 流程完成 0 / 103');
  await expect(bulk.locator('[data-testid^="automatic-result-"]')).toHaveCount(0);
  await capture('grouped-products-collapsed.png','[aria-label="当前任务范围"]',1900);

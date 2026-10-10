@@ -77,10 +77,10 @@ test('schema v6 gains the strict write journal while preserving prior version by
   await files(f.root, version, f.output, f.bytes);
   db.prepare('INSERT INTO image_versions VALUES(?,?)').run(version.id, JSON.stringify(version));
   dropRecordQueryIndexes(db);
-  db.exec('DROP TABLE IF EXISTS ai_usage_ledger; DROP TABLE IF EXISTS ai_usage_policies; DROP TABLE IF EXISTS image_write_operations; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; PRAGMA user_version=6'); db.close();
+  db.exec('DROP TABLE IF EXISTS ai_usage_ledger; DROP TABLE IF EXISTS ai_usage_policies; DROP TABLE IF EXISTS image_write_operations; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; PRAGMA user_version=6'); db.close();
   const upgraded = openDatabase(f.root);
   try {
-    assert.equal(SCHEMA_VERSION, 19); assert.equal(upgraded.prepare('PRAGMA user_version').get()!.user_version, 19);
+    assert.equal(SCHEMA_VERSION, 20); assert.equal(upgraded.prepare('PRAGMA user_version').get()!.user_version, 20);
     assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM image_write_operations').get()!.n, 0);
     const columns = upgraded.prepare('PRAGMA table_xinfo(image_write_operations)').all();
     assert.deepEqual(columns.map(c => [c.name, c.type, c.notnull, c.pk]), [['id', 'TEXT', 1, 1], ['record_json', 'TEXT', 1, 0]]);

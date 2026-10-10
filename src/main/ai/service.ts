@@ -1,4 +1,9 @@
 import { readManagedImageSync } from './source.ts';
+import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
+import { validateConsistencyContext,resolveConsistencyContext,consistencyScopeKey } from '../source-image-consistency/scope.ts';
+import { reserveConsistencyAttempt,recordConsistencyAssessment,validateConsistencyAttempt,assertConsistencyHistory } from '../source-image-consistency/history.ts';
+import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
+import { readConsistencyView,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
@@ -71,6 +76,7 @@ interface PreparedRequest {
   listingContext?: ListingAiContext;
   imageContext?: ProductImageContext;
   sourceColorContext?: SourceColorContext;
+  sourceConsistencyContext?: SourceConsistencyContext;
   invoke(credentials: AiCredentials, context: AdapterContext): Promise<AdapterResult>;
   assertFresh(): Promise<void>;
   assertBeforeSend?(): void;
@@ -392,11 +398,16 @@ export class AiService {
     await this.assertTextFresh(prepared.textInput, prepared.snapshot, new AbortController().signal); assertFresh();
     return { suggestion: prepared.suggestion, review: prepared.review, assertFresh };
   }
+  private assertListingSource(context:ListingAiContext):void {
+    const row=this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(context.draftId),draft=row?(JSON.parse(String(row.record_json)) as {draft:AmazonDraft}).draft:null;
+    if(!draft||draft.productId!==context.productId||draft.variantId!==context.variantId)throw new AiError('SOURCE_CHANGED');
+    this.product(context.productId,context.productRevision);this.store.assertSourceConsistency(context.productId,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[context.variantId]);
+  }
   /** Trusted main-process entry only. Shares credentials, request control and usage accounting. */
   async listingFields(context: ListingAiContext, assertContextFresh: () => Promise<void>, review?: { suggestionId: string; candidate: ListingFieldsOutput }, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
-    this.ensureOpen(); const profile = this.assertProfile(review ? 'deepseek-review' : 'deepseek');
+    this.ensureOpen();this.assertListingSource(context); const profile = this.assertProfile(review ? 'deepseek-review' : 'deepseek');
     return this.start(profile, { productId: context.productId, productRevision: context.productRevision }, { operation: review ? 'amazon-fields-review' : 'amazon-fields', context, review }, async activeSignal => {
-      const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal); };
+      const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal);this.assertListingSource(context); };
       await assertFresh();
       return { variantId: context.variantId, assetId: null, assetSha256: null, sourceResultIds: review ? [review.suggestionId] : [], sourceSha256: listingFingerprint(context), listingContext: context, assertFresh,
         invoke: (credentials, adapterContext) => review
@@ -406,10 +417,10 @@ export class AiService {
   }
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
-    this.ensureOpen(); const profile = this.assertProfile('deepseek-review'), currentCopy = validateCurrentListingCopy(copy);
+    this.ensureOpen();this.assertListingSource(context); const profile = this.assertProfile('deepseek-review'), currentCopy = validateCurrentListingCopy(copy);
     assertCurrentCopyEvidence(currentCopy,context);
     return this.start(profile, context, { operation: 'listing-current-review', context, currentCopy }, async activeSignal => {
-      const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal); };
+      const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal);this.assertListingSource(context); };
       await assertFresh();
       return { variantId: context.variantId, assetId: null, assetSha256: null, sourceResultIds: [], sourceSha256: listingFingerprint(context), listingContext: context, assertFresh,
         invoke: (credentials, adapterContext) => reviewCurrentListing(context, currentCopy, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
@@ -425,6 +436,7 @@ export class AiService {
     }
     const plan=planRaw?validateSalesPlan(planRaw):undefined,product=projectSalesProduct(source,plan,context.listing.variantId);
     const allowed=plan?.recipe.components.map(c=>c.variantId).sort()??[context.listing.variantId];
+    assertProductConsistency(this.db,source,allowed);
     for(const measurement of context.referenceMeasurements??[]){
       const ocr=this.getResult(measurement.ocrResultId),ref=context.referenceAssets.find(ref=>ref.assetId===measurement.assetId);
       if(!ocr||!ref||ocr.output.kind!=='ocr'||ocr.providerId!=='aliyun-ocr'||ocr.productId!==source.id||ocr.productRevision!==source.revision||ocr.assetId!==ref.assetId||ocr.assetSha256!==ref.sha256||!referenceMeasurementEvidence(ocr).some(item=>listingFingerprint(item)===listingFingerprint(measurement)))throw new AiError('SOURCE_CHANGED');
@@ -484,6 +496,51 @@ export class AiService {
     return { ...result, output:result.output };
   }
   /** Derive the original SKU snapshot without requiring a listing draft or provider call. */
+  sourceConsistencyContext(input:{productId:string;productRevision:number;variantId:string}):SourceConsistencyContext {
+    this.ensureOpen();return resolveConsistencyContext(this.db,this.store,this.directory,input);
+  }
+  getSourceConsistency(raw:unknown){const o=keys(raw,['productId','productRevision','variantId']);return readConsistencyView(this.db,this.sourceConsistencyContext({productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId)}));}
+  decideSourceConsistency(raw:unknown){return saveConsistencyDecision(this.db,this.store,this.directory,raw);}
+  async prepareSourceConsistency(raw:unknown,signal?:AbortSignal,assertFresh:()=>void=()=>{}){
+    const view=this.getSourceConsistency(raw);
+    if(!['MATCH','MANUAL'].includes(view.status))await this.observeSourceConsistency(view.context,assertFresh,signal);
+    assertFresh();return this.getSourceConsistency(raw);
+  }
+  private assertConsistencyPricing(context:SourceConsistencyContext):void {
+    for(const row of this.db.prepare("SELECT id,record_json FROM listing_drafts WHERE json_extract(record_json,'$.draft.productId')=?").all(context.productId)){
+      const {draft}=JSON.parse(String(row.record_json)) as {draft:AmazonDraft};
+      if(draft.productRevision===context.productRevision&&!draft.submittedAt&&['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)&&(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]).includes(context.variantId))assertStoredPricingForPaid(this.db,String(row.id));
+    }
+  }
+  private assertConsistencyFresh(context:SourceConsistencyContext):void {
+    if(listingFingerprint(this.sourceConsistencyContext(context))!==listingFingerprint(context))throw new AiError('SOURCE_CHANGED');
+  }
+  /** Explicit preparation only; unique durable send scope is reserved by the existing usage ledger. */
+  async observeSourceConsistency(raw:SourceConsistencyContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,assertBeforeSend?:()=>void):Promise<AiResult> {
+    this.ensureOpen();const context=validateConsistencyContext(raw);
+    throwIfAborted(signal??new AbortController().signal);await assertContextFresh();this.assertConsistencyFresh(context);
+    const attemptRow=this.db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(context));
+    if(attemptRow){
+      const attempt=validateConsistencyAttempt(JSON.parse(String(attemptRow.record_json)));
+      const saved=this.db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").get(attempt.callId);
+      if(!saved){const call=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId);const value=call?validateAiCall(JSON.parse(String(call.record_json))):null;throw new AiError(value?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');}
+      const result=validateStoredAiResult(JSON.parse(String(saved.record_json)));
+      if(result.output.kind!=='source-image-consistency'||!result.sourceConsistencyContext||consistencyScopeKey(result.sourceConsistencyContext)!==consistencyScopeKey(context))throw new AiError('INVALID_CONFIG');
+      this.successfulResult(result);this.db.exec('BEGIN IMMEDIATE');try{recordConsistencyAssessment(this.db,result);assertConsistencyHistory(this.db,this.directory);this.db.exec('COMMIT');}catch(error){this.db.exec('ROLLBACK');throw error;}
+      await assertContextFresh();this.assertConsistencyFresh(context);throwIfAborted(signal??new AbortController().signal);return result;
+    }
+    const profile={...this.assertProfile('deepseek'),model:'deepseek-flash'};
+    return this.start(profile,context,{operation:'source-image-consistency',context},async activeSignal=>{
+      const assertFresh=async()=>{throwIfAborted(activeSignal);await assertContextFresh();throwIfAborted(activeSignal);this.assertConsistencyFresh(context);};
+      await assertFresh();const images:DeepSeekReferenceImage[]=[];
+      for(const ref of context.referenceAssets){
+        const input={productId:context.productId,productRevision:context.productRevision,assetId:ref.assetId},asset=this.source(input),bytes=await this.readSource(input,asset,activeSignal);
+        await assertFresh();images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes});
+      }
+      return{variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceConsistencyContext:context,assertFresh,assertBeforeSend,
+        invoke:async(credentials,adapter)=>{await assertFresh();return requestSourceConsistency(context,credentials as DeepSeekCredentials,activeSignal,adapter,images);}};
+    },signal);
+  }
   sourceColorContext(input: {productId:string;productRevision:number;variantId:string}): SourceColorContext {
     this.ensureOpen();
     const product=this.product(uuid(input.productId),integer(input.productRevision,1,Number.MAX_SAFE_INTEGER)),variant=product.variants.find(item=>item.id===uuid(input.variantId));
@@ -605,10 +662,12 @@ export class AiService {
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
             const draftId=prepared.listingContext?.draftId??prepared.imageContext?.listing.draftId;
             if(draftId)assertStoredPricingForPaid(this.db,draftId);
+            if(prepared.listingContext)this.assertListingSource(prepared.listingContext);
             if(prepared.imageContext)for(const asset of this.imageSources(prepared.imageContext))readManagedImageSync(this.directory,asset);
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
+            if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}) }, body, completion ? call => this.completionJournal.markSent(completion,call) : undefined);
+            call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: value => { if (call && !finished && !activeSignal.aborted) untrustedOutput = { value }; },
@@ -619,12 +678,13 @@ export class AiService {
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}) });
+        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
+          if(prepared.listingContext)this.assertListingSource(prepared.listingContext);
           this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id, JSON.stringify(result));
           this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'SUCCEEDED', finishedAt: result.createdAt });
-          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(completion)this.completionJournal.recordResult(completion,result); this.db.exec('COMMIT'); return result;
+          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(result.sourceConsistencyContext)recordConsistencyAssessment(this.db,result); if(completion)this.completionJournal.recordResult(completion,result); this.db.exec('COMMIT'); return result;
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       } catch (error) {
         const safe = safeError(error, activeSignal);

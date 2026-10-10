@@ -1,3 +1,4 @@
+import type { SourceConsistencyApi } from './source-image-consistency-contracts.ts';
 import type { AmazonApi } from './amazon-contracts.ts';
 import type { SkuNamingApi } from './sku-naming.ts';
 import type { BackupApi } from './backup-contracts.ts';
@@ -135,7 +136,7 @@ export interface ImportResult { cancelled: boolean; count: number; productIds: s
 export interface ExportResult { cancelled: boolean; path?: string }
 
 /** Narrow IPC boundary. File system paths are selected by native dialogs, never submitted by the renderer. */
-export interface RedApi extends AmazonApi, BackupApi, WorkspaceApi, HostingApi, ExecutionApi, AiApi, ImageVersionApi, ContentApi, DiagnosticApi, CollectionApi, MiaoshouApi, ListingRulesApi, CatalogApi, ProcurementApi, FollowupApi, ProductDataApi, AppearanceApi, ImageGenerationApi, ImageWorkflowApi, AutomaticListingApi, ItemLabelApi, ShipmentDocumentApi, SkuNamingApi {
+export interface RedApi extends SourceConsistencyApi, AmazonApi, BackupApi, WorkspaceApi, HostingApi, ExecutionApi, AiApi, ImageVersionApi, ContentApi, DiagnosticApi, CollectionApi, MiaoshouApi, ListingRulesApi, CatalogApi, ProcurementApi, FollowupApi, ProductDataApi, AppearanceApi, ImageGenerationApi, ImageWorkflowApi, AutomaticListingApi, ItemLabelApi, ShipmentDocumentApi, SkuNamingApi {
   listProducts(): Promise<ProductSummary[]>;
   getProduct(id: string): Promise<ProductDetail>;
   createProduct(): Promise<ProductDetail>;

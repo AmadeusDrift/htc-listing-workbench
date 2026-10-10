@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from '../helpers/source-consistency-proof.ts';
 import {UserFacingError} from '../../src/shared/errors.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -31,6 +32,7 @@ export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'im
   const png=originalPng(),assetId=randomUUID();mkdirSync(join(directory,'assets'),{recursive:true});writeFileSync(join(directory,'assets',assetId+'.png'),png);writeFileSync(join(directory,'assets',assetId+'.preview.png'),png);
   product=store.addAssets({productId:product.id,revision:product.revision},[{id:assetId,fileName:'original.png',mimeType:'image/png',width:32,height:32,byteSize:png.length,originalPath:'assets/'+assetId+'.png',previewPath:'assets/'+assetId+'.preview.png',sha256:createHash('sha256').update(png).digest('hex')}]);
   product=store.updateAsset({productId:product.id,revision:product.revision,assetId,role:'main',variantIds:[product.variants[0].id]});
+  await confirmSourceConsistencyFixture(directory,store,product.id);
   const field={type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'},language_tag:{type:'string'}},required:['value'],additionalProperties:false}};
   const schema={$schema:'https://json-schema.org/draft/2019-09/schema',type:'object',properties:{item_name:field,material:field,color:field,...(optionalClosure?{closure:field}:{})},required:[],additionalProperties:true};
   const meta={$id:'https://schemas.amazon.com/selling-partners/definitions/product-types/meta-schema/v1',$schema:schema.$schema,type:['object','boolean']};

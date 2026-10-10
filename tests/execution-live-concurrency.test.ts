@@ -1,3 +1,4 @@
+import { addSourceOriginalFixture, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
@@ -50,13 +51,13 @@ async function fixture(t: test.TestContext, options: { scheduleFollowup?: (draft
     clientId: 'fixture_client', clientSecret: 'fixture_secret', refreshToken: 'fixture_refresh' });
   const drafts: AmazonDraft[] = [], uploads = new Map<string, { id: string; assetId: string; profileId: string; generation: number; sha256: string; publicUrl: string; status: string }>();
   for (let i = 0; i < 3; i++) {
-    let product = store.createProduct(); const assetId = randomUUID(), variantId = product.variants[0].id;
-    product = store.addAssets({ productId: product.id, revision: product.revision }, [{ id: assetId, fileName: 'fixture.png', mimeType: 'image/png', width: 1000, height: 1000,
-      byteSize: 10, originalPath: `assets/${assetId}.png`, previewPath: `assets/${assetId}.preview.png`, sha256: 'a'.repeat(64) }]);
-    product = store.updateAsset({ productId: product.id, revision: product.revision, assetId, role: 'main', variantIds: [variantId] });
+    let product = store.createProduct(); const variantId = product.variants[0].id;
+    product=addSourceOriginalFixture(directory,store,product.id,[variantId],'main',i);
+    const assetId=product.assets[0].id,sha256=store.getAssetRecord(assetId)!.sha256;
+    await confirmSourceConsistencyFixture(directory,store,product.id);
     const draft = await amazon.createDraft({ targetId: target.id, productId: product.id, variantId, productType: 'STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
     drafts.push(amazon.saveDraft({ id: draft.id, revision: draft.revision, attributes: { item_name: `Fixture ${i}` } }));
-    uploads.set(assetId, { id: randomUUID(), assetId, profileId: 'alpha', generation: 1, sha256: 'a'.repeat(64), publicUrl: `https://images.example.com/${assetId}.png`, status: 'AVAILABLE' });
+    uploads.set(assetId, { id: randomUUID(), assetId, profileId: 'alpha', generation: 1, sha256, publicUrl: `https://images.example.com/${assetId}.png`, status: 'AVAILABLE' });
   }
   const execution = new ExecutionService(directory, store, amazon, {
     getProfile: () => ({ id: 'alpha', host: 'ftp.example.com', port: 2121, secure: false, remoteRoot: '/', publicBaseUrl: 'https://images.example.com/', enabled: true, configured: true, generation }),

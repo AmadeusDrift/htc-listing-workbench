@@ -1,8 +1,9 @@
+import { addSourceOriginalFixture, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
@@ -25,11 +26,10 @@ async function fixture(t: test.TestContext, count = 7) {
   const uploaded = new Map<string, { id: string; assetId: string; profileId: string; generation: number; sha256: string; publicUrl: string; status: string }>();
   const target = amazon.enableDemo();
   for (let i = 0; i < count; i++) {
-    let product = store.createProduct(); const variantId = product.variants[0].id, assetId = randomUUID();
-    const sha256 = createHash('sha256').update(`fixture-image-${i}`).digest('hex');
-    product = store.addAssets({ productId: product.id, revision: product.revision }, [{ id: assetId, fileName: `main-${i}.png`, mimeType: 'image/png', width: 1000, height: 1000,
-      byteSize: 10, originalPath: `assets/${assetId}.png`, previewPath: `assets/${assetId}.preview.png`, sha256 }]);
-    product = store.updateAsset({ productId: product.id, revision: product.revision, assetId, role: 'main', variantIds: [variantId] });
+    let product = store.createProduct(); const variantId = product.variants[0].id;
+    product=addSourceOriginalFixture(directory,store,product.id,[variantId],'main',i);
+    const assetId=product.assets[0].id,sha256=store.getAssetRecord(assetId)!.sha256;
+    await confirmSourceConsistencyFixture(directory,store,product.id);
     let draft = await amazon.createDraft({ targetId: target.id, productId: product.id, variantId, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
     draft = amazon.saveDraft({ id: draft.id, revision: draft.revision, attributes: { ...draft.attributes,
       brand: [{ value: 'Verified Brand', marketplace_id: target.marketplaceId }], color: [{ value: `Color ${i}`, marketplace_id: target.marketplaceId }],

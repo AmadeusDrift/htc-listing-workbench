@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {fixture,saveInput,chat} from './fixtures/listing-ai.ts';
@@ -9,6 +10,7 @@ for(const example of [
 ])test(`known SKU facts repair existing contradictory copy without an independent review: ${example.spec}`,async t=>{
   const f=await fixture(t),saved=saveInput(f.product);
   const product=f.store.saveProduct({...saved,variants:saved.variants.map(variant=>({...variant,originalSpec:example.spec,normalizedSpec:example.spec}))});
+  await confirmSourceConsistencyFixture(f.directory,f.store,product.id);
   let draft=await f.amazon.createDraft({productId:product.id,variantId:product.variants[0].id,targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   draft=f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,item_name:[{value:example.before,marketplace_id:draft.marketplaceId}]}});
   f.amazon.previewDraft=async input=>({...f.amazon.getDraft((input as {id:string}).id),state:'AMAZON_VALIDATED',previewIssues:[]});

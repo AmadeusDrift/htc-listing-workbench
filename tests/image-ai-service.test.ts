@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { sceneSet } from './fixtures/image-set.ts';
 import { currentImageListingSnapshot, referenceMeasurementEvidence } from '../src/main/image-workflow/image-facts.ts';
 import test from 'node:test';
@@ -54,6 +55,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false)
     const asset=product.assets.find(asset=>asset.role!=='main')!;
     product=store.updateAsset({productId:product.id,revision:product.revision,assetId:asset.id,role:'gallery',variantIds:[product.variants[0].id]});
   }
+  await confirmSourceConsistencyFixture(directory,store,product.id);
   const hosting = new HostingService(directory, store, mockStorage), amazon = new AmazonService(directory, id => store.getProduct(id), mockStorage), target = amazon.enableDemo();
   if(withAge){const getSchema=amazon.getSchema.bind(amazon);amazon.getSchema=async input=>{const schema=await getSchema(input);(schema.schema.properties as any).age_range_description={type:'array',items:{type:'object',properties:{value:{type:'string'}}}};return schema;};}
   let draft = await amazon.createDraft({ productId: product.id, variantId: product.variants[0].id, targetId: target.id, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
@@ -448,6 +450,7 @@ test('current image authorization checks the approved slot plan and preserves su
   (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
   const db=openDatabase(f.directory),input={draftId:f.draft.id,draftRevision:f.draft.revision};
   db.prepare('UPDATE variants SET normalized_spec=? WHERE id=?').run('Children Blue',f.product.variants[0].id);
+  await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
   const pending=workflow.complete(input);workflow.cancel(f.draft.id);const stopped=await pending;
   const seed={...stopped.workflow,slotPolicy:'seven-provisional-v1'};
   db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(seed),seed.id);
@@ -465,6 +468,7 @@ test('current image authorization checks the approved slot plan and preserves su
     const raw=JSON.stringify(old),oldPlan=old.slots![1].attempts[0].planResultId!,oldPlanBytes=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(oldPlan)!.record_json;
     db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(raw,old.id);
     db.prepare('UPDATE variants SET source_spec=? WHERE id=?').run('不适合儿童',f.product.variants[0].id);
+  await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
     const before=f.requests.length;
     assert.deepEqual(approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),old.slots!.map(slot=>({id:slot.approvedAssetId,sha256:slot.approvedSha256})));
     assert.equal(f.requests.length,before);
@@ -478,6 +482,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`old ${vers
   const f=await fixture(t),{workflow,posts}=productionWorkflow(f),db=openDatabase(f.directory);
   try{
     db.prepare('UPDATE variants SET source_spec=?,normalized_spec=? WHERE id=?').run('不适合儿童','Children Blue',f.product.variants[0].id);
+  await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
     const listing=(workflow as any).listing as ListingAiService,strictContext=listing.currentContext.bind(listing);
     listing.currentContext=(...args)=>{const context=strictContext(...args);context.evidence=context.evidence.filter(e=>e.id!==`${f.product.variants[0].id}:age_range_description`);return context;};
     const specId=`${f.product.variants[0].id}:spec`,set=sceneSet();
@@ -512,6 +517,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`old ${vers
 
 test('real source-image color adoption keeps its citations through approved images and zero-call reuse',async t=>{
   const f=await fixture(t,false,true),product=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.filter(fact=>fact.name!=='适用年龄'),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:'型号: 602Q',normalizedSpec:'602Q'}))});
+  await confirmSourceConsistencyFixture(f.directory,f.store,product.id);
   let draft=await f.amazon.createDraft({productId:product.id,variantId:product.variants[0].id,targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   const market=draft.marketplaceId;
   draft=f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{item_name:[{value:'Silicone Coaster',marketplace_id:market,language_tag:'en_US'}],material:[{value:'Silicone',marketplace_id:market}],age_range_description:[{value:'Adult'}],brand:[{value:'Generic',marketplace_id:market}],purchasable_offer:[{marketplace_id:market,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:10}]}]}]}});
@@ -1083,7 +1089,8 @@ test('two distinct references retain their byte order and reversed understanding
 });
 
 for(const legacyVersion of ['product-image/v1','product-image/vision-v2'] as const)test(`legacy ${legacyVersion} plans and completed provenance survive backup/restore but cannot be reused`,async t=>{
-  const f=await fixture(t), plan=await f.ai.imagePlan(f.context,()=>{}), ocr=await f.ai.recognizeGeneratedImage(f.context,f.candidate,f.bytes,()=>{}), review=await f.ai.reviewGeneratedImage(f.context,plan,ocr,f.candidate,()=>{});
+  const f=await fixture(t),generated=Buffer.from(f.bytes);generated[32]=23;f.candidate.sha256=createHash('sha256').update(generated).digest('hex');
+  const plan=await f.ai.imagePlan(f.context,()=>{}), ocr=await f.ai.recognizeGeneratedImage(f.context,f.candidate,generated,()=>{}), review=await f.ai.reviewGeneratedImage(f.context,plan,ocr,f.candidate,()=>{});
   const legacyContext={...f.context,policyVersion:legacyVersion}; delete legacyContext.ipSource;
   const contextSha256=listingFingerprint(legacyContext), runId=randomUUID();
   const db=openDatabase(f.directory);
@@ -1098,7 +1105,9 @@ for(const legacyVersion of ['product-image/v1','product-image/vision-v2'] as con
       assert.deepEqual(validateAiResult(legacy),legacy);
       db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(legacy),legacy.id);
     }
-    const run={id:runId,draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,sku:f.draft.sku,status:'COMPLETED',stage:'complete',attempt:1,maxAttempts:2,contextSha256,draftSha256:imageWorkflowDraftStamp(f.draft),referenceAssets:legacyContext.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})),planResultIds:[plan.id],candidateIds:[f.candidate.id],ocrResultIds:[ocr.id],reviewResultIds:[review.id],approvedAssetId:f.product.assets[0].id,approvedSha256:f.candidate.sha256,createdAt:plan.createdAt,updatedAt:review.createdAt,error:null};
+    const generatedId=randomUUID(),path=`assets/${generatedId}.png`;writeFileSync(join(f.directory,path),generated);
+    db.prepare("INSERT INTO assets SELECT ?,product_id,file_name,'gallery',mime_type,width,height,byte_size,?,?,?,created_at FROM assets WHERE id=?").run(generatedId,path,path,f.candidate.sha256,f.product.assets[0].id);
+    const run={id:runId,draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,sku:f.draft.sku,status:'COMPLETED',stage:'complete',attempt:1,maxAttempts:2,contextSha256,draftSha256:imageWorkflowDraftStamp(f.draft),referenceAssets:legacyContext.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})),planResultIds:[plan.id],candidateIds:[f.candidate.id],ocrResultIds:[ocr.id],reviewResultIds:[review.id],approvedAssetId:generatedId,approvedSha256:f.candidate.sha256,createdAt:plan.createdAt,updatedAt:review.createdAt,error:null};
     db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(run.id,JSON.stringify(run));
   } finally {db.close();}
   const file=join(f.directory,'legacy.htcbackup'), target=join(f.directory,'restored');

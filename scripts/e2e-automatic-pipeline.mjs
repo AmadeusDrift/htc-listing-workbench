@@ -8,7 +8,8 @@ import { join, resolve } from 'node:path';
 await mkdir(resolve('.test-data'),{recursive:true});await mkdir(resolve('artifacts'),{recursive:true});
 const dataRoot=await mkdtemp(resolve('.test-data/automatic-pipeline-')),harness=join(dataRoot,'harness.cjs');
 await build({entryPoints:['tests/fixtures/execution-electron.ts'],outfile:harness,bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
-const require=createRequire(import.meta.url),env={...process.env,RED_DATA_DIR:dataRoot,RED_E2E:'1'};delete env.ELECTRON_RUN_AS_NODE;delete env.RED_DEV_SERVER_URL;
+const preload=join(dataRoot,'preload.cjs');await build({entryPoints:['src/main/preload.ts'],outfile:preload,bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
+const require=createRequire(import.meta.url),env={...process.env,RED_DATA_DIR:dataRoot,RED_E2E:'1',RED_E2E_PRELOAD:preload};delete env.ELECTRON_RUN_AS_NODE;delete env.RED_DEV_SERVER_URL;
 let app;const checks=[];
 try{
   app=await electron.launch({executablePath:require('electron'),args:[harness],cwd:resolve('.'),env,timeout:35000});
@@ -18,6 +19,8 @@ try{
   const input=await page.evaluate(async()=>{
     const target=await window.red.enableAmazonDemo(),examples=await window.red.loadExamples();let product=await window.red.getProduct(examples.find(value=>value.variantCount===3).id);
     for(const asset of product.assets)product=await window.red.updateAsset({productId:product.id,revision:product.revision,assetId:asset.id,role:asset.role,variantIds:asset.role==='main'?[product.variants[0].id]:[]});
+    const selected={productId:product.id,productRevision:product.revision,variantId:product.variants[0].id},view=await window.red.getSourceConsistency(selected);
+    await window.red.decideSourceConsistency({...selected,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Isolated fixture explicitly confirms this example original and SKU visual association only'});
     await window.red.prepareAmazonDrafts({targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',listingProgram:'standard',items:[{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,attributes:{brand:[{value:'Generic',marketplace_id:target.marketplaceId}],color:[{value:'Blue',marketplace_id:target.marketplaceId}],purchasable_offer:[{marketplace_id:target.marketplaceId,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:12.5}]}]}]}}]});
     return {productIds:[product.id],targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',profileId:'alpha'};
   });

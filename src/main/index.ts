@@ -1,3 +1,4 @@
+import { assertConsistencyView } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { app, BrowserWindow, dialog, nativeTheme, net, protocol, safeStorage, session } from 'electron';
 import { mkdirSync, readdirSync } from 'node:fs';
@@ -149,6 +150,9 @@ async function start() {
       }
       const generation = generationService.getConnection(); if (!generation.configured || !generation.enabled) throw new UserFacingError('请先在设置中配置并启用生图服务');
     },
+    prepareSourceConsistency: async (input,signal,fresh) => {
+      for(const variantId of input.variantIds){fresh();const view=await aiService.prepareSourceConsistency({productId:input.productId,productRevision:input.productRevision,variantId},signal,fresh);fresh();assertConsistencyView(view);}
+    },
     prepareSourceColors: async (id, signal) => {
       const current=amazonService.getDraft(id);
       return listingService.prepareSourceColors({draftId:id,draftRevision:current.revision},signal);
@@ -161,6 +165,7 @@ async function start() {
     recheckImage: async (input, signal) => {
       if (signal.aborted) throw new UserFacingError('自动任务已暂停');
       const draft = amazonService.getDraft(input.draftId), prior = workflowService.getProgress(input.draftId);
+      workflowService.assertSourceConsistency(draft.id);
       if (prior?.status === 'COMPLETED' && workflowService.isRiskPolicyCompatible(prior) && workflowService.isCopyReviewPolicyCompatible(prior) && prior.draftSha256 === imageWorkflowDraftStamp(draft) && prior.recheckedFromRunId === input.sourceWorkflowId) return draft;
       const cancel = () => workflowService.cancel(input.draftId); signal.addEventListener('abort', cancel, { once: true });
       try {

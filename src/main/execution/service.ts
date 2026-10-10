@@ -80,6 +80,7 @@ export class ExecutionService {
       if(!approved)throw new UserFacingError('父体等待子体主图通过检测');
       return [{...approved,role:'main'}];
     }
+    this.store.assertSourceConsistency(product.id,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);
     const workflow=workflowRuns(this.db,draft.id)[0];
     if(workflow&&draft.schema.parentageLevel!=='PARENT'&&!submitted(draft)&&!hasSevenApprovedImages(workflow))throw new UserFacingError('每个销售 SKU 必须完成 7 张图片审核，请继续自动准备');
     const approved = approvedWorkflowAssets(this.db, draft, product);

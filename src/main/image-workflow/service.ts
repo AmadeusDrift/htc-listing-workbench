@@ -75,6 +75,7 @@ export class ImageWorkflowService {
       }
     } catch (error) { this.db.close(); throw error; }
   }
+  assertSourceConsistency(draftId:string):void {const draft=this.amazon.getDraft(draftId);this.store.assertSourceConsistency(draft.productId,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);}
   private ensureOpen() { if (this.closed) throw new AiError('SERVICE_CLOSED'); }
   private currentContext(draft:AmazonDraft,product:ProductDetail,generation:number):ListingAiContext {
     return this.listing.currentContext?.(draft,product,generation)??buildListingContext(draft,product,generation);
@@ -86,6 +87,7 @@ export class ImageWorkflowService {
   }
   /** Current authorization only; never called by list/history/backup readers. */
   private assertCurrentEvidence(draft:AmazonDraft,base?:ProductImageContext,setPlan?:ImageWorkflowRun['setPlan'],planResultIds:string[]=[]):void {
+    this.assertSourceConsistency(draft.id);
     const context=this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
     const issues=currentDraftEvidenceIssues(draft,context,this.listing.currentContext?id=>this.ai.getResult(id):undefined);
     if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
@@ -237,6 +239,7 @@ export class ImageWorkflowService {
     }
     if (this.busy) throw new UserFacingError('另一个商品正在自动准备，请等待完成');
     const draft = this.amazon.getDraft(draftId);
+    this.assertSourceConsistency(draftId);
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     const prior = this.getProgress(draftId);
@@ -278,6 +281,7 @@ export class ImageWorkflowService {
     this.ensureOpen();
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId);
     integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);uuid(input.sourceWorkflowId);
+    this.assertSourceConsistency(draftId);
     if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
     const controller=new AbortController();
     const promise=Promise.resolve().then(async()=>{
@@ -289,6 +293,7 @@ export class ImageWorkflowService {
     this.active.set(draftId,{operation:'recheck',controller,promise});return promise;
   }
   private async tryReuseApproval(draftId:string,revision:number,sourceId:string,signal:AbortSignal):Promise<CompleteAutomaticProductResult|undefined> {
+    this.assertSourceConsistency(draftId);
     const runs=workflowRuns(this.db,draftId),requested=runs.find(run=>run.id===sourceId),prior=requested?.approvalReuse?runs.find(run=>run.id===requested.approvalReuse!.sourceRunId):requested;
     const draft=this.amazon.getDraft(draftId),base=prior?.imageContext;
     if(base&&prior)this.assertCurrentEvidence(draft,base,prior.setPlan,currentWorkflowPlanIds(prior));
@@ -387,8 +392,9 @@ export class ImageWorkflowService {
     const promise=Promise.resolve().then(()=>prior.slots?this.runSeven(run,draft,controller.signal,prior):this.run(run,draft,controller.signal,prior)).finally(()=>this.active.delete(draftId));
     this.active.set(draftId,{operation:'recheck',controller,promise});return promise;
   }
-  private paid<T>(draftId:string,send:()=>Promise<T>):Promise<T>{ this.amazon.assertPricingForPaid(draftId); return send(); }
+  private paid<T>(draftId:string,send:()=>Promise<T>):Promise<T>{ this.assertSourceConsistency(draftId);this.amazon.assertPricingForPaid(draftId); return send(); }
   private async runSeven(run:ImageWorkflowRun,initial:AmazonDraft,signal:AbortSignal,reuse?:ImageWorkflowRun):Promise<CompleteAutomaticProductResult>{
+    this.assertSourceConsistency(run.draftId);
     let result={draft:initial,aiCalls:0,previewAttempts:0,remaining:remaining(initial)};
     const riskEnabled=run.riskInterceptionEnabled!==false;
     const copyReviewEnabled=this.getCopyReviewSettings().enabled;
@@ -483,7 +489,7 @@ export class ImageWorkflowService {
             for(const ref of references){
               throwIfAborted(signal);
               const previous=this.ai.listResults(run.productId).findLast(value=>value.output.kind==='ocr'&&value.productRevision===run.productRevision&&value.assetId===ref.id&&value.assetSha256===ref.sha256&&this.ai.getCall(value.callId)?.status==='SUCCEEDED');
-              const ocr=previous??await this.paid(run.draftId,()=>this.ai.recognize({productId:run.productId,productRevision:run.productRevision,assetId:ref.id},signal,()=>this.amazon.assertPricingForPaid(run.draftId)));
+              const ocr=previous??await this.paid(run.draftId,()=>this.ai.recognize({productId:run.productId,productRevision:run.productRevision,assetId:ref.id},signal,()=>{this.assertSourceConsistency(run.draftId);this.amazon.assertPricingForPaid(run.draftId);}));
               if(!previous)result.aiCalls++;
               base.referenceMeasurements.push(...referenceMeasurementEvidence(ocr));
             }
@@ -504,6 +510,7 @@ export class ImageWorkflowService {
           ||draft.revision!==base.listing.draftRevision&&listingFingerprint(snapshot.currentListingCopy)!==listingFingerprint(base.currentListingCopy))throw new AiError('SOURCE_CHANGED');
       };
       const fresh=async()=>{
+        this.assertSourceConsistency(run.draftId);
         if(this.getRiskSettings().enabled!==riskEnabled||this.getCopyReviewSettings().enabled!==copyReviewEnabled)throw new AiError('CONFIG_CHANGED');
         throwIfAborted(signal);const current=this.store.getProduct(run.productId),draft=this.amazon.getDraft(run.draftId),target=this.amazon.executionTargetScope(draft.targetId);
         if(current.revision!==run.productRevision||imageWorkflowDraftStamp(draft)!==run.draftSha256||target.generation!==base.listing.targetGeneration||target.target.paused||!target.target.configured)throw new AiError('SOURCE_CHANGED');
@@ -518,6 +525,7 @@ export class ImageWorkflowService {
         assertEquivalentDraft(after,latestTarget.generation);
         if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
         throwIfAborted(signal);
+        this.assertSourceConsistency(run.draftId);
       };
       await fresh();
       if(base.setPolicy){
@@ -585,7 +593,7 @@ export class ImageWorkflowService {
               const previous=slot.attempts.at(-2),editCandidateId=previous?.reviewResultId?previous.candidateId??undefined:undefined;
               try{
                 const prompt=(editCandidateId?'The FIRST attached image is the failed candidate. Correct the reported text issue (including missing or unwanted text); the following images are the original product references. Preserve correct content. Do not treat the failed candidate as factual evidence.\n':'')+imageGenerationPrompt(plan.output,context,riskEnabled);
-                const candidate=await this.generation.generateForWorkflow({productId:run.productId,productRevision:run.productRevision,prompt,referenceAssetIds:run.referenceAssets.map(ref=>ref.id),size:connection!.size,quality:connection!.quality,background:'opaque'},{requestId:attempt.requestId,...(editCandidateId?{editCandidateId}:{})},signal,async()=>{await fresh();this.amazon.assertPricingForPaid(run.draftId);});
+                const candidate=await this.generation.generateForWorkflow({productId:run.productId,productRevision:run.productRevision,prompt,referenceAssetIds:run.referenceAssets.map(ref=>ref.id),size:connection!.size,quality:connection!.quality,background:'opaque'},{requestId:attempt.requestId,...(editCandidateId?{editCandidateId}:{})},signal,async()=>{await fresh();this.assertSourceConsistency(run.draftId);this.amazon.assertPricingForPaid(run.draftId);});
                 attempt.candidateId=candidate.id;attempt.state='GENERATED';this.save(run);
               }catch(error){
                 if(error instanceof AiError&&'notSent' in error&&error.notSent===true){
@@ -655,6 +663,7 @@ export class ImageWorkflowService {
     return [...details,...review.issues].slice(0,50).map(value=>value.slice(0,2000));
   }
   private async adoptSlot(run:ImageWorkflowRun,slot:ImageWorkflowSlot,attempt:ImageSlotAttempt,local:Awaited<ReturnType<Generator['readCandidate']>>,fresh:()=>Promise<void>,signal:AbortSignal,reusedAssetId?:string):Promise<void>{
+    this.assertSourceConsistency(run.draftId);
     const {candidate}=local;await fresh();
     if(digest(local.bytes)!==candidate.sha256||candidate.byteSize!==local.bytes.length||inspectRaster(local.bytes).mimeType!=='image/png'||inspectRaster(local.preview).mimeType!=='image/png')throw new AiError('OUTPUT_INVALID');
     if(!reusedAssetId&&this.store.findAssetByHash(run.productId,candidate.sha256))throw new UserFacingError('生成结果与已有图片完全相同，未将重复图片计入七图');
@@ -663,6 +672,7 @@ export class ImageWorkflowService {
       if(!reusedAssetId){const directory=privateDirectory(this.directory,'assets',true);for(const [suffix,bytes] of [['.png',local.bytes],['.preview.png',local.preview]] as const){throwIfAborted(signal);const path=join(directory,`${id}${suffix}`),file=await open(path,'wx');written.push(path);try{await file.writeFile(bytes);await file.sync();}finally{await file.close();}}}
       await fresh();this.db.exec('BEGIN IMMEDIATE');
       try{
+        this.assertSourceConsistency(run.draftId);
         if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256)throw new AiError('SOURCE_CHANGED');
         const now=new Date().toISOString();if(!reusedAssetId){this.db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,run.productId,`自动生成-${run.sku}-${slot.index}.png`,'gallery','image/png',candidate.width,candidate.height,candidate.byteSize,`assets/${id}.png`,`assets/${id}.preview.png`,candidate.sha256,now);this.db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(id,run.variantId,now);}
         slot.approvedAssetId=id;slot.approvedSha256=candidate.sha256;slot.status='PASSED';slot.error=null;attempt.state='PASSED';attempt.error=null;this.save(run);
@@ -672,6 +682,7 @@ export class ImageWorkflowService {
     }catch(error){for(const path of written)await unlink(path).catch(()=>{});throw error;}
   }
   private async run(run: ImageWorkflowRun, initial: AmazonDraft, signal: AbortSignal, reuse?:ImageWorkflowRun): Promise<CompleteAutomaticProductResult> {
+    this.assertSourceConsistency(run.draftId);
     let result = { draft:initial, aiCalls:0, previewAttempts:0, remaining:[] as string[] };
     const stage = (value: ImageWorkflowRun['stage']) => { throwIfAborted(signal); run.stage=value; this.save(run); };
     try {
@@ -712,6 +723,7 @@ export class ImageWorkflowService {
       run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;
       run.contextSha256=listingFingerprint(context); run.draftSha256=imageWorkflowDraftStamp(result.draft); this.save(run);
       const fresh = async () => {
+        this.assertSourceConsistency(run.draftId);
         throwIfAborted(signal);
         const draft=this.amazon.getDraft(run.draftId), current=this.store.getProduct(run.productId), target=this.amazon.executionTargetScope(draft.targetId);
         if (current.revision!==run.productRevision || draft.revision!==context.listing.draftRevision || imageWorkflowDraftStamp(draft)!==run.draftSha256 || target.generation!==context.listing.targetGeneration || target.target.paused || !target.target.configured) throw new AiError('SOURCE_CHANGED');
@@ -724,6 +736,7 @@ export class ImageWorkflowService {
         if (latestTarget.generation!==context.listing.targetGeneration || latestTarget.target.paused || !latestTarget.target.configured) throw new AiError('SOURCE_CHANGED');
         if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
         throwIfAborted(signal);
+        this.assertSourceConsistency(run.draftId);
       };
       let repair: {previousPlanId:string;issues:string[]} | undefined;
       for (let attempt=1;attempt<=run.maxAttempts;attempt++) {
@@ -737,7 +750,7 @@ export class ImageWorkflowService {
         if(!reuse)stage('generating'); await fresh();
         if(!reuse)this.amazon.assertPricingForPaid(run.draftId);
         const candidate=reuse?(await this.generation.readCandidate(reuse.candidateIds.at(-1)!)).candidate
-          :await this.generation.generate({productId:run.productId,productRevision:run.productRevision,prompt:imageGenerationPrompt(plan.output),referenceAssetIds:run.referenceAssets.map(ref=>ref.id),size:connection!.size,quality:connection!.quality,background:'opaque'},signal,async()=>{await fresh();this.amazon.assertPricingForPaid(run.draftId);});
+          :await this.generation.generate({productId:run.productId,productRevision:run.productRevision,prompt:imageGenerationPrompt(plan.output),referenceAssetIds:run.referenceAssets.map(ref=>ref.id),size:connection!.size,quality:connection!.quality,background:'opaque'},signal,async()=>{await fresh();this.assertSourceConsistency(run.draftId);this.amazon.assertPricingForPaid(run.draftId);});
         if(reuse&&(candidate.id!==reuse.candidateIds.at(-1)||candidate.sha256!==reuse.approvedSha256))throw new AiError('SOURCE_CHANGED');
         if (candidate.productId!==run.productId || candidate.productRevision!==run.productRevision || candidate.mode!=='edit' || listingFingerprint(candidate.sourceAssets)!==listingFingerprint(run.referenceAssets)) throw new AiError('SOURCE_CHANGED');
         run.candidateIds.push(candidate.id); this.save(run); await fresh();
@@ -775,10 +788,12 @@ export class ImageWorkflowService {
     }
   }
   private async finishRecheck(run:ImageWorkflowRun,prior:ImageWorkflowRun,candidate:GeneratedImageCandidate,fresh:()=>Promise<void>,signal:AbortSignal):Promise<void>{
+    this.assertSourceConsistency(run.draftId);
     const asset=this.store.getAssetRecord(prior.approvedAssetId!);
     if(!asset||asset.productId!==run.productId||asset.sha256!==candidate.sha256)throw new AiError('SOURCE_CHANGED');
     await readManagedImage(this.directory,asset,signal);await fresh();this.db.exec('BEGIN IMMEDIATE');
     try{
+      this.assertSourceConsistency(run.draftId);
       if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256
         ||!this.db.prepare('SELECT 1 FROM assets a JOIN variant_assets v ON a.id=v.asset_id WHERE a.id=? AND a.sha256=? AND v.variant_id=? AND v.confirmed=1').get(asset.id,candidate.sha256,run.variantId))throw new AiError('SOURCE_CHANGED');
       run.approvedAssetId=asset.id;run.approvedSha256=candidate.sha256;run.status='COMPLETED';run.stage='complete';run.error=null;this.save(run);
@@ -788,6 +803,7 @@ export class ImageWorkflowService {
     }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');run.approvedAssetId=null;run.approvedSha256=null;run.status='RUNNING';run.stage='adopting';throw error;}
   }
   private async adopt(run: ImageWorkflowRun,candidate:GeneratedImageCandidate,fresh:()=>Promise<void>,signal:AbortSignal):Promise<void> {
+    this.assertSourceConsistency(run.draftId);
     const local=await this.generation.readCandidate(candidate.id); await fresh();
     if (digest(local.bytes)!==candidate.sha256 || local.bytes.length!==candidate.byteSize) throw new AiError('SOURCE_CHANGED');
     const raster=inspectRaster(local.bytes), preview=inspectRaster(local.preview);
@@ -803,6 +819,7 @@ export class ImageWorkflowService {
       await fresh();
       this.db.exec('BEGIN IMMEDIATE');
       try {
+        this.assertSourceConsistency(run.draftId);
         if (this.store.getProduct(run.productId).revision!==run.productRevision || imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256) throw new AiError('SOURCE_CHANGED');
         const now=new Date().toISOString();
         this.db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,run.productId,`自动生成-${run.sku}.png`,'gallery','image/png',candidate.width,candidate.height,candidate.byteSize,`assets/${id}.png`,`assets/${id}.preview.png`,candidate.sha256,now);

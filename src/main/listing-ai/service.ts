@@ -131,11 +131,12 @@ export class ListingAiService {
     }
     return { draft, context };
   }
+  private assertSourceConsistency(draft:AmazonDraft):void {this.store.assertSourceConsistency(draft.productId,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);}
   private async fresh(reference: SuggestAmazonFieldsInput, snapshot: ListingAiContext): Promise<void> {
-    const { draft, context } = this.current(reference, snapshot);
+    const { draft, context } = this.current(reference, snapshot);this.assertSourceConsistency(draft);
     if (listingFingerprint(context) !== listingFingerprint(snapshot)) throw new UserFacingError('来源、店铺或规则已变化，请重新生成建议');
     for(const evidence of snapshot.evidence)if(evidence.imageObservation)await this.ai.assertSourceColorFresh(evidence.imageObservation.context);
-    const schema = await this.amazon.getSchema(draft.schema);
+    const schema = await this.amazon.getSchema(draft.schema);this.assertSourceConsistency(this.amazon.getDraft(draft.id));
     if (schema.checksum !== snapshot.schemaChecksum || schema.version !== snapshot.schemaVersion || listingFingerprint({ schema: schema.schema, metaSchema: schema.metaSchema }) !== snapshot.schemaSha256 || listingFingerprint(this.current(reference, snapshot).context) !== listingFingerprint(snapshot)) throw new UserFacingError('Amazon 字段规则或商品资料已更新，请建立新草稿');
   }
   private result(id: string, c: ListingAiContext): AiResult {
@@ -198,7 +199,7 @@ export class ListingAiService {
       return { field, before, after, evidence: context.evidence.filter(e => evidenceIds.has(e.id)) };
     });
     const adoption: ListingFieldAdoption = { id: adoptionId, at: new Date().toISOString(), suggestionResultId: suggestion.id, reviewResultId: review?.id ?? null, contextSha256: listingFingerprint(context), fromRevision: draft.revision, toRevision: draft.revision + 1, fields: [...reference.fields].sort(), changes, ...disposition };
-    signal?.throwIfAborted();return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); });
+    signal?.throwIfAborted();return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);this.assertSourceConsistency(this.amazon.getDraft(draft.id)); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); });
   }
 
   /** A fresh copy snapshot for image generation when independent copy review is disabled. */
@@ -301,6 +302,7 @@ export class ListingAiService {
   /** Validation previews never publish. Only reported copy/semantic fields enter this journal. */
   async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[]}> {
     signal?.throwIfAborted();const initial=input(raw,'suggest'),journal=this.ai.completionJournal;
+    const proofDraft=this.amazon.getDraft(initial.draftId);this.store.assertSourceConsistency(proofDraft.productId,proofDraft.salesPlan?.recipe.components.map(c=>c.variantId)??[proofDraft.variantId]);
     let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
     const reviewEnabled=operation.copyReviewEnabled;
     const refresh=()=>{operation=journal.get(operation.id);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);if(journal.unknown(operation.id))unknownCompletion();draft=this.completionDraft(operation);};

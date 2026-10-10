@@ -1,3 +1,4 @@
+import { SOURCE_CONSISTENCY_OUTCOMES } from '../../shared/source-image-consistency-contracts.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AutomaticListingItem, AutomaticListingTask } from '../../shared/automatic-listing-contracts.ts';
@@ -135,6 +136,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
   if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
   if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
     if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
+  }else if(Object.hasOwn(SOURCE_CONSISTENCY_OUTCOMES,result.code)){
+    if(result.kind!==SOURCE_CONSISTENCY_OUTCOMES[result.code as keyof typeof SOURCE_CONSISTENCY_OUTCOMES]||result.pricingReport||result.image)fail();
   }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(result.code)){
     if(result.kind!=='NEEDS_INPUT'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if(!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();

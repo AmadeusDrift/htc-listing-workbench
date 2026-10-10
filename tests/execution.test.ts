@@ -1,3 +1,4 @@
+import { addSourceOriginalFixture,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
@@ -18,16 +19,11 @@ async function fixture(t: test.TestContext, options: { holdUpload?: boolean; fai
   const directory = mkdtempSync(join(parent, 'execution-'));
   const store = new WorkspaceStore(directory);
   const amazon = new AmazonService(directory, id => store.getProduct(id), safeStorage, { fetch: async () => { throw Error('Unexpected network'); } });
-  let product = store.createProduct(); const variantId = product.variants[0].id, assetId = randomUUID();
-  product = store.addAssets({ productId: product.id, revision: product.revision }, [{ id: assetId, fileName: '测试主图.png', mimeType: 'image/png', width: 1000, height: 1000,
-    byteSize: 10, originalPath: `assets/${assetId}.png`, previewPath: `assets/${assetId}.preview.png`, sha256: 'a'.repeat(64) }]);
-  product = store.updateAsset({ productId: product.id, revision: product.revision, assetId, role: 'main', variantIds: [variantId] });
-  if (options.gallery) {
-    const galleryId = randomUUID();
-    product = store.addAssets({ productId: product.id, revision: product.revision }, [{ id: galleryId, fileName: 'gallery.png', mimeType: 'image/png', width: 1000, height: 1000,
-      byteSize: 10, originalPath: `assets/${galleryId}.png`, previewPath: `assets/${galleryId}.preview.png`, sha256: 'b'.repeat(64) }]);
-    product = store.updateAsset({ productId: product.id, revision: product.revision, assetId: galleryId, role: 'gallery', variantIds: [variantId] });
-  }
+  let product = store.createProduct(); const variantId = product.variants[0].id;
+  product=addSourceOriginalFixture(directory,store,product.id,[variantId]);
+  const assetId=product.assets[0].id;
+  if(options.gallery)product=addSourceOriginalFixture(directory,store,product.id,[variantId],'gallery',1);
+  await confirmSourceConsistencyFixture(directory,store,product.id);
   const target = amazon.enableDemo();
   if(options.requireMain){const getSchema=amazon.getSchema.bind(amazon);amazon.getSchema=async input=>{const schema=await getSchema(input);schema.schema.required=[...new Set([...(schema.schema.required as string[] ?? []),'main_product_image_locator'])];return schema;};}
   let draft = await amazon.createDraft({ targetId: target.id, productId: product.id, variantId, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
@@ -35,7 +31,7 @@ async function fixture(t: test.TestContext, options: { holdUpload?: boolean; fai
     brand: [{ value: 'Verified Brand', marketplace_id: target.marketplaceId }], color: [{ value: 'Blue', marketplace_id: target.marketplaceId }],
     purchasable_offer: [{ marketplace_id: target.marketplaceId, currency: 'USD', audience: 'ALL', our_price: [{ schedule: [{ value_with_tax: 12.5 }] }] }] } });
   let release = () => {}; const held = new Promise<void>(r => { release = r; });
-  const uploaded = { id: randomUUID(), assetId, profileId: 'alpha', generation: 1, sha256: 'a'.repeat(64), byteSize: 10, mimeType: 'image/png',
+  const uploaded = { id: randomUUID(), assetId, profileId: 'alpha', generation: 1, sha256: store.getAssetRecord(assetId)!.sha256, byteSize: 33, mimeType: 'image/png',
     batchId: randomUUID(), remotePath: '/test/image.png', publicUrl: 'https://images.example.com/test/image.png', status: 'AVAILABLE' as const, attempts: 1, errorCode: null,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   let uploadCalls = 0, verifyCalls = 0, generation = 1;
@@ -55,9 +51,9 @@ async function fixture(t: test.TestContext, options: { holdUpload?: boolean; fai
 function saveLegacyImageApproval(f: Awaited<ReturnType<typeof fixture>>) {
   const draft=f.amazon.getDraft(f.draft.id),asset=f.product.assets[0],now=new Date().toISOString();
   const run=validateImageWorkflowRun({id:randomUUID(),draftId:draft.id,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
-    status:'COMPLETED',stage:'complete',attempt:1,maxAttempts:2,contextSha256:'b'.repeat(64),draftSha256:imageWorkflowDraftStamp(draft),referenceAssets:[{id:asset.id,sha256:'a'.repeat(64)}],
+    status:'COMPLETED',stage:'complete',attempt:1,maxAttempts:2,contextSha256:'b'.repeat(64),draftSha256:imageWorkflowDraftStamp(draft),referenceAssets:[{id:asset.id,sha256:f.store.getAssetRecord(asset.id)!.sha256}],
     planResultIds:[randomUUID()],candidateIds:[randomUUID()],ipReviewResultIds:[randomUUID()],ocrResultIds:[randomUUID()],reviewResultIds:[randomUUID()],
-    approvedAssetId:asset.id,approvedSha256:'a'.repeat(64),createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION});
+    approvedAssetId:randomUUID(),approvedSha256:f.store.getAssetRecord(asset.id)!.sha256,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION});
   const db=new DatabaseSync(join(f.directory,'red.sqlite'));
   try{db.prepare('INSERT INTO image_workflow_runs(id,record_json) VALUES(?,?)').run(run.id,JSON.stringify(run));}finally{db.close();}
 }
@@ -271,5 +267,5 @@ test('an image confirmed for another SKU cannot satisfy an unconfirmed current-S
     SELECT ?,product_id,'CONFIRMED-OTHER',original_spec,normalized_spec,purchase_price,inventory,source_spec,source_purchase_price,position+1 FROM variants WHERE id=?`).run(other, f.draft.variantId);
   db.prepare('UPDATE variant_assets SET confirmed=0 WHERE variant_id=?').run(f.draft.variantId);
   db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(f.product.assets[0].id, other, new Date().toISOString()); db.close();
-  assert.throws(() => f.create(), /确认|主图/); assert.equal(f.uploadCalls, 0);
+  assert.throws(() => f.create(), error=>(error as any).code==='SOURCE_CONSISTENCY_IDENTITY_INVALID'); assert.equal(f.uploadCalls, 0);
 });

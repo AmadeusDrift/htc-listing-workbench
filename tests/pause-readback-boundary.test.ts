@@ -1,3 +1,4 @@
+import { addSourceOriginalFixture, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -92,9 +93,9 @@ async function fixture(t: test.TestContext) {
     let product = store.createProduct(); product = store.saveProduct({ id: product.id, revision: product.revision, title: 'Synthetic accepted product', sourceUrl: product.sourceUrl, description: product.description, status: product.status, facts: product.facts,
       variants: product.variants.map(({ id, originalSpec, normalizedSpec, purchasePrice, inventory }) => ({ id, sku: `PAUSE-${suffix}`, originalSpec, normalizedSpec, purchasePrice, inventory })) });
     if (withAsset) {
-      const assetId = randomUUID(), sha256 = 'a'.repeat(64);
-      product = store.addAssets({ productId: product.id, revision: product.revision }, [{ id: assetId, fileName: 'synthetic.png', mimeType: 'image/png', width: 1000, height: 1000, byteSize: 10, originalPath: `assets/${assetId}.png`, previewPath: `assets/${assetId}.preview.png`, sha256 }]);
-      product = store.updateAsset({ productId: product.id, revision: product.revision, assetId, role: 'main', variantIds: [product.variants[0].id] });
+      product=addSourceOriginalFixture(directory,store,product.id,[product.variants[0].id]);
+      const assetId=product.assets[0].id,sha256=store.getAssetRecord(assetId)!.sha256;
+      await confirmSourceConsistencyFixture(directory,store,product.id);
       uploads.set(assetId, { id: randomUUID(), assetId, profileId: 'alpha', generation: 1, sha256, publicUrl: `https://images.example.test/${assetId}.png`, status: 'AVAILABLE' });
     }
     return amazon.createDraft({ targetId: target.id, productId: product.id, variantId: product.variants[0].id, productType: 'STORAGE_BAG', requirements: 'LISTING', parentageLevel, locale: 'en_US' });

@@ -9,6 +9,7 @@ import { HostingService } from '../../src/main/hosting/service.ts';
 import { abortable } from '../../src/main/hosting/errors.ts';
 import { ExecutionService } from '../../src/main/execution/service.ts';
 import { installIpc } from '../../src/main/ipc.ts';
+import { assertConsistencyView } from '../../src/main/source-image-consistency/proof.ts';
 import { AiService } from '../../src/main/ai/service.ts';
 import { ImageVersionService } from '../../src/main/image-versions/service.ts';
 import { decodeArtifact } from '../../src/main/image-versions/decoder.ts';
@@ -60,6 +61,7 @@ void app.whenReady().then(async () => {
         slots:Array.from({length:7},(_,index)=>({index:index+1,status:'PASSED',approvedAssetId:crypto.randomUUID(),approvedSha256:store.getAssetRecord(asset.id)!.sha256}))};proofs.set(draft.id,workflow);return{draft,workflow};},
   };
   const automatic=new AutomaticListingService(root,{store,amazon,hosting,execution,followup,procurement,labels,images:imageBoundary as never,
+    prepareSourceConsistency:async(input,_signal,fresh)=>{for(const variantId of input.variantIds){fresh();assertConsistencyView(ai.getSourceConsistency({productId:input.productId,productRevision:input.productRevision,variantId}));}},
     rules:()=>{const rules=new ListingRuleStore(root);try{return rules.get();}finally{rules.close();}},labelFormat:()=>labelSettings.get()});
   writeFileSync(join(root, 'ftp-test-config.json'), JSON.stringify({ id: 'alpha', host: ftp.host, port: ftp.port, secure: false,
     username: 'fixture-user', password: 'fixture-password-only', remoteRoot: '/', publicBaseUrl: 'https://images.example.com/AAA/' }));
@@ -69,7 +71,7 @@ void app.whenReady().then(async () => {
     releaseUploads: () => { const release = releaseUploads; uploadGate = null; release(); },
   } });
   const url = 'data:text/html;charset=utf-8,<html><head><meta http-equiv="Content-Security-Policy" content="default-src %27none%27"></head><body>Isolated HTC execution test</body></html>';
-  const window = new BrowserWindow({ show: false, webPreferences: { preload: resolve('dist-electron/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  const window = new BrowserWindow({ show: false, webPreferences: { preload: resolve(process.env.RED_E2E_PRELOAD??'dist-electron/preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   installIpc(window, store, root, url, amazon, hosting, execution, ai, images, content, async () => { throw Error('Restore is tested in its dedicated harness'); },undefined,undefined,undefined,{followup,procurement,catalog,labels,labelSettings},undefined,undefined,undefined,automatic,{labels,labelSettings,shipmentDocuments,procurement});
   automatic.start();labels.resume();
   let closed = false, stopping = false;

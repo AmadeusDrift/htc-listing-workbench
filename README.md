@@ -6,6 +6,7 @@ Windows / Electron / React / TypeScript 批量上架工作台的源码归档基�
 
 ## 文档导航
 
+- [逐分支修复路线图](docs/version-control/REPAIR_ROADMAP.md)
 - [工作区导航与更新流程](docs/version-control/WORKSPACE_GUIDE.md)
 - [每次更新必须提交的工作约定](AGENTS.md)
 - [2026-10-10 合并与验证记录](docs/maintenance/2026-10-10-工作区合并与提交约定.md)

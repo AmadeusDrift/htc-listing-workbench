@@ -32,7 +32,7 @@
 | 20 | 成功已持久化但上层未确认时复用 | `tests/listing-completion-boundary.test.ts`：`resume after persisted candidate-result/review-result/adoption uses exact durable evidence without another adoption or request`；`tests/listing-completion-owners.test.ts` 双入口的 `persisted result/adoption is recovered ...` | **直接（离线局部组合），S+L**。真实结果、成功 call、usage、context 和 adoption 关联恢复；候选/复核/采用落库后注入上层中断，重建不重复请求或采用。此组持久结果中断为异常注入，真正 process.exit 另覆盖已发无结果边界。 |
 | 21 | 生图丢响应，本地候选有/无 | `tests/image-workflow-service.test.ts`：`a lost paid response reconciles a durable candidate after restart and resumes without a second generation for that slot`；`a paid 502 response remains unknown across restart and is locally reconciled without another POST` | **部分，S+L**。有候选复用且单槽不增尝试；无候选仍 UNKNOWN、POST 为 1。候选仓库在该 fixture 中是跨服务重建保留的 Map，未证明完整进程崩溃后的磁盘候选恢复。 |
 | 22 | 明确未发送与已发未知分开 | `tests/image-workflow-service.test.ts`：`a proven unsent generation failure preserves its ready attempt and resumes with the same request identity`；`a paid 502 response remains unknown across restart and is locally reconciled without another POST` | **部分，S+L**。生图 notSent 保留 READY/requestId，502 保留 UNKNOWN；此证据不能套用于字段操作（17、18）。 |
-| 23 | 各 await 暂停，晚返回不得越权采用/提交 | `tests/automatic-listing.test.ts`：`pause during images revokes later publishing, and explicit resume reuses completed images`；`pause after field repair checkpoints recheck and rebuilds the child without repeating fields or generation`；`tests/execution.test.ts`：`pause during Amazon submit preflight prevents the write and can resume safely` | **部分，S+L**。覆盖图片返回、字段返回和提交预校验的部分屏障；没有所有 await 点的参数化暂停/取消/迟到/重启矩阵。 |
+| 23 | 各 await 暂停，晚返回不得越权采用/提交 | `tests/automatic-listing.test.ts` 的图片/字段暂停；`tests/execution.test.ts` 的 submit preflight；`tests/pause-readback-boundary.test.ts` 的真实任务 scheduled/inflight 暂停取消、parent READY、real Execution late ACCEPTED 系列 | **部分，S+L**。补充实际回读/备货/标签组合和父体/提交晚返回检查点，均有继续对照与重建保护；仍没有所有 await 点的参数化矩阵，阶段 checkpoint 不是完整七图。见 G3。 |
 | 24 | 多商品、多并发、部分失败隔离 | `tests/execution-concurrency.test.ts`：`1 workers reach and obey the SKU limit while seven distinct SKUs keep every step in order`（同模板还有 `3`、`5`）；`one failed SKU does not stop its peers or finalize the batch before they settle`；`tests/automatic-preparation.test.ts`：`item preparation errors and partial completion errors retain saved changes and continue with other SKUs` | **部分，S+L**。并发上限、顺序和失败隔离直接断言；自动准备与执行层分别验证，未包含真实付费多商品服务组合。 |
 | 25 | 连点、同任务并发、跨任务同 SKU 防重 | `tests/image-workflow-service.test.ts`：`same draft call is deduplicated while active, then restart marks unfinished work interrupted without sending`；`tests/execution-concurrency.test.ts`：`concurrent tasks retain duplicate draft and same-listing SKU queue protection` | **部分，S+L**。同草稿共享 Promise、重复草稿/同店 SKU/跨未结束任务拒绝；未在完整 UI→自动任务→所有服务组合中验证双击。 |
 | 26 | 正式 PUT 未知跨重启仍不重发 | `tests/execution.test.ts`：`unknown submission is read back and remains human attention across retry and restart`；`tests/followup.test.ts`：`unknown write is retained for attention and never automatically read or replayed` | **部分，S+L**。执行替身写入 UNKNOWN 后 writes=1；独立回读队列对 UNKNOWN 不自动读/重发。执行层提交被替换，不能称真实正式 PUT 断网实验；两个入口的回读规则需分别保留。 |
@@ -44,7 +44,7 @@
 | 32 | 保存、崩溃、历史加载、隔离恢复一致 | `tests/fault-recovery.test.ts`：`actual process exits at all restore boundaries recover one complete workspace and retain newer safety history`；`tests/image-workflow-service.test.ts`：`blocked workflow is backed up durably, while a forged completion cannot enter a backup` | **部分，S+L**。确实对子进程退出、恢复日志、本地 SQLite/文件及未知写锁断言；夹具均合成，未包含本计划全部历史业务状态的脱敏回放。 |
 | 33 | 日志归因与环境权限错误可区分 | `tests/ai-provider-errors.test.ts`：`Aidge NoPermission explains service permission without blaming saved credentials or exposing server details`；`signature failures and generic authorization responses retain their distinct authentication error`；`tests/ai-output-diagnostics.test.ts`：`a paid-boundary service output failure retains only its unapproved reply and fixed rejection metadata` | **部分，S+L**。服务权限与鉴权分类、固定拒绝阶段及脱敏元数据有断言；尚缺贯通自动任务/字段/图片/外部请求的关联归因，以及 OS 权限失败与业务失败的统一报告。 |
 | 34 | 发布制品哈希与有界真实观察 | 没有对应的专门测试名；`scripts/package.mjs` 将文件 SHA-256 写入 `版本与摘要.json`，属构建逻辑，不是验收结果 | **缺口**。未验证本次隔离制品与源码提交绑定、交付文件摘要复核及获批后的有界真实样本；本次不启动真实观察。 |
-| 35 | 暂停任务与独立回读调度组合和重启 | `tests/followup.test.ts`：`maintenance pause cancels timers and prevents manual due runs until resume`；`restart preserves the remaining delay and resumes readback without any submission API`；`tests/automatic-listing.test.ts`：`pause during images revokes later publishing, and explicit resume reuses completed images` | **缺口；相关证据 S+L**。分别测试独立回读维护暂停、回读重启和自动任务暂停，未同时实例化两套服务验证任务暂停对已排期回读的协议及重启结果。见 G3。 |
+| 35 | 暂停任务与独立回读调度组合和重启 | `tests/pause-readback-boundary.test.ts`：`real task … permits accepted-only readback … including restart`、两任务隔离、maintenance pause、UNKNOWN/SUBMITTING 和已排队标签暂停系列 | **直接（离线组合），S+L**。同 SQLite 组合真实 Automatic、Followup、Amazon、Execution、Procurement、Labels、ImageWorkflow，公共 due/refreshWaiting 验证已排期/在途回读及重建；外部 HTTP/托管和付费 provider 为替身，未启用真实周期调度器、打印 UI 或实际店铺。见 G3。 |
 
 ## 修复增量：定价原因与证据
 
@@ -86,11 +86,20 @@
 - 队列按完整销售身份隔离未知结果，并在异步证据读取期间核对 journal；其他模式/销售配方不误标 UNKNOWN。自动修复恢复仍先检查已存在子任务的提交意图。
 - 自动 owner 使用真实 AutomaticListingService 的局部入口，但由夹具装载 repair 检查点并授予合成权限；后续执行/备货/标签为替身。单独 pipeline E2E 使用真实本地 FTP 和演示 Amazon，不能填补真实付费/正式上架验收。
 
+## 修复增量：暂停与回读采用边界
+
+`fix/pause-readback-boundary` 为场景 23、24、26、30、32、35 增加离线组合证据，类型为 S/L。规格和质量复审通过；新增 35 项、相关回归 293/293、独立质量探针 11/11；最终全量 1722 项、1721 通过、0 失败、0 取消、1 同文件符号链接权限跳过，150912.8292 ms；类型检查和隔离流水线 3 项通过。完整命令、请求计数与替身范围见 `docs/maintenance/2026-10-10-暂停与回读边界.md`。
+
+- 真实 GET 在途更换 generation 的 RED 证明旧响应曾被 Amazon 保存并能被真实 Procurement 采用。修复后成功/404/其他错误均先复核请求范围；初始 draft-target 身份也必须匹配。现有合法观察、accepted/未知锁、另一实例的新审计与新观察被保留；删除的草稿不会被旧请求重建。
+- 普通 accepted 经公共 create/startAuthorized，覆盖排期或在途 pause/cancel、维护暂停在 OAuth beforeSend/GET/多 SKU、UNKNOWN/SUBMITTING 人工与自动回读、重建不恢复权限。两任务仅停一个，另一任务仍通过真实备货与标签 PDF 文件路径；已排队标签停止后不发送。
+- 父体使用同商品真实命名 ledger、prepareDrafts 和 familyParentPlan，阶段检查点配合模拟既有 parent grant；暂停/取消下一准备入口 0 次，继续对照到达入口 1 次后由安全哨兵停止。晚 ACCEPTED 组合使用关联真实 Execution 的所有权检查点，公共启动和真实 transport 返回，继续对照完成回读/备货/标签。生产 Automatic 等待 Execution 返回后仍可安排已 accepted 的独立 Followup，测试中零 GET 仅限指定检查点，不代表全部晚返回路径。
+- 付费边界 fail-closed，所有用例付费 provider 调用为 0；没有执行实际七图、字段采用、真实店铺或打印。已有图片/字段阶段的暂停证据仍由原测试提供，不将本组扩大为所有 await 验收。
+
 ## 优先补齐的最小反例
 
 - **G1（15，并以 16 作负向保护）：离线反例已补齐。** 修复前 5 项定向测试中 4 项准确失败，包含仅字段说明变化使已有候选 UNKNOWN 被阻断；修复后相同测试通过。兼容范围明确为字段卡 `title/description`，推断权限和其他规则仍是严格语义边界。真实上下文构造、图片服务及本地持久机制已组合验证，外部提供方与真实业务验收仍未覆盖。
 - **G2（17、18、19、20、22）：离线局部组合反例已补齐。** 两个 owner 均组合真实字段/Amazon/AI 服务与 SQLite，覆盖预览失败字段 POST=0、beforeSend 后结果未知、已存结果/采用恢复，并核对同 operation/call、逻辑次数和 2+2 预算。来源颜色单独计数，预览失败不等于整个 complete 零付费。真实子进程退出、双连接并发、加密备份前进/后退恢复、保留期清理和严格历史反例见修复增量。规格复审另外确认：恢复完整快照可复用结果；快照停在已存非 PASS 复核但未写本地 checkpoint 时，BLOCKED 新增请求为 0，NEEDS_CHANGES 仅使用剩余第二轮 2 次。自动 owner 的检查点/grant 为合成装载，未覆盖完整 pump、原生授权、真实提供方或正式上架，不将这些边界写成已验收。
-- **G3（23、35）**：用同一工作区内真实自动任务服务和独立 `FollowupService`，构造 ACCEPTED 已排期、正在 GET、UNKNOWN、多个待到期 SKU；在各屏障暂停任务、维护暂停及重启。先固化协议：任务暂停后哪些只读查询允许继续、哪些权限必须撤销；再断言不再发生付费/PUT/未经许可采用，晚 GET 仅按协议落库、不会触发发布，重启不恢复已撤销授权。源码中 `AutomaticListingService.stopChildren` 停止图片、执行、标签，未直接调用独立回读暂停；`FollowupService.pause` 是独立内存状态，不能把各自单测当作组合验收。
+- **G3（23、35）：离线组合反例已补齐。** 同一真实工作区服务组合明确：任务暂停/取消撤销后续执行权限，独立 accepted-only 回读仍可继续；维护暂停阻止新请求但允许已发 GET 完成；UNKNOWN/SUBMITTING 自动不读，人工回读不解未知锁；重建不恢复 grant。已排期/在途、多 SKU、两个任务隔离、排队标签、父体 READY 与晚 ACCEPTED 均有断言。后两组使用明确阶段检查点并有正向继续对照；全七图、原生授权、实际打印、全部 await 与真实外部业务仍未验证。generation 与草稿范围在可信回读采用前校验，防止 Followup 拒绝了旧响应而其他本地消费者已经采用。
 
 ## 证据边界与补录要求
 

@@ -94,6 +94,16 @@ function copyPolicyIssues(draft: AmazonDraft): ListingIssue[] {
   } catch { return [localIssue('POLICY_SCHEMA_UNSUPPORTED','当前 Schema 无法提取文案约束，请更新字段规则')]; }
 }
 
+/** Readback metadata may advance independently; identity and submitted content may not. */
+function readbackDraftScope(draft: AmazonDraft): string {
+  const { id, productId, productRevision, variantId, sku, targetId, sellerId, marketplaceId, mode, revision, schema, attributes, listingProgram, salesPlan, submittedAt, submissionId } = draft;
+  return semanticJson({ id, productId, productRevision, variantId, sku, targetId, sellerId, marketplaceId, mode, revision, schema, attributes, listingProgram, salesPlan: salesPlan ?? null, submittedAt, submissionId } as unknown as JsonValue);
+}
+function readbackTargetScope(target: AmazonTarget): string {
+  const { id, sellerId, marketplaceId, mode, region, locale } = target;
+  return semanticJson({ id, sellerId, marketplaceId, mode, region, locale });
+}
+
 export class AmazonService {
   private persistence: AmazonPersistence;
   private vault: CredentialVault;
@@ -702,15 +712,25 @@ export class AmazonService {
     } finally { this.busy.delete(record.draft.id); }
   }
   async readListing(input: unknown, beforeSend?: () => void): Promise<AmazonDraft> {
-    const record = this.checked(input);
+    let record = this.checked(input);
     if (!record.draft.submittedAt && !['UNKNOWN', 'SUBMITTING'].includes(record.draft.state)) throw new UserFacingError('此草稿尚未正式提交，不能回读；请先完成校验、预览和确认提交');
     this.enter(record.draft.id);
     try {
       const target = this.active(record.draft.targetId); let result: ApiResult;
+      if (target.sellerId !== record.draft.sellerId || target.marketplaceId !== record.draft.marketplaceId || target.mode !== record.draft.mode) throw new UserFacingError('回读草稿与店铺身份不匹配，请核对后重新操作');
+      const draftId = record.draft.id, draftScope = readbackDraftScope(record.draft), targetScope = readbackTargetScope(target), generation = this.persistence.generation(target.id);
+      const currentRecord = () => {
+        this.ensureOpen();
+        if (generation !== this.persistence.generation(target.id) || targetScope !== readbackTargetScope(this.persistence.target(target.id))) throw new UserFacingError('回读期间店铺身份或授权配置已变化，未采用本次响应');
+        const current = this.persistence.record(draftId);
+        if (draftScope !== readbackDraftScope(current.draft)) throw new UserFacingError('回读期间草稿身份或提交内容已变化，未采用本次响应');
+        return current;
+      };
       if (target.mode === 'demo') { beforeSend?.(); result = { data: { sku: record.draft.sku, summaries: record.draft.submittedAt ? [{ marketplaceId: target.marketplaceId, status: ['BUYABLE', 'DISCOVERABLE'] }] : [], issues: [],relationships:record.draft.salesPlan?.parentage==='CHILD'?[{marketplaceId:target.marketplaceId,relationships:[{type:'VARIATION',parentSkus:[record.draft.salesPlan.parentSku!],variationTheme:{theme:record.draft.salesPlan.variationTheme!,attributes:[]}}]}]:[] }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'getListingsItem'); }
       else {
         try { result = await this.transport.api(target, 'getListingsItem', this.listingPath(record), { ...this.listingQuery(record), includedData: 'summaries,issues,attributes,offers,fulfillmentAvailability,relationships' }, undefined, beforeSend); }
         catch (error) {
+          record = currentRecord();
           if (error instanceof AmazonTransportError) { record.readResponse = error.response; this.exchange(record, 'readback', error); this.persistence.putRecord(record); }
           if (!(error instanceof AmazonTransportError) || error.status !== 404) throw error;
           record.draft.checkedAt = this.at(); record.draft.requestId = error.requestId; record.draft.statuses = [];
@@ -718,6 +738,9 @@ export class AmazonService {
           this.event(record, 'readback', 'Amazon 尚未查到此 SKU；不能据此推断前次写入未发生'); this.persistence.putRecord(record); return clone(record.draft);
         }
       }
+      // An already-sent read may settle during maintenance pause. Do not rerun
+      // beforeSend here: validate response ownership, then merge into current state.
+      record = currentRecord();
       record.readResponse = result.data; record.draft.requestId = result.requestId; record.draft.checkedAt = this.at(); this.exchange(record, 'readback', result); this.persistence.putRecord(record);
       if (result.data.sku !== record.draft.sku || !Array.isArray(result.data.summaries)) throw new UserFacingError('Amazon 回读响应的 SKU 或数据结构不匹配');
       record.draft.listingIssues = remoteIssues(result.data.issues, target.mode);

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { categoryAttributeValues, selectedSkuCategoryAttributes, sourceAttributes, sourceMappingReport } from '../src/main/amazon/demo.ts';
 import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { assertListingEvidence, assertListingReview, validateListingFieldsOutput, listingFingerprint } from '../src/main/listing-ai/validation.ts';
+import { assertListingEvidence as assertV2Evidence } from '../src/main/listing-ai/evidence-validation-v2.ts';
 import { currentCopyIssues, assertCurrentImageCategoryExclusions } from '../src/main/listing-ai/current-evidence.ts';
 import { parseCategorySource } from '../src/main/listing-ai/evidence-category-v2.ts';
 import { sceneSet } from './fixtures/image-set.ts';
@@ -163,8 +164,10 @@ test('a subtype token alone never excludes its broader category and clean affirm
     const parsed=parseCategorySource(field,raw);
     assert.deepEqual([...parsed.excluded,...parsed.unresolved],[term],raw);
     const e=[fact(name,raw)],context=scope('item_name',e);
-    assert.doesNotThrow(()=>assertListingEvidence(candidate('item_name',broaderClaim,e),context),raw);
-    assert.deepEqual(currentCopyIssues([{field:'item_name',values:[broaderClaim]}],context),[],raw);
+    assert.doesNotThrow(()=>assertV2Evidence(candidate('item_name',broaderClaim,e),context),raw);
+    // v2 exclusions never invent a broader exclusion. v3 also requires positive support.
+    assert.throws(()=>assertListingEvidence(candidate('item_name',broaderClaim,e),context),raw);
+    assert.ok(currentCopyIssues([{field:'item_name',values:[broaderClaim]}],context).length,raw);
   }
   assert.deepEqual(categoryAttributeValues('power_source_type','electric or corded electric'),['Corded Electric']);
   assert.deepEqual(categoryAttributeValues('item_firmness_description','soft or extra soft'),['Extra Soft']);
@@ -172,7 +175,7 @@ test('a subtype token alone never excludes its broader category and clean affirm
 });
 
 const checkOldCaption=(text:string,context:ListingAiContext)=>{
-  const set=sceneSet();set.slots[1].expectedText=[{text,evidenceIds:['unchanged-historical-citation']}];
+  const set=sceneSet();set.slots[1].expectedText=[{text,evidenceIds:context.evidence.map(item=>item.id)}];
   assertCurrentImageCategoryExclusions(context,{setPlan:set,plans:[]});
 };
 for(const channel of ['candidate','current copy','old caption'] as const)test(`unrelated candidate negation never erases source exclusions in ${channel}`,()=>{
@@ -199,9 +202,16 @@ test('candidate exclusions and broad terms are not promoted to affirmative or na
     ['供电方式','非电动','Non-electric Coaster'],
   ]){
     const e=[fact(name,raw)],context=scope('item_name',e);
-    assert.doesNotThrow(()=>assertListingEvidence(candidate('item_name',text,e),context),text);
-    assert.deepEqual(currentCopyIssues([{field:'item_name',values:[text]}],context),[],text);
-    assert.doesNotThrow(()=>checkOldCaption(text,context),text);
+    assert.doesNotThrow(()=>assertV2Evidence(candidate('item_name',text,e),context),text);
+    if(text==='Soft Bristles with no battery'||text==='Electric Coaster for non-smokers'){
+      assert.throws(()=>assertListingEvidence(candidate('item_name',text,e),context),text);
+      assert.ok(currentCopyIssues([{field:'item_name',values:[text]}],context).length,text);
+      assert.throws(()=>checkOldCaption(text,context),text);
+    }else{
+      assert.doesNotThrow(()=>assertListingEvidence(candidate('item_name',text,e),context),text);
+      assert.deepEqual(currentCopyIssues([{field:'item_name',values:[text]}],context),[],text);
+      assert.doesNotThrow(()=>checkOldCaption(text,context),text);
+    }
   }
 });
 
@@ -210,9 +220,10 @@ for(const [name,raw,text] of [
   ['供电方式','非有线电动','Electric Coaster for non-smokers; non-corded electric'],
 ])test(`candidate subtype constraints stay within their own clause: ${name}`,()=>{
   const e=[fact(name,raw)],context=scope('item_name',e);
-  assert.doesNotThrow(()=>assertListingEvidence(candidate('item_name',text,e),context));
-  assert.deepEqual(currentCopyIssues([{field:'item_name',values:[text]}],context),[]);
-  assert.doesNotThrow(()=>checkOldCaption(text,context));
+  assert.doesNotThrow(()=>assertV2Evidence(candidate('item_name',text,e),context));
+  assert.throws(()=>assertListingEvidence(candidate('item_name',text,e),context));
+  assert.ok(currentCopyIssues([{field:'item_name',values:[text]}],context).length);
+  assert.throws(()=>checkOldCaption(text,context));
 });
 
 test('an affirmative or unresolved subtype in its own clause remains constrained despite other negative clauses',()=>{
@@ -288,12 +299,12 @@ async function negativeAgeDraft(t:test.TestContext){
   return {...f,product,draft,reference:{draftId:draft.id,draftRevision:draft.revision}};
 }
 
-test('new results stamp v2 and partial repair retains legal fields without a policy retry',async t=>{
+test('new results stamp current v3 and partial repair retains legal fields without a policy retry',async t=>{
   const f=await negativeAgeDraft(t),context=buildListingContext(f.draft,f.product,1),age=context.evidence.find(e=>e.name==='适用年龄')!,material=context.evidence.find(e=>e.meaning==='material')!;
   context.fields=context.fields.filter(field=>['material','age_range_description'].includes(field.name));context.repairRequest={issues:[],currentValues:{}};
   f.respond(()=>chat({kind:'amazon-fields',candidates:[...candidate('material','Silicone',[material]).candidates,...candidate('age_range_description','Child',[age],true).candidates],missing:[]}));
   const result=await f.ai.listingFields(context,async()=>{});
-  assert.equal(result.listingEvidenceContractVersion,'listing-evidence/v2');
+  assert.equal(result.listingEvidenceContractVersion,'listing-evidence/v3');
   if(result.output.kind!=='amazon-fields')throw Error('fields');
   assert.deepEqual(result.output.candidates.map(item=>item.field),['material']);assert.deepEqual(result.output.missing.map(item=>item.field),['age_range_description']);
   assert.equal(f.requests.length,1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);
@@ -317,7 +328,7 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
   const path=join(f.directory,'versioned.htcbackup'),target=join(f.directory,'restored'),password='isolated negation evidence backup';
   await createWorkspaceBackup(f.directory,path,password);await commitWorkspaceRestore(target,await prepareWorkspaceRestore(target,path,password));
   const restored=openDatabase(target);try{assert.equal(restored.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json,raw);}finally{restored.close();}
-  const invalid=structuredClone(result);(invalid as any).listingEvidenceContractVersion='listing-evidence/v3';assert.throws(()=>validateStoredAiResult(invalid));
+  const invalid=structuredClone(result);(invalid as any).listingEvidenceContractVersion='listing-evidence/v999';assert.throws(()=>validateStoredAiResult(invalid));
 });
 
 test('current validation stays strict for unmarked, v1 and v2 results',async t=>{

@@ -18,7 +18,8 @@ import { buildListingContext } from './context.ts';
 import { assertListingEvidence, assertListingReview, listingFingerprint, selectedSkuCategoryConflicts, validateListingContext } from './validation.ts';
 import type { CurrentListingCopy } from '../../shared/image-ai-contracts.ts';
 import { currentImageListingSnapshot } from '../image-workflow/image-facts.ts';
-import { currentDraftEvidenceIssues } from './current-evidence.ts';
+import { currentDraftEvidenceIssues, currentProseRepairIssues } from './current-evidence.ts';
+import { isProseField } from './evidence-prose-v3.ts';
 
 export interface CurrentCopyRepairResult {
   draft: AmazonDraft;
@@ -218,6 +219,8 @@ export class ListingAiService {
     const reference = input(raw, 'suggest'), { draft, context } = this.current(reference);
     const snapshot = currentImageListingSnapshot(draft,context), currentListingCopy = snapshot.currentListingCopy;
     if (!currentListingCopy.length) throw new UserFacingError('草稿还没有可审核文案，请先完成文案');
+    const evidenceIssues=currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id));
+    if(evidenceIssues.length)throw new UserFacingError(evidenceIssues.join('；').slice(0,2000));
     const assertFresh = async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); const current=this.current(reference); if (listingFingerprint(currentImageListingSnapshot(current.draft,current.context)) !== listingFingerprint(snapshot)) throw new UserFacingError('草稿文案已变化，请重新审核'); };
     await assertFresh(); signal?.throwIfAborted();
     const review = await this.ai.reviewCurrentListing(snapshot.context, currentListingCopy, assertFresh, signal);
@@ -324,9 +327,11 @@ export class ListingAiService {
         signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);checkpoint();
         const currentScope=this.current({draftId:draft.id,draftRevision:draft.revision}).context;
         const sourceIssues:ListingIssue[]=currentScope.fields.flatMap(field=>{
+          if(isProseField(field.name))return [];
           const values=candidateTextValues(field.name,draft.attributes[field.name])??[],conflicts=values.flatMap(value=>selectedSkuCategoryConflicts(value,currentScope.evidence,field.name));
           return conflicts.length?[{code:'SKU_ATTRIBUTE_CONFLICT',severity:'ERROR',category:'field',source:'local',autoFixable:false,attributeNames:[field.name],message:'当前字段与所选 SKU 的明确属性矛盾：'+conflicts.map(c=>c.field+' 应为 '+c.expected.join(' / ')+'，现有 '+c.actual.join(' / ')).join('；')}]:[];
         });
+        sourceIssues.push(...currentProseRepairIssues(draft,currentScope,id=>this.ai.getResult(id)).map(issue=>({code:issue.kind==='citation'?'PROSE_ADOPTION_EVIDENCE':'PROSE_SOURCE_EVIDENCE',severity:'ERROR' as const,category:'field' as const,source:'local' as const,autoFixable:false,attributeNames:[issue.field],message:issue.reason})));
         if(draft.state==='AMAZON_VALIDATED'&&!reviewIssues.length&&!sourceIssues.length)return finish([]);
         const issues=[...errors(draft),...reviewIssues,...sourceIssues];remaining=issues.map(i=>(i.attributeNames.join('、')||i.code)+'：'+i.message);
         if(operation.rounds.length>=2)return finish(remaining);
@@ -348,7 +353,8 @@ export class ListingAiService {
         aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
       };
       const suggestion=await request('candidate'),candidate=this.candidates(suggestion,draft,context);
-      const fields=candidate.candidates.filter(c=>JSON.stringify(wrapCandidateValues(draft.schema,draft.marketplaceId,c.field,c.items.map(i=>i.value),draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field])).map(c=>c.field);
+      const citationRepairs=new Set(context.repairRequest?.issues.filter(issue=>issue.code==='PROSE_ADOPTION_EVIDENCE'&&isProseField(issue.field)).map(issue=>issue.field));
+      const fields=candidate.candidates.filter(c=>citationRepairs.has(c.field)||JSON.stringify(wrapCandidateValues(draft.schema,draft.marketplaceId,c.field,c.items.map(i=>i.value),draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field])).map(c=>c.field);
       if(!fields.length)return finish([...remaining,...candidate.missing.map(m=>m.field+'：'+m.reason)]);
       let review:AiResult|null=null;
       if(reviewEnabled){

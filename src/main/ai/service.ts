@@ -405,6 +405,7 @@ export class AiService {
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
     this.ensureOpen(); const profile = this.assertProfile('deepseek-review'), currentCopy = validateCurrentListingCopy(copy);
+    assertCurrentCopyEvidence(currentCopy,context);
     return this.start(profile, context, { operation: 'listing-current-review', context, currentCopy }, async activeSignal => {
       const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal); };
       await assertFresh();

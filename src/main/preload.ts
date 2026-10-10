@@ -1,10 +1,11 @@
+import { validateOutputRejection, presentRejection } from '../shared/rejection-presentation.ts';
 import { contextBridge, ipcRenderer } from 'electron';
 import type { RedApi } from '../shared/contracts.ts';
 import type { CollectionReceiveResult } from '../shared/collection-contracts.ts';
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
-  const response = await ipcRenderer.invoke(channel, ...args) as { ok: true; data: T } | { ok: false; error: string };
-  if (!response.ok) throw new Error(response.error);
+  const response = await ipcRenderer.invoke(channel, ...args) as { ok: true; data: T } | { ok: false; error: string; rejection?:unknown };
+  if (!response.ok) {if(response.rejection!==undefined){try{const rejection=validateOutputRejection(response.rejection);throw Object.assign(new Error(presentRejection(rejection.code)),{rejection});}catch(error){if(error instanceof Error&&'rejection' in error)throw error;throw new Error(presentRejection(undefined));}}throw new Error(response.error);}
   return response.data;
 }
 const api: RedApi = {

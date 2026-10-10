@@ -314,12 +314,13 @@ test('new results stamp current v3 and partial repair retains legal fields witho
 for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)test(`saved ${version??'v0'} listing result keeps its literal and bytes while current rejects negative claims`,async t=>{
   const f=await negativeAgeDraft(t),result=structuredClone(await f.listing.suggest(f.reference)),context=result.listingContext!,age=context.evidence.find(e=>e.name==='适用年龄')!;
   if(version==='listing-evidence/v2')age.value='不适合儿童；适用成人';
+  delete result.fieldRejections; // This literal historical payload predates presentation sidecars.
   result.output=candidate('age_range_description',version==='listing-evidence/v2'?'Adult':'Child',[age]);
   if(version===undefined)delete result.listingEvidenceContractVersion;else (result as any).listingEvidenceContractVersion=version;
   result.sourceSha256=listingFingerprint(context);
   assert.deepEqual(validateStoredAiResult(result),result);
   if(version==='listing-evidence/v2')assert.deepEqual(validateAiResult(result),result);else assert.throws(()=>validateAiResult(result));
-  const raw=JSON.stringify(result),db=openDatabase(f.directory);try{db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,result.id);}finally{db.close();}
+  const raw=JSON.stringify(result),db=openDatabase(f.directory);try{const call=JSON.parse(String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!.record_json));delete call.presentationContext;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,result.id);}finally{db.close();}
   assert.deepEqual(f.ai.getResult(result.id),result);assert.ok(f.ai.queryResults({productId:f.product.id}).items.some(item=>item.id===result.id));
   const before=f.requests.length;
   await assert.rejects(f.listing.review({...f.reference,suggestionResultId:result.id}));
@@ -333,6 +334,7 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
 
 test('current validation stays strict for unmarked, v1 and v2 results',async t=>{
   const f=await negativeAgeDraft(t),result=structuredClone(await f.listing.suggest(f.reference)),context=result.listingContext!,age=context.evidence.find(e=>e.name==='适用年龄')!;
+  delete result.fieldRejections; // This literal historical payload predates presentation sidecars.
   result.output=candidate('age_range_description','Child',[age]);
   for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2']){
     const input={...result,listingEvidenceContractVersion:version};if(version===undefined)delete input.listingEvidenceContractVersion;

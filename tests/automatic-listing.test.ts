@@ -151,11 +151,11 @@ test('confirmed pricing rejection is terminal and excluded only in the same targ
   assert.equal((await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,1);
   f.target.sellerId='seller';f.rules.revision++;
   const changed=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});
-  assert.equal(changed.products[0].eligibleCount,1);assert.match(changed.products[0].rows[0].reconsideration,/规则/);
+  assert.equal(changed.products[0].eligibleCount,1);assert.match(changed.products[0].rows[0].reconsideration,/规则/);assert.equal(changed.products[0].rows[0].noticeCode,'RULES_CHANGED');
   assert.equal(f.service.get(task.id).items[0].status,'SCREENED','read projection preserves audit');
   f.rules.revision--;
   const oldTitle=f.product.title;f.product.title='Updated source facts';
-  const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,1);assert.match(sourceChanged.products[0].rows[0].reconsideration!,/来源/);f.product.title=oldTitle;
+  const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,1);assert.match(sourceChanged.products[0].rows[0].reconsideration!,/来源/);assert.equal(sourceChanged.products[0].rows[0].noticeCode,'SOURCE_CHANGED');f.product.title=oldTitle;
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try{assert.deepEqual(restored.get(task.id),saved);assert.equal((await restored.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].filteredCount,1);assert.throws(()=>restored.prepareStart(task.id),/已经结束/);}finally{await restored.close();}
 });

@@ -35,8 +35,8 @@ window.red = {
  getAutomaticListingQueue:async input=>{state.queueReads=(state.queueReads??0)+1;return ({targetId:input.targetId,scope:{mode:'live',sellerId:input.targetId==='target-1'?'seller':'other-seller',marketplaceId:'ATVPDKIKX0DER'},ruleRevision:7,products:state.products.filter(p=>input.productIds.includes(p.id)).map(p=>{
   const scoped=input.targetId==='target-1',inputIssue=scoped&&state.queueMode==='input'?'销售配方待补资料：包装件数冲突':undefined;
   const rows=inputIssue?[]:p.variants.slice(0,scoped&&['mixed','reasons'].includes(state.queueMode)?3:2).map((v,index)=>{
-   const kind=scoped&&state.queueMode==='unknown'?'UNKNOWN':scoped&&(state.queueMode==='all'||['partial','mixed'].includes(state.queueMode)&&index===0||state.queueMode==='reasons'&&index<2)?'RULE_FILTERED':scoped&&['mixed','reasons'].includes(state.queueMode)&&index===2?'SYSTEM_REPAIR':'PENDING';
-   return {key:p.id+':'+v.id,productId:p.id,recipeKey:v.id,specification:v.sku,sku:v.sku,kind,eligible:kind==='PENDING',message:state.queueMode==='reasons'?['已确认 ROI 规则未通过','来源图片触发 IP 风险规则','来源图片下载失败，保留原任务待修复'][index]:kind==='RULE_FILTERED'?'已确认 ROI 规则未通过':kind==='SYSTEM_REPAIR'?'图片服务响应异常，保留原任务待修复':'',reconsideration:null,taskId:null};
+   const kind=state.queueMode==='status'?['COMPLETED','SUBMITTED'][index]:scoped&&state.queueMode==='unknown'?'UNKNOWN':scoped&&(state.queueMode==='all'||['partial','mixed'].includes(state.queueMode)&&index===0||state.queueMode==='reasons'&&index<2)?'RULE_FILTERED':scoped&&['mixed','reasons'].includes(state.queueMode)&&index===2?'SYSTEM_REPAIR':'PENDING';
+   return {key:p.id+':'+v.id,productId:p.id,recipeKey:v.id,specification:v.sku,sku:v.sku,kind,...(state.queueMode==='guidance'?{noticeCode:index===0?'SOURCE_CHANGED':'UNKNOWN_RECONCILED',continuationRequired:index===1}:{}),reasonCode:state.queueMode==='reasons'?['ROI_MAX_PRICE','IP_PLAN_BLOCKED','SOURCE_DOWNLOAD_FAILED'][index]:kind==='RULE_FILTERED'?'ROI_MAX_PRICE':kind==='SYSTEM_REPAIR'?'SYSTEM_FAILURE':undefined,eligible:kind==='PENDING',message:['status','guidance'].includes(state.queueMode)?'https://secret.invalid':state.queueMode==='reasons'?['已确认 ROI 规则未通过','来源图片触发 IP 风险规则','来源图片下载失败，保留原任务待修复'][index]:kind==='RULE_FILTERED'?'已确认 ROI 规则未通过':kind==='SYSTEM_REPAIR'?'图片服务响应异常，保留原任务待修复':'',reconsideration:null,taskId:null};
   });return {productId:p.id,title:p.title,inputIssue,rows,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>r.kind!=='RULE_FILTERED').length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length};})});},
  getListingRules:async()=>({revision:7,product:{variantLimit:2,stockSets:5}}),
  listAiCapabilities:async()=>['text','text-review','image-generation','ocr','image-risk'].map(capability=>({capability,available:true})),
@@ -95,18 +95,25 @@ try {
  await expect(page.getByText(/本次可启动 2 个销售 SKU/)).toBeVisible();
 
 
+ await page.evaluate(()=>window.fixture.queueMode='status');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await page.getByRole('tab',{name:/已提交与完成/}).click();await page.getByTestId('automatic-product-1').locator('summary').click();
+ await expect(page.getByTestId('automatic-product-1')).toContainText('流程已完成');await expect(page.getByTestId('automatic-product-1')).toContainText('已提交，等待平台回读或标签');await expect(page.getByTestId('automatic-product-1')).not.toContainText('无法归因');
+ await page.evaluate(()=>window.fixture.queueMode='guidance');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await page.getByRole('tab',{name:/待上架/}).click();
+ if(!await page.getByTestId('automatic-product-1').getAttribute('open'))await page.getByTestId('automatic-product-1').locator('summary').click();
+ await expect(page.getByTestId('automatic-product-1')).toContainText('来源资料已变化，重新评估');await expect(page.getByTestId('automatic-product-1')).toContainText('原未知结果已核对');await expect(page.getByTestId('automatic-product-1')).toContainText('请继续或取消原任务');await expect(page.getByTestId('automatic-product-1')).not.toContainText('secret.invalid');
+ pass('queue completion, readback, stale-rule reassessment and original-task guidance preserve typed producer messages');
+ await page.getByTestId('automatic-product-1').locator('summary').click();
  const start=page.getByRole('button',{name:'启动并自动发布',exact:true});
  await page.evaluate(()=>window.fixture.queueMode='input');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
  await expect(page.getByTestId('automatic-select-product-1')).toBeDisabled();await expect(start).toBeDisabled();await page.getByRole('tab',{name:'待修复与核对 1',exact:true}).click();await page.getByTestId('automatic-product-1').locator('summary').click();
- await expect(page.getByTestId('automatic-product-1').getByText('销售配方待补资料：包装件数冲突',{exact:true})).toHaveCount(1);
+ await expect(page.getByTestId('automatic-product-1').getByText('来源资料尚不完整。请进入商品资料核对。',{exact:true})).toHaveCount(1);
  await page.evaluate(()=>window.fixture.queueMode='mixed');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
- await expect(page.getByText(/本次可启动 1 个销售 SKU/)).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('图片服务响应异常，保留原任务待修复');
+ await expect(page.getByText(/本次可启动 1 个销售 SKU/)).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('系统处理未完成，尚无更细的可信归因');
  await mkdir(resolve('artifacts'),{recursive:true});await page.screenshot({path:resolve('artifacts/automatic-outcome-queue.png'),fullPage:true});
  await page.evaluate(()=>window.fixture.queueMode='reasons');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
  const reasonSearch=page.getByRole('searchbox',{name:'搜索原因',exact:true});await reasonSearch.fill('ROI');await page.getByRole('tab',{name:'规则淘汰 1',exact:true}).click();
  await expect(page.getByText('原因匹配：1 个来源商品 · 1 个销售配方',{exact:true})).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
  await reasonSearch.fill('IP');await expect(page.getByTestId('automatic-product-1')).toContainText('IP 风险');await expect(page.getByTestId('automatic-product-1')).not.toContainText('已确认 ROI');
- await reasonSearch.fill('下载');await page.getByRole('tab',{name:'待修复与核对 1',exact:true}).click();await expect(page.getByTestId('automatic-product-1')).toContainText('来源图片下载失败');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
+ await reasonSearch.fill('下载');await page.getByRole('tab',{name:'待修复与核对 1',exact:true}).click();await expect(page.getByTestId('automatic-product-1')).toContainText('来源图片下载未完成');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
  await page.getByRole('button',{name:'清除原因搜索',exact:true}).click();await expect(reasonSearch).toHaveValue('');await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI');await expect(page.getByTestId('automatic-product-1')).toContainText('IP 风险');
  await page.getByRole('tab',{name:'待上架 1',exact:true}).click();
  await page.evaluate(()=>window.fixture.queueMode='partial');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
@@ -153,16 +160,16 @@ try {
   Object.assign(task.items[1],{status:'DONE',stage:'COMPLETE',error:null});
  });
  await expect(page.getByTestId('automatic-task-task-1')).toContainText('需要处理');
- await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();await expect(page.getByTestId('automatic-result-v-z')).toContainText('历史标签失败测试原因');
+ await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();await expect(page.getByTestId('automatic-result-v-z')).toContainText('历史记录未保存可信的结构化细因');
  await page.evaluate(()=>{const task=window.fixture.tasks[0];task.revision++;task.status='COMPLETED';Object.assign(task.items[0],{status:'DONE',stage:'COMPLETE',error:null});});
- await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史标签失败测试原因');
+ await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史记录未保存可信的结构化细因');
  assert.equal(await page.evaluate(()=>window.fixture.tasks[0].items[0].outcome.message),'历史标签失败测试原因');
  pass('completed sales rows retain failure audit without displaying an old fault as the current result');
  await page.evaluate(()=>{const fixture=window.fixture,background=structuredClone(fixture.tasks[0]);background.id='task-background';background.revision=1;background.status='RUNNING';background.items=background.items.map(row=>({...row,status:'PENDING',stage:'DRAFT',outcome:undefined}));fixture.tasks.push(background);fixture.queueMode=null;});
  await expect(page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).locator('option')).toHaveCount(2);
  await page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).selectOption('task-1');await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(page.getByRole('tab',{name:'待上架 1',exact:true})).toBeVisible();
  await page.waitForTimeout(2400);
- await page.evaluate(()=>{const fixture=window.fixture,task=fixture.tasks.find(task=>task.id==='task-background');task.revision++;task.status='COMPLETED';task.items.forEach(row=>{row.status='SCREENED';row.outcome={kind:'RULE_FILTERED',message:'已确认 ROI 规则未通过'};});fixture.queueMode='all';});
+ await page.evaluate(()=>{const fixture=window.fixture,task=fixture.tasks.find(task=>task.id==='task-background');task.revision++;task.status='COMPLETED';task.items.forEach(row=>{row.status='SCREENED';row.outcome={kind:'RULE_FILTERED',code:'ROI_MAX_PRICE',message:'已确认 ROI 规则未通过'};});fixture.queueMode='all';});
  await expect(page.getByRole('tab',{name:'待上架 0',exact:true})).toBeVisible();await expect(page.getByRole('tab',{name:'规则淘汰 1',exact:true})).toBeVisible();await expect(page.getByTestId('automatic-task-task-1')).toBeVisible();
  await page.evaluate(()=>{const fixture=window.fixture,task=fixture.tasks.find(task=>task.id==='task-background');task.revision++;task.status='NEEDS_ATTENTION';task.items.forEach(row=>{row.status='FAILED';row.outcome={kind:'UNKNOWN',message:'结果待核对'};});fixture.queueMode='unknown';});
  await expect(page.getByRole('tab',{name:'待修复与核对 1',exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'启动并自动发布',exact:true})).toBeDisabled();

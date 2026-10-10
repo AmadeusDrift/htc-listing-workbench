@@ -110,7 +110,7 @@ export class ListingAiService {
         const paidCheck=()=>{check();this.amazon.assertPricingForPaid(reference.draftId);};
         result=await this.ai.observeSourceColor(scope,check,signal,paidCheck);aiCalls++;check();
       }
-      if(result.output.kind!=='source-color'||result.output.verdict!=='DETERMINED')throw new UserFacingError(`来源图中的颜色仍无法确定：${result.output.kind==='source-color'?result.output.reason:'观察结果无效'}`);
+      if(result.output.kind!=='source-color'||result.output.verdict!=='DETERMINED')throw new UserFacingError('来源图中的颜色仍无法确定，请核对当前 SKU 的原图和规格；未采用模型自述作为确定原因。');
     }
     const context=this.current(reference).context,evidence=context.evidence.filter(value=>value.source==='source_image');
     return {aiCalls,evidenceChanged:before!==listingFingerprint(context.evidence),...(evidence.length?{evidenceSha256:listingFingerprint(evidence)}:{})};
@@ -300,7 +300,7 @@ export class ListingAiService {
     throw new UserFacingError('字段操作对应的草稿已修改，保留进度，未自动重发');
   }
   /** Validation previews never publish. Only reported copy/semantic fields enter this journal. */
-  async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[]}> {
+  async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[];rejections?:{resultId:string;callId:string;details:import('../../shared/rejection-presentation.ts').FieldRejections}[]}> {
     signal?.throwIfAborted();const initial=input(raw,'suggest'),journal=this.ai.completionJournal;
     const proofDraft=this.amazon.getDraft(initial.draftId);this.store.assertSourceConsistency(proofDraft.productId,proofDraft.salesPlan?.recipe.components.map(c=>c.variantId)??[proofDraft.variantId]);
     let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
@@ -311,8 +311,9 @@ export class ListingAiService {
       const context=this.current({draftId:draft.id,draftRevision:draft.revision}).context;
       return [...new Set([...remaining,...currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
     };
-    const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining};};
-    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:currentRemaining(operation.remaining)};
+    const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
+    const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
+    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:currentRemaining(operation.remaining),rejections:rejections()};
     if(!operation.rounds.length){
       this.amazon.assertPricingForPaid(draft.id);
       aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;

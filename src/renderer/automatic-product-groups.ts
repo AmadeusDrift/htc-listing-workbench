@@ -1,6 +1,8 @@
-import type { AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
+import { presentRejection } from '../shared/rejection-presentation.ts';
+import type { AutomaticQueueRow, AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
 import type { ProductDetail, ProductSummary, Variant } from '../shared/contracts.ts';
 
+export const automaticItemReason=(item:AutomaticListingItem)=>presentRejection(item.outcome?.kind==='RULE_FILTERED'?item.outcome.code:item.rejection?.detail.code??item.outcome?.code,item.outcome?.kind==='UNKNOWN');
 export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
   if (item.status === 'FAILED'||item.status==='SCREENED') {
@@ -76,7 +78,17 @@ export function filterAutomaticProductGroups(groups: AutomaticProductGroup[], se
   const query = search.trim().toLocaleLowerCase();
   if (!query) return groups;
   return groups.filter(group => [group.title, group.sourceUrl, ...group.parentSkus,
-    ...group.items.flatMap(item => [item.sku, item.salesPlan?.recipe.specification ?? '', item.salesPlan?.recipe.color ?? '']),
+    ...group.items.flatMap(item => [item.sku, item.salesPlan?.recipe.specification ?? '', item.salesPlan?.recipe.color ?? '', automaticItemReason(item)]),
     ...group.sourceVariants.flatMap(({ variant }) => [variant.sku, variant.originalSpec, variant.normalizedSpec, variant.sourceSpec]),
   ].some(value => value?.toLocaleLowerCase().includes(query)));
+}
+
+export function automaticQueueReason(row:AutomaticQueueRow):string {
+ if(row.kind==='UNKNOWN')return presentRejection(undefined,true);
+ if(row.kind==='COMPLETED')return '流程已完成';
+ if(row.kind==='SUBMITTED')return '已提交，等待平台回读或标签';
+ const notices:Record<string,string>={RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'定价输入已变化，重新评估',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估',UNKNOWN_RECONCILED:'原未知结果已核对，可重新准备；历史未知记录保留，不会自动重试',EVIDENCE_READ_FAILED:'暂无法核对已保存证据，记录保留待修复'};
+ const notice=row.noticeCode&&Object.hasOwn(notices,row.noticeCode)?notices[row.noticeCode]:undefined;
+ const text=notice?(notice+(['UNKNOWN_RECONCILED','EVIDENCE_READ_FAILED'].includes(row.noticeCode!)?'':'；原淘汰记录保留，旧任务不会自动重启')):row.reasonCode||row.message?presentRejection(row.reasonCode):'';
+ return [text,row.continuationRequired?'请继续或取消原任务':''].filter(Boolean).join('；');
 }

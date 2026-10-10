@@ -12,6 +12,7 @@ import { assertBusinessRules } from '../listing-ai/history.ts';
 import { AUTOMATIC_SOURCE_ISSUES, type AutomaticSourceIssueCode } from '../../shared/image-workflow-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { AutomaticListingOutcome } from '../../shared/automatic-listing-contracts.ts';
+import { DECLARATION_SOURCE_CONFLICT } from '../amazon/declaration-safety.ts';
 
 export const sourceStamp = (product: ProductDetail): string => fingerprint({
   id: product.id, title: product.title, sourceUrl: product.sourceUrl, description: product.description,
@@ -133,6 +134,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
   if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
   if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
     if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
+  }else if(result.code===DECLARATION_SOURCE_CONFLICT){
+    if(result.kind!=='NEEDS_INPUT'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if(!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();
   return result;
 }

@@ -25,6 +25,7 @@ import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
 import type { ProductClassification } from '../../shared/category-ai-contracts.ts';
 import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
 import { projectSalesProduct, validateSalesPlan, validateSalesRecipe } from '../sales-plans/records.ts';
+import { DECLARATION_SOURCE_CONFLICT } from '../amazon/declaration-safety.ts';
 import { reconcileSalesIdentity } from '../sales-plans/reconciliation.ts';
 import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/service.ts';
 import { canResumeImageWorkflow, hasSevenApprovedImages, AUTOMATIC_SOURCE_ISSUES } from '../../shared/image-workflow-contracts.ts';
@@ -178,7 +179,8 @@ export class AutomaticListingService {
       const unknown=this.unknownCode(row,task);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
       else if(draft){
-        classification=pricingOutcome(draft,this.deps.rules())??classification;
+        const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
+        classification=pricingOutcome(draft,this.deps.rules())??(declarationConflict?{kind:'NEEDS_INPUT',code:DECLARATION_SOURCE_CONFLICT}:classification);
         if(classification.kind!=='RULE_FILTERED'&&this.deps.images.getRuleFilterEvidence){
           const image=await this.deps.images.getRuleFilterEvidence(draft.id);
           if(image)classification={kind:'RULE_FILTERED',code:image.kind,image};

@@ -8,6 +8,8 @@ import { convertMeasurement, DIMENSION_FIELDS, mapMeasurementFields, validateFie
 import type { ConfirmedMeasurements, MeasurementSet } from './field-mapping.ts';
 import { effectiveSourceMeasurements, sourceFactValue, sourceFieldName } from './demo.ts';
 import { productSourceQuantity, sourceQuantity } from '../../shared/source-quantity.ts';
+import { declarationRisks } from './declaration-safety.ts';
+import type { DeclarationScope } from './declaration-safety.ts';
 
 export interface BusinessRuleInput {
   product: ProductDetail; variant: Variant; schema: AmazonSchema; target: AmazonTarget; attributes: JsonObject;
@@ -17,6 +19,8 @@ export interface BusinessRuleInput {
   /** Supplied by the sales recipe boundary; component packages do not prove a mixed/bundled package. */
   packageMatchesSaleUnit?: boolean;
   baseSku?: string;
+  /** Raw selected source variants, before sales-display projection. */
+  declarationScope?: DeclarationScope;
 }
 
 /** Deterministic business inputs. Original source records are never modified. */
@@ -64,20 +68,13 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   for (const field of ['model_number','model_name','part_number']) add(field, input.baseSku??variant.sku, '缺失型号标识使用商品组基础 SKU');
   add('country_of_origin', 'CN', '普通商品原产国规则');
   if(target.marketplaceId==='ATVPDKIKX0DER'&&first('country_of_origin')?.value==='CN')add('import_designation','Imported','中国原产国在美国站对应进口商品；不沿用来源网站国内是否进口标签');
-  const factText = product.facts.filter(fact => ['source_confirmed','human_confirmed','conflicting'].includes(fact.state)).map(fact => `${fact.name}:${fact.value}`).join('\n');
-  const physicalRisk = /电动|充电|电池|清洗剂|清洁剂|消毒|农药|驱虫|气雾|喷雾|复合木|刨花板|密度板|\bbattery\b|\baerosol\b|\bpesticide\b/iu.test(`${product.title}\n${product.description}\n${factText}`);
-  const batteryRisk = /电动|充电|电池|\bbatter(?:y|ies)\b|\brechargeable\b|\belectric\b/iu.test(`${product.title}\n${product.description}\n${factText}`);
-  const batteryFact = product.facts.some(fact => /电池|batter/i.test(fact.name) && !/^(?:否|无|不需要|不含|false|no|none|not required)$/iu.test(fact.value.trim()));
-  const complianceConflict = product.facts.some(fact => fact.state === 'conflicting' && /合规|危险|电池|液体|证书|certif|battery|hazard/i.test(fact.name));
-  const specialDeclaration = product.facts.some(fact => ['source_confirmed','human_confirmed','conflicting'].includes(fact.state)
-    && ['supplier_declared_dg_hz_regulation','required_product_compliance_certificate'].includes(sourceFieldName(fact.name, 'haul'))
-    && !/^(?:not[ _]applicable|不适用)$/iu.test(fact.value.trim()));
+  const risk = declarationRisks(product,input.declarationScope??{variants:[variant],componentSpecifications:[]});
   if (p.ordinaryDeclarations) {
     add('gpsr_safety_attestation', true, '已确认的 GPSR 安全声明规则');
     // A chemical or certificate concern does not establish powered operation.
-    if (!batteryRisk && !batteryFact) add('batteries_required', false, '普通无电池商品声明规则');
+    if (!risk.battery) add('batteries_required', false, '普通无电池商品声明规则');
     else note('来源含电池、供电或电池声明冲突信息，未自动套用不需要电池的默认值');
-    if (!physicalRisk && !batteryFact && !complianceConflict && !specialDeclaration) {
+    if (!risk.compliance) {
       add('supplier_declared_dg_hz_regulation', 'not_applicable', '普通商品危险品法规不适用规则');
       add('required_product_compliance_certificate', 'Not Applicable', '普通商品适用证书类别规则');
     } else note('来源含电池、特殊物品或合规冲突信息，未自动套用危险品／证书不适用声明');

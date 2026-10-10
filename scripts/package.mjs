@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { cp, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { cp as copy, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -9,6 +9,12 @@ if (process.platform !== 'win32') throw new Error('此便携构建脚本目前�
 if (!existsSync('dist/index.html') || !existsSync('dist-electron/main.cjs') || !existsSync('dist-native/HTC.CollectionHost.exe') || !existsSync('dist-extension/manifest.json')) throw new Error('请先运行 npm run build');
 process.env.electron_config_cache = resolve('.cache/electron');
 const require = createRequire(import.meta.url);
+// Historical acceptance documents stay on the original machine; a fresh clone packages without them.
+const skippedDocuments = new Set();
+async function cp(source, target, options) {
+  if (/^docs[\\/]/.test(source) && !existsSync(source)) { skippedDocuments.add(resolve(target)); return; }
+  await copy(source, target, options);
+}
 const runtime = dirname(require('electron'));
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 const releaseRoot = resolve('release'), destination = resolve(releaseRoot, `HTC-${pkg.version}-win32-${process.arch}`);
@@ -68,6 +74,7 @@ digestPaths.push('Schema驱动AI字段验收记录.md');
 digestPaths.push('Amazon下载与VPN兼容验收记录.md', '2026-10-06真实接口联调记录.md');
 digestPaths.push('UI反馈统一验收记录.md', 'AI供应商共享连接验收记录.md');
 digestPaths.push('连接配置与密钥填写.md', ...(await readdir('dist/assets')).map(file => `resources/app/dist/assets/${file}`));
-for (const file of digestPaths) digests.push({ file, sha256: createHash('sha256').update(await readFile(join(destination, file))).digest('hex') });
+for (const file of digestPaths) if (!skippedDocuments.has(resolve(destination, file))) digests.push({ file, sha256: createHash('sha256').update(await readFile(join(destination, file))).digest('hex') });
 await writeFile(join(destination, '版本与摘要.json'), JSON.stringify({ version: pkg.version, generatedAt: new Date().toISOString(), platform: 'win32', architecture: process.arch, purpose: 'isolated manual testing', digests }, null, 2) + '\n');
+if (skippedDocuments.size) console.log(`未找到 ${skippedDocuments.size} 份历史说明文档，已跳过（不影响程序本体）`);
 console.log(`便携工作台已生成：${join(destination, 'HTC.exe')}`);

@@ -1,3 +1,5 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
+import { SourceConsistencyError } from '../src/main/source-image-consistency/proof.ts';
 import { sceneSet } from './fixtures/image-set.ts';
 import { attachNativeHistory } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
@@ -38,11 +40,11 @@ import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13,8); png.write('IHDR',12); png.writeUInt32BE(256,16); png.writeUInt32BE(256,20);
 test('native historical multiplicity blocks orphan refs in runSeven, completed reuse, recheck and rule proof',async t=>{
   const fresh=await fixture(t);attachNativeHistory(fresh.root,fresh.product);
-  const blocked=await fresh.run();assert.equal(blocked.workflow.status,'BLOCKED');assert.equal(fresh.calls.includes('generate'),false);
+  await assert.rejects(async()=>fresh.run(),error=>error instanceof SourceConsistencyError&&error.code==='SOURCE_CONSISTENCY_IDENTITY_INVALID');assert.equal(fresh.calls.includes('generate'),false);
   const prior=await fixture(t),completed=await prior.run();assert.equal(completed.workflow.status,'COMPLETED');
   attachNativeHistory(prior.root,prior.product);const count=prior.calls.length;
   await assert.rejects(async()=>prior.run());
-  await assert.rejects(prior.service.recheck({draftId:prior.draft.id,draftRevision:prior.amazon.getDraft(prior.draft.id).revision,sourceWorkflowId:completed.workflow.id}));
+  await assert.rejects(async()=>prior.service.recheck({draftId:prior.draft.id,draftRevision:prior.amazon.getDraft(prior.draft.id).revision,sourceWorkflowId:completed.workflow.id}));
   assert.equal(await prior.service.getRuleFilterEvidence(prior.draft.id),null);assert.equal(prior.calls.length,count);
 });
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -125,6 +127,7 @@ async function fixture(t: test.TestContext, options: { familyMigration?:boolean;
     },
     reconcileWorkflowGeneration:async(id:string)=>candidates.get(id)?.candidate??null,
   };
+  await confirmSourceConsistencyFixture(root,store,product.id);
   const service = new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never});
   t.after(async()=>{release(); await service.close(); amazon.close(); store.close(); await rm(root,{recursive:true,force:true});});
   return {root,store,amazon,product,draft,familyPlan,service,calls,listing,ai,generation,generationInputs,release,began,reopen:()=>new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never}),run:()=>service.complete({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision})};
@@ -430,6 +433,13 @@ test('complete chain adopts seven SKU images without invalidating source/draft r
   const db=openDatabase(f.root); try{assert.equal(approvedWorkflowAsset(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id))!.id,asset.id);assert.equal(approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id))!.length,7);}finally{db.close();}
   assert.equal((await f.run()).workflow.id,result.workflow.id); assert.equal(f.calls.length,27);
 });
+test('seven paid outputs remain intact while new source proof is pending and reuse without regeneration after explicit proof',async t=>{
+  const f=await fixture(t),first=await f.run(),ids=first.workflow.slots!.map(slot=>slot.approvedAssetId),count=f.calls.filter(c=>c==='generate').length;
+  const db=openDatabase(f.root);try{db.prepare('DELETE FROM source_consistency_decisions').run();}finally{db.close();}
+  assert.throws(()=>f.run(),SourceConsistencyError);assert.deepEqual(f.service.getProgress(f.draft.id)!.slots!.map(slot=>slot.approvedAssetId),ids);assert.equal(f.calls.filter(c=>c==='generate').length,count);
+  await confirmSourceConsistencyFixture(f.root,f.store,f.product.id);
+  const resumed=await f.run();assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.map(slot=>slot.approvedAssetId),ids);assert.equal(f.calls.filter(c=>c==='generate').length,count);
+});
 test('known review rejection repairs once, while persistent failure never adopts',async t=>{
   const f=await fixture(t,{rejected:1}), result=await f.run(); assert.equal(result.workflow.status,'COMPLETED'); assert.equal(result.workflow.slots![0].attempts.length,2);
   const g=await fixture(t,{rejectSlot:1}), blocked=await g.run(); assert.equal(blocked.workflow.status,'BLOCKED'); assert.equal(blocked.workflow.slots![0].attempts.length,3); assert.equal(g.calls.filter(c=>c==='generate').length,9);
@@ -666,7 +676,11 @@ test('old completed workflows remain readable but cannot be reused as a vision-r
   try {
     const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
     Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
-    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(legacy),first.workflow.id);
+    // Keep the other six paid assets identifiable as generated history when simulating a one-image legacy run.
+    const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};
+    db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(retained.id,JSON.stringify(retained));
+    db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(first.workflow.id);
+    db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(first.workflow.id,JSON.stringify(legacy));
     assert.equal(f.service.getProgress(f.draft.id)!.id,first.workflow.id);
     assert.throws(()=>approvedWorkflowAsset(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),/旧版流程/);
   } finally { db.close(); }
@@ -996,3 +1010,64 @@ test('known incomplete field preparation is retained across restart without repe
   try{const result=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'BLOCKED');assert.equal(count,1);assert.match(result.workflow.error!,/color missing/);}finally{await restarted.close();}
 });
 
+
+import { resolveConsistencyContext, consistencyDecisionKey } from '../src/main/source-image-consistency/scope.ts';
+import { saveConsistencyDecision } from '../src/main/source-image-consistency/proof.ts';
+test('QUALITY: human correction during final generation freshness await prevents send',async t=>{
+  const f=await fixture(t),db=openDatabase(f.root);let armed=false,sends=0,corrected=false;
+  const getSchema=f.amazon.getSchema.bind(f.amazon),generate=f.generation.generateForWorkflow;
+  f.amazon.getSchema=async input=>{
+    const schema=await getSchema(input);
+    if(armed&&!corrected){
+      corrected=true;const product=f.store.getProduct(f.product.id),context=resolveConsistencyContext(db,f.store,f.root,{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id});
+      const view=await saveConsistencyDecision(db,f.store,f.root,{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,fingerprint:consistencyDecisionKey(context),decision:'CORRECTION_NEEDED',reason:'Synthetic user discovers wrong original while presend schema awaits'});
+      assert.equal(view.status,'NEEDS_INPUT');
+    }
+    return schema;
+  };
+  (f.generation as any).generateForWorkflow=async(input:any,attempt:any,signal:any,assertFresh?:()=>Promise<void>)=>{
+    armed=true;await assertFresh?.();sends++;return generate(input,attempt,signal);
+  };
+  try{const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.ok(corrected);assert.equal(sends,0,'final presend freshness must reject changed human proof');}finally{db.close();}
+});
+
+test('QUALITY: source OCR final callback prevents send after human correction',async t=>{
+  const f=await fixture(t),db=openDatabase(f.root);let sends=0,corrected=false;const recognize=f.ai.recognize;
+  (f.ai as any).recognize=async(_input:any,_signal:any,beforeSend?:()=>void)=>{
+    const product=f.store.getProduct(f.product.id),context=resolveConsistencyContext(db,f.store,f.root,{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id});
+    const view=await saveConsistencyDecision(db,f.store,f.root,{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,fingerprint:consistencyDecisionKey(context),decision:'CORRECTION_NEEDED',reason:'Synthetic correction while OCR prepares source bytes'});
+    corrected=view.status==='NEEDS_INPUT';beforeSend?.();sends++;return recognize();
+  };
+  try{const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.ok(corrected);assert.equal(sends,0,'workflow OCR presend callback must reject changed proof');}finally{db.close();}
+});
+
+
+test('QUALITY: legacy freshness accepts current proof and blocks correction during its final schema await',async t=>{
+  for(const correct of [false,true])await t.test(correct?'revoked':'current',async t=>{
+    const f=await fixture(t,{rejectSlot:-1}),db=openDatabase(f.root);let armed=false,changed=false,sends=0;
+    const getSchema=f.amazon.getSchema.bind(f.amazon),generate=f.generation.generate;
+    (f.service as any).runSeven=(run:any,initial:any,signal:AbortSignal)=>{
+      const names=['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','ipReviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion'];
+      return (f.service as any).run({...Object.fromEntries(names.map(name=>[name,run[name]])),maxAttempts:2},initial,signal);
+    };
+    f.amazon.getSchema=async input=>{
+      const schema=await getSchema(input);
+      if(correct&&armed&&!changed){changed=true;const p=f.store.getProduct(f.product.id),context=resolveConsistencyContext(db,f.store,f.root,{productId:p.id,productRevision:p.revision,variantId:p.variants[0].id});await saveConsistencyDecision(db,f.store,f.root,{productId:p.id,productRevision:p.revision,variantId:p.variants[0].id,fingerprint:consistencyDecisionKey(context),decision:'CORRECTION_NEEDED',reason:'Synthetic correction during legacy final freshness await'});}
+      return schema;
+    };
+    (f.generation as any).generate=async(input:any,signal:any,fresh:()=>Promise<void>)=>{armed=true;await fresh();sends++;return generate(input,signal);};
+    try{const result=await f.run();assert.equal(sends,correct?0:1);assert.equal(result.workflow.status,correct?'BLOCKED':'COMPLETED',result.workflow.error??'');assert.equal(changed,correct);}finally{db.close();}
+  });
+});
+
+test('QUALITY: correction during final adoption freshness retains paid candidate without approval',async t=>{
+  const f=await fixture(t),db=openDatabase(f.root),getSchema=f.amazon.getSchema.bind(f.amazon);let changed=false,adoptionChecks=0;
+  f.amazon.getSchema=async input=>{
+    const schema=await getSchema(input);
+    if(!changed&&JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs ORDER BY rowid DESC LIMIT 1').get()?.record_json??'{}')).stage==='adopting'&&++adoptionChecks===2){
+      changed=true;const p=f.store.getProduct(f.product.id),context=resolveConsistencyContext(db,f.store,f.root,{productId:p.id,productRevision:p.revision,variantId:p.variants[0].id});await saveConsistencyDecision(db,f.store,f.root,{productId:p.id,productRevision:p.revision,variantId:p.variants[0].id,fingerprint:consistencyDecisionKey(context),decision:'CORRECTION_NEEDED',reason:'Synthetic correction during adoption freshness await'});
+    }
+    return schema;
+  };
+  try{const result=await f.run();assert.ok(changed);assert.equal(result.workflow.status,'BLOCKED');assert.equal(f.calls.filter(c=>c==='generate').length,1);assert.equal(result.workflow.candidateIds.length,1);assert.ok(await f.generation.readCandidate(result.workflow.candidateIds[0]));assert.equal(result.workflow.approvedAssetId,null);assert.equal(result.workflow.slots!.some(s=>s.status==='PASSED'),false);}finally{db.close();}
+});

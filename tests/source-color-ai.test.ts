@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -39,6 +40,7 @@ async function fixture(t:test.TestContext) {
   const bytes=sourcePng(),path=join(directory,'source.png');writeFileSync(path,bytes);
   product=await importImageFiles(store,directory,{productId:product.id,revision:product.revision},[path],b=>b);
   product=store.updateAsset({productId:product.id,revision:product.revision,assetId:product.assets[0].id,role:'main',variantIds:[product.variants[0].id]});
+  await confirmSourceConsistencyFixture(directory,store,product.id);
   const hosting=new HostingService(directory,store,mockStorage),requests:any[]=[];
   let respond=(payload:any,_options?:RequestInit):Response|Promise<Response>=>chat({kind:'source-color',verdict:'DETERMINED',colors:['Silver'],reason:'The product body has a silver appearance; packaging colors excluded.',referenceAssetIds:payload.referenceImages.map((image:any)=>image.assetId)});
   const ai=new AiService(directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{const body=JSON.parse(String(options?.body));requests.push(body);const content=body.messages[1].content;return respond(JSON.parse(typeof content==='string'?content:content[0].text),options);}});

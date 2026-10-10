@@ -10,8 +10,9 @@ import { publicApi } from './api-surface.mjs';
 await mkdir(resolve('.test-data'), { recursive: true }); await mkdir(resolve('artifacts'), { recursive: true });
 const dataRoot = await mkdtemp(resolve('.test-data/execution-e2e-')), harness = join(dataRoot, 'harness.cjs');
 await build({ entryPoints: ['tests/fixtures/execution-electron.ts'], outfile: harness, bundle: true, platform: 'node', target: 'node24', format: 'cjs', external: ['electron'] });
+const preload=join(dataRoot,'preload.cjs');await build({entryPoints:['src/main/preload.ts'],outfile:preload,bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
 process.env.electron_config_cache = resolve('.cache/electron');
-const require = createRequire(import.meta.url), env = { ...process.env, RED_DATA_DIR: dataRoot, RED_E2E: '1' }; delete env.ELECTRON_RUN_AS_NODE;
+const require = createRequire(import.meta.url), env = { ...process.env, RED_DATA_DIR: dataRoot, RED_E2E: '1', RED_E2E_PRELOAD:preload }; delete env.ELECTRON_RUN_AS_NODE;
 const checks = [], errors = []; let app, page;
 async function launch() {
   app = await electron.launch({ executablePath: require('electron'), args: [harness], cwd: resolve('.'), env, timeout: 35000 });
@@ -31,6 +32,7 @@ try {
   let product = await page.evaluate(id => window.red.getProduct(id), selected.id);
   for (const asset of product.assets) product = await page.evaluate(input => window.red.updateAsset(input), { productId: product.id, revision: product.revision,
     assetId: asset.id, role: asset.role, variantIds: asset.role === 'main' ? product.variants.map(v => v.id) : [] });
+  await page.evaluate(async product=>{for(const variant of product.variants){const input={productId:product.id,productRevision:product.revision,variantId:variant.id},view=await window.red.getSourceConsistency(input);await window.red.decideSourceConsistency({...input,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Isolated fixture confirms this exact example image and selected specification; no physical fact authority'});}},product);
   const target = await page.evaluate(() => window.red.enableAmazonDemo());
   assert.equal(await page.evaluate(() => typeof window.red.prepareAmazonDrafts), 'function', 'Batch preparation must be exposed through the desktop API');
   const preparationInput = { targetId: target.id, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US',

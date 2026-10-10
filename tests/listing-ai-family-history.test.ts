@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -17,6 +18,7 @@ async function fixture(t:test.TestContext) {
   let naming:SkuNamingService|undefined;t.after(()=>naming?.close());
   const f=await listingFixture(t);naming=new SkuNamingService(f.directory);
   const input=saveInput(f.product),product=f.store.saveProduct({...input,variants:input.variants.map(v=>({...v,originalSpec:'颜色: 蓝色 / 包装: 1个装',normalizedSpec:'Blue',purchasePrice:'20'}))});
+  await confirmSourceConsistencyFixture(f.directory,f.store,product.id);
   const target=f.amazon.executionTargetScope(f.draft.targetId).target,recipe=buildSalesRecipes(product,null,defaultListingRules())[0];
   const oldGroup=naming.allocate({storeScope:salesStoreScope(target),storeCode:'U2',sourceGroupKey:`local:${product.id}:${'a'.repeat(64)}`,collectedAt:product.createdAt,childKeys:[]});
   const parent=naming.allocate({storeScope:salesStoreScope(target),storeCode:'U2',sourceGroupKey:`local:${product.id}:family:${recipe.groupKey}`,collectedAt:product.createdAt,childKeys:[]});

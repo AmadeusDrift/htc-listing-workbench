@@ -1,4 +1,5 @@
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
+import { assertProductConsistency,sourceConsistencyUnknown,SourceConsistencyError } from '../source-image-consistency/proof.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
@@ -62,6 +63,7 @@ export interface AutomaticListingDependencies {
   beginFieldRepair?: (draftId:string)=>string;
   repairFields?: (draftId: string, signal: AbortSignal, operationId?:string) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
   prepareSourceColors?: (draftId: string, signal: AbortSignal) => Promise<{ aiCalls: number; evidenceChanged: boolean; evidenceSha256?: string }>;
+  prepareSourceConsistency?: (input:{productId:string;productRevision:number;variantIds:string[]},signal:AbortSignal,assertFresh:()=>void)=>Promise<void>;
   recheckImage?: (input: { draftId: string; draftRevision: number; sourceWorkflowId: string }, signal: AbortSignal) => Promise<AmazonDraft>;
   preflight?: () => void;
   sourceReceipt?: (productId: string) => MiaoshouReceipt | null;
@@ -160,6 +162,7 @@ export class AutomaticListingService {
     }
   }
   private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
+    if(sourceConsistencyUnknown(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]))return 'SOURCE_CONSISTENCY_SENT_UNKNOWN';
     const journal=new CompletionJournal(this.db);
     // A retained guard without its old draft uses the same source sale identity as begin().
     const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
@@ -195,6 +198,10 @@ export class AutomaticListingService {
         if(after.revision!==draft.revision||this.unknownCode(row,task))classification={kind:'UNKNOWN',code:this.unknownCode(row,task)??'EVIDENCE_READ_FAILED'};
       }else if(row.stage==='SOURCES'&&row.outcome&&Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code))classification={kind:row.outcome.kind,code:row.outcome.code};
       else if(row.stage==='PLAN'||row.outcome?.code==='SOURCE_INPUT_REQUIRED')classification={kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED'};
+      if(classification.kind!=='UNKNOWN'&&classification.kind!=='RULE_FILTERED'&&!(row.stage==='SOURCES'&&row.outcome&&(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code)||row.outcome.code==='SOURCE_INPUT_REQUIRED'))){
+        try{assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);}
+        catch(error){if(error instanceof SourceConsistencyError)classification={kind:error.kind,code:error.code};else throw error;}
+      }
     }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
     if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=('上次结果尚未确认，未自动重发。上次错误：'+(row.error??'请核对已有记录')).slice(0,2000);
     row.outcome={version:1,...classification,message:(classification.image?.message??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
@@ -404,6 +411,13 @@ export class AutomaticListingService {
     } else if (!this.matching(task, row, draft)) throw new UserFacingError('任务草稿归属发生变化');
     if (draft && submitted(draft)) { row.stage = 'READBACK'; row.status = 'WAITING'; this.deps.followup.schedule(draft.id); this.save(task); return; }
     if (!row.sourcesPrepared) {
+      // A new exact visual decision needs no source redelivery or sibling revision rebase.
+      try {
+        assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);
+        row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task);
+      } catch(error) { if(!(error instanceof SourceConsistencyError))throw error; }
+    }
+    if (!row.sourcesPrepared) {
       // Only an explicit local SKU binding, after all ready siblings submitted, can
       // release the frozen source group. prepareSources verifies that binding itself.
       const sourceProduct=this.deps.store.getProduct(row.productId);
@@ -422,12 +436,27 @@ export class AutomaticListingService {
       if (sourceStamp(result.product) !== row.sourceStamp) throw new UserFacingError('准备来源图期间商品资料变化');
       for (const sibling of siblings) {
         sibling.productRevision = result.product.revision;
-        const missing = result.missing.find(value => (sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]).includes(value.variantId));
+        let missing = result.missing.find(value => (sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]).includes(value.variantId));
+        let consistencyError:SourceConsistencyError|undefined;
+        if(!missing){
+          try{
+            this.checkpoint(task,sibling);
+            if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
+            await this.deps.prepareSourceConsistency({productId:sibling.productId,productRevision:sibling.productRevision,variantIds:sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]},this.controller!.signal,()=>this.checkpoint(task,sibling));
+            this.checkpoint(task,sibling);assertProductConsistency(this.db,this.deps.store.getProduct(sibling.productId),sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]);
+          }catch(error){
+            if(!this.running(task))throw error;
+            consistencyError=error instanceof SourceConsistencyError?error:new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_REQUEST_FAILED',errorMessage(error));
+            try{assertProductConsistency(this.db,this.deps.store.getProduct(sibling.productId),sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]);}catch(proofError){if(proofError instanceof SourceConsistencyError&&proofError.kind==='UNKNOWN')consistencyError=proofError;}
+            missing={variantId:sibling.variantId,message:consistencyError.message};
+          }
+        }
         // Finish the group download first, then require every component of this sales SKU.
         sibling.sourcesPrepared = !missing; sibling.stage = missing ? 'SOURCES' : 'DRAFT';
         sibling.status = missing ? 'FAILED' : 'PENDING'; sibling.error = missing?.message ?? null;
         if(missing)sibling.outcome={version:1,kind:missing.code?AUTOMATIC_SOURCE_ISSUES[missing.code]:'NEEDS_INPUT',code:missing.code??'SOURCE_INPUT_REQUIRED',message:missing.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,sibling),draftId:null,draftRevision:null};
         else delete sibling.outcome;
+        if(consistencyError)sibling.outcome={version:1,kind:consistencyError.kind,code:consistencyError.code,message:consistencyError.message,classifiedAt:new Date().toISOString(),scope:outcomeScope(task,sibling),draftId:null,draftRevision:null};
       }
       if (siblings.some(sibling => sibling.sourcesPrepared)) {
         for (const sibling of siblings) if (!sibling.sourcesPrepared) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));

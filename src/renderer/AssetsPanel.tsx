@@ -1,3 +1,4 @@
+import { SourceConsistencyPanel } from './SourceConsistencyPanel';
 import { Check, ImageIcon, Images, Link2, Plus, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { Asset, AssetRole, ProductDetail } from '../shared/contracts';
@@ -55,6 +56,7 @@ export function AssetsPanel({ product, busy, onImport, onUpdate }: Props) {
         <p className="association-note">取消勾选只解除 SKU 关联，图片仍保留在商品中。</p>
       </aside>}
     </div>}
+    <SourceConsistencyPanel product={product} busy={busy}/>
     {preview && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setPreview(null)} onKeyDown={(event) => { if (event.key === 'Tab') { event.preventDefault(); event.currentTarget.querySelector('button')?.focus(); } }}><button type="button" className="lightbox-close icon-button" aria-label="关闭图片预览" onClick={() => setPreview(null)} autoFocus><X size={22} /></button><img src={preview.previewUrl} alt={preview.fileName} onClick={(event) => event.stopPropagation()} /><p>{preview.fileName} · {preview.width} × {preview.height} px</p></div>}
   </div>;
 }

@@ -1,4 +1,6 @@
 import { readNativeImageReceipt } from './source-images.ts';
+import { recordConsistencyBinding,assertConsistencyHistory } from './source-image-consistency/history.ts';
+import { assertProductConsistency } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -24,8 +26,9 @@ const now = () => new Date().toISOString();
 export class WorkspaceStore {
   private db: DatabaseSync;
   private directory:string;
-  constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);try{assertSourceImageHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
+  constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);try{assertSourceImageHistory(this.db,directory);assertConsistencyHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
   close(): void { this.db.close(); }
+  assertSourceConsistency(productId:string,variantIds:string[]):void { assertProductConsistency(this.db,this.getProduct(productId),variantIds); }
 
   private transaction<T>(operation: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -176,6 +179,11 @@ export class WorkspaceStore {
       const asset = previous.assets.find(a => a.id === input.assetId);
       if (!asset) throw new UserFacingError('图片不属于当前商品');
       if (input.variantIds.some(id => !previous.variants.some(v => v.id === id))) throw new UserFacingError('图片关联的 SKU 不属于当前商品');
+      for(const variant of previous.variants){
+        const was=asset.variantIds.includes(variant.id),next=input.variantIds.includes(variant.id);
+        if(was!==next||asset.role!==input.role&&(was||next))recordConsistencyBinding(this.db,previous.id,variant.id,asset.id);
+      }
+      if(input.role==='main')for(const other of previous.assets.filter(a=>a.id!==asset.id&&a.role==='main'))for(const variant of previous.variants.filter(v=>other.variantIds.includes(v.id)||previous.variants.length===1))recordConsistencyBinding(this.db,previous.id,variant.id,other.id);
       if (input.role === 'main') this.db.prepare("UPDATE assets SET role='gallery' WHERE product_id=? AND role='main'").run(input.productId);
       this.db.prepare('UPDATE assets SET role=? WHERE id=?').run(input.role, input.assetId);
       this.db.prepare('DELETE FROM variant_assets WHERE asset_id=?').run(input.assetId);
@@ -204,6 +212,7 @@ export class WorkspaceStore {
       for(const id of variantIds){
         // Existing confirmed=0 rows must never be reconfirmed by an automatic download.
         if(!this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=?').get(anchor.assetId,id)){
+          recordConsistencyBinding(this.db,product.id,id,anchor.assetId);
           this.db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(anchor.assetId,id,now());changed=true;
         }
       }

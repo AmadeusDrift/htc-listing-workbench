@@ -1,3 +1,4 @@
+import { addSourceOriginalFixture, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -220,6 +221,8 @@ test('conflicting declaration evidence cannot downgrade current safety authoriza
 
 test('reopen and encrypted backup retain source bytes, old exchanges, paid mock records and adopted context hashes',async t=>{
   const f=fixture(t);f.store.saveProduct({...saveInput(f.product),facts:[...f.product.facts,fact('材质','Silicone'),fact('颜色','Blue')]});
+  addSourceOriginalFixture(f.directory,f.store,f.product.id,[f.product.variants[0].id]);
+  await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
   const getSchema=f.service.getSchema.bind(f.service);f.service.getSchema=async input=>{
     const schema=await getSchema(input);(schema.schema.properties as JsonObject).material=value('string');
     schema.checksum=createHash('md5').update(JSON.stringify(schema.schema)).digest('base64');return schema;

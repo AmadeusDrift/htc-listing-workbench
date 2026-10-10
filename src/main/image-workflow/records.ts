@@ -1,3 +1,4 @@
+import { assertProductConsistency } from '../source-image-consistency/proof.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ProductDetail, Asset } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
@@ -142,6 +143,7 @@ export function approvedWorkflowAsset(db: DatabaseSync, draft: AmazonDraft, prod
   return approvedWorkflowAssets(db,draft,product)?.[0]??null;
 }
 export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product:ProductDetail):{id:string;sha256:string}[]|null {
+  assertProductConsistency(db,product,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);
   const run = workflowRuns(db, draft.id)[0];
   if (!run) return null;
   if(!riskPolicyCompatible(run,readImageRiskSettings(db).enabled))throw new UserFacingError('风险拦截已开启，这套图片曾在关闭状态下通过，请先重新检查已有图片');

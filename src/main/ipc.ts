@@ -112,7 +112,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
     if (lane !== 'inbox' && lane !== 'automatic') throw new UserFacingError('本地示例工作区无效');
     return loadWorkspaceExamples(store, dataRoot, decodePreview, lane);
   });
-  handle('red:products:check', 1, id => checkReadiness(store.getProduct(identifier(id))));
+  handle('red:products:check', 1, id => {const product=store.getProduct(identifier(id)),readiness=checkReadiness(product);let passed=true,detail='当前 SKU 原图与规格已核对';try{store.assertSourceConsistency(product.id,product.variants.map(v=>v.id));}catch(error){passed=false;detail=publicError(error);}readiness.checks.push({key:'source-consistency',label:'原图与规格一致性',passed,detail});return readiness;});
   handle('red:audit:list', 1, id => store.listAudit(id === undefined ? undefined : identifier(id)));
   handle('red:settings:get', 0, () => {
     const targets = amazon.listTargets(), live = targets.find(target => target.mode === 'live' && target.configured);

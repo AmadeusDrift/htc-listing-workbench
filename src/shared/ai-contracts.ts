@@ -1,3 +1,4 @@
+import type { SourceConsistencyContext,SourceConsistencyOutput } from './source-image-consistency-contracts.ts';
 import type { ProductRecordQuery, RecordPage, RecordPageOptions } from './record-query-contracts.ts';
 import type { CategoryDecision } from './category-ai-contracts.ts';
 import type { AiProviderConfigInput } from './connection-inputs.ts';
@@ -39,6 +40,7 @@ export interface AiCall {
   startedAt: string; finishedAt: string | null; usage: AiUsage;
   /** Persisted with the usage reservation to prevent repeating an unknown color request. */
   sourceColorContext?: SourceColorContext;
+  sourceConsistencyContext?: SourceConsistencyContext;
 }
 /** Confidence is normalized to 0..1; Commerce placement is unknown. */
 export interface OcrLine { text: string; confidence: number | null; box: [number, number, number, number] | null }
@@ -70,7 +72,7 @@ export interface TextReviewOutput {
   sourceSha256: string; policyVersion: typeof TEXT_REVIEW_POLICY_VERSION;
   verdict: 'PASS' | 'NEEDS_CHANGES' | 'BLOCKED'; checks: ContentReviewCheck[]; issues: ContentReviewIssue[];
 }
-export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput;
+export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
   id: string; callId: string; providerId: AiProviderId; productId: string; productRevision: number;
   variantId: string | null; assetId: string | null; assetSha256: string | null;
@@ -86,7 +88,9 @@ export interface AiResult {
   imageContext?: ProductImageContext;
   imageRequestBytes?: number;
   sourceColorContext?: SourceColorContext;
+  sourceConsistencyContext?: SourceConsistencyContext;
   sourceColorRequestBytes?: number;
+  sourceConsistencyRequestBytes?: number;
   reviewState: 'unreviewed'; output: AiOutput;
 }
 export interface RecognizeImageInput { productId: string; productRevision: number; assetId: string }

@@ -1,3 +1,4 @@
+import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +12,7 @@ async function setup(t:test.TestContext, spec='602Q',requiredColor=true) {
   const f=await fixture(t);
   const getSchema=f.amazon.getSchema.bind(f.amazon);f.amazon.getSchema=async input=>{const schema=await getSchema(input);const required=(schema.schema.required as string[]??[]).filter(name=>name!=='color');schema.schema.required=requiredColor?[...required,'color']:required;return schema;};
   const product=f.store.saveProduct({...saveInput(f.product),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:spec,normalizedSpec:spec}))});
+  await confirmSourceConsistencyFixture(f.directory,f.store,product.id);
   const draft=await f.amazon.createDraft({productId:product.id,variantId:product.variants[0].id,targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   const context:SourceColorContext={policyVersion:'source-color/v1',productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,sourceSpec:spec,referenceAssets:[{assetId:randomUUID(),sha256:'a'.repeat(64)}]};
   const results:AiResult[]=[],calls:any[]=[];let observed=0,verdict:'DETERMINED'|'UNCERTAIN'='DETERMINED',fresh=true;

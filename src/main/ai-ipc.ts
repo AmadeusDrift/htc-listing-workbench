@@ -27,6 +27,9 @@ async function readConfig(path: string): Promise<unknown> {
 export function installAiIpc(window: BrowserWindow, ai: AiService, store: WorkspaceStore, handle: IpcHandler): void {
   const auditConnection = (action: string, summary: string, connection: AiConnection) => store.recordWorkspaceEvent(action, summary,
     { vendorId: connection.id, profiles: connection.profiles.map(({ id, generation }) => ({ id, generation })) });
+  handle('red:source-consistency:get',1,raw=>ai.getSourceConsistency(raw));
+  handle('red:source-consistency:prepare',1,raw=>ai.prepareSourceConsistency(raw));
+  handle('red:source-consistency:decide',1,raw=>ai.decideSourceConsistency(raw));
   handle('red:ai:connections', 0, () => ai.listConnections());
   handle('red:ai:connection-save', 1, raw => {
     const connection = ai.saveConnection(raw);

@@ -1,3 +1,5 @@
+import { validateConsistencyContext } from '../source-image-consistency/scope.ts';
+import { validateConsistencyOutput,assertConsistencyOutput } from '../source-image-consistency/comparison.ts';
 import { LISTING_EVIDENCE_CONTRACT_VERSIONS } from '../../shared/listing-ai-contracts.ts';
 import type { ListingEvidenceContractVersion } from '../../shared/listing-ai-contracts.ts';
 import { assertListingEvidence } from '../listing-ai/validation.ts';
@@ -74,13 +76,15 @@ export function validateUsage(raw: unknown): AiUsage {
 }
 export function requestId(raw: unknown): string | null { if (raw === null || raw === undefined) return null; if (typeof raw !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw)) invalid(); return raw; }
 export function validateAiCall(raw: unknown): AiCall {
-  const o = keys(raw, ['id', 'providerId', 'productId', 'productRevision', 'status', 'errorCode', 'requestId', 'model', 'generation', 'startedAt', 'finishedAt', 'usage'], ['sourceColorContext']), id = providerId(o.providerId);
+  const o = keys(raw, ['id', 'providerId', 'productId', 'productRevision', 'status', 'errorCode', 'requestId', 'model', 'generation', 'startedAt', 'finishedAt', 'usage'], ['sourceColorContext','sourceConsistencyContext']), id = providerId(o.providerId);
   if (typeof o.status !== 'string' || !['RUNNING', 'SUCCEEDED', 'FAILED'].includes(o.status) || (o.errorCode !== null && !AI_ERROR_CODES.includes(o.errorCode as AiErrorCode))) invalid();
   const startedAt = date(o.startedAt), finishedAt = o.finishedAt === null ? null : date(o.finishedAt);
   if ((o.status === 'RUNNING' && (finishedAt !== null || o.errorCode !== null)) || (o.status === 'SUCCEEDED' && (!finishedAt || o.errorCode !== null)) || (o.status === 'FAILED' && (!finishedAt || o.errorCode === null)) || (finishedAt && finishedAt < startedAt)) invalid();
   const sourceColorContext=o.sourceColorContext===undefined?undefined:validateSourceColorContext(o.sourceColorContext);
+  const sourceConsistencyContext=o.sourceConsistencyContext===undefined?undefined:validateConsistencyContext(o.sourceConsistencyContext);
+  if(sourceConsistencyContext&&(sourceColorContext||id!=='deepseek'||o.model!=='deepseek-flash'||sourceConsistencyContext.productId!==o.productId||sourceConsistencyContext.productRevision!==o.productRevision))invalid();
   if(sourceColorContext&&(id!=='deepseek'||o.model!=='deepseek-flash'||sourceColorContext.productId!==o.productId||sourceColorContext.productRevision!==o.productRevision))invalid();
-  return { id: uuid(o.id), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), status: o.status as AiCall['status'], errorCode: o.errorCode as AiCall['errorCode'], requestId: requestId(o.requestId), model: modelFor(id, o.model), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), startedAt, finishedAt, usage: validateUsage(o.usage), ...(sourceColorContext?{sourceColorContext}:{}) };
+  return { id: uuid(o.id), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), status: o.status as AiCall['status'], errorCode: o.errorCode as AiCall['errorCode'], requestId: requestId(o.requestId), model: modelFor(id, o.model), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), startedAt, finishedAt, usage: validateUsage(o.usage), ...(sourceColorContext?{sourceColorContext}:{}), ...(sourceConsistencyContext?{sourceConsistencyContext}:{}) };
 }
 export function ossImageUrl(raw: unknown): string {
   const value = boundedText(raw, 8192);
@@ -154,6 +158,7 @@ export function validateTextReviewOutput(raw: unknown): TextReviewOutput {
 }
 export function validateOutput(raw: unknown): AiOutput {
   const kind = object(raw).kind;
+  if (kind === 'source-image-consistency') return validateConsistencyOutput(raw);
   if (kind === 'source-color') return validateSourceColorOutput(raw);
   if (kind === 'category-decision') return validateCategoryDecision(raw);
   if (kind === 'image-plan') return validateImagePlan(raw);
@@ -183,12 +188,12 @@ export function validateOutput(raw: unknown): AiOutput {
   return invalid();
 }
 export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): AiResult {
-  const o = keys(raw, ['id', 'callId', 'providerId', 'productId', 'productRevision', 'variantId', 'assetId', 'assetSha256', 'sourceResultIds', 'model', 'createdAt', 'reviewState', 'output'], ['listingEvidenceContractVersion', 'listingNormalization', 'sourceSha256', 'listingContext', 'listingRequestBytes', 'imageContext', 'imageRequestBytes', 'sourceColorContext', 'sourceColorRequestBytes']), id = providerId(o.providerId), output = validateOutput(o.output);
+  const o = keys(raw, ['id', 'callId', 'providerId', 'productId', 'productRevision', 'variantId', 'assetId', 'assetSha256', 'sourceResultIds', 'model', 'createdAt', 'reviewState', 'output'], ['listingEvidenceContractVersion', 'listingNormalization', 'sourceSha256', 'listingContext', 'listingRequestBytes', 'imageContext', 'imageRequestBytes', 'sourceColorContext', 'sourceColorRequestBytes', 'sourceConsistencyContext', 'sourceConsistencyRequestBytes']), id = providerId(o.providerId), output = validateOutput(o.output);
   const variantId = o.variantId === null ? null : uuid(o.variantId), assetId = o.assetId === null ? null : uuid(o.assetId), sourceResultIds = uuidList(o.sourceResultIds, 10);
   const assetSha256 = o.assetSha256 === null ? null : boundedText(o.assetSha256, 64);
   const listingKind = output.kind === 'amazon-fields' || output.kind === 'amazon-fields-review' || output.kind === 'listing-current-review';
   const imageKind = output.kind === 'image-plan' || output.kind === 'generated-image-ocr' || output.kind === 'image-text-review' || output.kind === 'image-ip-review';
-  const expectedProvider = output.kind === 'source-color' ? 'deepseek' : output.kind === 'category-decision' ? output.phase === 'judge' ? 'deepseek-review' : 'deepseek' : imageKind ? output.kind === 'image-plan' ? 'deepseek' : output.kind === 'generated-image-ocr' ? 'aliyun-ocr' : output.kind === 'image-ip-review' ? 'aliyun-image-risk' : 'deepseek-review' : listingKind ? output.kind === 'amazon-fields' ? 'deepseek' : 'deepseek-review' : null;
+  const expectedProvider = output.kind === 'source-image-consistency' || output.kind === 'source-color' ? 'deepseek' : output.kind === 'category-decision' ? output.phase === 'judge' ? 'deepseek-review' : 'deepseek' : imageKind ? output.kind === 'image-plan' ? 'deepseek' : output.kind === 'generated-image-ocr' ? 'aliyun-ocr' : output.kind === 'image-ip-review' ? 'aliyun-image-risk' : 'deepseek-review' : listingKind ? output.kind === 'amazon-fields' ? 'deepseek' : 'deepseek-review' : null;
   if (o.reviewState !== 'unreviewed' || (expectedProvider ? id !== expectedProvider : output.kind !== CAPABILITIES[id]) || (assetSha256 !== null && !/^[a-f0-9]{64}$/.test(assetSha256))) invalid();
   if (isDeepSeek(id) || imageKind ? (!variantId || assetId !== null || assetSha256 !== null) : (variantId !== null || !assetId || !assetSha256 || sourceResultIds.length)) invalid();
   if (o.sourceSha256 !== undefined && id !== 'deepseek' && !listingKind && !imageKind && output.kind !== 'category-decision') invalid();
@@ -213,13 +218,19 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
     if (output.kind === 'image-text-review' && (sourceResultIds.length !== offset + 2 || sourceResultIds[offset] !== output.planResultId || sourceResultIds[offset+1] !== output.ocrResultId)) invalid();
   }
   if (imageContext && imageContext.policyVersion !== 'product-image/v1' && output.kind === 'image-plan' && o.model !== 'deepseek-flash') invalid();
+  const sourceConsistencyContext=output.kind==='source-image-consistency'?validateConsistencyContext(o.sourceConsistencyContext):undefined;
+  if(output.kind!=='source-image-consistency'&&(o.sourceConsistencyContext!==undefined||o.sourceConsistencyRequestBytes!==undefined))invalid();
+  if(sourceConsistencyContext&&output.kind==='source-image-consistency'){
+    if(o.model!=='deepseek-flash'||sourceResultIds.length||sourceConsistencyContext.productId!==o.productId||sourceConsistencyContext.productRevision!==o.productRevision||sourceConsistencyContext.variantId!==variantId||listingFingerprint(sourceConsistencyContext)!==o.sourceSha256)invalid();
+    assertConsistencyOutput(output,sourceConsistencyContext);
+  }
   const sourceColorContext=output.kind==='source-color'?validateSourceColorContext(o.sourceColorContext):undefined;
   if(output.kind!=='source-color'&&(o.sourceColorContext!==undefined||o.sourceColorRequestBytes!==undefined))invalid();
   if(sourceColorContext&&output.kind==='source-color'){
     if(o.model!=='deepseek-flash'||sourceResultIds.length||sourceColorContext.productId!==o.productId||sourceColorContext.productRevision!==o.productRevision||sourceColorContext.variantId!==variantId||listingFingerprint(sourceColorContext)!==o.sourceSha256)invalid();
     assertSourceColorOutput(output,sourceColorContext);
   }
-  return { id: uuid(o.id), callId: uuid(o.callId), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), variantId, assetId, assetSha256, sourceResultIds, model: modelFor(id, o.model), createdAt: date(o.createdAt), reviewState: 'unreviewed', output, ...(o.sourceSha256 === undefined ? {} : { sourceSha256: sha256(o.sourceSha256) }), ...(listingContext ? { listingContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), ...(o.listingRequestBytes===undefined?{}:{listingRequestBytes:integer(o.listingRequestBytes,1,1024*1024)}) } : {}), ...(listingNormalization ? { listingNormalization } : {}), ...(imageContext ? { imageContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), imageRequestBytes: integer(o.imageRequestBytes, 1, MAX_VISION_REQUEST_BYTES) } : {}), ...(sourceColorContext?{sourceColorContext,sourceColorRequestBytes:integer(o.sourceColorRequestBytes,1,MAX_VISION_REQUEST_BYTES)}:{}) };
+  return { id: uuid(o.id), callId: uuid(o.callId), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), variantId, assetId, assetSha256, sourceResultIds, model: modelFor(id, o.model), createdAt: date(o.createdAt), reviewState: 'unreviewed', output, ...(o.sourceSha256 === undefined ? {} : { sourceSha256: sha256(o.sourceSha256) }), ...(listingContext ? { listingContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), ...(o.listingRequestBytes===undefined?{}:{listingRequestBytes:integer(o.listingRequestBytes,1,1024*1024)}) } : {}), ...(listingNormalization ? { listingNormalization } : {}), ...(imageContext ? { imageContext, ...(o.listingEvidenceContractVersion===undefined?{}:{listingEvidenceContractVersion:o.listingEvidenceContractVersion as ListingEvidenceContractVersion}), imageRequestBytes: integer(o.imageRequestBytes, 1, MAX_VISION_REQUEST_BYTES) } : {}), ...(sourceColorContext?{sourceColorContext,sourceColorRequestBytes:integer(o.sourceColorRequestBytes,1,MAX_VISION_REQUEST_BYTES)}:{}), ...(sourceConsistencyContext?{sourceConsistencyContext,sourceConsistencyRequestBytes:integer(o.sourceConsistencyRequestBytes,1,MAX_VISION_REQUEST_BYTES)}:{}) };
 }
 function parseInput<T>(operation: () => T): T { try { return operation(); } catch { throw new AiError('INVALID_INPUT'); } }
 export function parseRecognizeInput(raw: unknown): RecognizeImageInput { return parseInput(() => { const o = keys(raw, ['productId', 'productRevision', 'assetId']); return { productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), assetId: uuid(o.assetId) }; }); }

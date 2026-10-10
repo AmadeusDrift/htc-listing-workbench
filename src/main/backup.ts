@@ -1,3 +1,4 @@
+import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
 import { assertSourceImageHistory, validateSourceImageProvenance } from './source-image-provenance.ts';
 import { assertCompletionHistory, retainCompletionOperations, validateCompletionOperation } from './listing-ai/completion-journal.ts';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt } from 'node:crypto';
@@ -126,7 +127,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (database.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') OR (type='table' AND upper(sql) LIKE 'CREATE VIRTUAL TABLE%')").get()) throw new UserFacingError('备份包含不受支持的数据库对象');
     const version = Number(database.prepare('PRAGMA user_version').get()!.user_version);
     if (version < 1 || version > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
-    for (const [name, expected] of [...Object.entries(requiredTables), ...Object.entries(version >= 2 ? versionTwoTables : {}), ...Object.entries(version >= 3 ? versionThreeTables : {}), ...Object.entries(version >= 4 ? versionFourTables : {}), ...Object.entries(version >= 5 ? versionFiveTables : {}), ...Object.entries(version >= 6 ? versionSixTables : {}), ...Object.entries(version >= 7 ? versionSevenTables : {}), ...Object.entries(version >= 8 ? versionEightTables : {}), ...Object.entries(version >= 10 ? versionTenTables : {}), ...Object.entries(version >= 11 ? versionElevenTables : {}), ...Object.entries(version >= 13 ? versionThirteenTables : {}), ...Object.entries(version >= 14 ? versionFourteenTables : {}), ...Object.entries(version >= 15 ? versionFifteenTables : {}), ...Object.entries(version >= 16 ? versionSixteenTables : {}), ...Object.entries(version >= 17 ? SKU_NAMING_TABLES : {}), ...Object.entries(version >= 18 ? versionEighteenTables : {}), ...Object.entries(version >= 19 ? versionNineteenTables : {})]) {
+    for (const [name, expected] of [...Object.entries(requiredTables), ...Object.entries(version >= 2 ? versionTwoTables : {}), ...Object.entries(version >= 3 ? versionThreeTables : {}), ...Object.entries(version >= 4 ? versionFourTables : {}), ...Object.entries(version >= 5 ? versionFiveTables : {}), ...Object.entries(version >= 6 ? versionSixTables : {}), ...Object.entries(version >= 7 ? versionSevenTables : {}), ...Object.entries(version >= 8 ? versionEightTables : {}), ...Object.entries(version >= 10 ? versionTenTables : {}), ...Object.entries(version >= 11 ? versionElevenTables : {}), ...Object.entries(version >= 13 ? versionThirteenTables : {}), ...Object.entries(version >= 14 ? versionFourteenTables : {}), ...Object.entries(version >= 15 ? versionFifteenTables : {}), ...Object.entries(version >= 16 ? versionSixteenTables : {}), ...Object.entries(version >= 17 ? SKU_NAMING_TABLES : {}), ...Object.entries(version >= 18 ? versionEighteenTables : {}), ...Object.entries(version >= 19 ? versionNineteenTables : {}), ...Object.entries(version >= 20 ? CONSISTENCY_TABLES : {})]) {
       const columns = new Set(database.prepare(`PRAGMA table_xinfo(${name})`).all().map(row => row.name));
       if (expected.some(column => !columns.has(column))) throw new UserFacingError('备份数据库结构不完整，当前工作区未更改');
     }
@@ -152,13 +153,14 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 17) Object.assign(approved, SKU_NAMING_TABLES);
     if (version >= 18) Object.assign(approved, versionEighteenTables);
     if (version >= 19) Object.assign(approved, versionNineteenTables);
+    if (version >= 20) Object.assign(approved, CONSISTENCY_TABLES);
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
       if (!expected || actual.length !== expected.length || actual.some(column => column.hidden !== 0 || !expected.includes(String(column.name)))) throw new UserFacingError('备份含有不支持的数据库结构，未更改工作区');
     }
     if (version >= 4) {
-      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {})]) {
+      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {}), ...Object.keys(version >= 20 ? CONSISTENCY_TABLES : {})]) {
         const table = database.prepare("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?").get(name);
         if (!table || table.wr !== 0) throw new UserFacingError('备份任务或 FTP 表必须保留标准行标识');
         const columns = database.prepare(`PRAGMA table_xinfo(${name})`).all(), indexes = database.prepare(`PRAGMA index_list(${name})`).all();
@@ -179,7 +181,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
         for (const row of database.prepare(`SELECT id,record_json FROM ${name}`).all()) {
           if (typeof row.record_json !== 'string' || Buffer.byteLength(row.record_json) > 4 * 1024 * 1024) throw new UserFacingError('备份任务或 FTP 记录过大');
           const value = JSON.parse(row.record_json);
-          const validators = { source_image_provenance:validateSourceImageProvenance, hosting_profiles: validatePersistedProfile, hosting_uploads: validatePersistedUpload, execution_tasks: validateExecutionTask,
+          const validators = { ...CONSISTENCY_VALIDATORS, source_image_provenance:validateSourceImageProvenance, hosting_profiles: validatePersistedProfile, hosting_uploads: validatePersistedUpload, execution_tasks: validateExecutionTask,
             listing_completion_operations:validateCompletionOperation, ai_profiles: validateAiProfile, ai_calls: validateAiCall, ai_results: validateStoredAiResult, ai_usage_policies: validateStoredAiUsagePolicy, ai_usage_ledger: validateAiUsageRecord,
             image_versions: validateImageVersion, image_selections: validateImageSelection, content_versions: validateContentVersion, image_write_operations: validateImageWriteOperation,
             collection_receipts: validateCollectionReceipt, collection_captures: validateCollectionCapture, miaoshou_receipts: validateMiaoshouReceipt,
@@ -242,6 +244,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
       const assetPath = String(asset[key]); managedAssetPath(dirname(path), assetPath); paths.add(assetPath);
     }
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
+    if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {
       const batches = new Map(database.prepare('SELECT record_json FROM procurement_batches').all().map(row => {
@@ -367,6 +370,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
       for (const row of current.prepare('SELECT id,target_id,created_at,event_json FROM amazon_calls').all()) addCall.run(row.id, row.target_id, row.created_at, row.event_json);
     }
     retainAiUsage(current, snapshot);
+    retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);

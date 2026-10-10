@@ -1,3 +1,9 @@
+import { AiService } from '../src/main/ai/service.ts';
+import { HostingService } from '../src/main/hosting/service.ts';
+import { chat,mockStorage } from './fixtures/listing-ai.ts';
+import { assertConsistencyView } from '../src/main/source-image-consistency/proof.ts';
+import { materializeSourceSnapshot,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
+import { WorkspaceStore } from '../src/main/store.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -36,6 +42,7 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   const workflow = new Map<string, any>();
   const dependencies: AutomaticListingDependencies = {
     store: { getProduct: () => structuredClone(product) },
+    prepareSourceConsistency:async input=>{materializeSourceSnapshot(directory,product,input.variantIds);const store=new WorkspaceStore(directory);try{await confirmSourceConsistencyFixture(directory,store,product.id,input.variantIds);}finally{store.close();}},
     rules: () => structuredClone(rules),
     previewSales: () => buildSalesRecipes(product,null,rules),
     hosting: { getProfile: () => structuredClone(profile) },
@@ -100,10 +107,11 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
       list: () => [...drafts.values()].map(draft => ({ batchId, lineId, draftId: draft.id, current: true, status: 'READY' })) as any,
     },
   };
+  const cleanups:(()=>Promise<void>)[]=[];
   const service = new AutomaticListingService(directory, dependencies);
-  t.after(async () => { await service.close(); rmSync(directory, { recursive: true, force: true }); });
+  t.after(async () => { await service.close(); for(const close of cleanups)await close(); rmSync(directory, { recursive: true, force: true }); });
   const create = () => service.create({ productIds: [product.id], targetId: target.id, profileId: 'alpha', productType: 'BOX' });
-  return { service, directory, dependencies, create, product, target, profile, rules, drafts, executions, calls, workflow,
+  return { service, directory, dependencies, cleanups, create, product, target, profile, rules, drafts, executions, calls, workflow,
     setReady: () => { ready = true; }, failImages: () => { imageFailure = true; },
     holdImages: (callback: () => void) => { started = callback; }, releaseImages: () => release?.() };
 }
@@ -355,7 +363,7 @@ test('automatic category is decided once per product after sources and saved bef
 
 test('child sales SKUs keep images while waiting for their parent and resume automatically without another generation',async t=>{
   const f=fixture(t,'live'),groupId=randomUUID(),parentDraftId=randomUUID();let parentReady=false;
-  f.product.variants=['红色','蓝色'].map((color,i)=>({...f.product.variants[0],id:i?randomUUID():f.product.variants[0].id,sku:`SOURCE-${i}`,originalSpec:`颜色: ${color} / 尺寸: 小号`,normalizedSpec:'',purchasePrice:'0.1'}));
+  f.product.variants=['红色','蓝色'].map((color,i)=>({...f.product.variants[0],id:i?randomUUID():f.product.variants[0].id,sku:`SOURCE-${i}`,sourceSpec:`颜色: ${color} / 尺寸: 小号`,originalSpec:`颜色: ${color} / 尺寸: 小号`,normalizedSpec:'',purchasePrice:'0.1'}));
   const recipes=buildSalesRecipes(f.product,null,f.rules);
   f.dependencies.planSales=()=>recipes.map((recipe,i):SalesListingPlan=>({namingGroupId:groupId,sourceGroupKey:'same-model',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:`H2-261008-1-${String.fromCharCode(65+i)}`,baseSku:'H2-261008-1',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'待选类目',familyResolved:false,namingChildKey:recipe.key}));
   f.dependencies.resolveFamily=async({plans})=>plans.map(plan=>({...plan,parentage:'CHILD',parentSku:plan.baseSku,variationTheme:'COLOR',relationReason:'Schema 允许颜色',familyResolved:true}));
@@ -765,7 +773,7 @@ for(const {field,spec,eligible} of [
   {field:'target_audience',spec:'red',eligible:true},{field:'fabric_type',spec:'red',eligible:true},
 ]) test(`legacy exhausted ${field} ${spec} repair receives only its eligible one-time capability migration`,async t=>{
   const f=fixture(t);let fields=0;
-  f.product.variants[0].sourceSpec=spec;f.product.variants[0].originalSpec=spec;
+  f.product.variants[0].sourceSpec=spec;f.product.variants[0].originalSpec=spec;f.product.variants[0].normalizedSpec=spec;
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing fields'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;const draft=f.drafts.get(id)!;draft.revision++;
     draft.localIssues=[{code:'LOCAL_required',message:`${field}: missing`,severity:'ERROR',attributeNames:[field],category:'field',source:'local',autoFixable:false}];return structuredClone(draft);};
@@ -1051,4 +1059,32 @@ for (const externalEdit of [false,true]) test(`interrupted recheck copy repair $
     else{assert.equal(restored.get(task.id).status,'COMPLETED',row.error??'');assert.equal(rechecks,2);assert.equal(f.calls.submissions,1);}
     assert.equal(fields,1);assert.equal(f.calls.images,1);
   }finally{await restored.close();}
+});
+
+for(const outcome of ['mismatch','unknown'] as const)test(`actual source observations isolate ${outcome} sibling and resume current manual proof without redelivery`,async t=>{
+  const f=fixture(t);f.rules.product.variantLimit=2;
+  const second={...f.product.variants[0],id:randomUUID(),sku:'SKU-BLUE',originalSpec:'Blue',normalizedSpec:'Blue',sourceSpec:'Blue'};f.product.variants.push(second);
+  const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
+  const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{
+    sends++;const p=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text);
+    if(outcome==='unknown'&&p.claims.some((c:any)=>c.value==='Blue'))throw new TypeError('synthetic unknown');
+    return chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Red'],appearance:[],claims:p.claims.map((c:any)=>({claimId:c.id,value:'Red',visibility:'visible'}))}))});
+  }});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-source-state-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
+  f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{
+    materializeSourceSnapshot(f.directory,f.product,input.variantIds);
+    for(const variantId of input.variantIds){const selected={productId:input.productId,productRevision:input.productRevision,variantId};const context=ai.sourceConsistencyContext(selected);await ai.observeSourceConsistency(context,fresh,signal);assertConsistencyView(await ai.getSourceConsistency(selected));}
+  };
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const first=f.service.get(task.id),healthy=first.items[0],blocked=first.items[1];
+  assert.equal(healthy.status,'DONE',healthy.error??'');assert.equal(blocked.outcome?.kind,outcome==='unknown'?'UNKNOWN':'NEEDS_INPUT');
+  assert.equal(f.calls.sources,1);assert.equal(f.calls.images,1);assert.equal(sends,2);
+  const proofInput={productId:f.product.id,productRevision:f.product.revision,variantId:second.id},view=await ai.getSourceConsistency(proofInput);
+  assert.equal(sends,2,'read projection never sends');
+  const confirm=()=>ai.decideSourceConsistency({...proofInput,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Synthetic independent human checked this exact visual association'});
+  if(outcome==='unknown')await assert.rejects(confirm());else await confirm();
+  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
+  assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(after.items[1].status,outcome==='unknown'?'FAILED':'DONE');
 });

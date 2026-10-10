@@ -3,11 +3,11 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { SecretStorage } from '../amazon/vault.ts';
 import { openDatabase } from '../database.ts';
 import type { WorkspaceStore } from '../store.ts';
-import type { MiaoshouImportResult, MiaoshouList, MiaoshouMode, MiaoshouPreview, MiaoshouProduct, MiaoshouReceipt, MiaoshouStatus } from '../../shared/miaoshou-contracts.ts';
+import type { MiaoshouImportResult, MiaoshouList, MiaoshouMapping, MiaoshouMode, MiaoshouPreview, MiaoshouProduct, MiaoshouReceipt, MiaoshouStatus } from '../../shared/miaoshou-contracts.ts';
 import { demoDetail, demoList } from './demo.ts';
 import { normalizeDetail, normalizeList } from './normalize.ts';
 import type { TextSanitizer } from './normalize.ts';
-import { getReceipt, persistImport } from './persistence.ts';
+import { getReceipt, persistImport, assertMiaoshouFactHistory } from './persistence.ts';
 import { MIAOSHOU_ENDPOINT, readMiaoshou } from './protocol.ts';
 import { MiaoshouReadScheduler } from './rate-limit.ts';
 import type { MiaoshouRateClock } from './rate-limit.ts';
@@ -57,7 +57,7 @@ export class MiaoshouService {
       importProduct: (product, scope) => {
         const current = this.syncScope(); if (current.accountScope !== scope.accountScope || current.mode !== scope.mode) return fail('CHANGED');
         if (this.existingImport(product.remoteId, scope)) return 'existing';
-        return persistImport(this.db, this.store, product, automaticMiaoshouMapping(product), scope.accountScope, scope.mode, this.date().toISOString()).duplicate ? 'existing' : 'added';
+        return this.persistProduct(product, automaticMiaoshouMapping(product), scope).duplicate ? 'existing' : 'added';
       },
       list: async (pageNo, pageSize, signal) => (await this.request('list', { pageNo, pageSize }, (raw, mode, sanitize) => normalizeList(raw, pageNo, pageSize, mode, sanitize, true), signal)).value,
       detail: async (id, signal) => { const result = await this.request('detail', { commonCollectBoxDetailId: id }, (raw, mode, sanitize) => normalizeDetail(raw, this.date().toISOString(), mode, sanitize), signal); if (result.value.remoteId !== id) return fail('RESPONSE'); return result.value; } });
@@ -137,12 +137,20 @@ export class MiaoshouService {
       const existing = this.existingImport(preview.product.remoteId, { accountScope: preview.accountScope, mode: preview.mode });
       if (existing) return { productId: existing.productId, duplicate: true, warnings: ['此来源商品已导入，来源更新仅暂存；已有商品、人工修改与原始导入记录均保留。'], skuCount: existing.snapshot.skus.length, imageCount: existing.snapshot.images.length };
     }
-    return persistImport(this.db, this.store, preview.product, mapping, preview.accountScope, preview.mode, this.date().toISOString());
+    return this.persistProduct(preview.product, mapping, preview);
+  }
+  private persistProduct(product: MiaoshouProduct, mapping: MiaoshouMapping, scope: SyncScope): MiaoshouImportResult {
+    const current = this.syncScope(); if (current.accountScope !== scope.accountScope || current.mode !== scope.mode) return fail('CHANGED');
+    // All public and cached/sync imports share this trusted, synchronous pre-write guard.
+    // Credentials stay in the service closure and never become receipt/audit fields.
+    return persistImport(this.db, this.store, product, mapping, scope.accountScope, scope.mode, this.date().toISOString(), value => {
+      if (scope.mode === 'live' && JSON.stringify(redactCredentials(value, this.credentials!)) !== JSON.stringify(value)) fail('RESPONSE');
+    });
   }
   private syncScope(): SyncScope { this.ensureOpen(); if (this.mode === 'unconfigured' || this.mode === 'live' && !this.credentials) return fail('NOT_CONFIGURED'); return { mode: this.mode, accountScope: this.mode === 'demo' ? hash('miaoshou-demo-v1') : hash(this.credentials!.appKey) }; }
   private existingImport(id: string, scope: SyncScope): MiaoshouReceipt | null {
     const row = this.db.prepare("SELECT record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.accountScope')=? AND json_extract(record_json,'$.mode')=? AND json_extract(record_json,'$.snapshot.remoteId')=? ORDER BY rowid LIMIT 1").get(scope.accountScope, scope.mode, id);
-    if (!row) return null; const receipt = validateMiaoshouReceipt(JSON.parse(String(row.record_json))); this.store.getProduct(receipt.productId); return receipt;
+    if (!row) return null; const receipt = validateMiaoshouReceipt(JSON.parse(String(row.record_json))); assertMiaoshouFactHistory(this.db, receipt); this.store.getProduct(receipt.productId); return receipt;
   }
   getSyncStatus() { return this.sync.status(); }
   getPreferences() { this.ensureOpen(); return this.preferences.get(); }

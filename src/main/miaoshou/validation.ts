@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { UserFacingError } from '../../shared/errors.ts';
-import type { MiaoshouDimensionId, MiaoshouMapping, MiaoshouProduct, MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
+import type { MiaoshouDimensionId, MiaoshouMapping, MiaoshouProduct, MiaoshouReceipt, SourceAttributeNormalizations } from '../../shared/miaoshou-contracts.ts';
+import { normalizeSourceAttributeV1 } from './source-attribute-normalization-v1.ts';
 
 const ERRORS = {
   INPUT: '妙手操作参数无效，请重新选择后重试', CONFIG: '妙手配置无效；请检查 AppKey 和 AppSecret 是否完整、无空格且不是模板占位文字',
@@ -153,7 +154,8 @@ export function fingerprint(product: MiaoshouProduct, mapping: MiaoshouMapping, 
   return hash(canonical({ accountScope, mode, snapshot: content, mapping: { ...mapping, skus: [...mapping.skus].sort((a, b) => compare(a.sourceKey, b.sourceKey)) } }));
 }
 export function validateMiaoshouReceipt(raw: unknown): MiaoshouReceipt {
-  const r = exact(raw, ['id', 'productId', 'fingerprint', 'accountScope', 'mode', 'receivedAt', 'snapshot', 'mapping', 'skuMappings']);
+  const hasNormalizations = Object.hasOwn(object(raw), 'factNormalizations');
+  const r = exact(raw, ['id', 'productId', 'fingerprint', 'accountScope', 'mode', 'receivedAt', 'snapshot', 'mapping', 'skuMappings', ...(hasNormalizations ? ['factNormalizations'] : [])]);
   if (r.mode !== 'demo' && r.mode !== 'live') return fail(); const mode = r.mode;
   const accountScope = text(r.accountScope, 64, true); if (!/^[0-9a-f]{64}$/.test(accountScope)) return fail();
   const snapshot = validateProduct(r.snapshot, mode), mapping = parseMapping(r.mapping, snapshot);
@@ -169,5 +171,24 @@ export function validateMiaoshouReceipt(raw: unknown): MiaoshouReceipt {
   unique(skuMappings.map(m => m.sourceKey)); unique(skuMappings.map(m => m.localVariantId));
   const id = uuid(r.id), productId = uuid(r.productId); unique([id, productId, ...skuMappings.map(m => m.localVariantId)]);
   if (skuMappings.length !== snapshot.skus.length) return fail();
-  return { id, productId, fingerprint: expectedFingerprint, accountScope, mode, receivedAt: timestamp(r.receivedAt), snapshot, mapping, skuMappings };
+  let factNormalizations: SourceAttributeNormalizations | undefined;
+  if (hasNormalizations) {
+    const record = exact(r.factNormalizations, ['version', 'entries']);
+    if (record.version !== 'source-attribute-normalization/v1') return fail();
+    const expected = snapshot.attributes.flatMap((attribute, attributeIndex) => {
+      const normalized = normalizeSourceAttributeV1(attribute);
+      return normalized.ruleIds.length ? [{ attributeIndex, rawName: attribute.name, rawValue: attribute.value, ...normalized }] : [];
+    });
+    const entries = array(record.entries, 100);
+    if (!expected.length || entries.length !== expected.length) return fail();
+    const validated = entries.map((rawEntry, index) => {
+      const entry = exact(rawEntry, ['factId', 'attributeIndex', 'rawName', 'rawValue', 'name', 'value', 'ruleIds']);
+      const factId = uuid(entry.factId), wanted = expected[index];
+      if (canonical(entry) !== canonical({ factId, ...wanted })) return fail();
+      return { factId, ...wanted };
+    });
+    unique([id, productId, ...skuMappings.map(m => m.localVariantId), ...validated.map(entry => entry.factId)]);
+    factNormalizations = { version: 'source-attribute-normalization/v1', entries: validated };
+  }
+  return { id, productId, fingerprint: expectedFingerprint, accountScope, mode, receivedAt: timestamp(r.receivedAt), snapshot, mapping, skuMappings, ...(factNormalizations ? { factNormalizations } : {}) };
 }

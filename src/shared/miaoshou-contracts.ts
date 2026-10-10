@@ -31,10 +31,18 @@ export interface MiaoshouSkuMapping { sourceKey: string; dimensions: Partial<Rec
 export interface MiaoshouMapping { priceField: 'none' | 'price' | 'oriPrice'; currency: 'unknown' | 'CNY'; skus: MiaoshouSkuMapping[] }
 export interface MiaoshouImportInput { previewId: string; mapping: MiaoshouMapping }
 export interface MiaoshouImportResult { productId: string; duplicate: boolean; warnings: string[]; skuCount: number; imageCount: number }
+export type SourceAttributeNormalizationRule = 'name-ascii-width' | 'name-trim' | 'value-ascii-width' | 'value-trim' | 'measurement-unit';
+export interface SourceAttributeNormalizationEntry {
+  factId: string; attributeIndex: number; rawName: string; rawValue: string; name: string; value: string;
+  ruleIds: SourceAttributeNormalizationRule[];
+}
+/** Creation audit against sanitized snapshot attributes; later fact edits do not rewrite it. */
+export interface SourceAttributeNormalizations { version: 'source-attribute-normalization/v1'; entries: SourceAttributeNormalizationEntry[] }
 export interface MiaoshouReceipt {
   id: string; productId: string; fingerprint: string; accountScope: string; mode: 'demo' | 'live';
   receivedAt: string; snapshot: MiaoshouProduct; mapping: MiaoshouMapping;
   skuMappings: { sourceKey: string; localVariantId: string; imageIds: string[] }[];
+  factNormalizations?: SourceAttributeNormalizations;
 }
 export interface MiaoshouDownloadInput { productId: string; revision: number; imageIds: string[] }
 export interface MiaoshouDownloadResult { product: ProductDetail; downloaded: number; existing: number; failures: { imageId: string; message: string }[] }

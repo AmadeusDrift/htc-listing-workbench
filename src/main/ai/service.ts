@@ -1,3 +1,4 @@
+import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
 import { assertCurrentCopyEvidence } from '../listing-ai/current-evidence.ts';
 import { assertCurrentListingReview } from './image-validation.ts';
@@ -72,6 +73,7 @@ interface PreparedRequest {
   sourceColorContext?: SourceColorContext;
   invoke(credentials: AiCredentials, context: AdapterContext): Promise<AdapterResult>;
   assertFresh(): Promise<void>;
+  assertBeforeSend?(): void;
 }
 type TextSnapshot = { payload: TextPayload; sources: { result: AiResult; asset: StoredAsset }[] };
 type StoredSuggestion = AiResult & { variantId: string; sourceSha256: string; output: ContentSuggestionOutput };
@@ -285,11 +287,11 @@ export class AiService {
     const bytes = await readManagedImage(this.directory, asset, signal); throwIfAborted(signal);
     if (!sameAsset(this.source(input, segmentation), asset)) throw new AiError('SOURCE_CHANGED'); return bytes;
   }
-  async recognize(raw: unknown, signal?: AbortSignal): Promise<AiResult> {
+  async recognize(raw: unknown, signal?: AbortSignal, assertBeforeSend?:()=>void): Promise<AiResult> {
     this.ensureOpen(); const input = parseRecognizeInput(raw), profile = this.assertProfile('aliyun-ocr'), asset = this.source(input);
     return this.start(profile, input, { asset }, async activeSignal => {
       const bytes = await this.readSource(input, asset, activeSignal);
-      return { variantId: null, assetId: asset.id, assetSha256: asset.sha256, sourceResultIds: [], invoke: (credentials, context) => recognizeWithAliyun(bytes, asset, credentials as AliyunCredentials, activeSignal, context), assertFresh: async () => { await this.readSource(input, asset, activeSignal); } };
+      return { variantId: null, assetId: asset.id, assetSha256: asset.sha256, sourceResultIds: [], assertBeforeSend, invoke: (credentials, context) => recognizeWithAliyun(bytes, asset, credentials as AliyunCredentials, activeSignal, context), assertFresh: async () => { await this.readSource(input, asset, activeSignal); } };
     }, signal);
   }
   private hosted(id: string, asset: StoredAsset, previous?: HostedAsset): HostedAsset {
@@ -506,7 +508,7 @@ export class AiService {
     throwIfAborted(activeSignal);
   }
   /** Main-process-only observation, stored as AI provenance rather than a product fact. */
-  async observeSourceColor(rawContext:SourceColorContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal):Promise<AiResult & {output:SourceColorOutput;sourceColorContext:SourceColorContext}> {
+  async observeSourceColor(rawContext:SourceColorContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,assertBeforeSend?:()=>void):Promise<AiResult & {output:SourceColorOutput;sourceColorContext:SourceColorContext}> {
     this.ensureOpen();const context=validateSourceColorContext(rawContext),profile={...this.assertProfile('deepseek'),model:'deepseek-flash'};
     const result=await this.start(profile,context,{operation:'source-color',context},async activeSignal=>{
       const assertFresh=async()=>{throwIfAborted(activeSignal);await assertContextFresh();await this.assertSourceColorFresh(context,activeSignal);await assertContextFresh();throwIfAborted(activeSignal);};
@@ -518,7 +520,7 @@ export class AiService {
         images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes});
         await assertContextFresh();throwIfAborted(activeSignal);this.assertSourceColorIdentity(context);
       }
-      return {variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceColorContext:context,assertFresh,
+      return {variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceColorContext:context,assertFresh,assertBeforeSend,
         invoke:async(credentials,adapterContext)=>{await assertFresh();return requestSourceColor(context,credentials as DeepSeekCredentials,activeSignal,adapterContext,images);}};
     },signal);
     if(result.output.kind!=='source-color'||!result.sourceColorContext)throw new AiError('OUTPUT_INVALID');
@@ -601,6 +603,9 @@ export class AiService {
           beforeSend: body => {
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
+            const draftId=prepared.listingContext?.draftId??prepared.imageContext?.listing.draftId;
+            if(draftId)assertStoredPricingForPaid(this.db,draftId);
+            prepared.assertBeforeSend?.();
             call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}) }, body, completion ? call => this.completionJournal.markSent(completion,call) : undefined);
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },

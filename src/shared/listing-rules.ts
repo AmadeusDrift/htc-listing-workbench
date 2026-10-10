@@ -109,7 +109,7 @@ export type PricingDecisionCode = 'QUOTE_VALID' | QuoteFailureCode | 'COST_CNY_U
 export type PackageInputBasis = 'confirmed_source' | 'business_default' | 'unverified' | 'missing' | 'conflicting';
 export interface PricingPackageInputs { dimensionsInches: [number, number, number] | null; weightPounds: number | null }
 /** Evidence describes the inputs to this attempt, not the current editable draft. */
-export interface PricingDecision {
+export interface PricingDecisionV1 {
   version: 1;
   status: 'quoted' | 'business_blocked' | 'needs_input' | 'system_error';
   code: PricingDecisionCode;
@@ -124,6 +124,12 @@ export interface PricingDecision {
     sourcePackage: PricingPackageInputs;
   };
 }
+/** v1 snapshots remain frozen; v2 separates estimates from actual editable attributes. */
+export interface PricingDecisionV2 extends Omit<PricingDecisionV1, 'version'> {
+  version: 2;
+  attributeInputs: Partial<Record<'item_package_dimensions' | 'item_package_weight', JsonValue>>;
+}
+export type PricingDecision = PricingDecisionV1 | PricingDecisionV2;
 export interface ListingQuote { price: number; minimum: number; roi: number; deliveryFee: number; commission: number; upfrontCny: number; dimensionalWeightGrams: number; billableWeightGrams: number; promotionPrice: number | null; promotionRoi: number | null }
 export interface ListingPricingBasis {
   kind: 'source_sale_unit' | 'source_piece_quote' | 'auto_bundle';

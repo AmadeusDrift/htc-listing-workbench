@@ -44,6 +44,8 @@ test('imported receipt keeps detail text and its matching SKU measurements fill 
     assert.equal(attributes.item_package_weight?.[0].value, 0.55);
     assert.equal(attributes.item_package_weight?.[0].unit, 'pounds');
     assert.ok(draft.sourceMapping?.find(row => row.field === 'item_length_width' && row.status === 'mapped'));
+    const validation=await f.amazon.validateDraft(draft);
+    assert.equal(validation.localIssues.some(issue=>issue.code.startsWith('FACT_')&&issue.attributeNames.some(field=>/weight|length|dimensions/.test(field))),false);
   }
   assert.deepEqual(f.store.getProduct(f.product.id), f.product, 'derivation does not alter product facts or revisions');
 });
@@ -55,6 +57,8 @@ test('manual measurement facts take precedence and saved draft overrides are nev
   assert.equal((draft.attributes.item_package_weight as any)[0].value, 1);
   const updated = f.amazon.saveDraft({ id: draft.id, revision: draft.revision, attributes: { ...draft.attributes, item_package_weight: [{ value: 2, unit: 'pounds', marketplace_id: 'ATVPDKIKX0DER' }] } });
   assert.equal((updated.attributes.item_package_weight as any)[0].value, 2);
+  const validation=await f.amazon.validateDraft(updated);
+  assert.ok(validation.localIssues.some(issue=>issue.code==='FACT_AUTHORITY_REQUIRED'&&issue.attributeNames.includes('item_package_weight')));
 });
 test('batch preparation derives each SKU and explicit batch values still take precedence', async t => {
   const f = await fixture(t);

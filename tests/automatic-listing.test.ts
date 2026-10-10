@@ -17,6 +17,8 @@ import type { SalesListingPlan } from '../src/shared/sales-plan-contracts.ts';
 import { UserFacingError } from '../src/shared/errors.ts';
 import { FAMILY_REBIND_EVENT_SUMMARY } from '../src/main/amazon/service.ts';
 import { validateAutomaticListingTask } from '../src/main/automatic-listing/records.ts';
+import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
+import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 
 function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   mkdirSync(resolve('.test-data'), { recursive: true });
@@ -148,6 +150,40 @@ test('confirmed pricing rejection is terminal and excluded only in the same targ
   const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,1);assert.match(sourceChanged.products[0].rows[0].reconsideration!,/来源/);f.product.title=oldTitle;
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try{assert.deepEqual(restored.get(task.id),saved);assert.equal((await restored.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].filteredCount,1);assert.throws(()=>restored.prepareStart(task.id),/已经结束/);}finally{await restored.close();}
+});
+
+for(const mutation of ['precision','partial','null','unsupported','missing-snapshot'] as const)test(`actual automatic prepare blocks a stale v2 successful quote before images: ${mutation}`,async t=>{
+  const f=fixture(t,'live'),prepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async input=>{
+    const result=await prepare(input),draft=result.items[0].draft!,resolved=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},f.rules);
+    draft.attributes=resolved.attributes;draft.businessRules=resolved.report;
+    assert.ok(draft.businessRules.quote);assert.equal(draft.businessRules.pricingDecision?.version,2);
+    if(mutation==='precision')draft.attributes.item_package_weight=[{value:.22000001,unit:'pounds'}];
+    if(mutation==='partial')draft.attributes.item_package_dimensions=[{length:{value:1.97,unit:'inches'}}];
+    if(mutation==='null')draft.attributes.item_package_weight=null;
+    if(mutation==='unsupported')(draft.businessRules.pricingDecision as any).version=3;
+    if(mutation==='missing-snapshot')delete (draft.businessRules.pricingDecision as any).attributeInputs;
+    f.drafts.set(draft.id,structuredClone(draft));return result;
+  };
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0];assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.equal(row.outcome?.kind,'NEEDS_INPUT');assert.equal(row.outcome?.code,'PRICING_EVIDENCE_STALE');
+});
+
+for(const phase of ['source-color','after-color','field-intent','recheck'] as const)test(`automatic repair rechecks v2 before new paid ${phase}`,async t=>{
+  const f=fixture(t,'live'),task=await f.create(),row=task.items[0];
+  const result=await f.dependencies.amazon.prepareDrafts({targetId:f.target.id,productType:'BOX',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',listingProgram:'haul',items:[{productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,attributes:{}}]});
+  const draft=result.items[0].draft!,priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},f.rules);
+  draft.attributes=priced.attributes;draft.businessRules=priced.report;
+  if(phase!=='after-color')draft.attributes.item_package_weight=null;
+  f.drafts.set(draft.id,structuredClone(draft));row.draftId=draft.id;row.stage='IMAGES';
+  row.repair={phase:phase==='recheck'?'RECHECK_PENDING':'FIELDS_PENDING',sourceWorkflowId:randomUUID(),draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),remaining:phase==='recheck'?[]:['color: required']};
+  let colors=0,fields=0,intents=0,rechecks=0;
+  f.dependencies.prepareSourceColors=async()=>{colors++;const changed=f.drafts.get(draft.id)!;changed.attributes.item_package_weight=null;return {aiCalls:0,evidenceChanged:false};};
+  f.dependencies.beginFieldRepair=()=>{intents++;return randomUUID();};
+  f.dependencies.repairFields=async()=>{fields++;return draft;};f.dependencies.recheckImage=async()=>{rechecks++;return draft;};
+  (f.service as any).controller=new AbortController();task.status='RUNNING';(f.service as any).grants.add(task.id);
+  await assert.rejects((f.service as any).finishRepair(task,row),/定价/);
+  assert.equal(colors,phase==='after-color'?1:0);assert.equal(fields,0);assert.equal(intents,0);assert.equal(rechecks,0);
 });
 
 test('pricing text without typed evidence remains unclassified and retained',async t=>{

@@ -10,6 +10,7 @@ import { convertMeasurement, mapMeasurementFields, validateFieldValues, wrapCand
 import type { ConfirmedMeasurements, MeasurementInput, MeasurementSet } from './field-mapping.ts';
 import { buildFieldCatalog, fieldSchema, resolveSchemaNode } from './field-catalog.ts';
 import { CATEGORY_ATTRIBUTE_FIELDS } from '../../shared/listing-ai-contracts.ts';
+import { currentFactAuthority } from './fact-authority.ts';
 
 export const DEMO_TYPE = 'HTC_DEMO_STORAGE_BAG';
 export function demoSchema(target: AmazonTarget, selection: SchemaSelection, now: number): AmazonSchema {
@@ -169,6 +170,7 @@ const MEASUREMENT_ALIASES: Record<string,string> = { 产品长度:'item.length',
   售卖件数:'unitCount',每套件数:'unitCount',unit_count:'unitCount' };
 const MEASUREMENT_FIELDS: Record<string,string[]> = {item_dimensions:['item.length','item.width','item.height'],item_length_width:['item.length','item.width'],item_depth_width_height:['item.depth','item.width','item.height'],item_thickness:['item.thickness'],item_weight:['item.weight'],
   item_package_dimensions:['package.length','package.width','package.height'],item_package_weight:['package.weight'],unit_count:['unitCount']};
+export function measurementFactName(name:string):string|undefined { return MEASUREMENT_ALIASES[name.trim()]; }
 const SKU_DEPENDENT_SOURCE_FIELDS = new Set(['color','size','number_of_items','item_package_quantity','number_of_packs',...Object.keys(MEASUREMENT_FIELDS)]);
 /** Facts currently have no SKU binding. Reuse the mapping scope when selecting AI evidence. */
 export function skuDependentSourceFact(name: string): boolean {
@@ -222,6 +224,7 @@ export function effectiveSourceMeasurements(product: ProductDetail, receipt: Con
 /** Explain current source mapping without promoting missing or uncertain facts. */
 export function sourceMappingReport(product: ProductDetail, variant: Variant, snapshot: AmazonSchema, target: AmazonTarget, program: ListingProgram = 'standard', attributes?: JsonObject, skuMeasurements: ConfirmedMeasurements = {}): SourceFieldMapping[] {
   const source = sourceAttributes(product, variant, snapshot, target, program, skuMeasurements); const current = attributes ?? source;
+  const authority = program === 'haul' ? currentFactAuthority(product,snapshot,target,current,skuMeasurements) : undefined;
   const selected=selectedSkuCategoryAttributes(variant),selectedSources=selectedSkuCategoryEvidence(variant);
   const facts = new Map<string,Fact[]>(); const measurements = new Map<string,Fact[]>();
   const add = (groups: Map<string,Fact[]>, name: string, fact: Fact) => { const values = groups.get(name) ?? []; values.push(fact); groups.set(name,values); };
@@ -238,6 +241,8 @@ export function sourceMappingReport(product: ProductDetail, variant: Variant, sn
     const entry = (status: SourceFieldMapping['status'], reason: string, ids = sourceFactIds): SourceFieldMapping => ({field,status,reason,sourceFactIds:ids});
     if (program === 'haul' && ['fulfillment_availability','externally_assigned_product_identifier','merchant_suggested_asin'].includes(field)) return entry('not_applicable',`Haul 不使用 ${field}，禁止从来源资料自动填入`,[]);
     if (Object.hasOwn(current,field)) {
+      const support=authority?.fields.get(field);
+      if(support)return entry(support.conflicting?'conflicting':support.supported?'mapped':'needs_input',support.supported?'当前已填分量有匹配来源依据；字段完整性仍由 Schema 校验':'当前已填分量需要核对事实依据；已匹配的来源 ID 保留',support.sourceFactIds);
       const fromSource = Object.hasOwn(source,field) && JSON.stringify(source[field]) === JSON.stringify(current[field]);
       if(fromSource&&Object.hasOwn(selected,field))return entry('mapped','已从所选 SKU 的明确规格映射；未沿用冲突的商品级属性',[]);
       return entry('mapped',fromSource ? (measurementNames.length && Object.keys(skuMeasurements).length ? '已结合当前 SKU 的妙手尺寸重量及单位规则映射；原始依据保留在来源快照，最终以 Schema 校验为准' : '已从可用来源映射；最终是否完整仍由当前 Schema 校验') : '当前草稿已提供此字段；最终是否完整仍由当前 Schema 校验',fromSource ? sourceFactIds.filter(id => related.find(fact=>fact.id===id)?.state !== 'conflicting') : []);

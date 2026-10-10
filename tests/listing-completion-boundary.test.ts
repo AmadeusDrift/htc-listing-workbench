@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { fixture } from './fixtures/listing-ai.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
@@ -121,14 +122,19 @@ test('pause inside adoption freshness prevents the final draft write',async t=>{
   await assert.rejects(f.listing.complete(f.reference,controller.signal));assert.equal(f.requests.length,2);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);
 });
 
-test('real defaults revision and journal checkpoint commit together before a thrown upper-layer continuation',async t=>{
+test('real confirmed-declaration revision and journal checkpoint commit together before a thrown upper-layer continuation',async t=>{
   const f=await fixture(t),target=f.amazon.getTarget(f.draft.targetId),selection={targetId:target.id,productType:'FIGURINE',parentageLevel:'PARENT' as const,requirements:'LISTING' as const,locale:'en_US'};
   f.amazon.getSchema=async()=>({...realParentAmazonSchema(),...selection,key:schemaKey(target,selection)});
+  const fact={id:randomUUID(),name:'batteries_required',value:'false',state:'human_confirmed' as const,source:'manual' as const,sourceRef:'Explicit synthetic declaration'};
+  f.store.saveProduct({...saveInput(f.product),facts:[...f.product.facts,fact]});
   const created=await f.amazon.createDraft({...selection,productId:f.product.id,variantId:f.product.variants[0].id,listingProgram:'haul'});
+  assert.ok(created.attributes.batteries_required,'confirmed source supplies the original declaration');
   const attributes={...created.attributes};delete attributes.batteries_required;
   const saved=f.amazon.saveDraft({id:created.id,revision:created.revision,attributes}),reference={draftId:saved.id,draftRevision:saved.revision},op=f.listing.beginCompletion(reference),defaults=f.amazon.applyBusinessDefaults.bind(f.amazon);
   let stopped=false;f.amazon.applyBusinessDefaults=(...args)=>{const draft=defaults(...args);if(!stopped){stopped=true;throw new Error('stopped after default transaction');}return draft;};
   await assert.rejects(f.listing.complete(reference,undefined,op.id),/stopped after/);const advanced=f.amazon.getDraft(saved.id);
+  assert.deepEqual(advanced.attributes.batteries_required,created.attributes.batteries_required);
+  assert.deepEqual(advanced.sourceMapping!.find(mapping=>mapping.field===fact.name)!.sourceFactIds,[fact.id]);
   assert.equal(advanced.revision,saved.revision+1);assert.equal(f.listing.getCompletion(op.id).draftRevision,advanced.revision);assert.equal(f.requests.length,0);
   f.amazon.previewDraft=async()=>({...f.amazon.getDraft(saved.id),state:'AMAZON_VALIDATED',previewIssues:[]});
   await new ListingAiService(f.store,f.amazon,f.ai).complete({draftId:saved.id,draftRevision:advanced.revision},undefined,op.id);assert.equal(f.requests.length,0);assert.equal(f.listing.getCompletion(op.id).state,'DONE');

@@ -32,6 +32,8 @@ import { getReceipt } from '../miaoshou/persistence.ts';
 import { readListingRules } from '../listing-rules.ts';
 import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
+import { currentFactAuthority } from './fact-authority.ts';
+import { assertStoredPricingForPaid } from './pricing-guard.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
 import { isMissingOnlyPreview } from './preview-validation.ts';
@@ -428,6 +430,7 @@ export class AmazonService {
     while (record.exchanges.length > 1 && Buffer.byteLength(JSON.stringify(record.exchanges)) > 16 * 1024 * 1024) record.exchanges.shift();
   }
   private request(record: DraftRecord): JsonObject { return { productType: record.draft.schema.productType, requirements: record.draft.schema.requirements, attributes: record.draft.attributes }; }
+  assertPricingForPaid(draftId:string):void { this.ensureOpen(); assertStoredPricingForPaid(this.persistence.db,draftId); }
   private businessDefaults(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram, previousBusinessReport?: BusinessRuleReport, salesPlan?: SalesListingPlan): { attributes: JsonObject; report?: BusinessRuleReport } {
     if (program !== 'haul') return { attributes };
     const receipt = getReceipt(this.persistence.db, product.id);
@@ -446,8 +449,12 @@ export class AmazonService {
     if(draft.listingProgram!=='haul')return [];
     const source=this.getProduct(draft.productId);
     // Validate identities against raw source SKUs, then read their original text.
-    projectSalesProduct(source,draft.salesPlan,draft.variantId);
-    return declarationSafetyIssues(source,selectedDeclarationScope(source,draft.variantId,draft.salesPlan?.recipe.components),draft.attributes);
+    const product=projectSalesProduct(source,draft.salesPlan,draft.variantId);
+    const risk=declarationSafetyIssues(source,selectedDeclarationScope(source,draft.variantId,draft.salesPlan?.recipe.components),draft.attributes);
+    const matchingPackage=draft.schema.parentageLevel!=='PARENT'&&(!draft.salesPlan||draft.salesPlan.recipe.components.length===1&&draft.salesPlan.recipe.components[0].quantity===draft.salesPlan.recipe.components[0].sourcePackPieces);
+    const authority=currentFactAuthority(product,draft.schema,draft,draft.attributes,matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db,product.id,draft.variantId,draft.mode):{});
+    const riskFields=new Set(risk.flatMap(issue=>issue.attributeNames));
+    return [...risk,...authority.issues.filter(issue=>!issue.attributeNames.some(field=>riskFields.has(field)))];
   }
   private newDraftRecord(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram = 'standard', businessRules?: BusinessRuleReport): DraftRecord {
     const now = this.at();
@@ -565,7 +572,7 @@ export class AmazonService {
           result.items.push({ productId: item.productId, variantId: item.variantId, sku, disposition: 'REUSED', draft: clone(draft), issues, error: null }); continue;
         }
         const record = this.newDraftRecord(product, variant, currentTarget, schema, attributes, program, businessRules);
-        if(plans?.[index]) record.draft.salesPlan=plans[index];
+        if(plans?.[index]) { record.draft.salesPlan=plans[index]; this.updateSourceMapping(record); }
         this.validate(record); records.push(record);
         result.items.push({ productId: item.productId, variantId: item.variantId, sku, disposition: 'CREATED', draft: clone(record.draft), issues: clone(record.draft.localIssues), error: null });
       }
@@ -585,7 +592,8 @@ export class AmazonService {
   private updateSourceMapping(record: DraftRecord): void {
     if (record.draft.listingProgram !== 'haul') return;
     const product = projectSalesProduct(this.getProduct(record.draft.productId),record.draft.salesPlan,record.draft.variantId), variant = product.variants.find(v=>v.id===record.draft.variantId);
-    if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode)), record.draft.businessRules, record.draft.attributes);
+    const plan=record.draft.salesPlan,matchingPackage=record.draft.schema.parentageLevel!=='PARENT'&&(!plan||plan.recipe.components.length===1&&plan.recipe.components[0].quantity===plan.recipe.components[0].sourcePackPieces);
+    if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode):{}), record.draft.businessRules, record.draft.attributes);
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
   applyBusinessDefaults(input: DraftReference, completionId?:string): AmazonDraft {

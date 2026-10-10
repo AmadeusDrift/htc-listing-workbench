@@ -8,7 +8,8 @@ import { convertMeasurement, DIMENSION_FIELDS, mapMeasurementFields, validateFie
 import type { ConfirmedMeasurements, MeasurementSet } from './field-mapping.ts';
 import { effectiveSourceMeasurements, sourceFactValue, sourceFieldName } from './demo.ts';
 import { productSourceQuantity, sourceQuantity } from '../../shared/source-quantity.ts';
-import { declarationRisks } from './declaration-safety.ts';
+import { pricingAttributeInputs } from './pricing-inputs.ts';
+import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
 import type { DeclarationScope } from './declaration-safety.ts';
 
 export interface BusinessRuleInput {
@@ -55,30 +56,11 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     const wrapped = wrapCandidateValues(schema, target.marketplaceId, field, [value]);
     attributes[field] = wrapped; report.fields[field] = { value: structuredClone(wrapped), reason }; return true;
   };
-  const fallback = '业务默认；缺少对应实测值，须按实际包装核实';
-  const brand = first('brand');
-  if (properties.brand && Array.isArray(attributes.brand) && attributes.brand.length === 1 && typeof brand?.value === 'string') {
-    const normalized = sourceFactValue(schema, 'brand', brand.value);
-    if (normalized !== brand.value) add('brand', normalized, '无品牌标签按已确认规则统一为 Generic', true);
-  }
-  add('brand', p.brand, '品牌固定规则');
-  const code = p.targetShops[target.id] ?? (Object.hasOwn(p.manufacturers, target.name) ? target.name : null);
-  if (code && p.manufacturers[code]) add('manufacturer', p.manufacturers[code], `店铺 ${code} 制造商规则`);
-  else if (!attributes.manufacturer && properties.manufacturer) note('请在商品规则中为此店铺选择制造商映射');
   for (const field of ['model_number','model_name','part_number']) add(field, input.baseSku??variant.sku, '缺失型号标识使用商品组基础 SKU');
-  add('country_of_origin', 'CN', '普通商品原产国规则');
-  if(target.marketplaceId==='ATVPDKIKX0DER'&&first('country_of_origin')?.value==='CN')add('import_designation','Imported','中国原产国在美国站对应进口商品；不沿用来源网站国内是否进口标签');
-  const risk = declarationRisks(product,input.declarationScope??{variants:[variant],componentSpecifications:[]});
-  if (p.ordinaryDeclarations) {
-    add('gpsr_safety_attestation', true, '已确认的 GPSR 安全声明规则');
-    // A chemical or certificate concern does not establish powered operation.
-    if (!risk.battery) add('batteries_required', false, '普通无电池商品声明规则');
-    else note('来源含电池、供电或电池声明冲突信息，未自动套用不需要电池的默认值');
-    if (!risk.compliance) {
-      add('supplier_declared_dg_hz_regulation', 'not_applicable', '普通商品危险品法规不适用规则');
-      add('required_product_compliance_certificate', 'Not Applicable', '普通商品适用证书类别规则');
-    } else note('来源含电池、特殊物品或合规冲突信息，未自动套用危险品／证书不适用声明');
-  }
+  const originFacts = product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === 'country_of_origin' && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
+  if (target.marketplaceId === 'ATVPDKIKX0DER' && first('country_of_origin')?.value === 'CN' && originFacts.length
+    && originFacts.every(fact => fact.state !== 'conflicting' && sourceFactValue(schema, 'country_of_origin', fact.value.trim()) === 'CN'))
+    add('import_designation','Imported','已确认中国原产国在美国站对应进口商品');
 
   // Parent schemas can require origin and declarations even though the parent
   // has no sale offer, condition, physical package or quantity of its own.
@@ -104,6 +86,12 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   // Capture source evidence before draft values or business fallbacks can overwrite it.
   const sourceMapped = mapMeasurementFields(schema, target.marketplaceId, measurements).attributes;
   const sourceBlocked = { ...blocked };
+  // Only independently resolved source measurements may create actual fields.
+  // A supplied partial object stays intact; schema validation owns missing siblings.
+  for (const [field,value] of Object.entries(sourceMapped)) if (!Object.hasOwn(attributes,field)) {
+    attributes[field] = value;
+    report.fields[field] = {value:structuredClone(value),reason:'当前 SKU 来源参数与字段允许单位的换算规则'};
+  }
   const packageInputs = (record: JsonObject): PricingPackageInputs => {
     const entry = (field: string) => Array.isArray(record[field]) && isObject(record[field][0]) ? record[field][0] : null;
     const converted = (value: JsonValue | undefined, kind: 'length' | 'weight'): number | null => {
@@ -119,7 +107,7 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const scopeFallback = new Set<string>();
   const scopeConflict = new Set<string>();
   for (const fact of product.facts) if (fact.state === 'conflicting' && /尺寸|长|宽|高|重量|weight|length|width|height|dimension/i.test(fact.name)) scopeConflict.add(/包装|package/i.test(fact.name) ? 'package' : 'item');
-  // Existing draft axes are authoritative, including partial hand-entered objects.
+  // Editable values are estimator inputs, never affirmative fact authority.
   for (const field of [...DIMENSION_FIELDS, 'item_weight', 'item_package_weight']) {
     const current = first(field); if (!current) continue;
     const scope = field.startsWith('item_package_') ? 'package' : 'item', set = measurements[scope] ?? {};
@@ -145,23 +133,9 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     measurements[scope] = set;
   }
   const mapped = mapMeasurementFields(schema, target.marketplaceId, measurements);
-  for (const [field,value] of Object.entries(mapped.attributes)) {
-    let combined = value;
-    if (Object.hasOwn(attributes, field)) {
-      if (!DIMENSION_FIELDS.includes(field as typeof DIMENSION_FIELDS[number]) || !Array.isArray(value) || value.length !== 1 || !isObject(value[0])
-        || !Array.isArray(attributes[field]) || attributes[field].length !== 1 || !first(field)) continue;
-      const merged = { ...value[0], ...first(field)! };
-      if (validateFieldValues(schema, target.marketplaceId, field, [merged], attributes).length) continue;
-      combined = [merged];
-      if (JSON.stringify(combined) === JSON.stringify(attributes[field])) continue;
-    }
-    const scope = /package/.test(field) ? 'package' : 'item';
-    const isDefault = field === 'item_package_weight' ? scopeFallback.has('weight') : scopeFallback.has(scope);
-    attributes[field] = combined; report.fields[field] = { value: structuredClone(combined), reason: isDefault ? fallback : '当前 SKU 来源参数与字段允许单位的换算规则' };
-  }
   for (const reason of Object.values(blocked)) note(`${reason}，未用业务默认掩盖`);
   if (scopeConflict.size) note('来源尺寸／重量存在冲突，未用业务默认掩盖冲突');
-  if (scopeFallback.size) note('部分尺寸或包装重量使用业务默认值，定价结果仍需以实际包装核实');
+  if (scopeFallback.size) note('部分尺寸或包装重量仅在私有估价输入中使用默认值，未写入商品属性；定价仍需实测核实');
 
   const itemCount = first('number_of_items')?.value;
   const existingCount = typeof itemCount === 'number' && Number.isSafeInteger(itemCount) && itemCount > 0 ? itemCount : null;
@@ -207,7 +181,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const countChanged = autoQuantity !== null && ['number_of_items', 'unit_count'].some(field => Object.hasOwn(attributes, field) && first(field)?.value !== autoQuantity);
   if (autoQuantity !== null && !countChanged) report.bundleQuantity = autoQuantity;
   if (legacyQuantity !== null && (countChanged || legacyConflict)) report.bundleQuantity = legacyQuantity;
-  const currentPackage = packageInputs(attributes);
+  const currentPackage = packageInputs(mapped.attributes);
+  const packageAuthority=currentFactAuthority(product,schema,target,attributes,input.measurements);
   const packageBasis = (kind: 'dimensions' | 'weight'): PackageInputBasis => {
     const key = kind === 'dimensions' ? 'dimensionsInches' : 'weightPounds', value = currentPackage[key];
     const conflicts = product.facts.some(fact => fact.state === 'conflicting' && /包装|package/i.test(fact.name)
@@ -215,16 +190,17 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     if (conflicts) return 'conflicting';
     if (value === null) return 'missing';
     const blockedSource = Object.keys(sourceBlocked).some(name => name.startsWith('package.') && (kind === 'weight' ? name === 'package.weight' : name !== 'package.weight'));
-    if (!blockedSource && sourcePackage[key] !== null && JSON.stringify(sourcePackage[key]) === JSON.stringify(value)) return 'confirmed_source';
+    if (!blockedSource && packageAuthority.fields.get(kind==='dimensions'?'item_package_dimensions':'item_package_weight')?.supported
+      && sourcePackage[key] !== null && JSON.stringify(sourcePackage[key]) === JSON.stringify(value)) return 'confirmed_source';
     const previous = previousReport?.pricingDecision;
-    const inheritedDefault = previous?.version === 1 && previous.evidence?.[kind] === 'business_default'
+    const inheritedDefault = previous !== undefined && previous.evidence?.[kind] === 'business_default'
       && JSON.stringify(previous.inputs?.[key]) === JSON.stringify(value);
     if (scopeFallback.has(kind === 'weight' ? 'weight' : 'package') || inheritedDefault) return 'business_default';
     return 'unverified';
   };
   const costCny = input.costCny !== null && Number.isFinite(input.costCny) && input.costCny > 0 ? input.costCny : null;
   const decision: PricingDecision = {
-    version: 1, status: 'needs_input', code: 'COST_CNY_UNCONFIRMED', quoteError: null,
+    version: 2, attributeInputs: pricingAttributeInputs(attributes), status: 'needs_input', code: 'COST_CNY_UNCONFIRMED', quoteError: null,
     inputs: { costCny, ...currentPackage },
     evidence: { cost: costCny !== null ? 'confirmed_cny' : 'unconfirmed', dimensions: packageBasis('dimensions'), weight: packageBasis('weight'),
       packageScope: 'unconfirmed', saleUnit: legacyConflict ? 'conflicting' : countChanged ? 'unconfirmed' : sourceUnits.conflict ? 'conflicting' : quantityUnconfirmed ? 'unconfirmed' : 'confirmed', sourcePackage },
@@ -299,6 +275,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
 export function ruleSourceMapping(mapping: SourceFieldMapping[], report: BusinessRuleReport | undefined, attributes: JsonObject): SourceFieldMapping[] {
   if (!report) return mapping;
   return mapping.map(entry => {
+    // Current component authority wins over every historical rule label, including receipts without fact IDs.
+    if (FACT_PROTECTED_FIELDS.has(entry.field)) return entry;
     const rule = report.fields[entry.field];
     return rule && JSON.stringify(rule.value) === JSON.stringify(attributes[entry.field]) ? { ...entry, status: 'mapped', sourceFactIds: [], reason: `业务规则 v${report.revision}：${rule.reason}` } : entry;
   });

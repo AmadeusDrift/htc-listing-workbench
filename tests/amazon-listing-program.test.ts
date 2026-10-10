@@ -9,6 +9,7 @@ import { schemaKey } from '../src/main/amazon/context.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import type { JsonObject } from '../src/shared/amazon-contracts.ts';
 import { realAmazonSchema, realParentAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
+import { saveInput } from './fixtures/listing-ai.ts';
 import { sourceAttributes } from '../src/main/amazon/demo.ts';
 import * as sourceMapping from '../src/main/amazon/demo.ts';
 import { listingProgramIssues, programAttributes } from '../src/main/amazon/listing-program.ts';
@@ -74,9 +75,11 @@ test('creating and preparing actual parent schema drafts never injects a child o
   assert.equal(f.service.getDraft(draft.id).revision,draft.revision);
 });
 
-test('existing parent drafts fill missing approved declarations once while keeping copy and image locations', async t => {
+test('existing parent drafts restore missing confirmed declarations once while keeping copy and image locations', async t => {
   const f=fixture(t), selection={...f.input,parentageLevel:'PARENT',productType:'FIGURINE'} as const;
   f.service.getSchema=async()=>({...realParentAmazonSchema(),targetId:f.target.id,key:schemaKey(f.target,selection)});
+  const facts=[['batteries_required','false'],['country_of_origin','CN'],['supplier_declared_dg_hz_regulation','not_applicable']].map(([name,value])=>({id:randomUUID(),name,value,state:'human_confirmed' as const,source:'manual' as const,sourceRef:'Explicit synthetic declaration'}));
+  f.store.saveProduct({...saveInput(f.product),facts});
   const created=await f.service.createDraft({...selection,listingProgram:'haul'}),record=f.persistence.record(created.id);
   const fields={batteries_required:false,country_of_origin:'CN',supplier_declared_dg_hz_regulation:'not_applicable'};
   for(const field of Object.keys(fields)){delete record.draft.attributes[field];delete record.draft.businessRules?.fields[field];}
@@ -89,6 +92,8 @@ test('existing parent drafts fill missing approved declarations once while keepi
   assert.deepEqual(fixed.attributes.item_name,before.item_name);
   assert.deepEqual(fixed.attributes.main_product_image_locator,before.main_product_image_locator);
   assert.equal(fixed.attributes.purchasable_offer,undefined);
+  for(const field of ['manufacturer','gpsr_safety_attestation'])assert.equal(fixed.attributes[field],undefined);
+  for(const fact of facts)assert.deepEqual(fixed.sourceMapping!.find(mapping=>mapping.field===fact.name)!.sourceFactIds,[fact.id]);
   assert.equal(f.service.applyBusinessDefaults({id:fixed.id,revision:fixed.revision}).revision,fixed.revision);
   assert.equal(f.service.listCalls().length,0);
 });
@@ -290,7 +295,7 @@ test('source mapping report explains multi-SKU ambiguity and invalid numeric sou
   for(const field of ['item_package_weight','unit_count']) {const entry=single.find(entry=>entry.field===field)!;assert.equal(entry.status,'needs_input');assert.ok(entry.reason.includes(field));assert.match(entry.reason,/单位|数字|整数|数值/);}
 });
 
-test('Haul create and prepare keep multi-SKU global facts out and attribute approved fallbacks', async t => {
+test('Haul create and prepare keep multi-SKU global facts out and estimates private', async t => {
   const f=fixture(t); const first=f.product.variants[0]; const largeId=randomUUID();
   const factValues=[['产品长度','10 cm'],['产品宽度','10 cm'],['产品高度','2 mm'],['商品重量','100 g'],
     ['包装长度','12 cm'],['包装宽度','12 cm'],['包装高度','1 cm'],['包装重量','120 g'],
@@ -301,23 +306,24 @@ test('Haul create and prepare keep multi-SKU global facts out and attribute appr
     facts:factValues.map(([name,value])=>({id:randomUUID(),name,value,state:'human_confirmed' as const,source:'manual' as const,sourceRef:'Product-level facts'}))});
   const numericFields=['item_dimensions','item_length_width','item_weight','item_package_dimensions','item_package_weight','unit_count','number_of_items','item_package_quantity','number_of_packs'];
   const haul=await f.service.createDraft({...f.input,variantId:largeId,listingProgram:'haul'});
-  const checkFallbacks = (draft: typeof haul) => {
-    for (const field of ['item_dimensions','item_length_width','item_package_dimensions']) {
-      const value = (draft.attributes[field] as JsonObject[])[0];
-      for (const axis of ['length','width','height']) if (value[axis]) assert.equal((value[axis] as JsonObject).value,1.97);
-      assert.match(draft.businessRules!.fields[field].reason,/业务默认/);
+  const checkPrivateEstimates = (draft: typeof haul) => {
+    for (const field of ['item_dimensions','item_length_width','item_weight','item_package_dimensions','item_package_weight']) {
+      assert.equal(Object.hasOwn(draft.attributes,field),false,field);
+      assert.equal(Object.hasOwn(draft.businessRules!.fields,field),false,field);
       const mapping = draft.sourceMapping!.find(entry => entry.field === field)!;
-      assert.match(mapping.reason,/业务规则.*业务默认/); assert.deepEqual(mapping.sourceFactIds,[]);
+      assert.equal(mapping.status,'needs_input');assert.match(mapping.reason,/SKU/);assert.ok(mapping.sourceFactIds.length>0,'source provenance remains without authorizing a SKU claim');
     }
-    assert.equal((draft.attributes.item_package_weight as JsonObject[])[0].value,.22);
-    assert.match(draft.businessRules!.fields.item_package_weight.reason,/业务默认/);
-    for (const field of ['item_weight','item_package_quantity','number_of_packs']) assert.equal(field in draft.attributes,false,`must not inherit global ${field}`);
+    const decision=draft.businessRules!.pricingDecision!;assert.equal(decision.version,2);
+    if(decision.version!==2)throw Error('Expected current pricing decision');
+    assert.deepEqual(decision.inputs.dimensionsInches,[1.97,1.97,1.97]);assert.equal(decision.inputs.weightPounds,.22);
+    assert.deepEqual(decision.attributeInputs,{});
+    for (const field of ['item_package_quantity','number_of_packs']) assert.equal(field in draft.attributes,false,`must not inherit global ${field}`);
     for (const field of ['unit_count','number_of_items']) assert.equal((draft.attributes[field] as JsonObject[])[0].value,8,`${field} comes from the selected 8 pcs spec, not the product's 4-piece fact`);
   };
-  checkFallbacks(haul);
+  checkPrivateEstimates(haul);
   const prepared=await f.service.prepareDrafts({...f.batch('haul'),items:[{productId:product.id,productRevision:product.revision,variantId:largeId,attributes:{}}]});
   assert.equal(prepared.items[0].disposition,'REUSED');
-  checkFallbacks(prepared.items[0].draft!);
+  checkPrivateEstimates(prepared.items[0].draft!);
   const report=Reflect.get(sourceMapping,'sourceMappingReport');const entries:{field:string;status:string;reason:string;sourceFactIds:string[]}[]=report(product,product.variants[1],realAmazonSchema(),f.target,'haul');
   for(const field of numericFields.filter(name=>Object.hasOwn(realAmazonSchema().schema.properties as JsonObject,name))) {
     const entry=entries.find(value=>value.field===field)!;assert.equal(entry.status,'needs_input',field);assert.match(entry.reason,/SKU/);assert.ok(entry.sourceFactIds.length>0,`${field} retains source provenance`);

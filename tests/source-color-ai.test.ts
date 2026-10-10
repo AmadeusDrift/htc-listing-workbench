@@ -18,6 +18,10 @@ import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore 
 import { chat, mockStorage, saveInput } from './fixtures/listing-ai.ts';
 import { assertSourceColorOutput, validateSourceColorContext, validateSourceColorOutput } from '../src/main/ai/source-color-validation.ts';
 import { SOURCE_COLOR_VALUES } from '../src/shared/source-color-contracts.ts';
+import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
+import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
+import { ListingRuleStore } from '../src/main/listing-rules.ts';
+import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 
 // A complete PNG with real pixels and CRCs, not only an IHDR header.
 function sourcePng(): Buffer {
@@ -58,6 +62,21 @@ test('source-color observes original pixels with SKU provenance, usage accountin
   assert.equal(f.ai.listCalls()[0].status,'SUCCEEDED');assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,150);
   assert.deepEqual(f.ai.listCalls()[0].sourceColorContext,context);
   assert.deepEqual(f.store.getProduct(f.product.id),before);
+});
+
+test('pricing changes after a paid color request preserve the received result and cache but stop the next new request',async t=>{
+  const f=await fixture(t),amazon=new AmazonService(f.directory,id=>f.store.getProduct(id),mockStorage),target=amazon.enableDemo(),rules=new ListingRuleStore(f.directory);
+  try {
+  const draft=await amazon.createDraft({targetId:target.id,productId:f.product.id,variantId:f.product.variants[0].id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
+  const p=(amazon as unknown as {persistence:AmazonPersistence}).persistence,record=p.record(draft.id);
+  const result=applyBusinessRules({product:f.product,variant:f.product.variants[0],target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
+  record.draft.listingProgram='haul';record.draft.businessRules={...result.report,fields:{}};p.putRecord(record);
+  const listing=new ListingAiService(f.store,amazon,f.ai),reference={draftId:draft.id,draftRevision:draft.revision};
+  f.respond(async payload=>{await Promise.resolve();rules.save(rules.get());return chat({kind:'source-color',verdict:'DETERMINED',colors:['Silver'],reason:'Observed silver surface.',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)});});
+  const prepared=await listing.prepareSourceColors(reference);assert.equal(prepared.aiCalls,1);assert.equal(f.ai.listCalls()[0].status,'SUCCEEDED');assert.equal(f.ai.listResults(f.product.id).length,1);
+  assert.equal((await listing.prepareSourceColors(reference)).aiCalls,0);assert.equal(f.requests.length,1);
+  await assert.rejects(listing.suggest(reference));assert.equal(f.requests.length,1);assert.equal(f.ai.listCalls().length,1);
+  } finally { amazon.close();rules.close(); }
 });
 
 test('uncertain observations are preserved without determined colors',async t=>{

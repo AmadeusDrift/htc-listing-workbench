@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Play, RefreshCw } from 'lucide-react';
+import { ArrowRight, ChevronLeft, ChevronRight, Play, RefreshCw } from 'lucide-react';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
 import type { AmazonTarget } from '../shared/amazon-contracts';
 import type { ListingRules } from '../shared/listing-rules';
@@ -10,6 +10,8 @@ import { createAutomaticPreparationPlan } from './automatic-preparation';
 import { AutomaticTaskPanel } from './AutomaticTaskPanel';
 import { errorText } from './utils';
 import type { SettingsModule } from './settings-navigation';
+
+const PRODUCT_PAGE_SIZE = 8;
 
 interface Props {
   products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean;
@@ -27,6 +29,7 @@ export function AutomaticPreparationPanel({ products, targets, busy, onManual, o
   const [riskEnabled,setRiskEnabled]=useState(true);
   const [copyReviewEnabled,setCopyReviewEnabled]=useState(true);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [productPage, setProductPage] = useState(1);
   const [details, setDetails] = useState<ProductDetail[]>([]);
   const [rules, setRules] = useState<ListingRules | null>(null);
   const [readErrors, setReadErrors] = useState<string[]>([]);
@@ -48,6 +51,9 @@ export function AutomaticPreparationPanel({ products, targets, busy, onManual, o
   const [startedTask, setStartedTask] = useState<AutomaticListingTask | null>(null);
   const mounted = useRef(true), startPending = useRef(false);
   const selected = products.filter(product => selectedIds.includes(product.id));
+  const pageCount = Math.max(1, Math.ceil(products.length / PRODUCT_PAGE_SIZE)), currentPage = Math.min(productPage, pageCount);
+  const pageProducts = products.slice((currentPage - 1) * PRODUCT_PAGE_SIZE, currentPage * PRODUCT_PAGE_SIZE);
+  const pageSelected = pageProducts.filter(product => selectedIds.includes(product.id)).length;
   const selectionKey = JSON.stringify(selected.map(product => [product.id, product.updatedAt]));
   const target = targets.find(value => value.id === targetId);
   const profile = profiles.find(value => value.id === profileId && value.configured && value.enabled);
@@ -110,8 +116,9 @@ export function AutomaticPreparationPanel({ products, targets, busy, onManual, o
       </section>
       <fieldset className="listing-setup" disabled={disabled}>
         <legend>1. 选择商品</legend>
-        {products.length > 0 && <label className="sku-checkbox"><input type="checkbox" data-testid="automatic-select-all" checked={selected.length === products.length} ref={element => { if (element) element.indeterminate = selected.length > 0 && selected.length < products.length; }} onChange={event => setSelectedIds(event.target.checked ? products.map(product => product.id) : [])} /><span><strong>全选</strong><small>共 {products.length} 件商品</small></span></label>}
-        <div className="sku-checkboxes">{products.map(product => <label className="sku-checkbox" key={product.id}><input type="checkbox" data-testid={`automatic-select-${product.id}`} checked={selectedIds.includes(product.id)} onChange={event => { setSelectedIds(values => event.target.checked ? [...values, product.id] : values.filter(id => id !== product.id)); }} /><span><strong>{product.title || '未命名商品'}</strong><small>{product.origin === 'sample' ? '本地示例 · ' : ''}{product.variantCount} 个来源规格</small></span></label>)}</div>
+        {products.length > 0 && <div className="selection-toolbar"><label><input type="checkbox" data-testid="automatic-select-all" checked={selected.length === products.length} ref={element => { if (element) element.indeterminate = selected.length > 0 && selected.length < products.length; }} onChange={event => setSelectedIds(event.target.checked ? products.map(product => product.id) : [])} /><span>全选全部商品</span></label><span className="selection-count">已选 <b>{selected.length}</b> / {products.length} 件</span><span className="selection-actions"><button type="button" className="text-button" data-testid="automatic-select-page" onClick={() => { const ids = pageProducts.map(product => product.id); setSelectedIds(values => pageSelected === ids.length ? values.filter(id => !ids.includes(id)) : [...new Set([...values, ...ids])]); }}>{pageSelected === pageProducts.length ? '取消本页' : '选择本页'}</button><button type="button" className="text-button" disabled={!selected.length} onClick={() => setSelectedIds([])}>清空</button></span></div>}
+        <div className="sku-checkboxes paged">{pageProducts.map(product => <label className="sku-checkbox" key={product.id}><input type="checkbox" data-testid={`automatic-select-${product.id}`} checked={selectedIds.includes(product.id)} onChange={event => { setSelectedIds(values => event.target.checked ? [...values, product.id] : values.filter(id => id !== product.id)); }} /><span><strong>{product.title || '未命名商品'}</strong><small>{product.origin === 'sample' ? '本地示例 · ' : ''}{product.variantCount} 个来源规格</small></span></label>)}</div>
+        {products.length > PRODUCT_PAGE_SIZE && <nav className="inbox-pagination selection-pagination" aria-label="商品分页"><span>共 {products.length} 件 · 每页 {PRODUCT_PAGE_SIZE} 件</span><div><button type="button" className="icon-button" aria-label="商品上一页" disabled={currentPage <= 1} onClick={() => setProductPage(currentPage - 1)}><ChevronLeft size={17} /></button><span aria-live="polite">第 {currentPage} / {pageCount} 页</span><button type="button" className="icon-button" aria-label="商品下一页" disabled={currentPage >= pageCount} onClick={() => setProductPage(currentPage + 1)}><ChevronRight size={17} /></button></div></nav>}
         {!products.length && <p className="small-copy">先从采集箱加入商品，或载入本地示例。</p>}
         <div className="workflow-actions"><button type="button" className="button secondary" disabled={loadingProducts || loadingRules || loadingHosting} onClick={() => setReload(value => value + 1)}><RefreshCw size={15} />刷新资料与连接</button><span className="small-copy">已选择 {selected.length} 个来源商品链接。所有来源规格保留，超出限制的规格不纳入本次任务。</span></div>
         {(loadingProducts || loadingRules) && <p className="small-copy" role="status">正在读取本地商品与规则…</p>}

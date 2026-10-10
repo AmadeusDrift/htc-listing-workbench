@@ -1,6 +1,13 @@
 # HTC 稳定化修复路线图
 
-日期：2026-10-10。基于合并后的源码与现有审查记录；本轮只制定计划，没有开始业务修复。
+日期：2026-10-10。基于合并后的源码与现有审查记录；用户已授权按计划推进，当前执行状态见下节。
+
+## 执行状态
+
+- 计划已通过 `docs/stability-repair-roadmap` 合并至集成分支，被测源码为 `a855e4e`。
+- 测试基线：类型检查通过；全量 1576 项，1575 通过、0 失败、0 取消、1 项因 Windows 文件符号链接权限跳过。详细限制见维护记录与回归矩阵。
+- 分类分流的前置依赖独立为 `fix/pricing-decision-evidence`：先在定价原因产生的位置保存固定原因码和输入可信程度，防止缺资料/默认包装造成的 ROI 失败被误作规则淘汰。随后 `fix/listing-outcome-classification` 消费该证据并实现队列与界面分流。
+- 该前置分支不改变既有费率、ROI 目标或销售价格算法，不自动删除或筛除商品；独立验证后合并。
 
 **目标：** 每个问题在独立分支完成复现、修复和验收，最终形成可追溯的源码、发布包与真实结果。
 
@@ -34,13 +41,13 @@
 
 ## 第一步：测试基线
 
-- [ ] 确认 Git 状态干净，从集成分支创建 `test/stability-baseline`，记录 HEAD、Node/npm 版本及已有安装包信息。
-- [ ] 运行 `npm run typecheck`，输出保存至忽略的 artifacts 目录；退出码必须为 0。
-- [ ] 运行 `node --test --test-concurrency=4 --test-timeout=180000 tests/*.test.ts`，完整记录通过、失败、取消、跳过及用时。
-- [ ] 对每个失败文件单独运行；不得通过降低断言或直接增加超时掩盖问题。目录联接权限问题按已知环境问题核对。
-- [ ] 新建 `docs/version-control/REGRESSION_MATRIX.md`，逐项映射原计划的 35 个编号到具体测试、是否合成/历史/真实验证、结果和缺口。没有证据就标记未验证。
-- [ ] 重点复核 `tests/automatic-listing-recheck-evidence.test.ts`、`tests/listing-ai-context.test.ts`、`tests/listing-ai-completion.test.ts`、`tests/followup.test.ts`、`tests/fault-recovery.test.ts`，定位前三个核心问题已有的反例覆盖。
-- [ ] 将纯基线结果脱敏记录后 commit；若有程序失败，登记独立修复项，基线记录本身不能声称系统验收通过。
+- [x] 确认 Git 状态干净，从集成分支创建 `test/stability-baseline`，记录 HEAD、Node/npm 版本及已有安装包信息。
+- [x] 运行 `npm run typecheck`，输出保存至忽略的 artifacts 目录；退出码必须为 0。
+- [x] 运行 `node --test --test-concurrency=4 --test-timeout=180000 tests/*.test.ts`，完整记录通过、失败、取消、跳过及用时。
+- [x] 对每个失败文件单独运行；不得通过降低断言或直接增加超时掩盖问题。目录联接权限问题按已知环境问题核对。
+- [x] 新建 `docs/version-control/REGRESSION_MATRIX.md`，逐项映射原计划的 35 个编号到具体测试、是否合成/历史/真实验证、结果和缺口。没有证据就标记未验证。
+- [x] 重点复核 `tests/automatic-listing-recheck-evidence.test.ts`、`tests/listing-ai-context.test.ts`、`tests/listing-ai-completion.test.ts`、`tests/followup.test.ts`、`tests/fault-recovery.test.ts`，定位前三个核心问题已有的反例覆盖。
+- [x] 将纯基线结果脱敏记录后 commit；若有程序失败，登记独立修复项，基线记录本身不能声称系统验收通过。
 
 ## 各修复的代码与测试入口
 
@@ -141,6 +148,6 @@
 - [ ] 分开统计调用、规划完成、七图完成、正式提交、ASIN、可发现、可购买和标签完成。
 - [ ] 遇到未知请求、范围外调用、重复提交风险或连续相同错误，停止扩大样本并定位；不得直接恢复整批。
 
-## 本轮计划验证
+## 最初计划整理的验证范围
 
-仅文档更新：核对原稳定化计划、Git 状态与相关源码/测试入口；检查 diff 和文件链接。未修改业务代码、运行生产任务或启动全量回归。
+计划整理阶段仅更新文档：核对原稳定化计划、Git 状态与相关源码/测试入口，检查 diff 和文件链接。后续执行的基线及修复结果以本文件顶部执行状态和各维护记录为准。

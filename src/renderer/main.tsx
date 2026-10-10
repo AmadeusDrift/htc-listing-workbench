@@ -6,6 +6,7 @@ import './workspace.css';
 import './miaoshou.css';
 import './settings-modules.css';
 import './glass-theme.css';
+import './feedback.css';
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode><App /></React.StrictMode>,

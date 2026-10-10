@@ -1,0 +1,33 @@
+/* One colour language for operation feedback: red = failed, green = done, amber = needs attention, blue = information / in progress. */
+:root { --info: #1f5a99; --info-soft: #e3eefb; --info-line: #a8c5e8; }
+:root[data-theme='dark'] { --info: #a9cdfa; --info-soft: #243a55; --info-line: #44648c; }
+
+:is(.workflow-notice, .workflow-warning, .ops-notice, .small-copy)[role="alert"], p[role="alert"]:not([class]), .error-banner, .workflow-error, .unsaved-dialog > p.dialog-error {
+  color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger-line); border-left: 3px solid var(--danger); border-radius: 6px; padding: 10px 13px;
+}
+.error-banner .icon-button, .error-banner strong { color: var(--danger); }
+:is(.workflow-notice, .ops-notice)[role="status"] {
+  color: var(--success); background: var(--success-soft); border: 1px solid var(--success-line); border-left: 3px solid var(--success); border-radius: 6px; padding: 10px 13px;
+}
+.workflow-warning:not([role="alert"]) { color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-line); border-left: 3px solid var(--warning); }
+.workflow-notice:not([role]) { color: var(--info); background: var(--info-soft); border-left-color: var(--info); border-radius: 6px; }
+.main-content :is(.workflow-notice, .workflow-warning, .ops-notice) :is(p, small, strong, span) { color: inherit; }
+
+.toast { color: var(--success); background: var(--success-soft); border-color: var(--success-line); }
+.toast > svg { color: var(--success); }
+.settings-status-badge.info { color: var(--info); background: var(--info-soft); border-color: var(--info-line); }
+.settings-status-badge.warning { background: var(--warning-soft); }
+.quiet-pill.attention { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+
+.automatic-connections[data-state="ready"] { border-left: 3px solid var(--success); }
+.automatic-connections[data-state="ready"] > div > strong { color: var(--success); }
+.automatic-connections[data-state="pending"] { border-left: 3px solid var(--warning); background: var(--warning-soft); }
+.automatic-connections[data-state="pending"] > div > strong { color: var(--warning); }
+
+/* New feedback and the place an action jumped to pulse once so the change is easy to spot. */
+@keyframes feedback-in { from { box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 30%, transparent); transform: translateY(-2px); } to { box-shadow: 0 0 0 0 transparent; transform: none; } }
+@keyframes jump-flash { 0%, 55% { box-shadow: 0 0 0 3px var(--info-line); background-color: var(--info-soft); } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: no-preference) {
+  :is(.workflow-notice, .workflow-warning, .ops-notice)[role], .error-banner, .workflow-error { animation: feedback-in .9s ease-out; }
+  .jump-highlight, .settings-module-content > div:not([hidden]) { animation: jump-flash 1.6s ease-out; border-radius: 10px; }
+}

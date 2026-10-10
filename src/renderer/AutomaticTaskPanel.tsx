@@ -27,10 +27,14 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
   const [loadingSources, setLoadingSources] = useState(false);
   const sourceKey = task ? JSON.stringify([task.id, ...new Map(task.items.map(item => [item.productId, item.productRevision])).entries()]) : '';
   const groups = useMemo(() => buildAutomaticProductGroups(task?.items ?? [], sourceProducts, products), [task, sourceProducts, products]);
-  const mounted = useRef(true), version = useRef(0), actionPending = useRef(false);
+  const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    if (startedTask) { version.current++; setTask(startedTask); setSelectedId(startedTask.id); setTasks(values => [startedTask, ...values.filter(value => value.id !== startedTask.id)]); }
+    if (startedTask) { version.current++; setTask(startedTask); setSelectedId(startedTask.id); setTasks(values => [startedTask, ...values.filter(value => value.id !== startedTask.id)]);
+      // Starting a task moves attention here; scroll to it and pulse once.
+      const element = panel.current;
+      if (element) { element.classList.remove('jump-highlight'); void element.offsetWidth; element.classList.add('jump-highlight'); element.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    }
   }, [startedTask]);
   useEffect(() => {
     let active = true, timer: ReturnType<typeof setTimeout> | undefined;
@@ -76,7 +80,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);
-  return <section className="amazon-workflow automatic-task-panel" aria-label="自动上架任务">
+  return <section ref={panel} className="amazon-workflow automatic-task-panel" aria-label="自动上架任务">
     <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending)} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} />刷新任务</button></div>
     {readError && <p className="workflow-notice" role="alert">任务读取未完成：{readError}</p>}{error && <p className="workflow-notice" role="alert">任务操作未完成：{error}</p>}
     {loading && <p className="small-copy" role="status">正在读取已保存任务…</p>}

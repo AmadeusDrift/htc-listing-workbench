@@ -107,7 +107,7 @@ export function AutomaticPreparationPanel({ products, targets, busy, onManual, o
   return <>
     <section className="amazon-workflow" aria-label="启动自动上架">
       <div className="section-heading"><div><h2>自动准备并发布</h2><p>确认执行范围后，按 SKU 连续完成文案、图片、上传、验证、提交、平台回读和商品标签。只有异常需要人工处理。</p></div><button type="button" className="button secondary" disabled={disabled} onClick={() => onSettings('product')}>管理商品与定价规则</button></div>
-      <section className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities}>
+      <section className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities} data-state={loadingCapabilities ? undefined : connectionsReady ? 'ready' : 'pending'}>
         <div><strong>{loadingCapabilities ? '正在检查全局连接…' : connectionsReady ? '全局连接已就绪' : '请先完成全局连接配置'}</strong><p>复用 DeepSeek、生图接口和 OCR，按开关执行文案复核与图片风险拦截。首图无字检查始终需要 DeepSeek 独立复核。每件商品的提示词与参考图自动准备。</p></div>
         {!loadingCapabilities && !capabilityError && !!missingCapabilities.length && <p className="small-copy">待配置或启用：{missingCapabilities.map(value => value.label).join('、')}</p>}
         {!loadingCapabilities&&!capabilityError&&<p className="small-copy">文案复核：{copyReviewEnabled?'已开启':'已关闭，仍生成文案并补齐必填字段'}。图片风险拦截：{riskEnabled?'已开启':'已关闭，首图仍检查无字'}。<button type="button" className="text-button" onClick={()=>onSettings('images')}>修改图片设置</button></p>}

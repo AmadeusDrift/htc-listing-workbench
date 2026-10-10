@@ -5,7 +5,7 @@ import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
 import type { SettingsStatusTone } from './SettingsStatusBadge';
 import { errorText } from './utils';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
-import { AutomaticProductGroups } from './AutomaticProductGroups';
+import { AutomaticProductGroups, OutcomeCount } from './AutomaticProductGroups';
 import { buildAutomaticProductGroups, summarizeAutomaticItems } from './automatic-product-groups';
 
 const statusLabels: Record<AutomaticListingStatus, string> = { CREATED:'已创建', QUEUED:'等待执行', RUNNING:'运行中', WAITING:'等待平台或服务返回', PAUSED:'已暂停', NEEDS_ATTENTION:'需要处理', COMPLETED:'任务完成', CANCELLED:'已取消' };
@@ -90,8 +90,8 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
       <div className="workflow-actions automatic-task-heading"><Badge tone={tone(task.status)}>{statusLabels[task.status]}</Badge><strong>{task.targetName} · {task.mode === 'demo' ? '本地演示' : '真实 Haul'} · {task.productType}</strong><span className="small-copy">规则版本 {task.ruleRevision}</span></div>
       <div className="automatic-task-scope" aria-label="当前任务范围"><span>来源商品链接<strong>{groups.length}</strong></span><span>来源规格<strong>{groups.every(group => group.sourceVariantCount !== null) ? groups.reduce((sum, group) => sum + (group.sourceVariantCount ?? 0), 0) : loadingSources ? '读取中' : '未完整读取'}</strong></span><span>本次销售 SKU<strong>{task.items.length}</strong></span></div>
       <progress className="automatic-task-progress" aria-label="流程已完成 SKU" value={outcomes.completed} max={Math.max(task.items.length,1)} />
-      <p className="small-copy" role="status">已提交待回读 {outcomes.submittedAwaitingReadback} · 流程完成 {outcomes.completed} / {task.items.length} 个销售 SKU · 准备标签 {outcomes.labels} · 待执行 {outcomes.pending}</p>
-      <p className="small-copy" aria-label="任务待确认分类">定价跳过 {outcomes.pricingSkipped} · 来源待确认 {outcomes.sourceReview} · 流程异常 {outcomes.failed}；原始原因保留在各 SKU 中。</p>
+      <p className="small-copy automatic-task-counts" role="status"><OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="success" label="流程完成" value={outcomes.completed} suffix={` / ${task.items.length} 个销售 SKU`} /> · <OutcomeCount tone="info" label="准备标签" value={outcomes.labels} /> · 待执行 {outcomes.pending}</p>
+      <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="定价跳过" value={outcomes.pricingSkipped} /> · <OutcomeCount tone="warning" label="来源待确认" value={outcomes.sourceReview} /> · <OutcomeCount tone="danger" label="流程异常" value={outcomes.failed} />；原始原因保留在各 SKU 中。</p>
       <div className="workflow-actions">
         {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}

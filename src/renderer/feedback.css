@@ -31,3 +31,20 @@
   :is(.workflow-notice, .workflow-warning, .ops-notice)[role], .error-banner, .workflow-error { animation: feedback-in .9s ease-out; }
   .jump-highlight, .settings-module-content > div:not([hidden]) { animation: jump-flash 1.6s ease-out; border-radius: 10px; }
 }
+
+/* Automatic task panel: counts, product cards and SKU rows carry their outcome colour. */
+.outcome-count[data-tone] { display: inline-block; padding: 0 8px; border: 1px solid; border-radius: 999px; font-weight: 600; line-height: 1.7; }
+.main-content .outcome-count[data-tone=success], [data-tone=success] > .workflow-notice { color: var(--success); background: var(--success-soft); border-color: var(--success-line); }
+.main-content .outcome-count[data-tone=info] { color: var(--info); background: var(--info-soft); border-color: var(--info-line); }
+.main-content .outcome-count[data-tone=warning], .main-content .workflow-notice[data-tone=warning] { color: var(--warning); background: var(--warning-soft); border-color: var(--warning-line); }
+.main-content .outcome-count[data-tone=danger], .main-content .workflow-notice[data-tone=danger] { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+.workflow-notice[data-tone=warning] { border-left-color: var(--warning); }
+.workflow-notice[data-tone=danger] { border-left-color: var(--danger); }
+.automatic-task-counts { line-height: 2.4; }
+.automatic-source-group[data-tone], .automatic-task-items > li[data-tone] { border-left: 4px solid var(--line); }
+.automatic-source-group[data-tone=danger], .automatic-task-items > li[data-tone=danger] { border-left-color: var(--danger); }
+.automatic-source-group[data-tone=warning], .automatic-task-items > li[data-tone=warning] { border-left-color: var(--warning); }
+.automatic-source-group[data-tone=success], .automatic-task-items > li[data-tone=success] { border-left-color: var(--success); }
+.automatic-source-group[data-tone=info], .automatic-task-items > li[data-tone=info] { border-left-color: var(--info); }
+.automatic-task-items > li[data-tone] { padding-left: 12px; }
+progress.automatic-task-progress { accent-color: var(--success); }

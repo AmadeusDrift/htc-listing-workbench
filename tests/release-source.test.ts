@@ -31,6 +31,32 @@ test('tracked-only archive binds exact Git tree/blobs and excludes ignored local
   await assert.rejects(s.verifySource(f.repo, result.snapshot), /source|blob|digest/i);
 });
 
+test('canonical snapshot preserves Chinese nested filenames, binary and empty blobs without archive decoding', async t => {
+  const s = await api(), f = await fixture(t);
+  const entries = new Map<string, Buffer>([
+    ['docs/maintenance/2026-10-10-字段规范化.md', Buffer.from('字段规范化：保留提交字节。\n')],
+    ['docs/maintenance/2026-10-10-默认估算与事实权限.md', Buffer.from('默认估算不是事实。\n')],
+    ['中文目录/嵌套 目录/源文件.bin', Buffer.from([0, 10, 13, 255, 128, 0])],
+    ['中文目录/嵌套 目录/空文件.txt', Buffer.alloc(0)],
+    ['启动合成.cmd', Buffer.from('@echo off\necho synthetic\n')],
+    ['.gitattributes', Buffer.from('*.cmd text eol=crlf\n')],
+  ]);
+  for (const [path, bytes] of entries) {
+    await mkdir(join(f.repo, path, '..'), { recursive: true }); await writeFile(join(f.repo, path), bytes);
+  }
+  await writeFile(join(f.repo, 'docs/maintenance/.env'), 'synthetic-ignored-never-copy');
+  f.git('add', '--', ...entries.keys());
+  f.git('-c', 'user.name=Release Test', '-c', 'user.email=release-test@example.invalid', 'commit', '-qm', 'Synthetic Chinese paths');
+  const result = await s.createSnapshot(f.repo, f.output);
+  assert.ok((await readFile(join(f.output, 'source.tar'))).length > 0, 'Original Git archive retained as evidence');
+  for (const [path, bytes] of entries) {
+    assert.deepEqual(await readFile(join(result.snapshot, path)), bytes, path);
+    assert.equal(result.source.objects.find((entry: any) => entry.path === path)?.mode, '100644');
+  }
+  await assert.rejects(readFile(join(result.snapshot, 'docs/maintenance/.env')), /ENOENT/);
+  await s.verifySource(f.repo, result.snapshot);
+});
+
 async function buildFixture(t: test.TestContext) {
   const s = await api(), f = await fixture(t);
   await writeFile(join(f.repo, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/electron': { version: '44.4.5' } } }));

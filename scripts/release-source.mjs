@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { assertNoLinkParents, digest, inventory, jsonDigest, reserveOutput, runFile, safeRelative, within } from './release-verification.mjs';
 
 export const sourceReceipt = '.release-source.json';
@@ -67,26 +67,34 @@ export async function createSnapshot(repo, output) {
   const archive = join(output, 'source.tar'), snapshot = join(output, 'source');
   await git(repo, ['archive', '--format=tar', `--output=${archive}`, commit]);
   await mkdir(snapshot);
-  await runFile('tar', ['-xf', archive, '-C', snapshot], { windowsHide: true, maxBuffer: 1024 * 1024 });
-  // Git for Windows archive applies eol attributes. Materialize canonical blob
-  // bytes after extraction so the snapshot has an exact, portable object binding.
+  // Retain archive evidence without decoding filenames through Windows tar.
+  // Validated ls-tree paths and canonical cat-file bytes alone materialize the
+  // snapshot, independent of archive locale and export/eol attributes.
   const blobs = await new Promise((done, reject) => {
     const child = spawn('git', ['-c', `safe.directory=${repo}`, '-C', repo, 'cat-file', '--batch'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [], errors = []; child.stdout.on('data', value => chunks.push(value)); child.stderr.on('data', value => errors.push(value));
+    child.stdin.once('error', reject);
     child.once('error', reject); child.once('close', code => code === 0 ? done(Buffer.concat(chunks)) : reject(Error(Buffer.concat(errors).toString())));
     child.stdin.end(objects.files.map(f => f.blob).join('\n') + '\n');
   });
   let offset = 0;
   for (const object of objects.files) {
-    const end = blobs.indexOf(10, offset), header = blobs.subarray(offset, end).toString();
+    const end = blobs.indexOf(10, offset); assert.ok(end >= offset, 'Truncated Git blob header');
+    const header = blobs.subarray(offset, end).toString();
     const match = /^([a-f0-9]{40}) blob (\d+)$/.exec(header); assert.ok(match && match[1] === object.blob, 'Invalid Git blob response');
-    const size = Number(match[2]), bytes = blobs.subarray(end + 1, end + 1 + size); offset = end + size + 2;
-    await writeFile(join(snapshot, object.path), bytes);
+    const size = Number(match[2]); assert.ok(Number.isSafeInteger(size) && size >= 0 && size < blobs.length - end - 1, 'Truncated Git blob payload');
+    const bytes = blobs.subarray(end + 1, end + 1 + size); offset = end + size + 2;
+    assert.equal(blobs[offset - 1], 10, 'Invalid Git blob separator');
+    assert.equal(createHash('sha1').update(`blob ${size}\0`).update(bytes).digest('hex'), object.blob, `Git blob content mismatch: ${object.path}`);
+    const target = join(snapshot, object.path);
+    await mkdir(dirname(target), { recursive: true }); await assertNoLinkParents(target);
+    await writeFile(target, bytes, { flag: 'wx', mode: parseInt(object.mode.slice(-3), 8) });
   }
+  assert.equal(offset, blobs.length, 'Unexpected trailing Git blob response');
   const files = await inventory(snapshot);
-  // ls-tree and inventory have the same bytewise lexical ordering for these source paths.
+  // Use Git's ordering explicitly; filesystem Unicode ordering can differ.
   const ordered = objects.files.map(object => files.find(file => file.path === object.path));
-  assert.ok(ordered.every(Boolean) && ordered.length === files.length, 'Archive differs from tracked source');
+  assert.ok(ordered.every(Boolean) && ordered.length === files.length, 'Snapshot differs from tracked source');
   const source = { schema: 'htc-source/v1', commit, tree: objects.tree, objects: objects.files, files: ordered,
     sourceDigest: jsonDigest(ordered), lockSha256: ordered.find(f => f.path === 'package-lock.json')?.sha256 };
   assert.ok(source.lockSha256, 'Tracked package-lock.json required');

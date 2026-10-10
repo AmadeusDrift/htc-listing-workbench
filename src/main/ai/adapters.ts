@@ -7,8 +7,9 @@ import { boundedText, integer, keys, modelFor, object, requestId, validateOutput
 import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from './validation.ts';
 import { MAX_VISION_REQUEST_BYTES, visionContent } from './vision.ts';
 import type { DeepSeekReferenceImage } from './vision.ts';
+import type { ListingNormalization } from '../../shared/listing-normalization-contracts.ts';
 
-export interface AdapterResult<T extends AiOutput = AiOutput> extends ProviderMetadata { output: T }
+export interface AdapterResult<T extends AiOutput = AiOutput> extends ProviderMetadata { output: T; listingNormalization?: ListingNormalization }
 export interface TextPayload {
   productId: string;
   sourceTitle: string;

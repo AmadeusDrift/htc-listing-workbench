@@ -185,11 +185,11 @@ test('attribute reviews can split ingredient and use phrases without confusing i
   }
 });
 
-test('repair accepts native boolean enum values but preserves exact schema enum restrictions',async()=>{
+test('repair accepts native booleans and unique enum spelling while preserving schema restrictions',async()=>{
   for(const [field,value,allowedValues,accepted] of [
     ['contains_liquid_contents',false,[false,true],true],['is_heat_sensitive','false',[false],true],
     ['is_expiration_dated_product',false,[true],false],['target_gender','unisex',['unisex','male','female'],true],
-    ['target_gender','Unisex',['unisex','male','female'],false],
+    ['target_gender','Unisex',['unisex','male','female'],true],
   ] as const){
     const context:any={productType:'KEYCHAIN',fields:[{name:field,closedEnum:true,allowedValues}],evidence:[{id:'category',name:'产品类别',value:'钥匙扣',meaning:'general',source:'source_confirmed'}],repairRequest:{issues:[],currentValues:{}}};
     const result=await suggestListingFields(context,'deepseek-flash',{apiKey:'test-only'},new AbortController().signal,{now:()=>new Date(),nonce:randomUUID,maxResponseBytes:200000,fetch:async()=>chat(output(field,value,['category'],inference))});

@@ -1,3 +1,4 @@
+import { persistSourceImageFixture, sourceImageId } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -34,6 +35,7 @@ async function fixture(t: test.TestContext, options: { fallback?: boolean; unmap
     receipt.snapshot.images=product.variants.map((_,i)=>({id:`alias-${i}`,url:`https://images.example.com/alias-${i}.png`,role:'gallery'}));
     receipt.skuMappings=product.variants.map((v,i)=>({sourceKey:`source-${i}`,localVariantId:v.id,imageIds:[`alias-${i}`]}));
   }
+  persistSourceImageFixture(directory,receipt);
   const downloads:string[]=[]; let began!:()=>void, release!:()=>void;
   const started=new Promise<void>(r=>began=r), held=new Promise<void>(r=>release=r);
   const images=new MiaoshouImageService(directory,store,()=>receipt,bytes=>bytes,{download:async(url,signal)=>{
@@ -70,7 +72,7 @@ test('unmapped SKU is blocked without borrowing another color, while the mapped 
 test('an unmapped SKU recovers only after its source photo is explicitly bound by the user',async t=>{
   const f=await fixture(t,{unmapped:true});await f.run([f.product.variants[0].id]);assert.equal(f.downloads.length,0);
   let product=f.store.getProduct(f.product.id);
-  const downloaded=await f.images.download({productId:product.id,revision:product.revision,imageIds:['red']});product=downloaded.product;
+  const downloaded=await f.images.download({productId:product.id,revision:product.revision,imageIds:[sourceImageId('https://images.example.com/red.png')]});product=downloaded.product;
   const unbound=await f.run([f.product.variants[0].id]);assert.equal(unbound.missing.length,1);
   f.store.updateAsset({productId:product.id,revision:product.revision,assetId:product.assets[0].id,role:'main',variantIds:[f.product.variants[0].id]});
   const recovered=await f.run([f.product.variants[0].id]);assert.deepEqual(recovered.missing,[]);assert.equal(f.downloads.length,1);
@@ -85,7 +87,7 @@ test('source diagnostics distinguish absent links, invalid IDs, download failure
   const invalid=await fixture(t);invalid.receipt.skuMappings[0].imageIds=['missing-id'];
   const invalidIds=await invalid.run([invalid.product.variants[0].id]);assert.match(invalidIds.missing[0].message,/映射.*ID.*无效/);assert.equal(invalid.downloads.length,0);
   assert.equal(invalidIds.missing[0].code,'SOURCE_MAPPING_INVALID');
-  const failed=await fixture(t,{fallback:true});failed.receipt.skuMappings[0].imageIds=['red'];
+  const failed=await fixture(t,{fallback:true});failed.receipt.skuMappings[0].imageIds=[sourceImageId('https://images.example.com/red.png')];
   const failedDownload=await failed.run([failed.product.variants[0].id]);assert.match(failedDownload.missing[0].message,/来源图片下载失败/);assert.equal(failed.downloads.length,1);
   assert.equal(failedDownload.missing[0].code,'SOURCE_DOWNLOAD_FAILED');
   const unconfirmed=await fixture(t);await unconfirmed.run([unconfirmed.product.variants[0].id]);

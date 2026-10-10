@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { LookupFunction } from 'node:net';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type { MiaoshouDownloadResult, MiaoshouProduct, MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
@@ -15,10 +15,13 @@ import { isPublicIp } from '../hosting/public-probe.ts';
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
 import { uuid } from './validation.ts';
+import { sourceImageReceipt, sourceImageMappings } from '../source-images.ts';
+import type { SourceImageReceipt } from '../source-images.ts';
+import { listingFingerprint } from '../listing-ai/validation.ts';
 
 interface DownloadBudget { remainingBytes: number }
 /** Main-process-only scope; never accepted through IPC or stored across automatic runs. */
-export interface SourceImageDownloadSession { createdAssets: Set<string> }
+export interface SourceImageDownloadSession { createdAssets: Set<string>; variantIds?: string[] }
 type Downloader = (url: string, signal: AbortSignal, budget?: DownloadBudget) => Promise<Buffer>;
 interface DownloadDependencies {
   lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
@@ -193,15 +196,19 @@ export class MiaoshouImageService {
     const input = record(raw, '来源图片下载', ['productId', 'revision', 'imageIds']), mutation = parseMutation(input);
     this.store.assertRevision(mutation);
     if (!Array.isArray(input.imageIds) || !input.imageIds.length || input.imageIds.length > 20 || input.imageIds.some(id => typeof id !== 'string') || new Set(input.imageIds).size !== input.imageIds.length) throw new UserFacingError('每次请选择 1–20 张不同的来源图片');
-    const receipt = this.getReceipt(mutation.productId);
-    if (!receipt || receipt.productId !== mutation.productId || input.imageIds.some(id => !receipt.snapshot.images.some(image => image.id === id))) throw new UserFacingError('来源图片不属于该商品');
+    const source = sourceImageReceipt(this.store.getCollectionReceipt(mutation.productId),this.getReceipt(mutation.productId));
+    const receipt=source?.receipt;
+    if (!source || !receipt || receipt.productId !== mutation.productId || input.imageIds.some(id => !receipt.snapshot.images.some(image => image.id === id))) throw new UserFacingError('来源图片不属于该商品');
     const signal = callerSignal ? AbortSignal.any([this.controller.signal, callerSignal]) : this.controller.signal;
     aborted(signal);
-    this.operation = this.perform(mutation, receipt, input.imageIds as string[], signal, session);
+    this.operation = this.perform(mutation, source, input.imageIds as string[], signal, session);
     try { return await this.operation; } finally { this.operation = undefined; }
   }
-  private async perform(input: { productId: string; revision: number }, receipt: MiaoshouReceipt, imageIds: string[], signal: AbortSignal, session?: SourceImageDownloadSession): Promise<MiaoshouDownloadResult> {
+  private async perform(input: { productId: string; revision: number }, source: SourceImageReceipt, imageIds: string[], signal: AbortSignal, session?: SourceImageDownloadSession): Promise<MiaoshouDownloadResult> {
+    const receipt=source.receipt, stamp=listingFingerprint(source);
+    const fresh=()=>{aborted(signal);if(listingFingerprint(sourceImageReceipt(this.store.getCollectionReceipt(input.productId),this.getReceipt(input.productId)))!==stamp)throw new UserFacingError('来源记录已变化');};
     await mkdir(this.directory, { recursive: true });
+    fresh();
     const temporary = await mkdtemp(join(this.directory, '.miaoshou-images-'));
     let downloaded = 0, existing = 0;
     const budget: DownloadBudget = { remainingBytes: 80 * 1024 * 1024 };
@@ -218,38 +225,40 @@ export class MiaoshouImageService {
         try {
           aborted(signal);
           const remaining = budget.remainingBytes;
-          const bytes = receipt.mode === 'demo' ? this.dependencies.demoImage?.(imageId) : await this.downloader(image.url, signal, budget);
+          const bytes = source.kind==='miaoshou'&&source.receipt.mode === 'demo' ? this.dependencies.demoImage?.(imageId) : await this.downloader(image.url, signal, budget);
           if (!bytes) throw new UserFacingError('演示图片生成不可用');
-          aborted(signal);
+          fresh();
           // Network streams consume this budget even if they later fail. Local/demo decoders also count.
           budget.remainingBytes = Math.min(budget.remainingBytes, Math.max(0, remaining - bytes.length));
           if (bytes.length > 20 * 1024 * 1024 || bytes.length > remaining) throw new UserFacingError('每张图片最多 20 MB，每批最多 80 MB');
           this.store.assertRevision({ productId: product.id, revision: product.revision });
           const raster = inspectRaster(bytes), hash = createHash('sha256').update(bytes).digest('hex');
-          const variants = receipt.skuMappings.filter(row => row.imageIds.includes(imageId) && product.variants.some(variant => variant.id === row.localVariantId)).map(row => row.localVariantId);
+          const variants = sourceImageMappings(source).filter(row => row.images.some(i=>i.imageId===imageId) && product.variants.some(variant => variant.id === row.localVariantId)&&(!session?.variantIds||session.variantIds.includes(row.localVariantId))).map(row => row.localVariantId);
           const previous = this.store.findAssetByHash(product.id, hash);
+          const anchor=(assetId:string,bindings:string[],newlyImported=false)=>this.store.anchorSourceImage({productId:product.id,revision:product.revision},{
+            version:'source-image-provenance/v1',id:randomUUID(),productId:product.id,receiptKind:source.kind,receiptId:receipt.id,receiptFingerprint:receipt.fingerprint,
+            imageId,url:image.url,mappings:sourceImageMappings(source).flatMap(m=>m.images.filter(i=>i.imageId===imageId).map(({imageId,...i})=>({localVariantId:m.localVariantId,sourceSku:m.sourceSku,...i}))),
+            assetId,sha256:hash,byteSize:bytes.length,mimeType:raster.mimeType,width:raster.width,height:raster.height,observedAt:new Date().toISOString(),
+          },bindings,newlyImported?image.role:undefined);
           if (previous) {
             // CDN aliases can be the same photo. Merge only this operation's new bindings;
             // assets that existed before it may have been deliberately edited by the user.
-            if (createdAssets.has(previous.id)) {
-              const asset = product.assets.find(row => row.id === previous.id)!;
-              const merged = [...new Set([...asset.variantIds, ...variants])];
-              if (merged.length !== asset.variantIds.length) product = this.store.updateAsset({ productId: product.id, revision: product.revision, assetId: asset.id, role: asset.role, variantIds: merged });
-            }
+            product=anchor(previous.id,createdAssets.has(previous.id)?variants:[]);
             existing++; continue;
           }
           const sourcePath = join(temporary, `source-${imageIds.indexOf(imageId)}.${raster.extension}`); await writeFile(sourcePath, bytes, { flag: 'wx' });
-          product = await importImageFiles(this.store, this.directory, { productId: product.id, revision: product.revision }, [sourcePath], this.decode);
+          fresh();this.store.assertRevision({productId:product.id,revision:product.revision});
+          product = await importImageFiles(this.store, this.directory, { productId: product.id, revision: product.revision }, [sourcePath], this.decode,()=>{fresh();this.store.assertRevision({productId:product.id,revision:product.revision});});
+          fresh();this.store.assertRevision({productId:product.id,revision:product.revision});
           const asset = this.store.findAssetByHash(product.id, hash);
           if (asset) {
-            const current = product.assets.find(row => row.id === asset.id)!;
-            product = this.store.updateAsset({ productId: product.id, revision: product.revision, assetId: asset.id,
-              role: current.role === 'main' ? 'main' : image.role === 'main' ? 'gallery' : image.role, variantIds: variants });
+            product=anchor(asset.id,variants,true);
             createdAssets.add(asset.id);
           }
           downloaded++;
         } catch (error) { failures.push({ imageId, message: publicError(error) }); if (signal.aborted) break; }
       }
+      aborted(signal);
       return { product: this.store.assertRevision({ productId: product.id, revision: product.revision }), downloaded, existing, failures };
     } finally {
       const path = resolve(temporary), root = resolve(this.directory);

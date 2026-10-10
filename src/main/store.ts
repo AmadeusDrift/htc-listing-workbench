@@ -1,3 +1,4 @@
+import { readNativeImageReceipt } from './source-images.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +9,7 @@ import type { WorkspacePlacement } from '../shared/workspace-contracts.ts';
 import { parseMoveWorkspaceProducts, readWorkspacePlacements } from './workspaces.ts';
 import type { CollectionCaptureRecord, CollectionReceipt, CollectionReceiveResult } from '../shared/collection-contracts.ts';
 import { CollectionError, collectionFingerprint, collectionId, localCollectionPrice, validateCollectionCapture, validateCollectionReceipt, validateCollectionSnapshot } from './collection/validation.ts';
+import { assertSourceImageHistory, assertSourceImageProvenance, validateSourceImageProvenance } from './source-image-provenance.ts';
 
 export interface NewAsset {
   id: string; fileName: string; mimeType: string; width: number; height: number; byteSize: number;
@@ -21,7 +23,8 @@ const now = () => new Date().toISOString();
 
 export class WorkspaceStore {
   private db: DatabaseSync;
-  constructor(directory: string) { this.db = openDatabase(directory); }
+  private directory:string;
+  constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);try{assertSourceImageHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
   close(): void { this.db.close(); }
 
   private transaction<T>(operation: () => T): T {
@@ -183,6 +186,31 @@ export class WorkspaceStore {
       return this.getProduct(input.productId);
     });
   }
+  /** Append authentic byte identity and only this download session's new bindings atomically. */
+  anchorSourceImage(input:ProductMutation,raw:unknown,variantIds:string[],newRole?:Asset['role']):ProductDetail {
+    const anchor=validateSourceImageProvenance(raw);
+    return this.transaction(()=>{
+      const product=this.assertRevision(input);
+      if(anchor.productId!==product.id)throw new UserFacingError('来源图片不属于该商品');
+      if(newRole!==undefined&&!['main','gallery','detail'].includes(newRole))throw new UserFacingError('图片角色无效');
+      assertSourceImageProvenance(this.db,anchor,this.directory);
+      if(variantIds.some(id=>!product.variants.some(v=>v.id===id)||!anchor.mappings.some(m=>m.localVariantId===id)))throw new UserFacingError('来源图片映射已变化');
+      const previous=this.db.prepare("SELECT record_json FROM source_image_provenance WHERE json_extract(record_json,'$.receiptId')=? AND json_extract(record_json,'$.imageId')=? AND json_extract(record_json,'$.assetId')=?").get(anchor.receiptId,anchor.imageId,anchor.assetId);
+      if(!previous)this.db.prepare('INSERT INTO source_image_provenance VALUES(?,?)').run(anchor.id,JSON.stringify(anchor));
+      let changed=false;
+      if(newRole!==undefined&&product.assets.find(a=>a.id===anchor.assetId)?.role!=='main'){
+        this.db.prepare('UPDATE assets SET role=? WHERE id=?').run(newRole==='main'?'gallery':newRole,anchor.assetId);changed=true;
+      }
+      for(const id of variantIds){
+        // Existing confirmed=0 rows must never be reconfirmed by an automatic download.
+        if(!this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=?').get(anchor.assetId,id)){
+          this.db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(anchor.assetId,id,now());changed=true;
+        }
+      }
+      if(changed)this.db.prepare('UPDATE products SET revision=revision+1,updated_at=? WHERE id=?').run(now(),product.id);
+      return this.getProduct(product.id);
+    });
+  }
   getAssetRecord(id: string): StoredAsset | null {
     const a = this.db.prepare('SELECT * FROM assets WHERE id=?').get(identifier(id));
     return a ? this.assetRecord(a) : null;
@@ -276,8 +304,7 @@ export class WorkspaceStore {
     return { captureId: capture.id, receiptId: receipt.id, productId: receipt.productId, duplicate: capture.duplicate, receivedAt: capture.receivedAt, warnings: receipt.snapshot.warnings, variantCount: receipt.snapshot.skus.length };
   }
   getCollectionReceipt(rawProductId: string): CollectionReceipt | null {
-    const row = this.db.prepare("SELECT record_json FROM collection_receipts WHERE json_extract(record_json,'$.productId')=?").get(identifier(rawProductId));
-    return row ? validateCollectionReceipt(JSON.parse(String(row.record_json))) : null;
+    return readNativeImageReceipt(this.db,identifier(rawProductId));
   }
   getStats(): { schemaVersion: number; productCount: number; assetCount: number } {
     return { schemaVersion: SCHEMA_VERSION, productCount: Number(this.db.prepare('SELECT count(*) AS n FROM products').get()!.n),

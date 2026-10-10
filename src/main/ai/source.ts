@@ -1,11 +1,25 @@
 import { createHash } from 'node:crypto';
 import { open, realpath, stat } from 'node:fs/promises';
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 import type { StoredAsset } from '../store.ts';
 import { managedAssetPath } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
 import { AiError, throwIfAborted } from './errors.ts';
 import { MAX_IMAGE_BYTES } from './validation.ts';
+
+/** Synchronous final identity check at a transaction/send boundary; no asynchronous gap. */
+export function readManagedImageSync(directory:string,asset:StoredAsset):Buffer {
+  try {
+    if(asset.originalPath!==`assets/${asset.id}.${asset.mimeType==='image/png'?'png':'jpg'}`)throw new AiError('SOURCE_CHANGED');
+    const path=managedAssetPath(directory,asset.originalPath),root=realpathSync(directory),actual=realpathSync(path),below=relative(root,actual);
+    if(!below||below==='..'||below.startsWith(`..${sep}`)||lstatSync(resolve(directory,'assets')).isSymbolicLink()||lstatSync(path).isSymbolicLink())throw new AiError('SOURCE_CHANGED');
+    const before=statSync(path);if(!before.isFile()||before.size!==asset.byteSize||before.size>20*1024*1024)throw new AiError('SOURCE_CHANGED');
+    const bytes=readFileSync(path),after=statSync(path),raster=inspectRaster(bytes);
+    if(realpathSync(path)!==actual||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||bytes.length!==asset.byteSize||createHash('sha256').update(bytes).digest('hex')!==asset.sha256||raster.width!==asset.width||raster.height!==asset.height||raster.mimeType!==asset.mimeType)throw new AiError('SOURCE_CHANGED');
+    return bytes;
+  }catch{throw new AiError('SOURCE_CHANGED');}
+}
 
 export function validateImage(asset: StoredAsset, segmentation: boolean): void {
   if (!['image/png', 'image/jpeg'].includes(asset.mimeType) || !Number.isSafeInteger(asset.byteSize) || asset.byteSize < 1 || asset.byteSize > MAX_IMAGE_BYTES || !Number.isSafeInteger(asset.width) || !Number.isSafeInteger(asset.height)) throw new AiError('IMAGE_INVALID');

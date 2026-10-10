@@ -11,7 +11,7 @@ export type PreviewDecoder = (data: Buffer) => Buffer;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 /** Original bytes are copied verbatim. Only the separate preview is resized. */
-export async function importImageFiles(store: WorkspaceStore, root: string, input: ProductMutation, paths: string[], decodePreview: PreviewDecoder): Promise<ProductDetail> {
+export async function importImageFiles(store: WorkspaceStore, root: string, input: ProductMutation, paths: string[], decodePreview: PreviewDecoder,assertFresh:()=>void=()=>{}): Promise<ProductDetail> {
   const before = store.assertRevision(input);
   if (!paths.length) return before;
   if (paths.length > 20 || before.assets.length + paths.length > 100) throw new UserFacingError('每次最多导入 20 张图片，每件商品最多保留 100 张');
@@ -19,8 +19,10 @@ export async function importImageFiles(store: WorkspaceStore, root: string, inpu
   const seen = new Set<string>(); let total = 0;
   for (const path of paths) {
     const info = await stat(path);
+    assertFresh();
     if (!info.isFile() || info.size > MAX_FILE_BYTES) throw new UserFacingError('请选择不超过 20 MB 的图片文件');
     const data = await readFile(path);
+    assertFresh();
     total += data.length;
     if (data.length > MAX_FILE_BYTES || total > 80 * 1024 * 1024) throw new UserFacingError('图片单张不能超过 20 MB，每批不能超过 80 MB');
     const raster = inspectRaster(data), sha256 = createHash('sha256').update(data).digest('hex');
@@ -28,24 +30,28 @@ export async function importImageFiles(store: WorkspaceStore, root: string, inpu
     seen.add(sha256);
     const id = randomUUID();
     const preview = decodePreview(data);
+    assertFresh();
     if (!preview.length) throw new UserFacingError(`图片「${basename(path)}」无法解码，请重新保存后导入`);
     prepared.push({ asset: { id, fileName: basename(path).slice(0, 255), mimeType: raster.mimeType, width: raster.width, height: raster.height,
       byteSize: data.length, originalPath: `assets/${id}.${raster.extension}`, previewPath: `assets/${id}.preview.png`, sha256 }, original: data, preview });
   }
   await mkdir(join(root, 'assets'), { recursive: true });
+  assertFresh();
   const written: string[] = [];
   async function writeNewFile(path: string, bytes: Buffer) {
     const file = await open(path, 'wx');
     // The newly created file belongs to this call even if writing fails halfway.
     written.push(path);
-    try { await file.writeFile(bytes); }
+    try { assertFresh();await file.writeFile(bytes);assertFresh(); }
     finally { await file.close(); }
   }
   try {
     for (const p of prepared) {
       const originalPath = managedAssetPath(root, p.asset.originalPath), previewPath = managedAssetPath(root, p.asset.previewPath);
       await writeNewFile(originalPath, p.original);
+      assertFresh();
       await writeNewFile(previewPath, p.preview);
+      assertFresh();
     }
     return store.addAssets(input, prepared.map(p => p.asset));
   } catch (error) {

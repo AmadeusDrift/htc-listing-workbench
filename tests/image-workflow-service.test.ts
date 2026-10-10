@@ -15,6 +15,7 @@ import type { SalesListingPlan } from '../src/shared/sales-plan-contracts.ts';
 import { importImageFiles } from '../src/main/assets.ts';
 import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
+import { ListingAiService } from '../src/main/listing-ai/service.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, validateImageWorkflowRun } from '../src/main/image-workflow/records.ts';
 import { AiError } from '../src/main/ai/errors.ts';
@@ -23,7 +24,7 @@ import type { AiCall, AiResult } from '../src/shared/ai-contracts.ts';
 import type { GeneratedImageCandidate } from '../src/shared/image-generation-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.ts';
 import type { ProductImageContext } from '../src/shared/image-ai-contracts.ts';
-import type { ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
+import type { ListingAiContext, ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { OpenAiImageAdapter } from '../src/main/image-generation/adapter.ts';
 import { canResumeImageWorkflow } from '../src/shared/image-workflow-contracts.ts';
@@ -32,6 +33,7 @@ import { currentImageListingSnapshot } from '../src/main/image-workflow/image-fa
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13,8); png.write('IHDR',12); png.writeUInt32BE(256,16); png.writeUInt32BE(256,20);
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t: test.TestContext, options: { familyMigration?:boolean; lostResponse?:boolean; rejectSlot?:number; knownGenerationFailures?:number; rejected?: number; configured?: boolean; generationError?: boolean; mutate?: boolean; hold?: boolean; rotateKeyDuringPlan?: boolean; insufficient?: boolean; legacyPlan?: boolean; ipVerdict?: 'PASS'|'BLOCKED'|'UNCERTAIN'; generatedRisk?: boolean; riskFailure?: boolean } = {}) {
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('External network is forbidden in image workflow fixtures');});
   await mkdir(resolve('.test-data'), { recursive:true }); const root = await mkdtemp(resolve('.test-data/image-flow-'));
   const store = new WorkspaceStore(root), amazon = new AmazonService(root, id => store.getProduct(id), {isEncryptionAvailable:()=>false, encryptString:()=>Buffer.alloc(0), decryptString:()=>''});
   let product = store.createProduct(); const source = join(root,'source.png'); await writeFile(source,png);
@@ -107,6 +109,119 @@ async function fixture(t: test.TestContext, options: { familyMigration?:boolean;
   t.after(async()=>{release(); await service.close(); amazon.close(); store.close(); await rm(root,{recursive:true,force:true});});
   return {root,store,amazon,product,draft,familyPlan,service,calls,listing,ai,generation,generationInputs,release,began,reopen:()=>new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never}),run:()=>service.complete({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision})};
 }
+
+// Exercise the real listing context builder and image snapshot together with the
+// workflow. Only provider responses and the version-specific card projection vary.
+function currentListingBridge(f:Awaited<ReturnType<typeof fixture>>) {
+  const real=new ListingAiService(f.store,f.amazon,f.ai as never);
+  const calls=new Map<string,AiCall>();
+  const seal=(result:AiResult,context:ProductImageContext,providerId:AiResult['providerId'])=>{
+    Object.assign(result,{providerId,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,model:'fixture',createdAt:new Date().toISOString(),imageContext:structuredClone(context),sourceSha256:listingFingerprint(context)});
+    calls.set(result.callId,{id:result.callId,providerId,productId:result.productId,productRevision:result.productRevision,model:result.model,status:'SUCCEEDED',finishedAt:result.createdAt} as AiCall);
+    return result;
+  };
+  const plan=f.ai.imagePlan,risk=f.ai.reviewGeneratedImageRisk,ocr=f.ai.recognizeGeneratedImage,text=f.ai.reviewGeneratedImage;
+  f.ai.imagePlan=async context=>seal(await plan(context),context,'deepseek');
+  f.ai.reviewGeneratedImageRisk=async(context,plan,candidate)=>seal(await risk(context,plan,candidate),context as ProductImageContext,'aliyun-image-risk');
+  f.ai.recognizeGeneratedImage=async(context,candidate)=>seal(await ocr(context,candidate),context as ProductImageContext,'aliyun-ocr');
+  f.ai.reviewGeneratedImage=async(context,plan,ocr,candidate)=>{
+    const result=seal(await text(context,plan,ocr,candidate),context as ProductImageContext,'deepseek-review');
+    Object.assign(result.output,{noTextVerified:true});return result;
+  };
+  (f.ai as any).getCall=(id:string)=>calls.get(id)??{status:'SUCCEEDED'};
+  let project=(context:ListingAiContext)=>context;
+  const currentContext=(...args:Parameters<ListingAiService['currentContext']>)=>project(real.currentContext(...args));
+  Object.assign(f.listing,{currentContext});
+  const snapshot=async()=>{const draft=f.amazon.getDraft(f.draft.id);return currentImageListingSnapshot(draft,currentContext(draft,f.store.getProduct(draft.productId),f.amazon.executionTargetScope(draft.targetId).generation));};
+  f.listing.snapshotCurrentForImages=snapshot as typeof f.listing.snapshotCurrentForImages;
+  const review=f.listing.reviewCurrentForImages;
+  f.listing.reviewCurrentForImages=async()=>{
+    const original=await review(),value=await snapshot();
+    Object.assign(original.review,{listingContext:structuredClone(value.context),sourceSha256:listingFingerprint(value.context)});
+    Object.assign(original.review.output,{currentListingCopy:value.currentListingCopy,copySha256:listingFingerprint(value.currentListingCopy)});
+    return {...value,review:original.review};
+  };
+  return {project:(value:typeof project)=>{project=value;}};
+}
+function olderFieldMetadata(context:ListingAiContext):ListingAiContext {
+  for(const field of context.fields){field.title=`Previous ${field.name}`;delete field.description;}
+  return context;
+}
+
+test('field title and description changes reuse completed images and preserve original context hashes',async t=>{
+  const f=await fixture(t),bridge=currentListingBridge(f);bridge.project(olderFieldMetadata);
+  const first=await f.run();assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
+  const original=structuredClone(first.workflow),before=f.calls.length;
+  bridge.project(context=>context);
+  const resumed=await f.run();
+  assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED');
+  assert.equal(f.calls.length,before,'metadata alone must not cause provider calls');
+  assert.deepEqual(resumed.workflow.imageContext,original.imageContext);assert.equal(resumed.workflow.contextSha256,original.contextSha256);
+  const rechecked=await f.service.recheck({draftId:f.draft.id,draftRevision:f.draft.revision,sourceWorkflowId:first.workflow.id});
+  assert.equal(rechecked.workflow.approvalReuse?.sourceRunId,first.workflow.id);
+  assert.equal(f.calls.length,before);assert.deepEqual(rechecked.workflow.imageContext,original.imageContext);
+  assert.equal(rechecked.workflow.contextSha256,original.contextSha256);
+});
+
+test('field metadata changes cannot resend an unknown paid request with no durable candidate',async t=>{
+  const f=await fixture(t,{generationError:true}),bridge=currentListingBridge(f);bridge.project(olderFieldMetadata);
+  const first=await f.run(),attempt=first.workflow.slots![0].attempts[0];assert.equal(attempt.state,'UNKNOWN');
+  bridge.project(context=>context);await f.service.close();const restarted=f.reopen();
+  try{
+    const resumed=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+    assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.slots![0].status,'UNKNOWN');
+    assert.equal(resumed.workflow.slots![0].attempts.length,1);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,attempt.requestId);
+    assert.equal(f.calls.filter(call=>call==='generate').length,1);
+  }finally{await restarted.close();}
+});
+
+test('semantic field and source changes still block the original unknown paid workflow',async t=>{
+  const changes:Record<string,(context:ListingAiContext)=>void>={
+    'allowed values':c=>{c.fields[0].allowedValues.push('Changed option');},
+    'field permissions':c=>{c.fields[0].requirement=c.fields[0].requirement==='required'?'optional':'required';},
+    'field bounds':c=>{c.fields[0].maxLength=(c.fields[0].maxLength??0)+1;},
+    'field collection':c=>{c.fields.pop();},
+    'source evidence':c=>{c.evidence.push({id:randomUUID(),name:'Color',value:'Red',meaning:'color',source:'source_confirmed'});},
+    'identity':c=>{c.targetGeneration++;},
+    'schema':c=>{c.schemaSha256='f'.repeat(64);},
+  };
+  for(const [label,change] of Object.entries(changes)){
+    const f=await fixture(t,{lostResponse:true}),bridge=currentListingBridge(f),first=await f.run();
+    assert.equal(first.workflow.slots![0].status,'UNKNOWN');
+    bridge.project(context=>{context.fields[0].description='New metadata';change(context);return context;});
+    const next=await f.run();assert.equal(next.workflow.status,'BLOCKED',label);assert.equal(next.workflow.id,first.workflow.id);
+    assert.equal(next.workflow.slots![0].attempts[0].requestId,first.workflow.slots![0].attempts[0].requestId);
+    assert.equal(next.workflow.slots![0].attempts.length,1);assert.equal(f.calls.filter(call=>call==='generate').length,1,label);
+  }
+});
+
+test('field metadata compatibility preserves exact rule-filter evidence hashes and source bytes',async t=>{
+  const f=await fixture(t,{ipVerdict:'BLOCKED'}),bridge=currentListingBridge(f);bridge.project(olderFieldMetadata);
+  const first=await f.run(),proof=await f.service.getRuleFilterEvidence(f.draft.id);assert.ok(proof);
+  const before=f.calls.length;bridge.project(context=>context);
+  assert.deepEqual(await f.service.getRuleFilterEvidence(f.draft.id),proof);assert.equal(f.calls.length,before);
+  const plan=f.ai.getResult(proof.resultId),original=structuredClone(plan.imageContext!);
+  plan.imageContext!.listing.fields[0].title='Tampered stored label';
+  assert.equal(await f.service.getRuleFilterEvidence(f.draft.id),null,'stored evidence is hashed without normalization');
+  plan.imageContext=original;
+  assert.deepEqual(await f.service.getRuleFilterEvidence(f.draft.id),proof);
+  const asset=f.store.getAssetRecord(first.workflow.referenceAssets[0].id)!;
+  await writeFile(join(f.root,asset.originalPath),Buffer.from('changed source bytes'));
+  assert.equal(await f.service.getRuleFilterEvidence(f.draft.id),null);assert.equal(f.calls.length,before);
+});
+
+test('approval reuse retains its existing bounded four-field migration exception',async t=>{
+  const f=await fixture(t),bridge=currentListingBridge(f),first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
+  const count=f.calls.length;
+  bridge.project(context=>{
+    for(const name of ['theme','subject_character','blade','target_audience'] as const)if(!context.fields.some(field=>field.name===name))
+      context.fields.push({name,title:`New ${name}`,description:'Newly supported catalog help',requirement:'optional',closedEnum:false,allowedValues:[],suggestedValues:[]});
+    return context;
+  });
+  const next=await f.service.recheck({draftId:f.draft.id,draftRevision:f.draft.revision,sourceWorkflowId:first.workflow.id});
+  assert.equal(next.workflow.approvalReuse?.sourceRunId,first.workflow.id);assert.equal(f.calls.length,count);
+  assert.deepEqual(next.workflow.imageContext,first.workflow.imageContext);assert.equal(next.workflow.contextSha256,first.workflow.contextSha256);
+});
 test('copy review switch skips independent copy review while preserving main text and risk checks',async t=>{
   const f=await fixture(t);assert.equal(f.service.getCopyReviewSettings().enabled,true);
   f.service.saveCopyReviewSettings({enabled:false});
@@ -512,9 +627,18 @@ test('missing configuration stops before paid content; ambiguous timeout never r
   await g.service.close();const restarted=g.reopen();await restarted.complete({draftId:g.draft.id,draftRevision:g.draft.revision});assert.equal(g.calls.filter(c=>c==='generate').length,1);assert.equal(restarted.getProgress(g.draft.id)!.slots![0].attempts.length,1);await restarted.close();
 });
 test('a lost paid response reconciles a durable candidate after restart and resumes without a second generation for that slot',async t=>{
-  const f=await fixture(t,{lostResponse:true}),first=await f.run();assert.equal(first.workflow.slots![0].status,'UNKNOWN');
-  await f.service.close();const restarted=f.reopen(),result=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
-  assert.equal(result.workflow.status,'COMPLETED');assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.equal(result.workflow.slots![0].attempts.length,1);await restarted.close();
+  const f=await fixture(t,{lostResponse:true}),bridge=currentListingBridge(f);
+  bridge.project(context=>{for(const field of context.fields)field.description='Earlier field help';return context;});
+  const first=await f.run();assert.equal(first.workflow.slots![0].status,'UNKNOWN');
+  const attempt=first.workflow.slots![0].attempts[0],context=structuredClone(first.workflow.imageContext);
+  bridge.project(value=>value);await f.service.close();const restarted=f.reopen();
+  try{
+    const result=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+    assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(result.workflow.id,first.workflow.id);
+    assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.equal(result.workflow.slots![0].attempts.length,1);
+    assert.equal(result.workflow.slots![0].attempts[0].requestId,attempt.requestId);assert.equal(result.workflow.slots![0].attempts[0].candidateId,attempt.requestId);
+    assert.deepEqual(result.workflow.imageContext,context);assert.equal(result.workflow.contextSha256,first.workflow.contextSha256);
+  }finally{await restarted.close();}
 });
 test('a paid 502 response remains unknown across restart and is locally reconciled without another POST',async t=>{
   const f=await fixture(t);let posts=0,reconciliations=0;

@@ -2,6 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, chat, reviewFor } from './fixtures/listing-ai.ts';
 
+test('image metadata compatibility does not relax listing-field adoption context identity',async t=>{
+  t.mock.method(globalThis,'fetch',()=>{throw new Error('External network is forbidden in adoption fixtures');});
+  const f=await fixture(t),suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
+  const input={...f.reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']};
+  const before=f.amazon.getDraft(f.draft.id),requests=f.requests.length,context=f.listing.currentContext.bind(f.listing);
+  for(const key of ['title','description'] as const){
+    const changed=t.mock.method(f.listing,'currentContext',(...args:Parameters<typeof context>)=>{
+      const current=context(...args);current.fields[0][key]='Different field metadata';return current;
+    });
+    await assert.rejects(f.listing.adopt(input),/过期|当前草稿/);changed.mock.restore();
+  }
+  assert.equal(f.requests.length,requests);assert.deepEqual(f.amazon.getDraft(f.draft.id),before);
+});
+
 test('schema refresh or target credential rotation blocks adoption without a paid call or draft mutation', async t => {
   const f = await fixture(t), suggestion = await f.listing.suggest(f.reference), review = await f.listing.review({ ...f.reference, suggestionResultId: suggestion.id });
   const input = { ...f.reference, suggestionResultId: suggestion.id, reviewResultId: review.id, fields: ['material'] };

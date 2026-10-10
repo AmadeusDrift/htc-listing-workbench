@@ -8,6 +8,7 @@ import { buildListingContext } from '../listing-ai/context.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { currentImageListingSnapshot } from './image-facts.ts';
 import { imageWorkflowDraftStamp } from './records.ts';
+import { imageListingContextsMatch } from './context-compatibility.ts';
 
 /** Proves a recheck recorded this exact draft version, not that its review passed. */
 export function hasRecordedRecheckDraft(input: {
@@ -36,7 +37,8 @@ export function hasRecordedRecheckDraft(input: {
     // context also pins its revision, so later human edits cannot reuse this proof.
     if(run.draftSha256){
       return run.draftSha256===imageWorkflowDraftStamp(draft)&&!!run.imageContext
-        &&listingFingerprint(run.imageContext.listing)===listingFingerprint(snapshot.context)
+        &&run.contextSha256===listingFingerprint(run.imageContext)
+        &&imageListingContextsMatch(run.imageContext.listing,snapshot.context)
         &&listingFingerprint(run.imageContext.currentListingCopy)===listingFingerprint(snapshot.currentListingCopy);
     }
     // A content refusal occurs before draftSha256 is saved. Its linked review still
@@ -48,7 +50,8 @@ export function hasRecordedRecheckDraft(input: {
       &&review.createdAt>=run.createdAt&&review.createdAt<=run.updatedAt
       &&call.id===review.callId&&call.status==='SUCCEEDED'&&call.productId===review.productId&&call.productRevision===review.productRevision
       &&call.providerId===review.providerId&&call.model===review.model&&call.finishedAt===review.createdAt
-      &&review.sourceSha256===listingFingerprint(snapshot.context)&&listingFingerprint(review.listingContext)===listingFingerprint(snapshot.context)
+      &&!!review.listingContext&&review.sourceSha256===listingFingerprint(review.listingContext)
+      &&imageListingContextsMatch(review.listingContext,snapshot.context)
       &&review.output.copySha256===listingFingerprint(snapshot.currentListingCopy)
       &&listingFingerprint(review.output.currentListingCopy)===listingFingerprint(snapshot.currentListingCopy);
   } catch { return false; }

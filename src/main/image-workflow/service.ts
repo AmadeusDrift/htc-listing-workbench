@@ -37,6 +37,7 @@ import { imageApprovalDraftSnapshot, assertApprovalReuseSource, compatibleApprov
 import { readImageRiskSettings, writeImageRiskSettings, riskPolicyCompatible } from './risk-settings.ts';
 import { readCopyReviewSettings, writeCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-ai/review-settings.ts';
 import { hasRecordedRecheckDraft } from './recheck-evidence.ts';
+import { imageListingContextsMatch } from './context-compatibility.ts';
 import type { AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 
@@ -77,7 +78,7 @@ export class ImageWorkflowService {
   private currentContextMatches(run:ImageWorkflowRun,draft:AmazonDraft):boolean {
     if(!this.listing.currentContext||!run.imageContext)return true;
     const context=this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
-    return listingFingerprint({...currentImageListingSnapshot(draft,context).context,draftRevision:run.imageContext.listing.draftRevision})===listingFingerprint(run.imageContext.listing);
+    return imageListingContextsMatch(run.imageContext.listing,{...currentImageListingSnapshot(draft,context).context,draftRevision:run.imageContext.listing.draftRevision});
   }
   private canRecheckImageContent(run:ImageWorkflowRun,draft:AmazonDraft,remaining:string[]=run.contentPreparation?.remaining??[]):boolean {
     return !run.categoryFieldPolicyVersion&&!run.categoryFieldRepair&&run.contentPreparation?.state!=='STARTED'
@@ -286,7 +287,7 @@ export class ImageWorkflowService {
       const context=currentImageListingSnapshot(current,this.currentContext(current,latest,scope.generation)).context;
       // The unchanged schema can expose newly supported field metadata; keep the original proof unchanged.
       context.fields=context.fields.filter(field=>base.listing.fields.some(old=>old.name===field.name)||!['theme','subject_character','blade','target_audience'].includes(field.name));
-      return listingFingerprint({...context,draftRevision:base.listing.draftRevision})===listingFingerprint(base.listing)
+      return imageListingContextsMatch(base.listing,{...context,draftRevision:base.listing.draftRevision})
         &&listingFingerprint(imageRiskSourceSnapshot(latest,prior.variantId))===listingFingerprint(base.ipSource)
         &&listingFingerprint(currentSourceImageMeasurements(this.db,current))===listingFingerprint(base.sourceMeasurements??[]);
     };
@@ -460,7 +461,7 @@ export class ImageWorkflowService {
         if(draft.revision!==operationRevision)throw new AiError('SOURCE_CHANGED');
         if(draft.revision===base.listing.draftRevision&&!this.listing.currentContext)return;
         const snapshot=currentImageListingSnapshot(draft,this.currentContext(draft,this.store.getProduct(run.productId),targetGeneration));
-        if(listingFingerprint({...snapshot.context,draftRevision:base.listing.draftRevision})!==listingFingerprint(base.listing)
+        if(!imageListingContextsMatch(base.listing,{...snapshot.context,draftRevision:base.listing.draftRevision})
           ||draft.revision!==base.listing.draftRevision&&listingFingerprint(snapshot.currentListingCopy)!==listingFingerprint(base.currentListingCopy))throw new AiError('SOURCE_CHANGED');
       };
       const fresh=async()=>{
@@ -663,7 +664,7 @@ export class ImageWorkflowService {
         const priorReview=this.ai.getResult(reuse.reviewResultIds.at(-1)!),call=priorReview&&this.ai.getCall(priorReview.callId),previous=priorReview?.imageContext;
         if(!previous||priorReview?.output.kind!=='image-text-review'||priorReview.output.verdict!=='PASS'||call?.status!=='SUCCEEDED'
           ||listingFingerprint(previous)!==reuse.contextSha256||priorReview.output.candidate.sha256!==reuse.approvedSha256
-          ||listingFingerprint({...previous.listing,draftRevision:0})!==listingFingerprint({...context.listing,draftRevision:0})
+          ||!imageListingContextsMatch({...previous.listing,draftRevision:0},{...context.listing,draftRevision:0})
           ||listingFingerprint(previous.referenceAssets)!==listingFingerprint(context.referenceAssets)||listingFingerprint(previous.ipSource)!==listingFingerprint(context.ipSource))throw new AiError('SOURCE_CHANGED');
       }
       run.contextSha256=listingFingerprint(context); run.draftSha256=imageWorkflowDraftStamp(result.draft); this.save(run);

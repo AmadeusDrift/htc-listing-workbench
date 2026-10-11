@@ -1,7 +1,7 @@
 import { AiService } from '../src/main/ai/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { chat,mockStorage } from './fixtures/listing-ai.ts';
-import { assertConsistencyView } from '../src/main/source-image-consistency/proof.ts';
+import { assertConsistencyView, assertProductConsistency } from '../src/main/source-image-consistency/proof.ts';
 import { materializeSourceSnapshot,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import test from 'node:test';
@@ -1180,4 +1180,31 @@ test('release mixed synthetic sample separates rule, missing facts, wrong source
     assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
     assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
   }finally{await restored.close();}
+});
+
+for (const submittedBeforeUpgrade of [false, true]) test(`legacy prepared source resumes consistency preparation without redelivery (submitted=${submittedBeforeUpgrade})`, async t => {
+  const f = fixture(t, 'live');
+  materializeSourceSnapshot(f.directory, f.product, [f.product.variants[0].id]);
+  const task = await f.create(), saved = (f.service as any).tasks.get(task.id), row = saved.items[0];
+  row.sourcesPrepared = true; row.stage = 'DRAFT';
+  const result = await f.dependencies.amazon.prepareDrafts({ items: [{ variantId: row.variantId }] });
+  row.draftId = result.items[0].draft!.id;
+  if (submittedBeforeUpgrade) { const draft = f.drafts.get(row.draftId)!; draft.submittedAt = new Date().toISOString(); draft.state = 'SUBMITTED'; }
+  let checks = 0;
+  const prepare = f.dependencies.prepareSourceConsistency!, complete = f.dependencies.images.complete;
+  f.dependencies.prepareSourceConsistency = async (...args) => { checks++; return prepare(...args); };
+  f.dependencies.images.complete = input => {
+    const db = openDatabase(f.directory);
+    try { assertProductConsistency(db, f.product, [row.variantId]); } finally { db.close(); }
+    return complete(input);
+  };
+  f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const after = f.service.get(task.id).items[0];
+  assert.equal(after.status, 'WAITING', after.error ?? '');
+  assert.equal(checks, submittedBeforeUpgrade ? 0 : 1);
+  assert.equal(f.calls.sources, 0, 'downloaded originals and product revision must be preserved');
+  assert.equal(f.product.revision, 1);
+  assert.equal(f.calls.images, submittedBeforeUpgrade ? 0 : 1);
+  assert.equal(f.calls.submissions, submittedBeforeUpgrade ? 0 : 1);
+  assert.equal(after.draftId, row.draftId);
 });

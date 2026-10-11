@@ -418,6 +418,19 @@ export class AutomaticListingService {
       if (sent) { row.draftId = sent.id; row.stage = 'READBACK'; row.status = 'WAITING'; this.deps.followup.schedule(sent.id); this.save(task); return; }
     } else if (!this.matching(task, row, draft)) throw new UserFacingError('任务草稿归属发生变化');
     if (draft && submitted(draft)) { row.stage = 'READBACK'; row.status = 'WAITING'; this.deps.followup.schedule(draft.id); this.save(task); return; }
+    if (row.sourcesPrepared) {
+      // Legacy tasks only recorded source delivery. Establish the current visual
+      // proof without downloading again or changing the frozen product revision.
+      const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
+      try { assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds); }
+      catch(error) {
+        if(!(error instanceof SourceConsistencyError)||error.code!=='SOURCE_CONSISTENCY_NEEDS_INPUT')throw error;
+        if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
+        await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
+        this.checkpoint(task,row);
+        assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds);
+      }
+    }
     if (!row.sourcesPrepared) {
       // A new exact visual decision needs no source redelivery or sibling revision rebase.
       try {

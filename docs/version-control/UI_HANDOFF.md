@@ -1,0 +1,88 @@
+# HTC UI 专项交接
+
+更新：2026-10-11。交接对象：继续在此工作区工作的 Codex。本文是当前状态和用户要求，不是已经批准的 UI 设计方案。
+
+## 1. 接手目标与用户原话
+
+用户反馈：**“页面不够清楚，分级不够清晰，太凌乱了……一面一面来。”** 用户不容易逐条描述问题，需要你先检查界面、归纳问题，再用具体页面与方案讨论，不要要求用户先写完整需求。
+
+最新顺序：**逐页讨论 UI → 完成统一优化与验证 → 再打包新软件给用户测试。** 暂不交付或启用现有候选包，也不要直接执行旧路线图的发布步骤。
+
+整体 UI 优化尚未开始，没有确定视觉风格、页面顺序或最终布局。已有错误原因和来源校验界面是业务修复的一部分，不代表整体改版已完成。当前授权是 UI 专项交接及后续讨论；先展示具体建议、确定范围，再实施。不要把下文建议当作用户已批准的方案。
+
+## 2. 工作区、Git 与版本
+
+- 工作区：`C:\Users\12079\OneDrive\Desktop\亚马逊Haul普品`。
+- **真正的 Git 仓库与软件本体**：工作区下的 `RED-独立上架中台`。命令在该子目录执行，目录名和启动相对路径不要改。
+- 接手先读根目录 `AGENTS.md`，检查 `git status`、当前分支和最新日志，不覆盖已有修改。
+- 集成分支：`feat/workbench-foundation`。本交接前修复基线：`9ff7c2f3a118c5539fa0e129a26c40b6597d0b8c`。
+- GitHub：`https://github.com/AmadeusDrift/htc-listing-workbench.git`。2026-10-11 已成功 push **集成分支**，并核对远程提交等于上述 `9ff7c2f`；没有更新远程 main，也没有逐一推送所有本地分支引用。
+- 本交接文档另在 `docs/ui-handoff` 提交并合并。接手用本地集成分支最新 HEAD；上述哈希是修复基线，不是要求退回的版本。不要假定交接文档已随前次 push 上传。
+- 原安装包：`release/HTC-1.0.0-win32-x64`。`启动 HTC.cmd` 优先启动它；**源码最新不等于日常程序最新**。`npm start` 也不自动构建。
+- 已验收但未启用的候选：`artifacts/release-verification-8d0fd45-01/candidate`，对应源码 `8d0fd45bc4cb4c644fb8daf4e212aa283b7508b1`。后续仅维护文档与合并提交不冒充候选构建来源。
+
+本机 Git 若提示 ownership 问题，使用命令级配置，不改全局：
+
+```powershell
+git -c safe.directory='C:/Users/12079/OneDrive/Desktop/亚马逊Haul普品/RED-独立上架中台' status --short
+```
+
+## 3. 已完成什么，不需要重做
+
+1. **合并与整理**：外部 8 个提交已导入；旧 release 已清理，工作区已分类；建立每项修复独立分支、每次更新 commit 的约定。
+2. **字段填写**：规范有限格式、布尔、合法枚举和来源属性；处理否定与证据冲突；默认尺寸/重量只用于估价，不把缺少依据的品牌、产地、合规声明强填成事实。空 prompt 修复已合入，后续补了精确原因展示，不要再次做同一补丁。
+3. **图片与规格**：1688 原生缩略图准确绑定 SKU；按有限颜色、形状、图案反向核验。错配、模糊、随机或证据不足保留待确认，不把下载成功当成视觉匹配。
+4. **商品分流**：规则淘汰自动移出待上架列表，系统异常保留待修复；另区分缺资料/人工确认和结果未知。分流不等于物理删除商品、图片或历史。
+5. **恢复与成果保护**：加强暂停、回读、请求发送边界和跨重启恢复；未知付费/提交结果不得普通重试；元数据变化不无故作废已有图片，合法历史成果可复用。
+6. **交付验证**：源码、构建与候选文件摘要绑定；真实候选 EXE 隔离启动、图片预览、加密、SQLite、API 与重启检查已完成。没有真实店铺或付费服务验收。
+
+完整修复记录见 [REPAIR_ROADMAP.md](REPAIR_ROADMAP.md) 与 `docs/maintenance/`，不必重新跑全部历史调查。
+
+## 4. UI 专项建议如何开始
+
+1. 先看源码和现有隔离截图，理解导航、列表、详情、任务进度之间的关系。现有截图：`artifacts/release-verification-8d0fd45-01/runtime/candidate-images.png`，仅是本地合成商品的手动上架图片页，不代表所有页面。
+2. 给用户一份短问题清单：哪里重复、哪里层级冲突、哪个主要操作不突出、哪些状态难区分。用具体页面说话，不泛泛提出“换皮”。
+3. 建议先确定全局导航、标题层级、主次按钮和列表/详情规则，再选一个高频页面做方案；**从自动上架还是手动上架开始仍待讨论**。必要时展示页面草图供比较。
+4. 每页确认“这页做什么、先看什么、下一步点哪里”，再改页面。跨页统一规范，避免逐页形成不同设计语言。不要提前一次性重写所有页面。
+
+讨论过但尚未批准的方向：减少重复标题、流程栏和大面积留白；让商品/SKU/图片内容更突出；集中常用操作；清晰显示异常原因、已完成成果与安全的下一步。用户未要求换技术栈、引入新 UI 库或扩大业务功能。
+
+## 5. 关键页面与源码入口
+
+以下路径均相对仓库根目录，先追踪实际调用和样式覆盖再改。
+
+| 区域 | 主要文件 |
+|---|---|
+| 全局布局、导航与流程层级 | `src/renderer/App.tsx`、`WorkspaceNavigation.tsx`、`WorkspaceParts.tsx`、`WorkflowRail.tsx` |
+| 商品列表、详情、规格与图片 | `src/renderer/ProductList.tsx`、`ProductEditor.tsx`、`AssetsPanel.tsx`、`SourceConsistencyPanel.tsx` |
+| 自动上架、分组与任务状态 | `src/renderer/AutomaticPage.tsx`、`AutomaticPreparationPanel.tsx`、`AutomaticTaskPanel.tsx`、`AutomaticProductGroups.tsx` |
+| 采集箱 | `src/renderer/InboxPage.tsx`、`InboxProductDetail.tsx`、`InboxSourceImage.tsx`、`CollectionSource.tsx` |
+| 字段、图片进度与上架结果 | `src/renderer/ListingAiPanel.tsx`、`ImageSlotProgress.tsx`、`AmazonPanel.tsx`、`ListingFollowups.tsx` |
+| 全局及局部样式 | `src/renderer/styles.css`、`workspace.css`、`glass-theme.css`、`feedback.css`，以及各功能 CSS |
+
+优先聚焦 renderer 展示与交互。若发现必须改变后端状态或 IPC 契约，明确业务影响并另拆范围，不把业务修复混进视觉整理。
+
+## 6. UI 必须保留的业务语义
+
+- 清楚区分：待上架、规则筛选、系统待修复、待补资料/确认、结果未知。单个 SKU 异常不连带淘汰健康兄弟规格。
+- UNKNOWN 必须优先展示真实未知状态；改按钮或提示不能绕过原有重试、授权与提交限制。
+- 字段缺资料不能用占位值遮住；合法 `false`、`0`、`NA` 不应一律显示为未填写。
+- 区分来源关联成功、视觉待确认、视觉冲突、生成中与已完成；不静默改绑图片，不破坏历史付费成果。
+- 展示固定安全原因和实际下一步，不直接把模型自由文本、凭据、原始调用内容放到错误面板。
+- 保留正常队列的完成、待回读、继续/取消和重新评估指引；不能把所有状态统一显示成“失败”。
+
+## 7. 验证、分支与最终打包
+
+- 当前全量基线：**2092 tests，2091 pass，0 fail，0 cancelled，1 skipped**。跳过是 Windows 文件符号链接权限限制，不是全部场景都通过；最后只修改包外验收脚本的增量另用真实候选 E2E 验证。
+- 类型检查通过。独立候选 94 文件校验、同 EXE 两次会话、185 项 API、8 个禁网反例及图片/重启验证通过；原安装包 143 文件摘要未变。详情见 [候选验收记录](../maintenance/2026-10-11-候选制品追溯与隔离验收.md)。
+- 新 UI 工作从最新集成分支创建独立分支；计划名称 `feat/workbench-ui-optimization` 尚未创建，不假定存在。每个完成的更新都 commit；按 AGENTS 做相关验证与合并前完整回归，保留分支，默认 `--no-ff` 合并，不强推。
+- 类型检查：`npm run typecheck`。完整回归：`node --test --test-concurrency=4 --test-timeout=180000 --test-reporter=tap tests/*.test.ts`。
+- 按受影响页面选择现有 `scripts/e2e.mjs`、`e2e-workspaces.mjs`、`e2e-inbox-ui.mjs`、`e2e-automatic-listing-ui.mjs`、`e2e-actionable-reasons-ui.mjs`、`e2e-source-consistency-ui.mjs`、`e2e-appearance.mjs` 等，不宣称未运行的脚本已通过。
+- 检查空列表、长中文、多 SKU、混合状态、错误/等待/完成、窄窗口、滚动和弹窗。重要交互保留可访问名称与语义；修改测试定位不能删除原业务断言。实际截图要检查，不以 DOM 存在代替页面清晰可用。
+- 使用新的隔离数据目录和合成样本。`RED_E2E=1` **只隐藏窗口，不禁网**；不要直接启动真实工作区或旧业务任务。可复用 `scripts/release-runtime.mjs` 的入口前测试 guard；不要移除 guard 或增加生产绕过。
+- UI 完成后，再按 `snapshot-release.mjs → package.mjs → verify-package.mjs → e2e-release-candidate.mjs` 从干净新提交生成新候选。具体显式参数见候选验收记录。不可覆盖旧候选冒充新版本；当前旧候选不包含未来 UI。
+- 真实店铺、付费调用、正式提交、打印、真实数据库迁移及当前安装包/启动入口切换不能由 UI 测试顺带触发。最终软件交付时明确源码版本、测试结果与实际启动入口。
+
+## 8. 本交接更新的验证
+
+仅增加交接说明并更新路线图中的最新 push 与 UI 交付顺序，不修改产品代码、运行数据或安装包。核对了 Git 基线、源码入口、脚本、文档链接及 diff；文档更新不重复运行业务测试。此前登录失败和“UI 仅登记、不影响发布”的历史叙述，以本次成功 push 和用户最新的“UI 完成后统一打包”要求为准。

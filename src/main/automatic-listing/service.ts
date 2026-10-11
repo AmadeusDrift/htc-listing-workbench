@@ -187,6 +187,12 @@ export class AutomaticListingService {
     let draft:AmazonDraft|undefined, classification:Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'|'image'>={kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'};
     try {
       if(row.draftId)draft=this.deps.amazon.getDraft(row.draftId);
+      // Confirmed submissions are already beyond source preparation, pricing and
+      // image admission. Their readback/label failure must retain its actual cause.
+      if(draft&&submitted(draft)&&!['UNKNOWN','SUBMITTING'].includes(draft.state)&&this.matching(task,row,draft)&&['READBACK','LABELS'].includes(row.stage)){
+        row.outcome={version:1,kind:'SYSTEM_REPAIR',code:row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
+        return;
+      }
       const unknown=this.unknownCode(row,task);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
       else if(draft){

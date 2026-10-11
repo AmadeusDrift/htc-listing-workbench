@@ -59,7 +59,7 @@ export class ItemLabelService {
       row.status='DOWNLOADING';row.message='正在下载和核验全部标签文件';row.paused=this.get(row.id).paused;this.put(row);
       const documents=itemLabelDownloads(response.data,this.now()),files:ItemLabelRecord['files']=[];let total=0;
       for(const [index,doc]of documents.entries()){
-        let bytes:Buffer|undefined;for(let attempt=0;attempt<2;attempt++){try{bytes=await this.amazon.downloadItemLabel(doc.uri);break;}catch{if(attempt===1)throw new UserFacingError('标签文件下载失败，未取得完整 PDF 集合');await this.sleep(500);}}
+        let bytes:Buffer|undefined;for(let attempt=0;attempt<2;attempt++){try{bytes=await this.amazon.downloadItemLabel(doc.uri);break;}catch(error){if(attempt===1)throw error instanceof UserFacingError?error:new UserFacingError('标签文件下载失败，未取得完整 PDF 集合');await this.sleep(500);}}
         if(!bytes)throw new UserFacingError('标签文件下载失败');total+=bytes.length;if(total>128*1024*1024)throw new UserFacingError('标签文件集合超过允许大小');
         files.push(await saveLabelPdf(this.directory,row.id,index+1,bytes));
       }
@@ -71,7 +71,7 @@ export class ItemLabelService {
       const transient=error instanceof AmazonTransportError&&!error.unknownWrite&&(error.status===429||error.status===408||error.status!==null&&error.status>=500);
       row.status=transient&&row.attempts<3?'QUEUED':'FAILED';row.nextDueAt=row.status==='QUEUED'?new Date(this.now()+Math.min(120000,10000*2**(row.attempts-1))).toISOString():null;
       row.requestId=error instanceof AmazonTransportError?error.requestId:row.requestId;row.errorCode=error instanceof AmazonTransportError?(error.unknownWrite?'REQUEST_UNKNOWN':`HTTP_${error.status??'NETWORK'}`):'LABEL_FILE_FAILED';
-      row.message=error instanceof AmazonTransportError&&error.status===403?'商品标签接口权限不足，请核对 Amazon Fulfillment 角色':error instanceof AmazonTransportError&&error.unknownWrite?'标签请求结果未知，未获得可核验文件；请检查后重试':row.status==='QUEUED'?'标签接口暂时不可用，已安排有限重试':'标签获取或 PDF 校验失败，未获得完整可打印文件';row.files=[];this.put(row);
+      row.message=error instanceof AmazonTransportError&&error.status===403?'商品标签接口权限不足，请核对 Amazon Fulfillment 角色':error instanceof AmazonTransportError&&error.unknownWrite?'标签请求结果未知，未获得可核验文件；请检查后重试':row.status==='QUEUED'?'标签接口暂时不可用，已安排有限重试':error instanceof UserFacingError?error.message.slice(0,1200):'标签获取或 PDF 校验失败，未获得完整可打印文件';row.files=[];this.put(row);
     }
   }
   runDue():Promise<void>{if(this.stopped)return Promise.resolve();if(this.running)return this.running;this.running=(async()=>{for(const row of this.list().filter(row=>row.current&&!row.paused&&row.status==='QUEUED'&&Date.parse(row.nextDueAt!)<=this.now())){if(this.stopped)break;await this.run(this.get(row.id));}})().finally(()=>{this.running=null;this.arm();});return this.running;}

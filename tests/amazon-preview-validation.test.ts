@@ -48,3 +48,25 @@ test('non-schema source, program, copy and image guards cannot use the missing-o
   assert.equal(check({...schema,required:['not_a_real_field']},{},{}),false);
   assert.equal(check({type:'object',unsupportedAssertion:true},{},{}),false);
 });
+
+test('Haul platform delegation covers choices and nested missing values but keeps identity and structural guards',async()=>{
+  const {isPlatformFieldIssue,canSendToPreview}=await import('../src/main/amazon/preview-validation.ts');
+  const make=(code:string,message='choice：枚举问题',source:ListingIssue['source']='local'):ListingIssue=>({code,message,source,severity:'ERROR',category:'field',attributeNames:['choice'],autoFixable:false});
+  for(const code of ['LOCAL_required','LOCAL_enum','LOCAL_oneOf','LOCAL_dependentRequired','LOCAL_maxLength'])assert.equal(isPlatformFieldIssue('haul',make(code)),true);
+  for(const source of ['amazon','demo'] as const)assert.equal(isPlatformFieldIssue('haul',make('LOCAL_enum','choice',source)),false);
+  for(const code of ['LOCAL_type','SCHEMA_UNSUPPORTED','SOURCE_CHANGED','FACT_SOURCE_CONFLICT','LOCAL_ASSET_URL'])assert.equal(isPlatformFieldIssue('haul',make(code)),false);
+  for(const path of ['choice.0.marketplace_id','choice.0.language_tag','main_product_image_locator.0.media_location'])assert.equal(isPlatformFieldIssue('haul',make('LOCAL_required',path)),false);
+  assert.equal(isPlatformFieldIssue('standard',make('LOCAL_enum')),false);
+  const large:JsonObject={type:'object',properties:Object.fromEntries([...Array.from({length:110},(_,i)=>[`choice${i}`,{enum:['A']}]),['last',{type:'number'}]])};
+  const attributes:JsonObject=Object.fromEntries([...Array.from({length:110},(_,i)=>[`choice${i}`,'B']),['last','broken']]);
+  const localIssues=validateAttributes(large,attributes);assert.equal(localIssues.length,100);assert.ok(localIssues.every(i=>i.code==='LOCAL_enum'));
+  assert.equal(canSendToPreview({listingProgram:'haul',schema:{schema:large,metaSchema:{}} as any,attributes,localIssues}),false,'truncated display diagnostics cannot hide structural error 111');
+});
+
+test('delegated local remaining text disappears without hiding same-message platform feedback',async()=>{
+  const {nonDeferredImageIssues,withoutDeferredImageRemaining}=await import('../src/main/image-workflow/deferred-fields.ts');
+  const local:ListingIssue={code:'LOCAL_enum',message:'choice：选项待平台核对',source:'local',severity:'ERROR',category:'field',attributeNames:['choice'],autoFixable:false};
+  const draft={listingProgram:'haul',attributes:{},localIssues:[local],previewIssues:[]} as any;
+  assert.deepEqual(nonDeferredImageIssues(draft),[]);assert.deepEqual(withoutDeferredImageRemaining(draft,[local.message]),[]);
+  draft.previewIssues=[{...local,source:'amazon'}];assert.equal(nonDeferredImageIssues(draft).length,1);assert.deepEqual(withoutDeferredImageRemaining(draft,[local.message]),[local.message]);
+});

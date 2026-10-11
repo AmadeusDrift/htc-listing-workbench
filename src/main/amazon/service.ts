@@ -36,7 +36,7 @@ import { currentFactAuthority } from './fact-authority.ts';
 import { assertStoredPricingForPaid } from './pricing-guard.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
-import { isMissingOnlyPreview } from './preview-validation.ts';
+import { canSendToPreview } from './preview-validation.ts';
 import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
 import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.ts';
 import { salesStoreScope } from '../sales-plans/planning.ts';
@@ -676,8 +676,8 @@ export class AmazonService {
     try {
       this.mutable(record); const target = this.active(record.draft.targetId); const generation = this.persistence.generation(target.id);
       const locallyValid = this.persistence.transaction(()=>this.validate(record,completionId));
-      const missingOnly = record.draft.listingProgram === 'haul' && isMissingOnlyPreview(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema, record.draft.localIssues);
-      if (!locallyValid && !missingOnly) throw new UserFacingError('本地校验未通过，请先处理字段问题');
+      const sendable = canSendToPreview(record.draft);
+      if (!locallyValid && !sendable) throw new UserFacingError('本地校验未通过，请先处理字段问题');
       let result: ApiResult;
       if (target.mode === 'demo') { result = { data: { sku: record.draft.sku, status: locallyValid ? 'VALID' : 'INVALID', submissionId: `DEMO-PREVIEW-${randomUUID()}`, issues: locallyValid ? [] : record.draft.localIssues.map(issue => ({code:issue.code,message:issue.message,severity:issue.severity,attributeNames:issue.attributeNames})) }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'previewListingsItem'); }
       else result = await this.transport.api(target, 'previewListingsItem', this.listingPath(record), { ...this.listingQuery(record), mode: 'VALIDATION_PREVIEW', includedData: 'issues' }, this.request(record), () => this.currentProduct(record));
@@ -723,7 +723,7 @@ export class AmazonService {
         record.draft.state='BLOCKED';record.preview=null;record.draft.previewedAt=null;
         this.persistence.putRecord(record);
       }
-      if (record.draft.localIssues.some(issue => issue.severity === 'ERROR')) throw new UserFacingError('本地校验未通过，不能正式提交');
+      if (!canSendToPreview(record.draft)) throw new UserFacingError('本地校验未通过，不能正式提交');
       const guard = () => {
         try { taskGuard?.(); } catch { throw new TaskWriteNotSentError(); }
         this.currentProduct(record); this.active(target.id); this.requirePreview(this.persistence.record(record.draft.id), target, true);

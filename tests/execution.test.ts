@@ -281,3 +281,14 @@ test('Haul cleanup saved before execution checkpoint resumes without stale hash 
   await f.reopen();f.start(task.id);await f.service.waitForIdle();
   const done=f.service.get(task.id);assert.equal(done.status,'COMPLETED',JSON.stringify(f.amazon.getDraft(f.draft.id).localIssues));assert.deepEqual(done.items[0].assets,assets);assert.equal(f.uploadCalls,1);
 });
+
+test('Haul field omission reaches preview after hosting and does not fail before upload',async t=>{
+  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
+  r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];delete r.draft.attributes.color;
+  r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';
+  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);
+  f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  const task=f.create();f.start(task.id);await f.service.waitForIdle();const result=f.service.get(task.id);
+  assert.equal(f.uploadCalls,1);assert.equal(result.items[0].steps.find(s=>s.name==='validate')!.status,'DONE');assert.equal(result.items[0].steps.find(s=>s.name==='preview')!.status,'FAILED');assert.equal(result.items[0].submitStarted,false);
+  assert.ok(f.amazon.getDraft(f.draft.id).previewIssues.some(i=>i.source==='demo'));
+});

@@ -258,3 +258,19 @@ test('reopen and encrypted backup retain source bytes, old exchanges, paid mock 
     }finally{db.close();amazon.close();store.close();}
   }finally{await ai.close();await hosting.close();}
 });
+
+test('Haul defers sendable field choices to platform preview and honours its VALID result on submit',async t=>{
+  const f=fixture(t,['Plain']);await f.live();const get=f.service.getSchema.bind(f.service);
+  f.service.getSchema=async input=>{const schema=await get(input);(schema.schema.properties as JsonObject).novel_choice={type:'array',items:{type:'object',properties:{value:{enum:['A']}},required:['value']}};schema.checksum=createHash('md5').update(JSON.stringify(schema.schema)).digest('base64');return schema;};
+  let draft=await f.create();draft=f.service.saveDraft({...draft,attributes:{...draft.attributes,novel_choice:[{value:'B'}]}});
+  const preview=await f.service.previewDraft(draft);assert.equal(preview.state,'AMAZON_VALIDATED');assert.ok(preview.localIssues.some(i=>i.code==='LOCAL_enum'));
+  const submitted=await f.service.submitDraft(preview,true);assert.equal(submitted.state,'SUBMITTED');assert.equal(f.requests.length,2);
+});
+
+test('Haul demo preview still reports INVALID for delegated enum errors',async t=>{
+  const f=fixture(t,['Plain']),get=f.service.getSchema.bind(f.service);
+  f.service.getSchema=async input=>{const schema=await get(input);(schema.schema.properties as JsonObject).novel_choice={type:'array',items:{type:'object',properties:{value:{enum:['A']}},required:['value']}};return schema;};
+  let draft=await f.create();draft=f.service.saveDraft({...draft,attributes:{...draft.attributes,novel_choice:[{value:'B'}]}});
+  const preview=await f.service.previewDraft(draft);assert.equal(preview.state,'BLOCKED');assert.ok(preview.previewIssues.some(i=>i.code==='LOCAL_enum'&&i.source==='demo'));assert.equal(preview.submittedAt,null);
+  await assert.rejects(f.service.submitDraft(preview,true),/预览/);assert.equal(f.requests.length,0);
+});

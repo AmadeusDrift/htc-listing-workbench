@@ -1,3 +1,4 @@
+import { isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import type { AmazonDraft, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { FIELD_REPAIR_MIGRATION_FIELDS, CATEGORY_FIELD_REPAIR_FIELDS } from '../../shared/automatic-listing-contracts.ts';
@@ -62,14 +63,14 @@ export function isDeferredImageIssue(draft: AmazonDraft, issue: ListingIssue, pl
 }
 
 export function nonDeferredImageIssues(draft: AmazonDraft, plannedImages = 7): ListingIssue[] {
-  return [...draft.localIssues,...draft.previewIssues].filter(issue => issue.severity === 'ERROR' && !isDeferredImageIssue(draft,issue,plannedImages));
+  return [...draft.localIssues,...draft.previewIssues].filter(issue => issue.severity === 'ERROR' && !isDeferredImageIssue(draft,issue,plannedImages) && !isPlatformFieldIssue(draft.listingProgram,issue));
 }
 
 export function withoutDeferredImageRemaining(draft: AmazonDraft, remaining: string[], plannedImages = 7): string[] {
   const forms = (issue: ListingIssue) => [issue.message,`${issue.attributeNames.join('、') || issue.code}：${issue.message}`];
   const errors = [...draft.localIssues,...draft.previewIssues].filter(issue => issue.severity === 'ERROR');
-  const deferred = new Set(errors.filter(issue => isDeferredImageIssue(draft,issue,plannedImages)).flatMap(forms));
+  const deferred = new Set(errors.filter(issue => isDeferredImageIssue(draft,issue,plannedImages)||isPlatformFieldIssue(draft.listingProgram,issue)).flatMap(forms));
   // Identical wording attached to a real field error must remain visible.
-  for (const message of errors.filter(issue => !isDeferredImageIssue(draft,issue,plannedImages)).flatMap(forms)) deferred.delete(message);
+  for (const message of errors.filter(issue => !isDeferredImageIssue(draft,issue,plannedImages)&&!isPlatformFieldIssue(draft.listingProgram,issue)).flatMap(forms)) deferred.delete(message);
   return remaining.filter(message => !deferred.has(message));
 }

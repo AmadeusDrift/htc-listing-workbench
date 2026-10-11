@@ -1,3 +1,4 @@
+import { haulUnsupportedField } from '../amazon/listing-program.ts';
 import type { ValidateFunction, ErrorObject } from 'ajv';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -190,8 +191,9 @@ function compositionFields(error:ErrorObject,schema:unknown):string[]|undefined 
   visit(node);return [...fields];
 }
 export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiContext):ListingIssue[]{
-  const attributes={...c.currentAttributes},names=new Set(output.candidates.map(c=>c.field)),issues:ListingIssue[]=[];
-  for(const candidate of output.candidates){
+  const candidates=output.candidates.filter(candidate=>!haulUnsupportedField(c.listingProgram,candidate.field));
+  const attributes={...c.currentAttributes},names=new Set(candidates.map(c=>c.field)),issues:ListingIssue[]=[];
+  for(const candidate of candidates){
     const categoryConflicts=nativeText(candidate.field,candidate.nativeValue!).flatMap(value=>explicitCategoryConflicts(candidate.field,value,c));
     for(const message of categoryConflicts)issues.push({code:'SOURCE_VALUE_CONFLICT',message,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});
     if(candidate.field==='color'){

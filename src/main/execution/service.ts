@@ -1,3 +1,4 @@
+import { cleanHaulAttributes } from '../amazon/listing-program.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
@@ -193,6 +194,14 @@ export class ExecutionService {
     let step: ExecutionStep | undefined;
     try {
       item.status = 'RUNNING'; this.save(task);
+      if(!submitted(this.amazon.getDraft(item.draftId))){
+        const current=this.current(item),cleanup=cleanHaulAttributes(current.listingProgram,current.attributes);
+        if(cleanup.removed.length){
+          item.intendedAttributesHash=fingerprint(cleanup.attributes);this.save(task);
+          const saved=this.amazon.saveDraft({...ref(current),attributes:current.attributes});
+          item.draftRevision=saved.revision;item.attributesHash=fingerprint(saved.attributes);item.intendedAttributesHash=null;this.save(task);
+        }
+      }
       const beforeUpload = this.amazon.getDraft(item.draftId);
       if (!submitted(beforeUpload) && item.steps.find(value => value.name === 'upload')?.status !== 'DONE') {
         const draft = this.current(item);
@@ -264,10 +273,10 @@ export class ExecutionService {
       return;
     }
     if (step.name === 'images') {
-      const attributes = hostedAttributes(draft, item), nextHash = fingerprint(attributes);
+      const attributes = cleanHaulAttributes(draft.listingProgram,hostedAttributes(draft, item)).attributes, nextHash = fingerprint(attributes);
       if (nextHash !== item.attributesHash) {
         item.intendedAttributesHash = nextHash; this.save(task);
-        const saved = this.amazon.saveDraft({ ...ref(draft), attributes }); item.draftRevision = saved.revision; item.attributesHash = nextHash; item.intendedAttributesHash = null; this.save(task);
+        const saved = this.amazon.saveDraft({ ...ref(draft), attributes }); item.draftRevision = saved.revision; item.attributesHash = fingerprint(saved.attributes); item.intendedAttributesHash = null; this.save(task);
       }
       return;
     }

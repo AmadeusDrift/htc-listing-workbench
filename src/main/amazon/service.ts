@@ -26,7 +26,7 @@ import { LISTING_CANDIDATE_FIELDS } from '../../shared/listing-ai-contracts.ts';
 import { candidateTextValues, validatePolicyOutputs, wrapCandidateValues } from './field-mapping.ts';
 import { resolveSchemaNode } from './field-catalog.ts';
 import { PREPARATION_MAX_BYTES, preparationInput, preparationSchemaIdentity, semanticJson } from './preparation.ts';
-import { assertListingProgram, listingProgram, listingProgramIssues, programAttributes } from './listing-program.ts';
+import { cleanHaulAttributes, haulCleanupReason, assertListingProgram, listingProgram, listingProgramIssues, programAttributes } from './listing-program.ts';
 import { miaoshouMeasurementsForVariant } from '../miaoshou/measurements.ts';
 import { getReceipt } from '../miaoshou/persistence.ts';
 import { readListingRules } from '../listing-rules.ts';
@@ -433,6 +433,7 @@ export class AmazonService {
   assertPricingForPaid(draftId:string):void { this.ensureOpen(); assertStoredPricingForPaid(this.persistence.db,draftId); }
   private businessDefaults(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram, previousBusinessReport?: BusinessRuleReport, salesPlan?: SalesListingPlan): { attributes: JsonObject; report?: BusinessRuleReport } {
     if (program !== 'haul') return { attributes };
+    const cleanup=cleanHaulAttributes(program,attributes); attributes=cleanup.attributes;
     const receipt = getReceipt(this.persistence.db, product.id);
     const validReceipt = receipt && (target.mode !== 'live' || receipt.mode === 'live') && receipt.skuMappings.some(row => row.localVariantId === variant.id);
     const currency = confirmedPurchaseCurrency(product.facts, Boolean(validReceipt && (receipt.snapshot.sources.some(s=>s.source==='1688') || receipt.mapping.currency === 'CNY' && receipt.mapping.priceField !== 'none')));
@@ -442,6 +443,7 @@ export class AmazonService {
       declarationScope:selectedDeclarationScope(salesPlan?this.getProduct(product.id):product,variant.id,salesPlan?.recipe.components),
       ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
       measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
+    if(cleanup.removed.length)result.report.notices.push(haulCleanupReason(cleanup.removed));
     if (currency.notice) result.report.notices.push(currency.notice);
     return result;
   }
@@ -561,10 +563,11 @@ export class AmazonService {
         const existing = listingRecords.filter(({ draft }) => draft.productId === item.productId && draft.productRevision === item.productRevision
           && draft.variantId === item.variantId && draft.targetId === currentTarget.id && draft.listingProgram === program && preparationSchemaIdentity(draft.schema) === schemaIdentity);
         const attributeIdentity = semanticJson(attributes);
-        if (existing.some(record => semanticJson(record.draft.attributes) !== attributeIdentity)) {
+        if (existing.some(record => semanticJson(cleanHaulAttributes(program,record.draft.attributes).attributes) !== attributeIdentity)) {
           result.items.push(reject('当前商品版本已有内容不同的草稿，可能已被人工修改；请核对已有草稿，不能覆盖或重复创建')); continue;
         }
         if (existing.length) {
+          this.normalizeHaulRecord(existing[0]); this.persistence.putRecord(existing[0]);
           const draft = existing[0].draft;
           const declarationIssues=this.declarationIssues(draft);
           const issues = [...listingProgramIssues(program, schema, draft.attributes), ...validateAttributes(schema.schema, draft.attributes, schema.metaSchema), ...imageIssues(draft.attributes), ...copyPolicyIssues(draft), ...declarationIssues];
@@ -585,12 +588,13 @@ export class AmazonService {
   saveDraft(input: unknown): AmazonDraft {
     const record = this.checked(input); if (this.busy.has(record.draft.id)) throw new UserFacingError('草稿正在处理，请等待完成后保存'); this.mutable(record);
     if (Object.hasOwn(object(input), 'listingProgram') && object(input).listingProgram !== record.draft.listingProgram) throw new UserFacingError('不能通过保存更改草稿的上架项目类型，请新建草稿');
-    const attributes = attributesObject(object(input).attributes); const redacted = this.vault.redact(attributes);
+    const rawAttributes = attributesObject(object(input).attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,rawAttributes);
+    const attributes=cleanup.attributes, redacted = this.vault.redact(rawAttributes);
     assertListingProgram(record.draft.listingProgram, record.draft.schema, attributes);
-    if (JSON.stringify(redacted) !== JSON.stringify(attributes)) throw new UserFacingError('attributes 中不能包含授权配置或令牌');
+    if (JSON.stringify(redacted) !== JSON.stringify(rawAttributes)) throw new UserFacingError('attributes 中不能包含授权配置或令牌');
     record.draft.attributes = attributes; record.draft.revision++; record.draft.state = 'DRAFT'; record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
     record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null; record.previewResponse = null; record.request = this.request(record);
-    this.updateSourceMapping(record); this.event(record, 'save', '已保存独立 attributes；旧校验和预览已失效'); this.persistence.putRecord(record); return clone(record.draft);
+    this.updateSourceMapping(record); if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed)); this.event(record, 'save', '已保存独立 attributes；旧校验和预览已失效'); this.persistence.putRecord(record); return clone(record.draft);
   }
   private updateSourceMapping(record: DraftRecord): void {
     if (record.draft.listingProgram !== 'haul') return;
@@ -630,9 +634,10 @@ export class AmazonService {
       return this.persistence.transaction(() => {
         const record = this.checked(input); this.mutable(record); this.currentProduct(record); assertFresh();
         if (adoption.fromRevision !== record.draft.revision || adoption.toRevision !== record.draft.revision + 1) throw new UserFacingError('采纳修订不匹配');
-        const normalized = attributesObject(attributes);
-        if (JSON.stringify(this.vault.redact(normalized)) !== JSON.stringify(normalized)) throw new UserFacingError('属性不能包含授权配置');
+        const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
+        if (JSON.stringify(this.vault.redact(supplied)) !== JSON.stringify(supplied)) throw new UserFacingError('属性不能包含授权配置');
         record.draft.attributes = normalized; record.draft.revision++;
+        if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed));
         record.draft.fieldAdoptions = [...(record.draft.fieldAdoptions ?? []), clone(adoption)];
         record.draft.state = 'DRAFT'; record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
         record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null; record.previewResponse = null; record.request = this.request(record);
@@ -641,7 +646,19 @@ export class AmazonService {
       });
     } finally { this.busy.delete(input.id); }
   }
-  private validate(record: DraftRecord): boolean {
+  private normalizeHaulRecord(record: DraftRecord, completionId?: string): void {
+    const cleanup=cleanHaulAttributes(record.draft.listingProgram,record.draft.attributes);
+    if(!cleanup.removed.length)return;
+    this.mutable(record);this.currentProduct(record);
+    const journal=completionId?new CompletionJournal(this.persistence.db):null,operation=completionId?journal!.get(completionId):null;
+    if(operation&&(operation.draftId!==record.draft.id||operation.draftRevision!==record.draft.revision||operation.draftStamp!==completionDraftStamp(record.draft)))throw new UserFacingError('字段操作对应的草稿已修改，未自动清理');
+    record.draft.attributes=cleanup.attributes;record.draft.revision++;record.preview=null;record.draft.previewedAt=null;record.previewResponse=null;
+    record.draft.state='DRAFT';record.draft.localIssues=[];record.draft.previewIssues=[];record.request=this.request(record);
+    this.updateSourceMapping(record);this.event(record,'save',haulCleanupReason(cleanup.removed));
+    if(operation){operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal!.save(operation);}
+  }
+  private validate(record: DraftRecord, completionId?: string): boolean {
+    this.normalizeHaulRecord(record,completionId);
     record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
     try { this.currentProduct(record); record.draft.localIssues.push(...this.declarationIssues(record.draft)); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
     const valid = !record.draft.localIssues.some(issue => issue.severity === 'ERROR');
@@ -650,15 +667,15 @@ export class AmazonService {
   }
   async validateDraft(input: unknown): Promise<AmazonDraft> {
     const record = this.checked(input); this.enter(record.draft.id);
-    try { this.mutable(record); this.validate(record); return clone(record.draft); } finally { this.busy.delete(record.draft.id); }
+    try { return this.persistence.transaction(()=>{this.mutable(record); this.validate(record); return clone(record.draft);}); } finally { this.busy.delete(record.draft.id); }
   }
   private listingPath(record: DraftRecord): string { return `/listings/2021-08-01/items/${encodeURIComponent(record.draft.sellerId)}/${encodeURIComponent(record.draft.sku)}`; }
   private listingQuery(record: DraftRecord): Record<string, string> { return { marketplaceIds: record.draft.marketplaceId, issueLocale: record.draft.schema.locale }; }
-  async previewDraft(input: unknown): Promise<AmazonDraft> {
+  async previewDraft(input: unknown, completionId?: string): Promise<AmazonDraft> {
     const record = this.checked(input); this.enter(record.draft.id);
     try {
       this.mutable(record); const target = this.active(record.draft.targetId); const generation = this.persistence.generation(target.id);
-      const locallyValid = this.validate(record);
+      const locallyValid = this.persistence.transaction(()=>this.validate(record,completionId));
       const missingOnly = record.draft.listingProgram === 'haul' && isMissingOnlyPreview(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema, record.draft.localIssues);
       if (!locallyValid && !missingOnly) throw new UserFacingError('本地校验未通过，请先处理字段问题');
       let result: ApiResult;

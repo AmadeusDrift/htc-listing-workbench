@@ -1,3 +1,4 @@
+import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
 import { currentPolicyRemaining } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
@@ -192,6 +193,8 @@ export class ListingAiService {
   }
   async adopt(raw: unknown, signal?:AbortSignal): Promise<AmazonDraft> {
     signal?.throwIfAborted();const reference = input(raw, 'adopt'), reviewEnabled = this.copyReviewEnabled();
+    const ignored=reference.fields.filter(field=>haulUnsupportedField(this.amazon.getDraft(reference.draftId).listingProgram,field));
+    reference.fields=reference.fields.filter(field=>!ignored.includes(field));
     const disposition = !reviewEnabled && reference.reviewResultId === null ? { reviewDisposition: 'SKIPPED_DISABLED' as const } : {};
     const adoptionId = listingFingerprint({ draftId: reference.draftId, revision: reference.draftRevision, suggestion: reference.suggestionResultId, review: reference.reviewResultId, fields: [...reference.fields].sort(), ...disposition });
     const existing = this.amazon.getDraft(reference.draftId);
@@ -216,6 +219,8 @@ export class ListingAiService {
       if (review.output.kind !== 'amazon-fields-review' || review.output.verdict !== 'PASS' || review.sourceResultIds[0] !== suggestion.id) throw new UserFacingError('复核发现问题，请先处理问题再采纳');
       assertListingReview(review.output, candidate, context);
     }
+    if(ignored.length)this.store.recordWorkspaceEvent('amazon.haul.candidates.omitted',haulCleanupReason(ignored),{draftId:draft.id,fields:ignored});
+    if(!reference.fields.length)return draft;
     const attributes: JsonObject = structuredClone(draft.attributes);
     if(isFullSchema(context)){
       const selected={...candidate,candidates:candidate.candidates.filter(c=>reference.fields.includes(c.field))};
@@ -366,8 +371,9 @@ export class ListingAiService {
       let remaining=operation.remaining;
       if(!round){
         previewAttempts++;
-        try{draft=await this.amazon.previewDraft({id:draft.id,revision:draft.revision});}
+        try{draft=await this.amazon.previewDraft({id:draft.id,revision:draft.revision},operation.id);}
         catch(error){draft=this.amazon.getDraft(draft.id);if(!(error instanceof UserFacingError)||!error.message.startsWith('本地校验未通过'))throw error;}
+        operation=journal.get(operation.id);
         signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);checkpoint();
         const currentScope=operationContext({draftId:draft.id,draftRevision:draft.revision}).context;
         const sourceIssues:ListingIssue[]=currentScope.fields.flatMap(field=>{
@@ -407,7 +413,7 @@ export class ListingAiService {
       }
       const candidate=this.candidates(suggestion,draft,context);
       const citationRepairs=new Set(context.repairRequest?.issues.filter(issue=>issue.code==='PROSE_ADOPTION_EVIDENCE'&&isProseField(issue.field)).map(issue=>issue.field));
-      const fields=candidate.candidates.filter(c=>citationRepairs.has(c.field)||JSON.stringify(candidateNative(c,draft.schema,draft.marketplaceId,draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field])).map(c=>c.field);
+      const fields=candidate.candidates.filter(c=>!haulUnsupportedField(draft.listingProgram,c.field)&&(citationRepairs.has(c.field)||JSON.stringify(candidateNative(c,draft.schema,draft.marketplaceId,draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field]))).map(c=>c.field);
       if(!fields.length){
         const rejected=candidate.missing.filter(m=>!m.omitted&&/^\[/.test(m.reason));
         if(isFullSchema(context)&&rejected.length&&operation.rounds.length<2){operation.reviewIssues=rejected.map(m=>({field:m.field,message:m.reason}));reviewIssues=rejected.map(m=>({code:'FIELD_REPAIR',message:m.reason,severity:'ERROR',category:'field',source:'local',attributeNames:[m.field],autoFixable:false}));round!.resolved=true;checkpoint();continue;}

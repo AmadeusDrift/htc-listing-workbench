@@ -217,3 +217,16 @@ test('duplicate JSON values ignore object key order and conflicting malformed ci
   assert.equal(different.candidates.length,0);assert.ok(different.missing.some(m=>m.reason.includes('冲突')));
   assert.deepEqual(different.rejectedCandidates?.map(x=>x.nativeValue),['two','one']);
 });
+
+test('Haul adoption omits unsupported fields while retaining raw response, unrelated candidates and idempotency',async t=>{
+  const f=await fixture(t,{novel_feature:{type:'array',items:{type:'object',properties:{value:{type:'string'}},required:['value']}},merchant_suggested_asin:{type:'array',items:{type:'object',properties:{value:{type:'string'}},required:['value']}}});
+  const p=(f.amazon as any).persistence,r=p.record(f.draft.id);r.draft.listingProgram='haul';r.draft.attributes.merchant_suggested_asin=[];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer=[{audience:'BZR',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
+  f.ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:false});
+  const {ListingAiService}=await import('../src/main/listing-ai/service.ts'),listing=new ListingAiService(f.store,f.amazon,f.ai,()=>false);
+  f.respond(payload=>{assert.ok(payload.programRules.unsupportedFields.includes('merchant_suggested_asin'));assert.ok(payload.fullSchema.schema.properties.merchant_suggested_asin);return chat({kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'novel_feature',nativeValue:[{value:'Useful feature'}],evidenceIds:[]},{field:'merchant_suggested_asin',nativeValue:[{value:'B000FIXTURE'}],evidenceIds:[]}],missing:[]});});
+  const suggestion=await listing.suggest(f.reference),original=JSON.stringify(suggestion),input={...f.reference,suggestionResultId:suggestion.id,reviewResultId:null,fields:['novel_feature','merchant_suggested_asin']};
+  const adopted=await listing.adopt(input);assert.equal(adopted.attributes.merchant_suggested_asin,undefined);assert.deepEqual(adopted.attributes.novel_feature,[{value:'Useful feature'}]);
+  assert.deepEqual(adopted.fieldAdoptions!.at(-1)!.fields,['novel_feature']);assert.equal(JSON.stringify(f.ai.getResult(suggestion.id)),original);
+  assert.equal((await listing.adopt(input)).revision,adopted.revision);assert.equal(f.requests.length,1);
+  assert.doesNotThrow(()=>assertListingHistory(adopted,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c]))));
+});

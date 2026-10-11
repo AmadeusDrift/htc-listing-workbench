@@ -1,3 +1,4 @@
+import { HAUL_UNSUPPORTED_FIELDS } from '../amazon/listing-program.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { LISTING_CANDIDATE_FIELDS, CATEGORY_ATTRIBUTE_FIELDS, CATEGORY_INFERENCE_POLICY_VERSION } from '../../shared/listing-ai-contracts.ts';
@@ -95,7 +96,7 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
 }
 /** Shop identifiers, schema and connection generation stay in the main process. */
 export function listingModelPayload(context: ListingAiContext) {
-  if(isFullSchema(context))return {contract:FULL_SCHEMA_CONTRACT,operation:'amazon-fields',targetLanguage:'US English',productType:context.productType,marketplaceId:context.marketplaceId,locale:context.locale,fullSchema:context.fullSchema,currentAttributes:context.currentAttributes,businessValues:context.businessValues,sourceProduct:context.sourceProduct,fields:context.fields.map(field=>({name:field.name,title:field.title,valueMode:undefined,options:undefined,suggestedOptions:undefined})),evidence:context.evidence,policy:{titleMaxCharacters:75,bulletCount:5,bulletMaxCharacters:500,descriptionMaxCharacters:500,keywordMaxUtf8Bytes:200},...(context.repairRequest?{repairRequest:context.repairRequest}:{})};
+  if(isFullSchema(context))return {contract:FULL_SCHEMA_CONTRACT,operation:'amazon-fields',programRules:context.listingProgram==='haul'?{unsupportedFields:HAUL_UNSUPPORTED_FIELDS,reason:'Amazon Haul does not support these fields even when the full PTD schema contains them. Omit them; do not generate image URLs, which the program fills after hosting.'}:undefined,targetLanguage:'US English',productType:context.productType,marketplaceId:context.marketplaceId,locale:context.locale,fullSchema:context.fullSchema,currentAttributes:context.currentAttributes,businessValues:context.businessValues,sourceProduct:context.sourceProduct,fields:context.fields.map(field=>({name:field.name,title:field.title,valueMode:undefined,options:undefined,suggestedOptions:undefined})),evidence:context.evidence,policy:{titleMaxCharacters:75,bulletCount:5,bulletMaxCharacters:500,descriptionMaxCharacters:500,keywordMaxUtf8Bytes:200},...(context.repairRequest?{repairRequest:context.repairRequest}:{})};
   return { targetLanguage: 'US English', productType: context.productType, policyVersion: context.policyVersion,
     policy: { titleMaxCharacters: 75, preferredTitleMaxCharacters: 70, bulletCount: 5, bulletMaxCharacters: 500, descriptionMaxCharacters: 500, keywordMaxUtf8Bytes: 200 },
     fields: context.fields.map(field=>({...field,valueMode:field.closedEnum?(field.allowedValues.length===1?'fixed' as const:'single_choice' as const):'free_text' as const,

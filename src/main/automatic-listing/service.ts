@@ -440,7 +440,7 @@ export class AutomaticListingService {
       const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
       try { assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds); }
       catch(error) {
-        if(!(error instanceof SourceConsistencyError)||error.code!=='SOURCE_CONSISTENCY_NEEDS_INPUT')throw error;
+        if(!(error instanceof SourceConsistencyError)||!['SOURCE_CONSISTENCY_NEEDS_INPUT','SOURCE_CONSISTENCY_INVALID_OUTPUT'].includes(error.code))throw error;
         if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
         await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
         this.checkpoint(task,row);
@@ -452,7 +452,18 @@ export class AutomaticListingService {
       try {
         assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);
         row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task);
-      } catch(error) { if(!(error instanceof SourceConsistencyError))throw error; }
+      } catch(error) {
+        if(!(error instanceof SourceConsistencyError))throw error;
+        // A retained format failure already has its exact source scope. Recover it
+        // before frozen-sibling delivery guards; recovery never needs another download.
+        if(error.code==='SOURCE_CONSISTENCY_INVALID_OUTPUT'){
+          if(!this.deps.prepareSourceConsistency)throw error;
+          const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
+          await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
+          this.checkpoint(task,row);assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds);
+          row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task);
+        }
+      }
     }
     if (!row.sourcesPrepared) {
       // Only an explicit local SKU binding, after all ready siblings submitted, can

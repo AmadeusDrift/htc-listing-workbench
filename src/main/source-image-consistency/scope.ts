@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { SOURCE_CONSISTENCY_VERSION } from '../../shared/source-image-consistency-contracts.ts';
+import { SOURCE_CONSISTENCY_VERSION,SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
 import type { SourceClaimField, SourceConsistencyContext, SourceConsistencyIdentity } from '../../shared/source-image-consistency-contracts.ts';
 import type { WorkspaceStore } from '../store.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
@@ -14,7 +14,7 @@ import { SourceConsistencyError } from './errors.ts';
 
 export function validateConsistencyContext(raw:unknown):SourceConsistencyContext {
   const o=keys(raw,['version','productId','productRevision','variantId','identity','referenceAssets','fields','claims','issues']);
-  if(o.version!==SOURCE_CONSISTENCY_VERSION||!Array.isArray(o.fields)||o.fields.length>205||!Array.isArray(o.referenceAssets)||!o.referenceAssets.length||o.referenceAssets.length>10)throw new AiError('INVALID_INPUT');
+  if(![SOURCE_CONSISTENCY_VERSION,SOURCE_OBSERVATION_VERSION].includes(o.version as never)||!Array.isArray(o.fields)||o.fields.length>205||!Array.isArray(o.referenceAssets)||!o.referenceAssets.length||o.referenceAssets.length>10)throw new AiError('INVALID_INPUT');
   const identityRaw=o.identity as Record<string,unknown>;
   const s=keys(identityRaw,identityRaw?.kind==='local-original'?['kind']:['kind','receiptId','receiptFingerprint','sourceSku']);
   let identity:SourceConsistencyIdentity;
@@ -27,7 +27,7 @@ export function validateConsistencyContext(raw:unknown):SourceConsistencyContext
   if(listingFingerprint(o.claims)!==listingFingerprint(projection.claims)||listingFingerprint(o.issues)!==listingFingerprint(projection.issues))throw new AiError('INVALID_INPUT');
   const referenceAssets=o.referenceAssets.map(raw=>{const a=keys(raw,['source','assetId','sha256','byteSize','bindingEpoch','anchorId','imageId']);if(!['local-original','receipt-image'].includes(String(a.source))||(a.source==='local-original')!==(a.anchorId===null&&a.imageId===null)||a.source==='receipt-image'&&identity.kind==='local-original')throw new AiError('INVALID_INPUT');return{source:a.source as 'local-original'|'receipt-image',assetId:uuid(a.assetId),sha256:sha256(a.sha256),byteSize:integer(a.byteSize,1,20*1024*1024),bindingEpoch:sha256(a.bindingEpoch),anchorId:a.anchorId===null?null:uuid(a.anchorId),imageId:a.imageId===null?null:boundedText(a.imageId,100)};});
   if(new Set(referenceAssets.map(a=>a.assetId)).size!==referenceAssets.length)throw new AiError('INVALID_INPUT');
-  return{version:SOURCE_CONSISTENCY_VERSION,productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),identity,referenceAssets,...projection};
+  return{version:o.version as SourceConsistencyContext['version'],productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),identity,referenceAssets,...projection};
 }
 /** Send liability is image/spec based, independent of model, cosmetic revisions and new anchor timestamps. */
 export function consistencyScopeKey(context:SourceConsistencyContext):string {
@@ -53,7 +53,7 @@ export function resolveConsistencyContext(db:DatabaseSync,store:Pick<WorkspaceSt
   }
   fields.push({id:'variant.sourceSpec',name:'spec',value:variant.sourceSpec},{id:'variant.originalSpec',name:'spec',value:variant.originalSpec},{id:'variant.normalizedSpec',name:'spec',value:variant.normalizedSpec});
   const generated=new Set(db.prepare("SELECT json_extract(record_json,'$.approvedAssetId') AS id FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? UNION SELECT json_extract(s.value,'$.approvedAssetId') AS id FROM image_workflow_runs w,json_each(w.record_json,'$.slots') s WHERE json_extract(w.record_json,'$.productId')=?").all(product.id,product.id).map(r=>String(r.id)));
-  const confirmed=(assetId:string,variantId:string)=>db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(assetId,variantId)?.confirmed===1;
+  const confirmed=(assetId:string,variantId:string)=>{const binding=db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=? AND variant_id=?').get(assetId,variantId);return binding?.confirmed===1||!!source&&!!binding;};
   const allowUnbound=allowSourceUnbound(product,source);
   const anchors=new Map<string,ReturnType<typeof validateSourceImageProvenance>>();
   // Establish exact eligible supplier originals before generic count/byte/role ordering.
@@ -80,5 +80,5 @@ export function resolveConsistencyContext(db:DatabaseSync,store:Pick<WorkspaceSt
     if(epoch&&!binding)throw new AiError('SOURCE_CHANGED');
     return{source:anchorId?'receipt-image' as const:'local-original' as const,assetId:asset.id,sha256:asset.sha256,byteSize:asset.byteSize,anchorId,imageId,bindingEpoch:listingFingerprint({epoch:epoch?.id??null,binding:binding??null,role:ref.role})};
   });
-  return validateConsistencyContext({version:SOURCE_CONSISTENCY_VERSION,productId:product.id,productRevision:product.revision,variantId:variant.id,identity,referenceAssets:referenceAssets.some(a=>a.source==='receipt-image')?referenceAssets.filter(a=>a.source==='receipt-image'):referenceAssets,...projectSourceClaims(fields)});
+  return validateConsistencyContext({version:SOURCE_OBSERVATION_VERSION,productId:product.id,productRevision:product.revision,variantId:variant.id,identity,referenceAssets:referenceAssets.some(a=>a.source==='receipt-image')?referenceAssets.filter(a=>a.source==='receipt-image'):referenceAssets,...projectSourceClaims(fields)});
 }

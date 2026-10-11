@@ -110,7 +110,7 @@ test('native anchored originals take precedence before local count and byte budg
       if(mode==='shared')assert.equal(f.store.getProduct(p.id).assets.find(a=>a.id===anchored.id)!.variantIds.length,2,'shared native reference wins over single-SKU locals');
       f.db.exec('BEGIN');try{
         f.db.prepare('UPDATE variant_assets SET confirmed=0 WHERE asset_id=? AND variant_id=?').run(anchored.id,variantId);
-        assert.ok(resolveConsistencyContext(f.db,f.store,f.directory,input()).referenceAssets.every(a=>a.source==='local-original'),'unconfirmed native original cannot be selected');
+        assert.ok(resolveConsistencyContext(f.db,f.store,f.directory,input()).referenceAssets.every(a=>a.source==='receipt-image'),'supplier SKU image binding is sufficient without a second human confirmation');
         f.db.prepare('DELETE FROM variant_assets WHERE asset_id=? AND variant_id=?').run(anchored.id,variantId);
         assert.ok(resolveConsistencyContext(f.db,f.store,f.directory,input()).referenceAssets.every(a=>a.source==='local-original'),'unbound or sibling-only native original cannot be selected');
       }finally{f.db.exec('ROLLBACK');}

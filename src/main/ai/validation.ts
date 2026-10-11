@@ -50,6 +50,11 @@ export function uuidList(raw: unknown, max: number, min = 0): string[] {
 }
 export function isDeepSeek(id: AiProviderId): id is 'deepseek' | 'deepseek-review' { return id === 'deepseek' || id === 'deepseek-review'; }
 export function modelFor(id: AiProviderId, raw: unknown): string { if (typeof raw !== 'string' || (isDeepSeek(id) ? !['deepseek-flash', 'deepseek-v4-pro'].includes(raw) : raw !== MODELS[id])) invalid(); return raw; }
+export function parseFunctionSettings(raw: unknown) {
+  const o = keys(raw, ['id', 'model', 'enabled'], ['thinking']), id = providerId(o.id), model = modelFor(id, o.model);
+  if (typeof o.enabled !== 'boolean' || o.thinking !== undefined && (typeof o.thinking !== 'boolean' || !isDeepSeek(id))) invalid('INVALID_INPUT');
+  return { id, model, enabled: o.enabled, ...(o.thinking === undefined ? {} : { thinking: o.thinking as boolean }) };
+}
 function secret(raw: unknown): string { const text = boundedText(raw, 4096); if (text.length < 8 || /[^\x21-\x7e]/.test(text)) invalid(); return text; }
 export function parseProfileImport(raw: unknown): ProfileImport {
   const id = providerId(object(raw).id);

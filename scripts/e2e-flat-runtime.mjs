@@ -11,7 +11,7 @@ const dataRoot = await mkdtemp(resolve('.test-data/flat-runtime-'));
 let app;
 const errors = [], checks = [];
 try {
-  app = await launchGuarded({ executable: require('electron'), args: ['.'], dataRoot, guardPath: resolve('scripts/release-network-guard.cjs'), cwd: resolve('.') });
+  app = await launchGuarded({ executable: process.env.RED_E2E_EXECUTABLE || require('electron'), args: process.env.RED_E2E_EXECUTABLE ? [] : ['.'], dataRoot, guardPath: resolve('scripts/release-network-guard.cjs'), cwd: resolve('.') });
   const page = await app.firstWindow(); page.setDefaultTimeout(10000);
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].webContents.backgroundThrottling = false; });
   page.on('pageerror', error => errors.push(error.message));
@@ -46,6 +46,18 @@ try {
         assert.deepEqual(overflow, [], `${name} ${theme} ${width}: overflow`);
         const controls = await page.locator('.button').evaluateAll(elements => elements.filter(el => el.getClientRects().length).map(el => { const s = getComputedStyle(el); return { text: el.textContent, radius: s.borderRadius, image: s.backgroundImage }; }));
         assert.ok(controls.every(value => value.radius === '4px' && value.image === 'none'), JSON.stringify(controls));
+        const accents = await page.evaluate(() => {
+          const found = [];
+          for (const el of document.querySelectorAll('.workflow-notice,.workflow-warning,.ops-notice,.error-banner,.workflow-error,.rule-formula,.product-item,.automatic-connections,.automatic-source-group[data-tone],.automatic-task-items>li[data-tone]')) {
+            if (el.getClientRects().length && parseFloat(getComputedStyle(el).borderLeftWidth) > 1) found.push(el.className);
+          }
+          for (const el of document.querySelectorAll('.editor-tabs button.active,.automatic-queue-tabs button[aria-selected=true],.settings-nav button[aria-current=page],.primary-navigation button.active,.collection-row.inspected,.automatic-source-variants li[data-search-match=true]')) {
+            if (el.getClientRects().length && getComputedStyle(el).boxShadow !== 'none') found.push(el.className);
+            if (el.matches('.editor-tabs button.active') && getComputedStyle(el).borderBottomWidth !== '0px') found.push(el.className);
+          }
+          return found;
+        });
+        assert.deepEqual(accents, [], `${name} ${theme}: decorative accent lines remain`);
         if (['自动上架', '手动上架', '设置'].includes(name)) await capture(`${theme}-${width}-${name}`);
         checks.push(`${theme} ${width} ${name}`);
       }

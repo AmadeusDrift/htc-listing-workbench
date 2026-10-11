@@ -67,7 +67,16 @@
 .settings-panel { padding: 20px; }
 .appearance-row { padding-block: 18px; }
 .workflow-notice, .workflow-warning, .ops-notice { overflow-wrap: anywhere; line-height: 1.65; }
-#root :is(.workflow-notice, .small-copy)[role='alert'], #root .error-banner, #root .workflow-error { border-left: 3px solid var(--danger); font-weight: 500; }
+#root :is(.workflow-notice, .small-copy)[role='alert'], #root .error-banner, #root .workflow-error { font-weight: 500; }
+/* Status and selection use text, icons and fills throughout the workbench. */
+#root :is(.workflow-notice, .workflow-warning, .ops-notice, .error-banner, .workflow-error, .small-copy[role='alert']) { border: 0; }
+#root .rule-formula, #root .product-item { border-left: 0; }
+#root .settings-nav button[aria-current='page'], #root .primary-navigation button.active { box-shadow: none; }
+#root .collection-row.inspected { box-shadow: none; background: var(--accent-soft); }
+#root .automatic-source-variants li[data-search-match='true'] { box-shadow: none; border-color: var(--line); background: var(--accent-soft); }
+#root .editor-tabs { border-block: 0; }
+#root .editor-tabs button { border-bottom: 0; padding-inline: 10px; margin-block: 4px; }
+#root .editor-tabs button.active { color: var(--accent); background: var(--accent-soft); box-shadow: none; }
 .automatic-workspace { gap: 16px; }
 .automatic-overview { display: flex; flex-wrap: wrap; gap: 12px 0; padding: 0; border: 0; }
 .automatic-overview > div { display: flex; align-items: baseline; gap: 10px; padding: 0 24px; }
@@ -86,6 +95,7 @@
 .automatic-target-setup .form-grid > .small-copy { grid-row: 2; }
 .automatic-target-setup .workflow-notice { margin-block: 8px 0; font-size: 12px; }
 .automatic-connections { padding: 10px 14px; margin: 12px 0; }
+#root .automatic-connections { border-left: 1px solid var(--line); }
 .automatic-connections summary { cursor: pointer; font-size: 13px; font-weight: 600; }
 .automatic-connections[data-state='ready'] summary { color: var(--success); }
 .automatic-connections[data-state='pending'] summary { color: var(--warning); }
@@ -95,9 +105,10 @@
 .automatic-unified-queue { box-shadow: none; }
 .automatic-queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
 .automatic-queue-heading h2 { font-size: 15px; }
-.automatic-queue-tabs { display: flex; gap: 22px; border-block: 1px solid var(--line); padding: 0 16px; overflow-x: auto; }
+.automatic-queue-tabs { display: flex; gap: 14px; border-block: 0; padding: 0 16px; overflow-x: auto; }
 .automatic-queue-tabs button { flex-shrink: 0; padding: 11px 0; border: 0; background: transparent; color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 7px; }
-.automatic-queue-tabs button[aria-selected='true'] { color: var(--accent); box-shadow: inset 0 -2px var(--accent); font-weight: 600; }
+.automatic-queue-tabs button { padding: 8px; }
+.automatic-queue-tabs button[aria-selected='true'] { color: var(--accent); background: var(--accent-soft); box-shadow: none; font-weight: 600; }
 .automatic-queue-tabs button span { padding: 0 5px; border-radius: 4px; background: var(--panel-soft); font-variant-numeric: tabular-nums; }
 .automatic-queue-toolbar { padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .automatic-queue-toolbar .automatic-group-search { max-width: 380px; background: var(--panel); }
@@ -136,7 +147,7 @@
 .automatic-task-counts { line-height: 2; }
 .automatic-task-scope { padding: 10px 14px; }
 .automatic-task-panel .automatic-source-group { margin-top: 8px; }
-.automatic-task-panel .automatic-source-group[data-tone], .automatic-task-items > li[data-tone] { border-left-width: 3px; }
+#root .automatic-source-group[data-tone], #root .automatic-task-items > li[data-tone] { border-left: 1px solid var(--line); }
 .automatic-task-panel .automatic-task-items > li[data-tone] { padding-left: 0; }
 :root[data-density='compact'] .automatic-queue-entry .automatic-product > summary { padding-block: 9px; }
 :root[data-density='compact'] .automatic-row-select { padding-top: 24px; }

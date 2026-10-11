@@ -36,6 +36,12 @@ async function launch() {
   assert.deepEqual(bridge.keys, [...publicApi].sort()); assert.equal(bridge.require, 'undefined'); assert.equal(bridge.process, 'undefined');
   sessions.push(identity); return page;
 }
+async function openAiSettings(page) {
+  await page.getByRole('button',{name:'设置',exact:true}).click();
+  const nav=page.locator('#settings-nav-ai');
+  if(await nav.isVisible())await nav.click();else await page.locator('.settings-module-select select').selectOption('ai');
+  await page.getByLabel('AI 连接供应商',{exact:true}).selectOption('deepseek');
+}
 try {
   let page = await launch(); checks.push('candidate execPath/appPath/version, hidden sandbox, exact public IPC API');
   const runtime = await app.evaluate(async ({ safeStorage, nativeImage }, dataRoot) => {
@@ -79,6 +85,24 @@ try {
     return captured.toPNG().toString('base64');
   });
   await writeFile(join(output, 'candidate-images.png'), Buffer.from(screenshot, 'base64')); checks.push('real preload/IPC sample persistence and managed image rendering');
+  const settings=await page.evaluate(async()=>{
+    await window.red.saveAiConnection({id:'deepseek',apiKey:'synthetic-release-ai-secret'});
+    await window.red.saveAiFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:false,thinking:true});
+    await window.red.saveAiFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:false,thinking:false});
+    await window.red.saveAiFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false});
+    const before=await window.red.listAiProviders();let rejected=false;
+    try{await window.red.saveAiFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false,thinking:'invalid'});}catch{rejected=true;}
+    return {before,after:await window.red.listAiProviders(),rejected,calls:await window.red.listAiCalls()};
+  });
+  assert.equal(settings.rejected,true);assert.deepEqual(settings.after,settings.before);assert.deepEqual(settings.calls,[]);
+  assert.equal(settings.after.find(p=>p.id==='deepseek').thinking,true);assert.equal(settings.after.find(p=>p.id==='deepseek-review').thinking,false);
+  assert.ok(settings.after.filter(p=>p.id.startsWith('deepseek')).every(p=>p.configured&&!p.enabled));
+  await openAiSettings(page);
+  const thinking=page.getByLabel('文案生成思考模式',{exact:true});await expect(thinking).toHaveValue('on');
+  await expect(page.getByLabel('文案复核思考模式',{exact:true})).toHaveValue('off');
+  await thinking.selectOption('off');await expect.poll(()=>page.evaluate(()=>window.red.listAiProviders().then(rows=>rows.find(p=>p.id==='deepseek').thinking))).toBe(false);
+  await thinking.selectOption('on');await expect.poll(()=>page.evaluate(()=>window.red.listAiProviders().then(rows=>rows.find(p=>p.id==='deepseek').thinking))).toBe(true);
+  checks.push('actual settings IPC/UI: independent thinking, model switch retains value and key, invalid input has no mutation or provider calls');
   report.guardProbes = await probeGuard(app); assert.equal(report.guardProbes.attempts.length, 8); assert.equal(report.guardProbes.total, 8, 'Only deliberate guard probes may attempt outbound');
   await app.close(); app = undefined;
   page = await launch();
@@ -90,6 +114,12 @@ try {
     return { value, secret: safeStorage.decryptString(Buffer.from(encrypted, 'base64')), attempts: globalThis.__releaseGuard.attempts, shown: globalThis.__releaseGuard.shownWindows };
   }, { dataRoot, encrypted: runtime.encrypted });
   assert.equal(restored.value, 'synthetic'); assert.equal(restored.secret, 'synthetic-release-secret'); assert.deepEqual(restored.attempts, []); assert.deepEqual(restored.shown, []);
+  await openAiSettings(page);
+  await expect(page.getByLabel('文案生成思考模式',{exact:true})).toHaveValue('on');
+  await expect(page.getByLabel('文案复核思考模式',{exact:true})).toHaveValue('off');
+  assert.ok((await page.evaluate(()=>window.red.listAiProviders())).filter(p=>p.id.startsWith('deepseek')).every(p=>p.configured&&!p.enabled));
+  assert.deepEqual(await page.evaluate(()=>window.red.listAiCalls()),[]);
+  checks.push('restarted actual EXE displays persisted thinking without re-entering synthetic keys');
   checks.push('same candidate restart preserves SQLite, encrypted synthetic secret and product IDs; no outbound');
   assert.deepEqual(errors, []); report.passed = true;
 } catch (error) { report.passed = false; report.failure = String(error.stack || error); throw error; }

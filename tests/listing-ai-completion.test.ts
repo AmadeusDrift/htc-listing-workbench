@@ -177,3 +177,13 @@ for (const secondReviewPass of [true, false]) test(`negative item verdict alias 
     assert.ok(result.remaining.some(value => value.includes('Remove the unsupported wording.')));
   }
 });
+
+test('preview cleanup checkpoints an active completion atomically before caller recovery',async t=>{
+  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id);r.draft.listingProgram='haul';r.draft.attributes.merchant_suggested_asin=[];p.putRecord(r);
+  const operation=f.listing.beginCompletion(f.reference),before=operation.draftStamp;
+  try{await f.amazon.previewDraft(f.draft,operation.id);}catch{/* unrelated malformed demo attributes are still blocked */}
+  const current=f.amazon.getDraft(f.draft.id),saved=f.ai.completionJournal.get(operation.id);
+  const {completionDraftStamp}=await import('../src/main/listing-ai/completion-journal.ts');
+  assert.equal(current.attributes.merchant_suggested_asin,undefined);assert.equal(saved.draftRevision,current.revision);assert.equal(saved.draftStamp,completionDraftStamp(current));assert.notEqual(saved.draftStamp,before);
+  assert.equal(f.listing.beginCompletion({draftId:current.id,draftRevision:current.revision},operation.id).id,operation.id);assert.equal(f.requests.length,0);
+});

@@ -194,7 +194,6 @@ test('Haul preparation identity separates programs and reuses only matching prog
 
 test('Haul rejects forbidden JSON on save and preparation', async t => {
   const invalid: JsonObject[] = [
-    { fulfillment_availability: [] }, { externally_assigned_product_identifier: [] }, { merchant_suggested_asin: [] },
     { purchasable_offer: [{ audience: 'ALL' }] }, { purchasable_offer: [] }, { is_value_stores_item: [{ value: 'true' }] }, { is_value_stores_item: [{ value: false }] },
   ];
   for (const patch of invalid) {
@@ -204,13 +203,17 @@ test('Haul rejects forbidden JSON on save and preparation', async t => {
   }
 });
 
-test('tampered persisted Haul JSON is blocked in validation, preview and submit before any API', async t => {
-  const f = fixture(t); const d = await f.service.createDraft({ ...f.input, listingProgram: 'haul' });
-  const record = f.persistence.record(d.id); record.draft.attributes.fulfillment_availability = []; f.persistence.putRecord(record);
-  const validated = await f.service.validateDraft(d); assert.ok(validated.localIssues.some(issue => issue.code === 'HAUL_FORBIDDEN_ATTRIBUTE'));
-  await assert.rejects(f.service.previewDraft(validated), /校验|Haul/);
-  await assert.rejects(f.service.submitDraft(validated, true), /预览|Haul/);
-  assert.equal(f.service.listCalls().filter(call => /ListingsItem/.test(call.operation)).length, 0);
+test('Haul save and old draft validation clean only three unsupported fields and invalidate preview once', async t => {
+  const f=fixture(t),draft=await f.service.createDraft({...f.input,listingProgram:'haul'});
+  const patch={fulfillment_availability:[],externally_assigned_product_identifier:[],merchant_suggested_asin:[]};
+  const original=structuredClone(draft.attributes),saved=f.service.saveDraft({...draft,attributes:{...original,...patch}});
+  assert.deepEqual(saved.attributes,original);assert.ok(saved.events.some(e=>e.summary.includes('merchant_suggested_asin')));
+  const record=f.persistence.record(saved.id);Object.assign(record.draft.attributes,patch);record.draft.previewedAt=new Date().toISOString();f.persistence.putRecord(record);
+  const validated=await f.service.validateDraft(saved);assert.deepEqual(validated.attributes,original);assert.equal(validated.revision,saved.revision+1);assert.equal(validated.previewedAt,null);
+  assert.ok(!validated.localIssues.some(i=>i.code==='HAUL_FORBIDDEN_ATTRIBUTE'));
+  assert.equal((await f.service.validateDraft(validated)).revision,validated.revision);
+  assert.equal(f.service.listCalls().length,0);
+  const standard=await f.service.createDraft(f.input);assert.deepEqual(f.service.saveDraft({...standard,attributes:{...standard.attributes,...patch}}).attributes.fulfillment_availability,[]);
 });
 
 test('Haul source mapping uses confirmed measured item/package facts and leaves unverified copy, brand and inventory out', t => {

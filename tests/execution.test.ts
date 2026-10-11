@@ -269,3 +269,15 @@ test('an image confirmed for another SKU cannot satisfy an unconfirmed current-S
   db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(f.product.assets[0].id, other, new Date().toISOString()); db.close();
   assert.throws(() => f.create(), error=>(error as any).code==='SOURCE_CONSISTENCY_IDENTITY_INVALID'); assert.equal(f.uploadCalls, 0);
 });
+
+test('Haul cleanup saved before execution checkpoint resumes without stale hash or regenerated assets',async t=>{
+  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
+  r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';r.draft.attributes.merchant_suggested_asin=[];
+  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);
+  f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  const task=f.create(),assets=structuredClone(task.items[0].assets),save=f.amazon.saveDraft.bind(f.amazon);let once=true;
+  f.amazon.saveDraft=input=>{const result=save(input);if(once){once=false;throw Error('synthetic crash after save');}return result;};
+  f.start(task.id);await f.service.waitForIdle();assert.equal(f.uploadCalls,0);assert.equal(f.amazon.getDraft(f.draft.id).attributes.merchant_suggested_asin,undefined);
+  await f.reopen();f.start(task.id);await f.service.waitForIdle();
+  const done=f.service.get(task.id);assert.equal(done.status,'COMPLETED',JSON.stringify(f.amazon.getDraft(f.draft.id).localIssues));assert.deepEqual(done.items[0].assets,assets);assert.equal(f.uploadCalls,1);
+});

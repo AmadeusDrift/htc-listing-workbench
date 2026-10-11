@@ -4,6 +4,15 @@ import { isObject } from './context.ts';
 import { compileAttributesSchema } from './schema.ts';
 import { resolveSchemaNode } from './field-catalog.ts';
 
+export const HAUL_UNSUPPORTED_FIELDS = ['fulfillment_availability','externally_assigned_product_identifier','merchant_suggested_asin'] as const;
+export const haulUnsupportedField = (program: ListingProgram | undefined, field: string) => program === 'haul' && (HAUL_UNSUPPORTED_FIELDS as readonly string[]).includes(field);
+export function cleanHaulAttributes(program: ListingProgram | undefined, input: JsonObject) {
+  const attributes=structuredClone(input),removed=Object.keys(attributes).filter(field=>haulUnsupportedField(program,field));
+  for(const field of removed)delete attributes[field];
+  return {attributes,removed};
+}
+export const haulCleanupReason = (fields: readonly string[]) => `已自动移除 Haul 官方不支持字段：${fields.join('、')}；其他内容和原始响应保留`;
+
 export function listingProgram(value: unknown): ListingProgram {
   if (value === undefined) return 'standard';
   if (value !== 'haul' && value !== 'standard') throw new UserFacingError('上架项目类型无效，仅支持 haul 或 standard');
@@ -55,7 +64,7 @@ export function listingProgramIssues(program: ListingProgram, snapshot: AmazonSc
   const parent = snapshot.parentageLevel === 'PARENT';
   if (!parent && !supported(snapshot, 'purchasable_offer', 'audience', 'BZR')) add('HAUL_SCHEMA_UNSUPPORTED', '当前 Schema 不支持 Haul 的 BZR 报价受众，不能回退到普通上架', 'purchasable_offer');
   if (!attributes) return issues;
-  for (const name of ['fulfillment_availability', 'externally_assigned_product_identifier', 'merchant_suggested_asin']) {
+  for (const name of HAUL_UNSUPPORTED_FIELDS) {
     if (Object.hasOwn(attributes, name)) add('HAUL_FORBIDDEN_ATTRIBUTE', `Haul 草稿不能包含 ${name}`, name);
   }
   const flags = attributes.is_value_stores_item;

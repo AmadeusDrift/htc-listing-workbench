@@ -10,7 +10,8 @@ import { persistImport, getReceipt, assertMiaoshouHistory } from '../src/main/mi
 import { MiaoshouService } from '../src/main/miaoshou/service.ts';
 import { fingerprint, validateMiaoshouReceipt } from '../src/main/miaoshou/validation.ts';
 import { demoSchema, sourceAttributes } from '../src/main/amazon/demo.ts';
-import { buildListingContext } from '../src/main/listing-ai/context.ts';
+// Verify normalized source facts against the frozen v3 evidence and measurement contract.
+import { buildListingContext } from './helpers/legacy-listing-context.ts';
 import { assertListingEvidence, validateListingFieldsOutput, listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { currentDraftEvidenceIssues } from '../src/main/listing-ai/current-evidence.ts';
 import { sourceImageMeasurements } from '../src/main/image-workflow/source-measurements.ts';
@@ -75,7 +76,7 @@ for(const [name,raw,expected,claim] of [
   ['产品长度','2 millimeters','2 mm','Length 2 mm.'],['产品长度','2 in','2 inches','Length 2 inches.'],
   ['产品重量','453.59237 grams','453.59237 g','Weight 453.59237 g.'],['产品重量','2 kilograms','2 kg','Weight 2 kg.'],
   ['产品重量','2 lb','2 pounds','Weight 2 pounds.'],['产品重量','2 ounces','2 oz','Weight 2 oz.'],
-] as const)test(`new source measurement supports mapping and current v3 evidence: ${raw}`,t=>{
+] as const)test(`new source measurement supports mapping and legacy v3 evidence: ${raw}`,t=>{
   const f=fixture(t,[{name,value:raw}]);assert.equal(f.product.facts[0].value,expected);assert.equal(trace(f.receipt)!.entries[0].rawValue,raw);
   const field=name==='产品重量'?'item_weight':'item_length'; assert.ok(listing(f.product).mapped[field]);
   assert.doesNotThrow(()=>assertClaim(f.product,'product_description',claim));

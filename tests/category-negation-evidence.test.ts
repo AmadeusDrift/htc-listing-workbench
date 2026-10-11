@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { categoryAttributeValues, selectedSkuCategoryAttributes, sourceAttributes, sourceMappingReport } from '../src/main/amazon/demo.ts';
-import { buildListingContext } from '../src/main/listing-ai/context.ts';
+// Frozen v0-v3 category parsing and persisted-history compatibility; v4 uses full-schema evidence.
+import { buildListingContext } from './helpers/legacy-listing-context.ts';
 import { assertListingEvidence, assertListingReview, validateListingFieldsOutput, listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { assertListingEvidence as assertV2Evidence } from '../src/main/listing-ai/evidence-validation-v2.ts';
 import { currentCopyIssues, assertCurrentImageCategoryExclusions } from '../src/main/listing-ai/current-evidence.ts';
 import { parseCategorySource } from '../src/main/listing-ai/evidence-category-v2.ts';
 import { sceneSet } from './fixtures/image-set.ts';
-import { fixture, saveInput, chat } from './fixtures/listing-ai.ts';
+import { legacyFixture as fixture, saveInput, chat } from './fixtures/listing-ai.ts';
 import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
@@ -299,7 +300,7 @@ async function negativeAgeDraft(t:test.TestContext){
   return {...f,product,draft,reference:{draftId:draft.id,draftRevision:draft.revision}};
 }
 
-test('new results stamp current v3 and partial repair retains legal fields without a policy retry',async t=>{
+test('legacy results stamp v3 and partial repair retains legal fields without a policy retry',async t=>{
   const f=await negativeAgeDraft(t),context=buildListingContext(f.draft,f.product,1),age=context.evidence.find(e=>e.name==='适用年龄')!,material=context.evidence.find(e=>e.meaning==='material')!;
   context.fields=context.fields.filter(field=>['material','age_range_description'].includes(field.name));context.repairRequest={issues:[],currentValues:{}};
   f.respond(()=>chat({kind:'amazon-fields',candidates:[...candidate('material','Silicone',[material]).candidates,...candidate('age_range_description','Child',[age],true).candidates],missing:[]}));

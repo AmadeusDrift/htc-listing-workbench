@@ -91,7 +91,7 @@ test('automatic sales SKU drafts preserve source identities and reuse durable re
       const result=await f.service.prepareDrafts({...f.selected,items:[{productId:product.id,productRevision:product.revision,variantId:plan.recipe.components[0].variantId,attributes:configured(f.target.marketplaceId)}]},[plan]);
       assert.equal(result.items[0].disposition,'CREATED',result.items[0].error??'');
       const draft=result.items[0].draft!;assert.equal(draft.sku,plan.sku);assert.deepEqual(draft.salesPlan,plan);
-      const context=buildListingContext(draft,product,0);assert.equal(context.sku,plan.sku);assert.ok(context.evidence.some(e=>e.id.endsWith(':sale-count')&&e.value==='10 pieces'));
+      const context=buildListingContext(draft,product,0);assert.equal(context.sku,plan.sku);assert.equal(context.sourceProduct?.salesRecipe?.recipe.totalPieces,10);assert.deepEqual(context.sourceProduct?.salesRecipe,plan);
       assert.doesNotThrow(()=>f.service.validateDraft({id:draft.id,revision:draft.revision}));
     }
     assert.deepEqual(f.store.getProduct(product.id),original);

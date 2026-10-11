@@ -8,7 +8,8 @@ import { importImageFiles } from '../src/main/assets.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
-import { ListingAiService } from '../src/main/listing-ai/service.ts';
+// Restored v3 color calls must retain their original paid-call and unknown-result semantics.
+import { LegacyListingAiService as ListingAiService } from './helpers/legacy-listing-context.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { chat, mockStorage, saveInput } from './fixtures/listing-ai.ts';

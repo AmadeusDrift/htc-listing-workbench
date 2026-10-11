@@ -7,6 +7,7 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { boundedText, date, integer, keys, sha256, uuid, validateAiCall, validateStoredAiResult } from '../ai/validation.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { validateAiUsageRecord } from '../ai/usage.ts';
+import { isFullSchema,nativeCandidateIssues,fullCopyPolicyIssues } from './full-schema.ts';
 
 export interface CompletionCall { id:string; sent:boolean; resultId:string|null }
 export interface CompletionRound {
@@ -172,7 +173,11 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
       // an intact snapshot round can prove adoption; mixed local refs cannot.
       const adopted=!!prior?.candidate.resultId&&(!prior.review||!!prior.review.resultId)&&committedAdoption(draft,prior);
       const review=round.review?.resultId?snapshotJournal.result(round.review,round):undefined;
-      const rejected=review?.output.kind==='amazon-fields-review'&&review.output.verdict!=='PASS';
+      const candidate=round.candidate.resultId?snapshotJournal.result(round.candidate,round):undefined;
+      const candidateOutput=candidate?.output.kind==='amazon-fields'?candidate.output:undefined;
+      const checked=candidateOutput?{...candidateOutput,candidates:[...candidateOutput.candidates,...candidateOutput.rejectedCandidates??[]]}:undefined;
+      const nativeRejected=isFullSchema(round.context)&&!!checked&&!!draft&&(nativeCandidateIssues(checked,round.context).length>0||fullCopyPolicyIssues(checked).length>0);
+      const rejected=review?.output.kind==='amazon-fields-review'&&review.output.verdict!=='PASS'||nativeRejected;
       // A guard forgets adoption references, but not that this round was resolved.
       // Exact negative reviews prove no adoption was needed; replay their local
       // checkpoint when the snapshot stopped immediately after saving the result.

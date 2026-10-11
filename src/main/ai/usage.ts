@@ -50,12 +50,16 @@ export function requestTokenReservation(id: AiProviderId, body: string | Buffer)
   const thinking=parsed.thinking?.type==='enabled';
   const maximum = integer(parsed.max_tokens, 1, thinking?32768:16384);
   let setPlanning=false;
+  let fullSchemaListing=false;
+  if(id==='deepseek'&&maximum===16384)for(const message of parsed.messages??[])if(typeof message.content==='string'){
+    try{const payload=JSON.parse(message.content);if(payload.operation==='amazon-fields'&&payload.contract==='listing-full-schema/v1'&&payload.fullSchema?.schema&&payload.fullSchema?.metaSchema)fullSchemaListing=true;}catch{/* Not a field generation payload. */}
+  }
   if(id==='deepseek'&&maximum===16384){
     for(const message of parsed.messages??[])if(Array.isArray(message.content))for(const part of message.content)if(part.type==='text'&&typeof part.text==='string'){
       try{const payload=JSON.parse(part.text);if(payload.operation==='image-plan'&&payload.setPolicy==='seven-product-v2'&&!payload.slot)setPlanning=true;}catch{/* Ordinary text is not a planning request. */}
     }
   }
-  if (maximum !== (thinking ? 32768 : id === 'deepseek-review'||setPlanning ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
+  if (maximum !== (thinking ? 32768 : id === 'deepseek-review'||setPlanning||fullSchemaListing ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
   let imageTokens = 0;
   for (const message of parsed.messages ?? []) if (Array.isArray(message.content)) {
     for (const part of message.content) if (part.type === 'image_url') {

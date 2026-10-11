@@ -5,6 +5,7 @@ import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { AiError } from '../ai/errors.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { candidateTextValues } from '../amazon/field-mapping.ts';
+import { isFullSchema,nativeText } from '../listing-ai/full-schema.ts';
 
 type Measurement = { kind:'length'|'weight'; value:number };
 const measurementPattern=()=>/(\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)*)\s*(millimeters?|centimeters?|毫米|厘米|千克|公斤|英寸|inches|inch|ounces|ounce|pounds|pound|grams|gram|mm|cm|kg|lbs|lb|oz|in|g|m|克|米)(?![a-z])/gi;
@@ -65,7 +66,7 @@ export function imageListingSnapshot(draft:AmazonDraft,listing:ListingAiContext,
 export function currentImageListingSnapshot(draft:AmazonDraft,context:ListingAiContext):{context:ListingAiContext;currentListingCopy:CurrentListingCopy[]}{
   const copy=context.fields.flatMap(field=>{
     const raw=draft.attributes[field.name];if(raw===undefined)return [];
-    const values=candidateTextValues(field.name,raw);
+    const values=isFullSchema(context)?nativeText(field.name,raw):candidateTextValues(field.name,raw);
     if(!values)throw new UserFacingError('当前文案字段格式不完整，不能开始图片审核');
     return values.length?[{field:field.name,values}]:[];
   });

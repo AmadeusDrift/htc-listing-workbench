@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, candidateFor, chat, reviewFor } from './fixtures/listing-ai.ts';
+import { fixture, legacyFixture, candidateFor, chat, reviewFor } from './fixtures/listing-ai.ts';
 
 const issue = (field: string) => ({code:'90220',message:`Missing ${field}`,severity:'ERROR' as const,attributeNames:[field],autoFixable:false,source:'amazon' as const,category:'field' as const});
 
@@ -24,8 +24,8 @@ test('a schema-bound semantic field is repaired and independently reviewed befor
   assert.equal(result.draft.fieldAdoptions?.[0].changes[0].evidence[0].value,'Coaster');
   const payload=JSON.parse(f.requests[0].messages[1].content);
   assert.deepEqual(payload.fields.map((field:any)=>field.name),['included_components']);
-  assert.deepEqual(payload.fields[0].allowedValues,['Coaster']);
-  assert.equal(payload.fields[0].description,'List only supplied components');
+  assert.deepEqual(payload.fullSchema.schema.properties.included_components.items.properties.value.enum,['Coaster']);
+  assert.equal(payload.fullSchema.schema.properties.included_components.description,'List only supplied components');
   assert.equal(payload.candidate,undefined);
 });
 test('preview first: a valid draft uses no DeepSeek call or second review', async t => {
@@ -82,12 +82,12 @@ test('automatic repair keeps valid copy when another field has unsupported evide
   assert.notEqual((result.draft.attributes.color as any)?.[0]?.value,'Green');
   assert.equal(result.aiCalls,3);assert.equal(f.requests.length,3);
   assert.deepEqual(JSON.parse(f.requests[2].messages[1].content).fields.map((field:any)=>field.name),['color']);
-  assert.ok(result.remaining.some(value=>value.includes('color')&&value.includes('依据')));
+  assert.ok(result.remaining.some(value=>value.includes('color')&&value.includes('矛盾')));
   assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);
 });
 
 test('automatic repair isolates a field length error but rejects unexpected envelope keys', async t => {
-  const f=await fixture(t);let previews=0;
+  const f=await legacyFixture(t);let previews=0;
   f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:++previews===1?[issue('item_name'),issue('material')]:[issue('compliance_document')]});
   f.respond(payload=>{if(payload.candidate)return chat(reviewFor(payload));const response=candidateFor(payload);response.candidates.find((c:any)=>c.field==='material')!.items[0].value='x'.repeat(501);return chat(response);});
   const result=await f.listing.complete(f.reference);
@@ -120,7 +120,7 @@ test('two explicit review rejections exhaust automatic repair without adopting e
 });
 
 for (const secondReviewComplete of [true, false]) test(`incomplete claim coverage enters bounded repair; second review complete=${secondReviewComplete}`, async t => {
-  const f = await fixture(t); let reviews = 0;
+  const f = await legacyFixture(t); let reviews = 0;
   f.amazon.previewDraft = async () => {
     const draft = f.amazon.getDraft(f.draft.id), adopted = Boolean(draft.fieldAdoptions?.length);
     return { ...draft, state: adopted ? 'AMAZON_VALIDATED' : 'BLOCKED', previewIssues: adopted ? [] : [issue('product_description')] };

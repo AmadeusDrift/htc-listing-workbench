@@ -1,7 +1,8 @@
+// Historical v0-v3 contract compatibility; new production behavior is covered by listing-full-schema tests.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './fixtures/listing-ai.ts';
-import { buildListingContext } from '../src/main/listing-ai/context.ts';
+import { legacyFixture as fixture } from './fixtures/listing-ai.ts';
+import { buildListingContext } from './helpers/legacy-listing-context.ts';
 import { assertListingEvidence, validateListingFieldsOutput } from '../src/main/listing-ai/validation.ts';
 import { randomUUID } from 'node:crypto';
 import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';

@@ -1,3 +1,4 @@
+// Historical v0-v3 contract compatibility; new production behavior is covered by listing-full-schema tests.
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';

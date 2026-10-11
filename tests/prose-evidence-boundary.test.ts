@@ -6,15 +6,15 @@ import { assertListingEvidence, assertListingReview, validateListingFieldsOutput
 import { currentCopyIssues, currentDraftEvidenceIssues, currentProseRepairIssues, assertCurrentImageCategoryExclusions } from '../src/main/listing-ai/current-evidence.ts';
 import { assertStoredListingEvidence } from '../src/main/listing-ai/stored-evidence.ts';
 import { assertCurrentListingReview, assertImagePlan } from '../src/main/ai/image-validation.ts';
-import { fixture, saveInput, chat, reviewFor, mockStorage } from './fixtures/listing-ai.ts';
+import { legacyFixture as fixture, saveInput, chat, reviewFor, mockStorage } from './fixtures/listing-ai.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
-import { ListingAiService } from '../src/main/listing-ai/service.ts';
-import { buildListingContext } from '../src/main/listing-ai/context.ts';
+// Frozen v0-v3 prose authorization and historical adoption/backup compatibility.
+import { LegacyListingAiService as ListingAiService, buildListingContext } from './helpers/legacy-listing-context.ts';
 import type { CandidateField, ListingAiContext, ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
 
 const prose=['item_name','bullet_point','product_description','generic_keyword'] as const;

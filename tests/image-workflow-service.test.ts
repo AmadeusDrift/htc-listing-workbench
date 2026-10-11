@@ -16,9 +16,11 @@ import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import type { AmazonDraft, JsonObject } from '../src/shared/amazon-contracts.ts';
 import type { SalesListingPlan } from '../src/shared/sales-plan-contracts.ts';
 import { importImageFiles } from '../src/main/assets.ts';
+// Frozen field-metadata migration fixtures use the historical finite context.
+import { LegacyListingAiService as ListingAiService } from './helpers/legacy-listing-context.ts';
 import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
-import { ListingAiService } from '../src/main/listing-ai/service.ts';
+
 import { openDatabase } from '../src/main/database.ts';
 import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, validateImageWorkflowRun } from '../src/main/image-workflow/records.ts';
 import { AiError } from '../src/main/ai/errors.ts';

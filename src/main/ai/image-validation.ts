@@ -11,6 +11,8 @@ import { assertListingEvidence, assertListingReview, listingFingerprint, validat
 import { AiError } from './errors.ts';
 import { boundedText, date, integer, keys, sha256, uuid, validateOutput } from './validation.ts';
 import { assertImageMeasurements, assertImagePromptMeasurements, imageEvidence, imageMeasurements, sourceDimensionEvidence, withoutImageMeasurements } from '../image-workflow/image-facts.ts';
+import { isFullSchema,parseFullReview } from '../listing-ai/full-schema.ts';
+import { explicitCategoryConflicts } from '../listing-ai/full-schema-conflicts.ts';
 
 function fail(): never { throw new AiError('OUTPUT_INVALID'); }
 /** Omission is current authorization; an explicit null selects unmarked stored v0 evidence. */
@@ -20,15 +22,15 @@ function ids(raw: unknown): string[] { const values = list(raw, 200, value => bo
 function flag(raw: unknown): boolean { return typeof raw === 'boolean' ? raw : fail(); }
 function englishText(value: string): string { if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Cyrillic}\p{Script=Arabic}]/u.test(value)) fail(); return value; }
 function verdict(raw: unknown): 'SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED' { return ['SUPPORTED','UNSUPPORTED','CONTRADICTED'].includes(String(raw)) ? raw as 'SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED' : fail(); }
-export function validateCurrentListingCopy(raw: unknown): CurrentListingCopy[] {
-  const copy = list(raw, LISTING_CANDIDATE_FIELDS.length, raw => {
+export function validateCurrentListingCopy(raw: unknown,fullSchema=false): CurrentListingCopy[] {
+  const copy = list(raw, fullSchema?2000:LISTING_CANDIDATE_FIELDS.length, raw => {
     const item = keys(raw, ['field','values']);
-    if (!LISTING_CANDIDATE_FIELDS.includes(item.field as CandidateField)) fail();
-    const values = list(item.values, item.field === 'bullet_point' ? 5 : 1, value => boundedText(value, 5000));
+    if (fullSchema?typeof item.field!=='string'||!item.field:!LISTING_CANDIDATE_FIELDS.includes(item.field as CandidateField)) fail();
+    const values = list(item.values, fullSchema?100:item.field === 'bullet_point' ? 5 : 1, value => boundedText(value, fullSchema?20000:5000));
     if (!values.length) fail();
     return { field: item.field as CandidateField, values };
   });
-  if (!copy.length || new Set(copy.map(item => item.field)).size !== copy.length) fail();
+  if (!fullSchema&&!copy.length || new Set(copy.map(item => item.field)).size !== copy.length) fail();
   return copy;
 }
 function validateIpSource(raw:unknown):ImageRiskSourceSnapshot {
@@ -47,7 +49,7 @@ export function imageRiskSourceSnapshot(product:ProductDetail,variantId:string):
 }
 export function validateProductImageContext(raw: unknown,options:ImageEvidenceOptions={}): ProductImageContext {
   const value = keys(raw, ['listing','currentListingCopy','listingReviewResultId','referenceAssets','purpose','policyVersion'], ['ipSource','sourceVariantIds','slot','setPolicy','setPlan','referenceMeasurements','sourceMeasurements','copyReviewBypass']);
-  const listing = validateListingContext(value.listing), currentListingCopy = validateCurrentListingCopy(value.currentListingCopy);
+  const listing = validateListingContext(value.listing), currentListingCopy = validateCurrentListingCopy(value.currentListingCopy,isFullSchema(listing));
   if (listing.repairRequest || !['product-image/v1','product-image/vision-v2',PRODUCT_IMAGE_POLICY_VERSION].includes(String(value.policyVersion)) || !['main','detail'].includes(String(value.purpose))) fail();
   if (currentListingCopy.some(item => !listing.fields.some(field => field.name === item.field))) fail();
   let copyReviewBypass: ProductImageContext['copyReviewBypass'];
@@ -66,7 +68,7 @@ export function validateProductImageContext(raw: unknown,options:ImageEvidenceOp
     if (variantId !== null && !(sourceVariantIds??[listing.variantId]).includes(variantId)) fail();
     return { assetId: uuid(asset.assetId), sha256: sha256(asset.sha256), variantId };
   });
-  if (!referenceAssets.length || new Set(referenceAssets.map(asset => asset.assetId)).size !== referenceAssets.length || Buffer.byteLength(JSON.stringify(value)) > 180000) fail();
+  if (!referenceAssets.length || new Set(referenceAssets.map(asset => asset.assetId)).size !== referenceAssets.length || Buffer.byteLength(JSON.stringify(value)) > (isFullSchema(listing)?20*1024*1024:180000)) fail();
   if(value.policyVersion!==PRODUCT_IMAGE_POLICY_VERSION && value.ipSource!==undefined)fail();
   const ipSource=value.policyVersion===PRODUCT_IMAGE_POLICY_VERSION?validateIpSource(value.ipSource):undefined;
   let slot:ProductImageContext['slot'];if(value.slot!==undefined){const raw=keys(value.slot,['index','total','provisional']);if(raw.total!==7||raw.provisional!==true)fail();slot={index:integer(raw.index,1,7),total:7,provisional:true};if((slot.index===1)!==(value.purpose==='main'))fail();}
@@ -287,14 +289,23 @@ export function validateImageTextReview(raw: unknown): ImageTextReviewOutput {
   return { kind: 'image-text-review', candidate: validateCandidateImageIdentity(value.candidate), planResultId: uuid(value.planResultId), ocrResultId: uuid(value.ocrResultId), verdict: value.verdict as ImageTextReviewOutput['verdict'], checks, expectedTextChecks, noTextVerified: flag(value.noTextVerified), issues, visualReview: 'not_performed' };
 }
 export function validateListingCurrentReview(raw: unknown): ListingCurrentReviewOutput {
-  const value = keys(raw, ['kind','currentListingCopy','copySha256','verdict','checks','issues']);
+  const value = keys(raw, ['kind','currentListingCopy','copySha256','verdict','checks','issues'],['contract']);
   if (value.kind !== 'listing-current-review') fail();
-  const currentListingCopy = validateCurrentListingCopy(value.currentListingCopy);
+  const fullSchema=isFullSchema(value as {contract?:string});
+  const currentListingCopy = validateCurrentListingCopy(value.currentListingCopy,fullSchema);
   if (listingFingerprint(currentListingCopy) !== sha256(value.copySha256)) fail();
-  const review = validateListingReviewOutput({ kind: 'amazon-fields-review', verdict: value.verdict, checks: value.checks, issues: value.issues });
+  const parse=fullSchema?parseFullReview:validateListingReviewOutput;
+  const review = parse({ kind: 'amazon-fields-review', verdict: value.verdict, checks: value.checks, issues: value.issues });
   return { ...review, kind: 'listing-current-review', currentListingCopy, copySha256: String(value.copySha256) };
 }
 export function assertCurrentListingReview(review: ListingFieldsReviewOutput, copy: CurrentListingCopy[], context: ListingAiContext,options:{storedVersion?:string|null}={}): void {
+  if(isFullSchema(context)&&(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4')){
+    const expected=copy.flatMap(item=>item.values.map((_,index)=>`${item.field}:${index}`));
+    if(review.checks.length!==expected.length||new Set(review.checks.map(c=>`${c.field}:${c.index}`)).size!==expected.length||review.checks.some(c=>!expected.includes(`${c.field}:${c.index}`)))fail();
+    for(const check of review.checks)for(const id of [...check.evidenceIds,...check.claims.flatMap(c=>c.evidenceIds)])if(!context.evidence.some(e=>e.id===id))fail();
+    if(review.verdict==='PASS'&&(review.issues.length||review.checks.some(c=>c.verdict!=='SUPPORTED'||c.claims.some(claim=>claim.verdict!=='SUPPORTED'))))fail();
+    return;
+  }
   if (review.checks.length !== copy.reduce((sum,item) => sum + item.values.length, 0)) fail();
   for (const item of copy) for (const [index,value] of item.values.entries()) {
     const check = review.checks.find(check => check.field === item.field && check.index === index) ?? fail();
@@ -320,6 +331,11 @@ function assertTextEvidence(text: string, evidenceIds: string[], context: Produc
   if(!context.setPolicy&&!evidenceIds.length)fail();
   const evidence=context.setPolicy?imageEvidence(context):context.listing.evidence;
   if(context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
+  if(isFullSchema(context.listing)&&(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4')){
+    if(!context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
+    if(evidenceIds.some(id=>!evidence.some(item=>item.id===id))||explicitCategoryConflicts('product_description',text,{evidence}).length)fail();
+    return;
+  }
   const fields = [{ name: 'product_description' as const, title: 'Image text', requirement: 'optional' as const, closedEnum: false, allowedValues: [], suggestedValues: [] }];
   const output={ kind: 'amazon-fields' as const, candidates: [{ field: 'product_description' as const, items: [{ value: context.setPolicy?withoutImageMeasurements(text):text, evidenceIds, transformation: 'compose' as const }] }], missing: [] };
   const scope={fields,evidence,variantId:context.listing.variantId,...(context.listing.evidenceBlockers?{evidenceBlockers:context.listing.evidenceBlockers}:{})};

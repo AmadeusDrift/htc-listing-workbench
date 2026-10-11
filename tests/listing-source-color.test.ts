@@ -1,9 +1,10 @@
+// Historical v0-v3 contract compatibility; new production behavior is covered by listing-full-schema tests.
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { fixture, saveInput, chat } from './fixtures/listing-ai.ts';
-import { ListingAiService } from '../src/main/listing-ai/service.ts';
+import { legacyFixture as fixture, saveInput, chat } from './fixtures/listing-ai.ts';
+import { LegacyListingAiService as ListingAiService } from './helpers/legacy-listing-context.ts';
 import { listingFingerprint, validateListingContext, assertListingEvidence } from '../src/main/listing-ai/validation.ts';
 import type { AiResult } from '../src/shared/ai-contracts.ts';
 import type { SourceColorContext } from '../src/shared/source-color-contracts.ts';

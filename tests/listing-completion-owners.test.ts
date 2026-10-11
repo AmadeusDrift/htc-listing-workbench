@@ -33,10 +33,10 @@ for(const owner of ['automatic','images'] as const){
     await assert.rejects(f.run());assert.equal(stopped,true);assert.equal(f.requests.length,1);const op=f.listing.completionOperations(f.draft.id)[0];await f.reopen();await assert.rejects(f.run(),/Downstream|文案/);
     assert.equal(f.requests.length,1);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length,1);assert.equal(f.listing.getCompletion(op.id).rounds.length,1);
   });
-  test(`${owner}: original image color observation is reused after a later preview failure`,async t=>{
+  test(`${owner}: bound source observations are reused after a later preview failure without a redundant color call`,async t=>{
     const f=await completionOwnerFixture(t,owner,true);f.previewFailure(true);
-    await assert.rejects(f.run());assert.equal(f.requests.filter(p=>p.operation==='source-color').length,1);assert.equal(f.requests.filter(p=>p.operation!=='source-color').length,0);
-    await f.reopen();f.previewFailure(false);await assert.rejects(f.run());assert.equal(f.requests.filter(p=>p.operation==='source-color').length,1);assert.ok(f.requests.filter(p=>p.operation!=='source-color').length>=1);
+    await assert.rejects(f.run());assert.equal(f.requests.filter(p=>p.operation==='source-color').length,0);assert.equal(f.requests.filter(p=>p.operation!=='source-color').length,0);
+    await f.reopen();f.previewFailure(false);await assert.rejects(f.run());assert.equal(f.requests.filter(p=>p.operation==='source-color').length,0);assert.ok(f.requests.filter(p=>p.operation!=='source-color').length>=1);assert.ok(f.requests.some(p=>p.sourceProduct?.assets?.length&&p.sourceProduct?.observations?.some((o:any)=>o.variantId===f.draft.variantId)));
   });
 }
 

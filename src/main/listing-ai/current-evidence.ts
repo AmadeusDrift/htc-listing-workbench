@@ -9,9 +9,12 @@ import { PROSE_FIELDS, isProseField, proseEvidenceIssues } from './evidence-pros
 import type { ProseEvidenceIssue } from './evidence-prose-v3.ts';
 import { assertListingEvidence, ListingValidationError, listingFingerprint, selectedSkuCategoryConflicts } from './validation.ts';
 import { candidateTextValues } from '../amazon/field-mapping.ts';
-import { imageListingSnapshot } from '../image-workflow/image-facts.ts';
+import { imageEvidence,imageListingSnapshot } from '../image-workflow/image-facts.ts';
+import { isFullSchema,nativeText,assertFullEvidence } from './full-schema.ts';
+import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
 
 export function currentCopyIssues(copy:CurrentListingCopy[],context:ListingAiContext):string[]{
+  if(isFullSchema(context))return copy.flatMap(item=>item.values.flatMap(value=>explicitCategoryConflicts(item.field,value,context)));
   return [...currentCopyEvidenceIssues(copy,context).map(issue=>`${issue.field}：${issue.reason}`),...copy.flatMap(item=>item.values.flatMap(value=>selectedSkuCategoryConflicts(value,context.evidence,item.field).length?[`${item.field}：当前声明与所选 SKU 的明确属性冲突`]:[]))];
 }
 export function assertCurrentCopyEvidence(copy:CurrentListingCopy[],context:ListingAiContext):void{
@@ -23,6 +26,11 @@ export function assertCurrentImageCategoryExclusions(context:ListingAiContext,in
   const plans=input.plans.flatMap(result=>result.output.kind==='image-plan'?[result.output]:[]);
   const sets=[input.base?.setPlan,input.setPlan,...plans.map(plan=>plan.setPlan)];
   const texts=[...plans.flatMap(plan=>plan.expectedText),...sets.flatMap(set=>set?.slots.flatMap(slot=>slot.expectedText)??[])];
+  if(isFullSchema(context)){
+    const evidence=input.base?imageEvidence({...input.base,listing:context,setPlan:input.setPlan??input.base.setPlan}):context.evidence;
+    if(texts.some(line=>line.evidenceIds.some(id=>!evidence.some(e=>e.id===id))||explicitCategoryConflicts('product_description',line.text,{evidence}).length))throw new UserFacingError('当前来源无法支持旧图片文案中的引用或存在明确属性冲突');
+    return;
+  }
   if(texts.some(line=>proseEvidenceIssues('product_description',line.text,context,line.evidenceIds).length))throw new UserFacingError('当前来源无法支持旧图片文案中的分类声明或引用，已保留原图片与审核记录');
 }
 /** Known adopted AI candidates retain their original infer/citation obligations on current reuse. */
@@ -55,10 +63,27 @@ function proseAdoptionIssues(draft:AmazonDraft,context:ListingAiContext,getResul
 }
 /** Only these structured finite prose failures enter automatic field repair. */
 export function currentProseRepairIssues(draft:AmazonDraft,context:ListingAiContext,getResult?:(id:string)=>AiResult|undefined):ProseEvidenceIssue[]{
+  if(isFullSchema(context))return context.fields.filter(field=>isProseField(field.name)).flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:nativeText(field.name,raw).flatMap(value=>explicitCategoryConflicts(field.name,value,context).map(reason=>({field:field.name,kind:'source' as const,reason})));});
   const issues=context.fields.filter(field=>isProseField(field.name)).flatMap(field=>(candidateTextValues(field.name,draft.attributes[field.name])??[]).flatMap(value=>proseEvidenceIssues(field.name,value,context)));
   return [...issues,...(getResult?proseAdoptionIssues(draft,context,getResult,{},true):[])];
 }
 export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiContext,getResult?:(id:string)=>AiResult|undefined,options:AdoptionOptions={}):string[]{
+  if(isFullSchema(context)){
+    const issues=currentCopyIssues(context.fields.flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:[{field:field.name,values:nativeText(field.name,raw)}];}),context);
+    if(getResult)for(const adoption of draft.fieldAdoptions??[]){
+      const active=adoption.changes.filter(change=>listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]));
+      if(!active.length)continue;
+      const result=getResult(adoption.suggestionResultId);
+      if(!result||result.output.kind!=='amazon-fields'||!result.listingContext||result.sourceSha256!==adoption.contextSha256||listingFingerprint(result.listingContext)!==adoption.contextSha256){issues.push('已采用候选的来源记录不完整');continue;}
+      for(const change of active){
+        const candidate=result.output.candidates.find(candidate=>candidate.field===change.field);
+        if(!candidate||(Object.hasOwn(candidate,'nativeValue')?listingFingerprint(candidate.nativeValue)!==listingFingerprint(change.after):listingFingerprint(candidate.items.map(item=>item.value))!==listingFingerprint(candidateTextValues(change.field,change.after)))){issues.push(`${change.field}：已采用候选与当前字段值不一致`);continue;}
+        try{assertFullEvidence({kind:'amazon-fields',candidates:[candidate],missing:[]},options.adoptionContext==='stored'?result.listingContext:context);}
+        catch(error){if(!(error instanceof ListingValidationError))throw error;issues.push(`${change.field}：${error.validationReason}`);}
+      }
+    }
+    return [...new Set(issues)];
+  }
   const issues:string[]=[];
   const copy:CurrentListingCopy[]=context.fields.flatMap(field=>{
     const raw=draft.attributes[field.name];if(raw===undefined)return [];

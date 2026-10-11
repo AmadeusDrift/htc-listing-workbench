@@ -28,3 +28,22 @@ test('human visual confirmation cannot authorize random fulfillment or clear a s
   const decide=()=>saveConsistencyDecision(f.db,f.store,f.directory,{productId:context.productId,productRevision:context.productRevision,variantId:context.variantId,fingerprint:readConsistencyView(f.db,context).fingerprint,decision:'CONFIRMED',reason:'Looks similar'});
   await assert.rejects(decide());let p=f.store.getProduct(f.p.id);f.store.saveProduct({...saveInput(p),variants:saveInput(p).variants.map(v=>({...v,originalSpec:'Blue random'}))});context=f.context();await assert.rejects(decide());
 });
+
+for(const corrupt of [false,true])test(`legacy single-SKU unbound original distinguishes missing association from corrupt bytes (${corrupt})`,async t=>{
+  const {persistSourceImageFixture}=await import('./helpers/source-image-receipt.ts');
+  const {writeFileSync}=await import('node:fs');const {resolve}=await import('node:path');
+  const f=consistencyFixture(t);let p=f.store.getProduct(f.p.id);
+  p=f.store.updateAsset({productId:p.id,revision:p.revision,assetId:p.assets[0].id,role:'main',variantIds:[]});
+  persistSourceImageFixture(f.directory,{productId:p.id,snapshot:{images:[{id:'blue',url:'https://images.example.com/blue.png',role:'main'}]},skuMappings:[{sourceKey:'Blue',localVariantId:p.variants[0].id,imageIds:['blue']}]} as any);
+  if(corrupt)writeFileSync(resolve(f.directory,f.store.getAssetRecord(p.assets[0].id)!.originalPath),Buffer.alloc(33));
+  assert.throws(()=>assertProductConsistency(f.db,p,[p.variants[0].id]),(error:any)=>{
+    assert.ok(error instanceof SourceConsistencyError);
+    assert.equal(error.code,corrupt?'SOURCE_CONSISTENCY_IDENTITY_INVALID':'SOURCE_CONSISTENCY_BINDING_REQUIRED');
+    assert.equal(error.kind,corrupt?'SYSTEM_REPAIR':'NEEDS_INPUT');return true;
+  });
+  assert.equal(f.db.prepare('SELECT count(*) n FROM ai_calls').get()!.n,0);
+  if(!corrupt){
+    p=f.store.updateAsset({productId:p.id,revision:p.revision,assetId:p.assets[0].id,role:'main',variantIds:[p.variants[0].id]});
+    assert.throws(()=>assertProductConsistency(f.db,p,[p.variants[0].id]),(error:any)=>error.code==='SOURCE_CONSISTENCY_NEEDS_INPUT','binding still requires a separate visual consistency proof');
+  }
+});

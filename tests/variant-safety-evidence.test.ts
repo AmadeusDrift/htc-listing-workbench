@@ -115,7 +115,7 @@ test('every selected mixed recipe component contributes original text even when 
       assert.equal(safetyIssues(await f.service.validateDraft(existing)).length,3);
       const plain=plans.find(p=>p.recipe.components.length===1&&p.recipe.components[0].variantId===product.variants[1-riskIndex].id)!;
       const other=await f.service.prepareDrafts({...f.selection,listingProgram:'haul',items:[{productId:product.id,productRevision:product.revision,variantId:plain.recipe.components[0].variantId,attributes:{}}]},[plain]);
-      assert.equal(other.items[0].draft!.attributes.batteries_required,undefined);
+      assert.equal(entry(other.items[0].draft!,'batteries_required'),false,'ordinary sibling uses configured no-battery rule');
       const ordinary=legacyDraft(f,other.items[0].draft!);assert.deepEqual(safetyIssues(await f.service.validateDraft(ordinary)),[]);
       assert.equal(JSON.stringify(f.product),before);assert.deepEqual(result.items[0].draft!.salesPlan,mixed);
     }finally{naming.close();}

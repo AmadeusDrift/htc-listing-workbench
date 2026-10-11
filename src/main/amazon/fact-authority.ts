@@ -20,7 +20,7 @@ export interface CurrentFactAuthority { fields: Map<string,FieldAuthority>; issu
  * Missing siblings belong to schema validation; every present component needs its own support.
  */
 export function currentFactAuthority(product: ProductDetail, schema: AmazonSchema, target: Pick<AmazonTarget,'marketplaceId'>,
-  attributes: JsonObject, receipt: ConfirmedMeasurements = {}): CurrentFactAuthority {
+  attributes: JsonObject, receipt: ConfirmedMeasurements = {}, ruleValues: JsonObject = {}): CurrentFactAuthority {
   const fields = new Map<string,FieldAuthority>(), issues: ListingIssue[] = [];
   const resolve = (raw:unknown):JsonObject => { try { return raw===undefined?{}:resolveSchemaNode(schema.schema,raw as JsonObject); } catch { return {}; } };
   const normalized = (field:string,value:string) => { try { return sourceFactValue(schema,field,value); } catch { return undefined; } };
@@ -32,12 +32,15 @@ export function currentFactAuthority(product: ProductDetail, schema: AmazonSchem
       value:facts.length&&values.size===1&&facts.every(fact=>fact.value.trim())?normalized(field,facts[0].value.trim()):undefined};
   };
   const record = (field:string, result:FieldAuthority) => {
+    // ruleValues must be freshly derived by the caller from current store/SKU configuration.
+    // Never accept a saved report alone as authority, and never mask explicit conflicts.
+    if (!result.conflicting && Object.hasOwn(ruleValues, field) && JSON.stringify(ruleValues[field]) === JSON.stringify(attributes[field])) result.supported = true;
     result.sourceFactIds = [...new Set(result.sourceFactIds)]; fields.set(field,result);
     if(result.supported)return;
     issues.push({code:result.conflicting?FACT_SOURCE_CONFLICT:FACT_AUTHORITY_REQUIRED,severity:'ERROR',category:/gpsr|batter|regulation|certificate/.test(field)?'compliance':'fact',
       source:'local',autoFixable:false,attributeNames:[field],message:result.conflicting
         ? `${field} 的当前来源事实存在冲突，须核对后再提交；已有属性与历史记录保留`
-        : `${field}${result.unsupported.length?`（${result.unsupported.join('、')}）`:''} 缺少匹配当前销售规格的已确认事实或有效 SKU 回执；规则默认和直接保存的数值不构成事实确认`});
+        : `${field}${result.unsupported.length?`（${result.unsupported.join('、')}）`:''} 缺少匹配当前销售规格的已确认事实或有效 SKU 回执；未匹配当前业务规则，直接保存的数值不构成事实确认`});
   };
   for(const field of declarationFields){
     if(!Object.hasOwn(attributes,field))continue;

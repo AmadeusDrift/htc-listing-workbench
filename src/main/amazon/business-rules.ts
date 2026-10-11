@@ -9,7 +9,8 @@ import type { ConfirmedMeasurements, MeasurementSet } from './field-mapping.ts';
 import { effectiveSourceMeasurements, sourceFactValue, sourceFieldName } from './demo.ts';
 import { productSourceQuantity, sourceQuantity } from '../../shared/source-quantity.ts';
 import { pricingAttributeInputs } from './pricing-inputs.ts';
-import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
+import { currentFactAuthority } from './fact-authority.ts';
+import { declarationRisks } from './declaration-safety.ts';
 import type { DeclarationScope } from './declaration-safety.ts';
 
 export interface BusinessRuleInput {
@@ -36,6 +37,9 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const first = (name: string) => Array.isArray(attributes[name]) && isObject(attributes[name][0]) ? attributes[name][0] as JsonObject : null;
   const note = (message: string) => { if (!report.notices.includes(message)) report.notices.push(message); };
   const explicitFields = new Set<string>();
+  // Refresh only untouched program-generated declarations; user edits remain distinct.
+  const configuredFields = new Set(['model_number','model_name','part_number','brand','manufacturer']);
+  for (const field of configuredFields) if (report.fields[field]) { delete attributes[field]; delete report.fields[field]; }
   const sourceFields = ['brand','manufacturer','country_of_origin','import_designation','model_number','model_name','part_number','condition_type',
     'gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate','number_of_items'];
   for (const field of sourceFields) {
@@ -56,11 +60,25 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     const wrapped = wrapCandidateValues(schema, target.marketplaceId, field, [value]);
     attributes[field] = wrapped; report.fields[field] = { value: structuredClone(wrapped), reason }; return true;
   };
-  for (const field of ['model_number','model_name','part_number']) add(field, input.baseSku??variant.sku, '缺失型号标识使用商品组基础 SKU');
-  const originFacts = product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === 'country_of_origin' && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
-  if (target.marketplaceId === 'ATVPDKIKX0DER' && first('country_of_origin')?.value === 'CN' && originFacts.length
-    && originFacts.every(fact => fact.state !== 'conflicting' && sourceFactValue(schema, 'country_of_origin', fact.value.trim()) === 'CN'))
-    add('import_designation','Imported','已确认中国原产国在美国站对应进口商品');
+  const fallback = '业务默认；缺少对应实测值，须按实际包装核实';
+  add('brand', p.brand, '品牌固定规则；原供应商品牌保留在来源与 IP 检查中', true);
+  const code = p.targetShops[target.id] ?? (Object.hasOwn(p.manufacturers, target.name) ? target.name : null);
+  if (code && p.manufacturers[code]) add('manufacturer', p.manufacturers[code], `店铺 ${code} 制造商规则`);
+  else if (!attributes.manufacturer && properties.manufacturer) note('请在商品规则中为此店铺选择制造商映射');
+  for (const field of ['model_number','model_name','part_number']) add(field, schema.parentageLevel === 'PARENT' ? input.baseSku??variant.sku : variant.sku, '缺失型号标识使用本行销售 SKU');
+  add('country_of_origin', 'CN', '普通商品原产国规则');
+  if(target.marketplaceId==='ATVPDKIKX0DER'&&first('country_of_origin')?.value==='CN')add('import_designation','Imported','中国原产国在美国站对应进口商品；不沿用来源网站国内是否进口标签');
+  const risk = declarationRisks(product,input.declarationScope??{variants:[variant],componentSpecifications:[]});
+  if (p.ordinaryDeclarations) {
+    add('gpsr_safety_attestation', true, '已确认的 GPSR 安全声明规则');
+    // A chemical or certificate concern does not establish powered operation.
+    if (!risk.battery) add('batteries_required', false, '普通无电池商品声明规则');
+    else note('来源含电池、供电或电池声明冲突信息，未自动套用不需要电池的默认值');
+    if (!risk.compliance) {
+      add('supplier_declared_dg_hz_regulation', 'not_applicable', '普通商品危险品法规不适用规则');
+      add('required_product_compliance_certificate', 'Not Applicable', '普通商品适用证书类别规则');
+    } else note('来源含电池、特殊物品或合规冲突信息，未自动套用危险品／证书不适用声明');
+  }
 
   // Parent schemas can require origin and declarations even though the parent
   // has no sale offer, condition, physical package or quantity of its own.
@@ -82,6 +100,10 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     else note('当前类目不接受已确认的美元标价，未套用标价规则');
   }
 
+  // Recompute only unchanged rule fallback fields; fresh source values now take precedence.
+  for (const [field, entry] of Object.entries(report.fields)) if (entry.reason.includes('业务默认') && /dimension|length|width|height|weight/.test(field)) {
+    delete attributes[field]; delete report.fields[field];
+  }
   const { measurements, blocked } = effectiveSourceMeasurements(product, input.measurements);
   // Capture source evidence before draft values or business fallbacks can overwrite it.
   const sourceMapped = mapMeasurementFields(schema, target.marketplaceId, measurements).attributes;
@@ -133,9 +155,24 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     measurements[scope] = set;
   }
   const mapped = mapMeasurementFields(schema, target.marketplaceId, measurements);
+  for (const [field,value] of Object.entries(mapped.attributes)) {
+    let combined = value;
+    if (Object.hasOwn(attributes, field)) {
+      if (!DIMENSION_FIELDS.includes(field as typeof DIMENSION_FIELDS[number]) || !Array.isArray(value) || value.length !== 1 || !isObject(value[0])
+        || !Array.isArray(attributes[field]) || attributes[field].length !== 1 || !first(field)) continue;
+      const merged = { ...value[0], ...first(field)! };
+      if (validateFieldValues(schema, target.marketplaceId, field, [merged], attributes).length) continue;
+      combined = [merged];
+      if (JSON.stringify(combined) === JSON.stringify(attributes[field])) continue;
+    }
+    const scope = /package/.test(field) ? 'package' : 'item';
+    const isDefault = field === 'item_package_weight' ? scopeFallback.has('weight') : scopeFallback.has(scope);
+    attributes[field] = combined; report.fields[field] = { value: structuredClone(combined), reason: isDefault ? fallback : '当前 SKU 来源参数与字段允许单位的换算规则' };
+  }
+
   for (const reason of Object.values(blocked)) note(`${reason}，未用业务默认掩盖`);
   if (scopeConflict.size) note('来源尺寸／重量存在冲突，未用业务默认掩盖冲突');
-  if (scopeFallback.size) note('部分尺寸或包装重量仅在私有估价输入中使用默认值，未写入商品属性；定价仍需实测核实');
+  if (scopeFallback.size) note('部分尺寸或包装重量使用已确认业务默认填报，不能作为图片实测依据');
 
   const itemCount = first('number_of_items')?.value;
   const existingCount = typeof itemCount === 'number' && Number.isSafeInteger(itemCount) && itemCount > 0 ? itemCount : null;
@@ -276,7 +313,7 @@ export function ruleSourceMapping(mapping: SourceFieldMapping[], report: Busines
   if (!report) return mapping;
   return mapping.map(entry => {
     // Current component authority wins over every historical rule label, including receipts without fact IDs.
-    if (FACT_PROTECTED_FIELDS.has(entry.field)) return entry;
+    if (entry.status === 'conflicting' || entry.status === 'mapped' && entry.sourceFactIds.length) return entry;
     const rule = report.fields[entry.field];
     return rule && JSON.stringify(rule.value) === JSON.stringify(attributes[entry.field]) ? { ...entry, status: 'mapped', sourceFactIds: [], reason: `业务规则 v${report.revision}：${rule.reason}` } : entry;
   });

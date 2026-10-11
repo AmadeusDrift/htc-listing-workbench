@@ -1,3 +1,4 @@
+import { pricingAttributeInputs } from '../src/main/amazon/pricing-inputs.ts';
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,7 +74,7 @@ test('pricing changes after a paid color request preserve the received result an
   const draft=await amazon.createDraft({targetId:target.id,productId:f.product.id,variantId:f.product.variants[0].id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   const p=(amazon as unknown as {persistence:AmazonPersistence}).persistence,record=p.record(draft.id);
   const result=applyBusinessRules({product:f.product,variant:f.product.variants[0],target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-  record.draft.listingProgram='haul';record.draft.businessRules={...result.report,fields:{}};p.putRecord(record);
+  record.draft.listingProgram='haul';record.draft.businessRules={...result.report,fields:{}};if(record.draft.businessRules.pricingDecision?.version===2)record.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(record.draft.attributes);p.putRecord(record);
   const listing=new ListingAiService(f.store,amazon,f.ai),reference={draftId:draft.id,draftRevision:draft.revision};
   f.respond(async payload=>{await Promise.resolve();rules.save(rules.get());return chat({kind:'source-color',verdict:'DETERMINED',colors:['Silver'],reason:'Observed silver surface.',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)});});
   const prepared=await listing.prepareSourceColors(reference);assert.equal(prepared.aiCalls,1);assert.equal(f.ai.listCalls()[0].status,'SUCCEEDED');assert.equal(f.ai.listResults(f.product.id).length,1);

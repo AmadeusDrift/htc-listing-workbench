@@ -71,9 +71,9 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
 }
 
 /** Only this call's bounded regular diagnostic files, with exact request identity. No network. */
-export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
+function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{rejectionStage:string;output?:unknown}[] {
   if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return [];
-  const values:unknown[]=[];
+  const values:{rejectionStage:string;output?:unknown}[]=[];
   try{
     const root=resolve(directory),folder=join(root,'ai-diagnostics');safeDirectory(root);safeDirectory(folder);
     for(const entry of readdirSync(folder).filter(name=>managedName.test(name)&&name.endsWith(`-${call.id}.json`)).sort().reverse()){
@@ -81,9 +81,16 @@ export function readInvalidAiOutputs(directory:string,call:AiCall,operation:stri
         const path=join(folder,entry),info=lstatSync(path);
         if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>MAX_BYTES||canonical(realpathSync(path))!==canonical(path))continue;
         const raw=JSON.parse(readFileSync(path,'utf8'));
-        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&raw.rejectionStage==='operation-output-validation'&&raw.output!==null&&raw.output!==undefined)values.push(raw.output);
+        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&['operation-output-validation','source-freshness','result-record-validation'].includes(raw.rejectionStage))values.push(raw);
       }catch{/* A damaged diagnostic does not hide another retained response. */}
     }
   }catch{/* Missing evidence remains an explicit unrecoverable output. */}
   return values;
+}
+
+export function hasInvalidAiResponse(directory:string,call:AiCall,operation:string):boolean {
+  return readInvalidAiRecords(directory,call,operation).length>0;
+}
+export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
+  return readInvalidAiRecords(directory,call,operation).filter(record=>record.rejectionStage==='operation-output-validation'&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
 }

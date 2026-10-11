@@ -35,6 +35,8 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  /** Provider content was received; independent of local parsing success. */
+  responseReceived?: true;
   thinking?: boolean;
   rejection?: import('./rejection-presentation.ts').OutputRejection;
   presentationContext?: {workflowId?:string;kind:'image'|'listing';draftId:string;variantId:string;sourceSha256:string;slot:number};
@@ -78,6 +80,7 @@ export interface TextReviewOutput {
 }
 export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
+  localRecovery?: { parserVersion:'full-schema-recovery/v1'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   fieldRejections?: import('./rejection-presentation.ts').FieldRejections;
   id: string; callId: string; providerId: AiProviderId; productId: string; productRevision: number;
   variantId: string | null; assetId: string | null; assetSha256: string | null;

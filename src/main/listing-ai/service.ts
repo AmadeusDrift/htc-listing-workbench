@@ -1,3 +1,4 @@
+import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
 import type { CompletionOperation, CompletionRound } from './completion-journal.ts';
@@ -155,7 +156,7 @@ export class ListingAiService {
   }
   private result(id: string, c: ListingAiContext): AiResult {
     const result = this.ai.getResult(id), call = result && this.ai.getCall(result.callId);
-    if (!result || !call || call.status !== 'SUCCEEDED' || call.providerId !== result.providerId || call.productId !== c.productId || call.productRevision !== c.productRevision || call.model !== result.model || call.finishedAt !== result.createdAt || !result.listingContext || result.sourceSha256 !== listingFingerprint(c) || listingFingerprint(result.listingContext) !== listingFingerprint(c)) throw new UserFacingError('候选已过期或不属于当前草稿，请重新生成');
+    if (!result || !call || !resultHasOwner(result,call) || call.providerId !== result.providerId || call.productId !== c.productId || call.productRevision !== c.productRevision || call.model !== result.model || !result.listingContext || result.sourceSha256 !== listingFingerprint(c) || listingFingerprint(result.listingContext) !== listingFingerprint(c)) throw new UserFacingError('候选已过期或不属于当前草稿，请重新生成');
     return result;
   }
   private candidates(result: AiResult, draft: AmazonDraft, context: ListingAiContext): ListingFieldsOutput {
@@ -323,6 +324,10 @@ export class ListingAiService {
   /** Validation previews never publish. Only reported copy/semantic fields enter this journal. */
   async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[];rejections?:{resultId:string;callId:string;details:import('../../shared/rejection-presentation.ts').FieldRejections}[]}> {
     signal?.throwIfAborted();const initial=input(raw,'suggest'),journal=this.ai.completionJournal;
+    // Preserve the response under its original frozen context before evaluating
+    // whether changed current data still permits adoption. Never runs on startup.
+    const prior=operationId?journal.get(operationId):journal.list(initial.draftId).find(op=>op.state==='ACTIVE');
+    if(prior){if(prior.draftId!==initial.draftId)throw new UserFacingError('字段操作不属于当前草稿');journal.recoverReceived(prior.id);}
     const proofDraft=this.amazon.getDraft(initial.draftId);this.store.assertSourceConsistency(proofDraft.productId,proofDraft.salesPlan?.recipe.components.map(c=>c.variantId)??[proofDraft.variantId]);
     let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
     const operationContext=(reference:SuggestAmazonFieldsInput)=>this.current(reference,operation.scopeHash===this.completionScope(draft)?undefined:{} as ListingAiContext);
@@ -378,7 +383,7 @@ export class ListingAiService {
       const context=round.context,reference={draftId:draft.id,draftRevision:context.draftRevision};
       await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
-        const entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;if(entry.sent)unknownCompletion();
+        const entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;if(entry.sent){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
         const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
         aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
       };

@@ -176,7 +176,7 @@ export class ImageWorkflowService {
     const run=this.getProgress(rawId);if(!run)return null;
     let resultUnknown=false;
     if(run.contentPreparation?.operationId){
-      const journal=new CompletionJournal(this.db),operation=journal.get(run.contentPreparation.operationId),owner=operation.safetyIdentity;
+      const journal=new CompletionJournal(this.db,this.directory),operation=journal.get(run.contentPreparation.operationId),owner=operation.safetyIdentity;
       if(operation.draftId!==run.draftId||owner.productId!==run.productId||owner.productRevision!==run.productRevision||owner.variantId!==run.variantId||owner.sku!==run.sku)throw new UserFacingError('字段请求进度归属不一致，请核对已有记录');
       resultUnknown=journal.unknown(operation.id);
     }else if(run.contentPreparation?.state==='STARTED')resultUnknown=true;
@@ -443,7 +443,7 @@ export class ImageWorkflowService {
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
-      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||new CompletionJournal(this.db).unknown(run.contentPreparation.operationId)))throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
+      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||new CompletionJournal(this.db,this.directory).unknown(run.contentPreparation.operationId)))throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
       let sourceColorEvidenceSha256:string|undefined;
       if(this.listing.prepareSourceColors){
         const prepared=await this.listing.prepareSourceColors({draftId:run.draftId,draftRevision:initial.revision},signal);

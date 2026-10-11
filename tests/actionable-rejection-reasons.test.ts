@@ -73,7 +73,7 @@ test('real AI failure persists fixed reason through restart and exact workflow o
  const progress=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,{} as any);
  try{
   const rawBefore=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json),journalBefore=JSON.stringify(f.ai.completionJournal.get(operation.id));
-  assert.equal((progress.getProgressPresentation(run.draftId) as any)?.resultUnknown,true,'real sent/no-result journal must override local FIELD_FORMAT_INVALID');
+  assert.equal((progress.getProgressPresentation(run.draftId) as any)?.resultUnknown,false,'known received invalid response is a recoverable format failure, not an unknown request');
   assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json),rawBefore);assert.equal(JSON.stringify(f.ai.completionJournal.get(operation.id)),journalBefore);
  }finally{await progress.close();}
 

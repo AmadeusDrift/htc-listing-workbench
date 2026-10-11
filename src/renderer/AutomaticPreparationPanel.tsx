@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, ChevronLeft, ChevronRight, Play, RefreshCw } from 'lucide-react';
+import { ArrowRight, Play, RefreshCw } from 'lucide-react';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
 import type { AmazonTarget } from '../shared/amazon-contracts';
 import type { ListingRules } from '../shared/listing-rules';
@@ -11,12 +11,13 @@ import { AutomaticTaskPanel } from './AutomaticTaskPanel';
 import { errorText } from './utils';
 import type { SettingsModule } from './settings-navigation';
 
-const PRODUCT_PAGE_SIZE = 8;
+import { AutomaticQueueProducts } from './AutomaticQueueProducts';
 
 interface Props {
   products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean;
   taskProducts:ProductSummary[];targetId:string;onTargetChange:(id:string)=>void;queue:AutomaticListingQueue|null;queueLoading:boolean;queueError:string;onRefreshQueue:()=>void;
-  onManual: (productId: string, draftId?: string) => void; onSettings: (module?: SettingsModule) => void; onRunningChange: (running: boolean) => void;
+  onManual: (productId: string, draftId?: string) => void; onSettings: (module?: SettingsModule) => void;
+  onExamples: () => void; onInbox: () => void;
   onShipping?: (batchId: string) => void;
 }
 const requiredCapabilities = [
@@ -25,12 +26,11 @@ const requiredCapabilities = [
   { capability: 'image-risk', label: '阿里云图片侵权检测' },
 ] as const;
 
-export function AutomaticPreparationPanel({ products, taskProducts, targets, targetId, onTargetChange, queue, queueLoading, queueError, onRefreshQueue, busy, onManual, onSettings, onRunningChange, onShipping }: Props) {
+export function AutomaticPreparationPanel({ products, taskProducts, targets, targetId, onTargetChange, queue, queueLoading, queueError, onRefreshQueue, busy, onManual, onSettings, onExamples, onInbox, onShipping }: Props) {
   const api = window.red;
   const [riskEnabled,setRiskEnabled]=useState(true);
   const [copyReviewEnabled,setCopyReviewEnabled]=useState(true);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [productPage, setProductPage] = useState(1);
   const [details, setDetails] = useState<ProductDetail[]>([]);
   const [rules, setRules] = useState<ListingRules | null>(null);
   const [readErrors, setReadErrors] = useState<string[]>([]);
@@ -53,9 +53,6 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
   const selectable=products.filter(product=>!targetId||!!queue?.products.find(p=>p.productId===product.id)?.eligibleCount);
   const selected = selectable.filter(product => selectedIds.includes(product.id));
   const salesRows=queue?.products.filter(p=>selectedIds.includes(p.productId)).flatMap(p=>p.rows.filter(row=>row.eligible))??[];
-  const pageCount = Math.max(1, Math.ceil(products.length / PRODUCT_PAGE_SIZE)), currentPage = Math.min(productPage, pageCount);
-  const pageProducts = products.slice((currentPage - 1) * PRODUCT_PAGE_SIZE, currentPage * PRODUCT_PAGE_SIZE);
-  const pageSelected = pageProducts.filter(product => selectedIds.includes(product.id)).length;
   const selectionKey = JSON.stringify(selected.map(product => [product.id, product.updatedAt]));
   const target = targets.find(value => value.id === targetId);
   const profile = profiles.find(value => value.id === profileId && value.configured && value.enabled);
@@ -65,6 +62,7 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
   const missingCapabilities = requiredCapabilities.filter(required => (riskEnabled||required.capability!=='image-risk')&&!capabilities.some(value => value.capability === required.capability && value.available));
   const connectionsReady = !loadingCapabilities && !capabilityError && !missingCapabilities.length;
   const canStart = !disabled && !queueLoading && !queueError && queue?.targetId===targetId && !loadingProducts && !loadingRules && !readErrors.length && !rulesError && connectionsReady && !loadingHosting && !hostingError && Boolean(profile && salesRows.length && target?.configured && !target.paused && supported);
+  const startHint = disabled ? '当前有操作进行中，请等待完成。' : !targetId ? '请先选择目标店铺。' : queueLoading || loadingProducts || loadingRules || loadingHosting || loadingCapabilities ? '正在核对商品、规则与连接，请稍候。' : queueError ? '队列读取失败，请刷新资料后再启动。' : !target?.configured || target.paused || !supported ? '请选择已配置、未暂停的美国站英文目标。' : !connectionsReady ? '请先处理上方连接配置问题。' : hostingError || !profile ? '请配置并选择已启用的图片托管服务器。' : rulesError || readErrors.length ? '商品或规则读取失败，请查看上方原因并刷新。' : !salesRows.length ? '请勾选含有可启动销售 SKU 的商品。' : '';
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -98,30 +96,40 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
 
   async function start() {
     if (!canStart || startPending.current) return;
-    startPending.current = true; setStarting(true); onRunningChange(true); setError(''); setNotice('');
+    startPending.current = true; setStarting(true); setError(''); setNotice('');
     try {
       const task = await api.startAutomaticListing({ productIds: selected.map(value => value.id), targetId, profileId });
       if (mounted.current) { if (task) setStartedTask(task); else setNotice('已取消启动，未创建自动上架任务。'); }
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
-    finally { startPending.current = false; if (mounted.current) { setStarting(false); onRunningChange(false); } }
+    finally { startPending.current = false; if (mounted.current) { setStarting(false); } }
   }
 
   return <>
-    <section className="amazon-workflow" aria-label="启动自动上架">
-      <div className="section-heading"><div><h2>自动准备并发布</h2><p>确认执行范围后，按 SKU 连续完成文案、图片、上传、验证、提交、平台回读和商品标签。只有异常需要人工处理。</p></div><button type="button" className="button secondary" disabled={disabled} onClick={() => onSettings('product')}>管理商品与定价规则</button></div>
-      <section className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities} data-state={loadingCapabilities ? undefined : connectionsReady ? 'ready' : 'pending'}>
-        <div><strong>{loadingCapabilities ? '正在检查全局连接…' : connectionsReady ? '全局连接已就绪' : '请先完成全局连接配置'}</strong><p>复用 DeepSeek、生图接口和 OCR，按开关执行文案复核与图片风险拦截。首图无字检查始终需要 DeepSeek 独立复核。每件商品的提示词与参考图自动准备。</p></div>
+    <section className="amazon-workflow automatic-preparation" aria-label="启动自动上架">
+      <div className="section-heading"><div><h2>执行设置</h2></div><button type="button" className="button secondary" disabled={disabled} onClick={() => onSettings('product')}>管理商品与定价规则</button></div>
+      <fieldset className="listing-setup automatic-target-setup" disabled={disabled}>
+        <legend>1. 选择目标与图片托管</legend>
+        <div className="form-grid">
+          <label className="field"><span>目标店铺与站点</span><select aria-label="目标店铺与站点" value={targetId} onChange={event => onTargetChange(event.target.value)}><option value="">请选择已启用的目标</option>{targets.map(value => <option key={value.id} value={value.id} disabled={!value.configured || value.paused}>{value.mode === 'demo' ? '本地演示' : '真实 Haul'} · {value.name} / {value.marketplaceName}{value.paused ? '（已暂停）' : !value.configured ? '（未配置）' : ''}</option>)}</select></label>
+          <label className="field"><span>图片托管服务器</span><select aria-label="图片托管服务器" value={profileId} disabled={loadingHosting} onChange={event => setProfileId(event.target.value)}><option value="">{loadingHosting ? '正在读取托管配置…' : '请选择已配置且启用的服务器'}</option>{profiles.map(value => <option key={value.id} value={value.id} disabled={!value.configured || !value.enabled}>{value.name}{value.configured ? ` · ${value.host}` : ' · 未配置'}{value.configured && !value.enabled ? '（未启用）' : ''}</option>)}</select></label>
+        </div>
+        {hostingError && <p className="workflow-notice" role="alert">托管配置读取失败：{hostingError}</p>}
+        {!loadingHosting && !profile && <p className="workflow-notice">配置并启用图片托管后，任务会自动上传图片并检查公开地址。</p>}
+        <button type="button" className="text-button automatic-hosting-link" onClick={() => onSettings('hosting')}>管理图片托管<ArrowRight size={14} /></button>
+        {target && <p className="workflow-notice">{target.mode === 'demo' ? '本地演示不会正式发布；文案、出图、OCR 和复核仍会调用已启用的服务并计入用量。' : '真实店铺将使用 Haul 规则并正式提交到 Amazon。启动时会弹出本次范围确认。'} 当前支持美国站 en_US；同款同规格按类目允许的主题建立父子体。</p>}
+        {target && !supported && <p className="workflow-notice">该目标的站点或语言暂不支持，请选择美国站英文目标。</p>}
+      </fieldset>
+      <details open={!connectionsReady} className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities} data-state={loadingCapabilities ? undefined : connectionsReady ? 'ready' : 'pending'}>
+        <summary>{loadingCapabilities ? '正在检查全局连接…' : connectionsReady ? '全局连接已就绪 · 查看连接与复核设置' : '连接尚未就绪 · 需要处理'}</summary>
+        <div><p>按 SKU 读取来源事实与参考图；首图无字检查始终需要 DeepSeek 独立复核。</p></div>
         {!loadingCapabilities && !capabilityError && !!missingCapabilities.length && <p className="small-copy">待配置或启用：{missingCapabilities.map(value => value.label).join('、')}</p>}
         {!loadingCapabilities&&!capabilityError&&<p className="small-copy">文案复核：{copyReviewEnabled?'已开启':'已关闭，仍生成文案并补齐必填字段'}。图片风险拦截：{riskEnabled?'已开启':'已关闭，首图仍检查无字'}。<button type="button" className="text-button" onClick={()=>onSettings('images')}>修改图片设置</button></p>}
         {capabilityError && <p role="alert">连接状态读取失败：{capabilityError}</p>}
         <div className="workflow-actions"><button type="button" className="text-button" disabled={disabled} onClick={() => onSettings('ai')}>配置 AI 与检测<ArrowRight size={14} /></button><button type="button" className="text-button" disabled={disabled} onClick={() => onSettings('images')}>配置生图接口<ArrowRight size={14} /></button></div>
-      </section>
-      <fieldset className="listing-setup" disabled={disabled}>
-        <legend>1. 选择商品</legend>
-        {products.length > 0 && <div className="selection-toolbar"><label><input type="checkbox" data-testid="automatic-select-all" checked={selectable.length>0&&selected.length === selectable.length} disabled={!selectable.length||queueLoading} ref={element => { if (element) element.indeterminate = selected.length > 0 && selected.length < selectable.length; }} onChange={event => setSelectedIds(event.target.checked ? selectable.map(product => product.id) : [])} /><span>全选全部商品</span></label><span className="selection-count">已选 <b>{selected.length}</b> / {selectable.length} 件</span><span className="selection-actions"><button type="button" className="text-button" data-testid="automatic-select-page" onClick={() => { const ids = pageProducts.filter(p=>selectable.includes(p)).map(product => product.id); setSelectedIds(values => pageSelected === ids.length ? values.filter(id => !ids.includes(id)) : [...new Set([...values, ...ids])]); }}>{pageSelected === pageProducts.length ? '取消本页' : '选择本页'}</button><button type="button" className="text-button" disabled={!selected.length} onClick={() => setSelectedIds([])}>清空</button></span></div>}
-        <div className="sku-checkboxes paged">{pageProducts.map(product => <label className="sku-checkbox" key={product.id}><input type="checkbox" data-testid={`automatic-select-${product.id}`} disabled={queueLoading||!selectable.includes(product)} checked={selected.some(p=>p.id===product.id)} onChange={event => { setSelectedIds(values => event.target.checked ? [...values, product.id] : values.filter(id => id !== product.id)); }} /><span><strong>{product.title || '未命名商品'}</strong><small>{product.origin === 'sample' ? '本地示例 · ' : ''}{product.variantCount} 个来源规格{queue?` · 可启动销售配方 ${queue.products.find(p=>p.productId===product.id)?.eligibleCount??0}`:''}</small></span></label>)}</div>
-        {products.length > PRODUCT_PAGE_SIZE && <nav className="inbox-pagination selection-pagination" aria-label="商品分页"><span>共 {products.length} 件 · 每页 {PRODUCT_PAGE_SIZE} 件</span><div><button type="button" className="icon-button" aria-label="商品上一页" disabled={currentPage <= 1} onClick={() => setProductPage(currentPage - 1)}><ChevronLeft size={17} /></button><span aria-live="polite">第 {currentPage} / {pageCount} 页</span><button type="button" className="icon-button" aria-label="商品下一页" disabled={currentPage >= pageCount} onClick={() => setProductPage(currentPage + 1)}><ChevronRight size={17} /></button></div></nav>}
-        {!products.length && <p className="small-copy">先从采集箱加入商品，或载入本地示例。</p>}
+      </details>
+      <fieldset className="listing-setup automatic-selection" disabled={disabled}>
+        <legend>2. 选择商品与执行范围</legend>
+        <AutomaticQueueProducts products={products} queue={queue} selectedIds={selected.map(product => product.id)} selectableIds={selectable.map(product => product.id)} disabled={disabled} loading={queueLoading} onSelection={setSelectedIds} onManual={onManual} onExamples={onExamples} onInbox={onInbox}/>
         <div className="workflow-actions"><button type="button" className="button secondary" disabled={loadingProducts || loadingRules || loadingHosting} onClick={() => {setReload(value => value + 1);onRefreshQueue();}}><RefreshCw size={15} />刷新资料与连接</button><span className="small-copy">已选择 {selected.length} 个来源商品链接。所有来源规格保留，超出限制的规格不纳入本次任务。</span></div>
         {(loadingProducts || loadingRules) && <p className="small-copy" role="status">正在读取本地商品与规则…</p>}
         {rulesError && <p className="workflow-notice" role="alert">规则读取失败：{rulesError}</p>}
@@ -130,20 +138,8 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
         {queueLoading&&<p className="small-copy" role="status">正在核对销售配方和已保存结果…</p>}{queueError&&<p className="workflow-notice" role="alert">{queueError}</p>}
         {!!salesRows.length && <details className="listing-details"><summary>查看待处理销售配方</summary><ul className="listing-history">{salesRows.map(row => <li key={row.key}><strong>{row.specification}</strong><p>备货 {rules?.product.stockSets} 套；{row.reconsideration||'使用当前目标店铺规则'}</p></li>)}</ul></details>}
       </fieldset>
-      <fieldset className="listing-setup" disabled={disabled}>
-        <legend>2. 选择目标与图片托管</legend>
-        <div className="form-grid">
-          <label className="field span-full"><span>目标店铺与站点</span><select aria-label="目标店铺与站点" value={targetId} onChange={event => onTargetChange(event.target.value)}><option value="">请选择已启用的目标</option>{targets.map(value => <option key={value.id} value={value.id} disabled={!value.configured || value.paused}>{value.mode === 'demo' ? '本地演示' : '真实 Haul'} · {value.name} / {value.marketplaceName}{value.paused ? '（已暂停）' : !value.configured ? '（未配置）' : ''}</option>)}</select></label>
-          <p className="small-copy span-full">每件商品使用资料和来源图独立判断类目，再获取对应 Schema；同一任务可以混合不同类目的商品。</p>
-          <label className="field span-full"><span>图片托管服务器</span><select aria-label="图片托管服务器" value={profileId} disabled={loadingHosting} onChange={event => setProfileId(event.target.value)}><option value="">{loadingHosting ? '正在读取托管配置…' : '请选择已配置且启用的服务器'}</option>{profiles.map(value => <option key={value.id} value={value.id} disabled={!value.configured || !value.enabled}>{value.name}{value.configured ? ` · ${value.host}` : ' · 未配置'}{value.configured && !value.enabled ? '（未启用）' : ''}</option>)}</select></label>
-        </div>
-        {hostingError && <p className="workflow-notice" role="alert">托管配置读取失败：{hostingError}</p>}
-        {!loadingHosting && !profile && <p className="workflow-notice">配置并启用图片托管后，任务会自动上传图片并检查公开地址。</p>}
-        <button type="button" className="text-button" onClick={() => onSettings('hosting')}>管理图片托管<ArrowRight size={14} /></button>
-        {target && <p className="workflow-notice">{target.mode === 'demo' ? '本地演示不会正式发布；文案、出图、OCR 和复核仍会调用已启用的服务并计入用量。' : '真实店铺将使用 Haul 规则并正式提交到 Amazon。启动时会弹出本次范围确认。'} 当前支持美国站 en_US；同款同规格按类目允许的主题建立父子体。</p>}
-        {target && !supported && <p className="workflow-notice">该目标的站点或语言暂不支持，请选择美国站英文目标。</p>}
-      </fieldset>
-      <div className="workflow-actions"><button type="button" className="button primary" disabled={!canStart} onClick={() => { void start(); }}><Play size={16} />{starting ? '正在创建任务…' : '启动并自动发布'}</button><span className="small-copy">任务保存在本机。启动后可切换页面；暂停或取消请使用下方任务操作。</span></div>
+
+      <div className="workflow-actions automatic-launch-actions"><strong>已选 {selected.length} 件商品 · 可启动 {salesRows.length} 个销售 SKU</strong><button type="button" className="button primary" disabled={!canStart} aria-describedby="automatic-start-hint" onClick={() => { void start(); }}><Play size={16} />{starting ? '正在创建任务…' : '启动并自动发布'}</button><span id="automatic-start-hint" className="small-copy">{canStart ? '任务保存在本机。启动后可切换页面；暂停或取消请使用下方任务操作。' : startHint}</span></div>
       <p className="small-copy automatic-review-scope">每个销售 SKU 生成 7 张图，{riskEnabled?'全部检查侵权风险':'当前已关闭图片风险拦截'}；只检查第一张主图是否带字，其余图片不做 OCR 或文字复核。已通过图片保留，仅主图文字问题最多重试两次。</p>
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}

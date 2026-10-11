@@ -128,3 +128,92 @@ test('new operation scope does not invoke the legacy catalog or small-source bud
   const again=f.listing.beginCompletion({draftId:draft.id,draftRevision:draft.revision});
   assert.equal(again.id,op.id);assert.equal(again.scopeHash,op.scopeHash);assert.equal(f.requests.length,0);
 });
+
+test('full response keeps native values and unknown metadata while isolating malformed fields and duplicate conflicts', async t=>{
+  const f=await fixture(t,{alpha:{type:'string'},beta:{type:'integer'},gamma:{type:'string'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const out=parseFullGeneration({candidates:[
+    {field:'alpha',nativeValue:'native',transformation:'an unfamiliar explanation',items:[{value:'wrong projection',evidenceIds:[]}]},
+    {field:'beta',nativeValue:2,evidenceIds:[12]},
+    {field:'gamma',nativeValue:'one'},{field:'gamma',nativeValue:'two'}]},c);
+  assert.deepEqual(out.candidates.map(x=>x.field),['alpha']);
+  assert.equal(out.candidates[0].items[0].value,'native');
+  assert.equal(out.candidates[0].items[0].transformation,'unclassified');
+  assert.equal(out.candidates[0].items[0].transformationOriginal,'an unfamiliar explanation');
+  assert.ok(out.missing.some(x=>x.field==='beta'));
+  assert.ok(out.missing.some(x=>x.field==='gamma'&&x.reason.includes('冲突')));
+  assert.equal(out.rejectedCandidates?.filter(x=>x.field==='gamma').length,2);
+});
+
+test('full response deduplicates equal native fields and maps only the current SKU reference', async t=>{
+  const f=await fixture(t,{alpha:{type:'string'},beta:{type:'string'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const id=c.variantId+':spec';
+  const out=parseFullGeneration({candidates:[{field:'alpha',nativeValue:'same',evidenceIds:[c.variantId,c.variantId]},{field:'alpha',nativeValue:'same',evidenceIds:[id]}, {field:'beta',nativeValue:'bad',evidenceIds:['other-sku:spec']}]},c);
+  assert.equal(out.candidates.length,1);assert.deepEqual(out.candidates[0].items[0].evidenceIds,[id]);
+  assert.ok(out.missing.some(x=>x.field==='beta'&&x.reason.includes('other-sku:spec')));
+});
+
+test('dependency failure removes only the triggering field and keeps unrelated native fields', async t=>{
+  const f=await fixture(t),c=structuredClone(f.listing.currentContext(f.draft,f.product,0));
+  c.fullSchema!.schema={type:'object',properties:{alpha:{type:'boolean'},beta:{type:'integer'},gamma:{type:'string'}},dependentRequired:{alpha:['beta']}};
+  c.fullSchema!.metaSchema={};c.schemaSha256=listingFingerprint(c.fullSchema);c.currentAttributes={};c.businessValues={};
+  const {retainValidNativeCandidates}=await import('../src/main/listing-ai/full-schema.ts');
+  const out=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'alpha',nativeValue:true},{field:'gamma',nativeValue:'kept'}]},c),c);
+  assert.deepEqual(out.candidates.map(x=>x.field),['gamma']);
+  assert.ok(out.missing.some(x=>x.field==='alpha'&&x.reason.includes('beta')));
+});
+
+test('discarded optional candidate does not force a repair but required native errors stay actionable',async t=>{
+  const f=await fixture(t,{alpha:{type:'string'},beta:{type:'integer'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const {retainValidNativeCandidates,parseFullOutput}=await import('../src/main/listing-ai/full-schema.ts');
+  const output=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'alpha',nativeValue:'kept'},{field:'beta',nativeValue:'invalid'}]},c),c);
+  assert.equal(output.missing.find(m=>m.field==='beta')?.omitted,true);
+  assert.deepEqual(parseFullOutput(output),output);
+  const required=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'beta',nativeValue:'invalid'}]},c),{...c,repairRequest:{issues:[{field:'beta',code:'required',message:'Required by Amazon'}],currentValues:{}}});
+  assert.equal(required.missing.find(m=>m.field==='beta')?.omitted,undefined);
+});
+
+test('unresolvable extra citation remains visible with a valid direct current SKU citation',async t=>{
+  const f=await fixture(t,{alpha:{type:'string'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const out=parseFullGeneration({candidates:[{field:'alpha',nativeValue:'kept',evidenceIds:[`${c.variantId}:spec`,'foreign-id']}]},c);
+  assert.equal(out.candidates.length,1);assert.ok(out.candidates[0].normalizationNotes?.[0].includes('foreign-id'));
+});
+
+test('full metadata round trip preserves item-specific citations and actual color conflicts remain rejected',async t=>{
+  const f=await fixture(t,{color:{type:'string'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const {parseFullOutput,retainValidNativeCandidates}=await import('../src/main/listing-ai/full-schema.ts');
+  const canonical={kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'bullet_point',nativeValue:[{value:'First'},{value:'Second'}],items:[{value:'First',evidenceIds:['first'],transformation:'copy'},{value:'Second',evidenceIds:['second'],transformation:'translate'}]}],missing:[]};
+  assert.deepEqual(parseFullOutput(canonical),canonical);
+  c.evidence.push({id:'selected-color',name:'color',meaning:'color',source:'selected_sku',value:'Blue'});
+  const output=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'color',nativeValue:'Red',evidenceIds:['selected-color']}]},c),c);
+  assert.equal(output.candidates.length,0);assert.ok(output.missing.some(m=>m.reason.includes('SOURCE_VALUE_CONFLICT')));
+});
+
+test('conditional required branches keep unrelated fields',async t=>{
+  const f=await fixture(t),c=structuredClone(f.listing.currentContext(f.draft,f.product,0));
+  c.fullSchema!.schema={type:'object',properties:{alpha:{type:'boolean'},beta:{type:'integer'},gamma:{type:'string'}},if:{required:['alpha'],properties:{alpha:{const:true}}},then:{required:['beta']}};
+  c.fullSchema!.metaSchema={};c.schemaSha256=listingFingerprint(c.fullSchema);c.currentAttributes={};c.businessValues={};
+  const {retainValidNativeCandidates}=await import('../src/main/listing-ai/full-schema.ts');
+  const out=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'alpha',nativeValue:true},{field:'gamma',nativeValue:'kept'}]},c),c);
+  assert.deepEqual(out.candidates.map(x=>x.field),['gamma']);
+});
+
+test('anyOf failures preserve unrelated fields and equal duplicate metadata survives serialization',async t=>{
+  const f=await fixture(t),c=structuredClone(f.listing.currentContext(f.draft,f.product,0));
+  c.fullSchema!.schema={type:'object',properties:{alpha:{type:'boolean'},beta:{type:'integer'},gamma:{type:'string'}},anyOf:[{properties:{alpha:{const:false}},required:['alpha']},{required:['beta']}]};
+  c.fullSchema!.metaSchema={};c.schemaSha256=listingFingerprint(c.fullSchema);c.currentAttributes={};c.businessValues={};
+  const {retainValidNativeCandidates,parseFullOutput}=await import('../src/main/listing-ai/full-schema.ts');
+  const out=retainValidNativeCandidates(parseFullGeneration({candidates:[{field:'alpha',nativeValue:true},{field:'gamma',nativeValue:'kept',transformation:'first explanation'},{field:'gamma',nativeValue:'kept',transformation:'second explanation',inferenceReason:'second rationale'}]},c),c);
+  assert.deepEqual(out.candidates.map(x=>x.field),['gamma']);
+  assert.ok(out.candidates[0].normalizationNotes?.includes('second explanation'));
+  assert.ok(out.candidates[0].normalizationNotes?.includes('second rationale'));
+  assert.deepEqual(parseFullOutput(out),out);
+});
+
+test('duplicate JSON values ignore object key order and conflicting malformed citations cannot silently replace a value',async t=>{
+  const f=await fixture(t,{alpha:{type:'object'},beta:{type:'string'}}),c=f.listing.currentContext(f.draft,f.product,0);
+  const same=parseFullGeneration({candidates:[{field:'alpha',nativeValue:{a:1,b:2}},{field:'alpha',nativeValue:{b:2,a:1}}]},c);
+  assert.equal(same.candidates.length,1);
+  const different=parseFullGeneration({candidates:[{field:'beta',nativeValue:'one',evidenceIds:[12]},{field:'beta',nativeValue:'two'}]},c);
+  assert.equal(different.candidates.length,0);assert.ok(different.missing.some(m=>m.reason.includes('冲突')));
+  assert.deepEqual(different.rejectedCandidates?.map(x=>x.nativeValue),['two','one']);
+});

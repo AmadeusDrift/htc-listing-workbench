@@ -394,9 +394,9 @@ export class ListingAiService {
       const citationRepairs=new Set(context.repairRequest?.issues.filter(issue=>issue.code==='PROSE_ADOPTION_EVIDENCE'&&isProseField(issue.field)).map(issue=>issue.field));
       const fields=candidate.candidates.filter(c=>citationRepairs.has(c.field)||JSON.stringify(candidateNative(c,draft.schema,draft.marketplaceId,draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field])).map(c=>c.field);
       if(!fields.length){
-        const rejected=candidate.missing.filter(m=>/^\[/.test(m.reason));
+        const rejected=candidate.missing.filter(m=>!m.omitted&&/^\[/.test(m.reason));
         if(isFullSchema(context)&&rejected.length&&operation.rounds.length<2){operation.reviewIssues=rejected.map(m=>({field:m.field,message:m.reason}));reviewIssues=rejected.map(m=>({code:'FIELD_REPAIR',message:m.reason,severity:'ERROR',category:'field',source:'local',attributeNames:[m.field],autoFixable:false}));round!.resolved=true;checkpoint();continue;}
-        return finish([...remaining,...candidate.missing.map(m=>m.field+'：'+m.reason)]);
+        return finish([...remaining,...candidate.missing.filter(m=>!m.omitted).map(m=>m.field+'：'+m.reason)]);
       }
       let review:AiResult|null=null;
       if(reviewEnabled){
@@ -406,7 +406,7 @@ export class ListingAiService {
           round!.resolved=true;checkpoint();if(review.output.verdict==='BLOCKED')return finish(reviewIssues.map(issue=>issue.attributeNames.join('、')+'：'+issue.message));continue;
         }
       }
-      operation.reviewIssues=isFullSchema(context)?candidate.missing.filter(m=>/^\[/.test(m.reason)).map(m=>({field:m.field,message:m.reason})):[];reviewIssues=operation.reviewIssues.map(m=>({code:'FIELD_REPAIR',message:m.message,severity:'ERROR',category:'field',source:'local',attributeNames:[m.field],autoFixable:false}));
+      operation.reviewIssues=isFullSchema(context)?candidate.missing.filter(m=>!m.omitted&&/^\[/.test(m.reason)).map(m=>({field:m.field,message:m.reason})):[];reviewIssues=operation.reviewIssues.map(m=>({code:'FIELD_REPAIR',message:m.message,severity:'ERROR',category:'field',source:'local',attributeNames:[m.field],autoFixable:false}));
       round!.adoptionId=listingFingerprint({draftId:reference.draftId,revision:reference.draftRevision,suggestion:suggestion.id,review:review?.id??null,fields:[...fields].sort(),...(!reviewEnabled?{reviewDisposition:'SKIPPED_DISABLED'}:{})});checkpoint();
       signal?.throwIfAborted();draft=await this.adopt({...reference,suggestionResultId:suggestion.id,reviewResultId:review?.id??null,fields},signal);
       round!.resolved=true;checkpoint();

@@ -44,6 +44,11 @@ artifacts/
 /docs/*
 !/docs/version-control/
 !/docs/maintenance/
+!/docs/ui-preview/
+/docs/ui-preview/*
+!/docs/ui-preview/index.html
+!/docs/ui-preview/serve.mjs
+!/docs/ui-preview/verify.mjs
 /GitHub可复用底座与选型.md
 /RED-独立亚马逊上架中台需求文档.md
 /第一阶段实施范围.md

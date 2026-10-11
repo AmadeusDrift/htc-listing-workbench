@@ -254,6 +254,8 @@ export class ImageWorkflowService {
     const promise=Promise.resolve().then(()=>prepareImageWorkflowSources(this.store,this.db,this.sources,input,controller.signal)).finally(()=>this.activeSources.delete(input.productId));
     this.activeSources.set(input.productId,{scope,controller,promise});return promise;
   }
+  // Admission contract: synchronous checks send nothing. Accepted work is deferred
+  // so the automatic coordinator can persist its intent before any async work runs.
   complete(raw: unknown, options: {maxImageAttempts?:1|2|3} = {}): Promise<CompleteAutomaticProductResult> {
     this.ensureOpen(); const input = keys(raw, ['draftId','draftRevision']), draftId = uuid(input.draftId), revision = integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
     if (this.active.has(draftId)) {

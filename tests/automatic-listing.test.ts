@@ -1208,3 +1208,37 @@ for (const submittedBeforeUpgrade of [false, true]) test(`legacy prepared source
   assert.equal(f.calls.submissions, submittedBeforeUpgrade ? 0 : 1);
   assert.equal(after.draftId, row.draftId);
 });
+
+test('synchronous image source preflight rejection is not an unknown paid request and can resume after restart', async t => {
+  const { ImageWorkflowService } = await import('../src/main/image-workflow/service.ts');
+  const f = fixture(t), complete = f.dependencies.images.complete;
+  let rejectPreflight = true;
+  f.dependencies.images.complete = input => {
+    if (!rejectPreflight) return complete(input);
+    const db = openDatabase(f.directory);
+    try {
+      db.exec('DELETE FROM source_consistency_decisions');
+      const realEntry = Object.assign(Object.create(ImageWorkflowService.prototype), {
+        closed: false, active: new Map(), activeSources: new Map(),
+        store: f.dependencies.store, db, amazon: f.dependencies.amazon,
+      });
+      return realEntry.complete(input);
+    } finally { db.close(); }
+  };
+  const task = await f.create();
+  f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const row = f.service.get(task.id).items[0];
+  assert.equal(row.imageStarted, false, 'the real synchronous source guard rejected before a workflow was admitted');
+  assert.equal(row.outcome?.code, 'SOURCE_CONSISTENCY_NEEDS_INPUT');
+  assert.equal(f.workflow.size, 0); assert.equal(f.calls.images, 0); assert.equal(f.calls.submissions, 0);
+  rejectPreflight = false;
+  await f.service.close();
+  const restored = new AutomaticListingService(f.directory, f.dependencies);
+  try {
+    restored.startAuthorized(restored.prepareStart(task.id)); await restored.waitForIdle();
+    assert.equal(restored.get(task.id).status, 'COMPLETED', restored.get(task.id).items[0].error ?? '');
+    assert.equal(f.calls.sources, 1, 'retry reuses downloaded source originals');
+    assert.equal(f.calls.images, 1); assert.equal(f.calls.submissions, 1);
+    assert.equal(restored.get(task.id).items[0].draftId, row.draftId);
+  } finally { await restored.close(); }
+});

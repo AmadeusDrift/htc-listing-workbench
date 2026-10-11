@@ -1,6 +1,6 @@
-import type { JsonObject, ListingIssue } from '../../shared/amazon-contracts.ts';
+import type { AmazonDraft, JsonObject, ListingIssue, ListingProgram } from '../../shared/amazon-contracts.ts';
 import { isObject } from './context.ts';
-import { compileAttributesSchema } from './schema.ts';
+import { compileAttributesSchema, validateAttributes } from './schema.ts';
 
 /** Only absent business attributes may be deferred to Amazon's validation preview. */
 export function isMissingOnlyPreview(schema: JsonObject, attributes: JsonObject, metaSchema: JsonObject = {}, localIssues: readonly ListingIssue[] = []): boolean {
@@ -30,4 +30,17 @@ export function isMissingOnlyPreview(schema: JsonObject, attributes: JsonObject,
   } catch {
     return false;
   }
+}
+
+
+const platformKeywords = new Set(['required','enum','const','anyOf','oneOf','allOf','if','then','else','not','dependentRequired','dependencies','additionalProperties','minLength','maxLength','pattern','format','minimum','maximum','exclusiveMinimum','exclusiveMaximum','multipleOf','minItems','maxItems','uniqueItems','contains','minContains','maxContains','minProperties','maxProperties','minUniqueItems','maxUniqueItems','minUtf8ByteLength','maxUtf8ByteLength']);
+/** Local diagnostics only. Amazon/demo errors must remain actionable platform feedback. */
+export function isPlatformFieldIssue(program: ListingProgram | undefined, issue: ListingIssue): boolean {
+  return program === 'haul' && issue.source === 'local' && platformKeywords.has(issue.code.replace(/^LOCAL_/,'')) && issue.code.startsWith('LOCAL_')
+    && !/marketplace_id|language_tag|media_location/.test(issue.message);
+}
+export function canSendToPreview(draft: Pick<AmazonDraft,'listingProgram'|'schema'|'attributes'|'localIssues'>): boolean {
+  // Eligibility must see all errors, including structural errors beyond the display limit.
+  return [...draft.localIssues,...validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema,Infinity)]
+    .every(issue=>issue.severity!=='ERROR'||isPlatformFieldIssue(draft.listingProgram,issue));
 }

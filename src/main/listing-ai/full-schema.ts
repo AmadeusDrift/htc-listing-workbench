@@ -1,3 +1,4 @@
+import { isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import { haulUnsupportedField } from '../amazon/listing-program.ts';
 import type { ValidateFunction, ErrorObject } from 'ajv';
 import { createHash } from 'node:crypto';
@@ -209,7 +210,8 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
   for(const e of validate.errors??[]){
     const field=e.instancePath.split('/')[1]?.replaceAll('~1','/').replaceAll('~0','~')||String(e.params.missingProperty??e.params.additionalProperty??'');
     if(!names.has(field)&&prior.has(errorKey(e)))continue;
-    issues.push({code:`LOCAL_${e.keyword}`,message:JSON.stringify({instancePath:e.instancePath,schemaPath:e.schemaPath,keyword:e.keyword,params:e.params,message:e.message}),attributeNames:e.keyword==='dependentRequired'?[String(e.params.property)]:field?[field]:compositionFields(e,c.fullSchema!.schema)??[...names],severity:'ERROR',category:'field',source:'local',autoFixable:false});
+    const issue:ListingIssue={code:`LOCAL_${e.keyword}`,message:JSON.stringify({instancePath:e.instancePath,schemaPath:e.schemaPath,keyword:e.keyword,params:e.params,message:e.message}),attributeNames:e.keyword==='dependentRequired'?[String(e.params.property)]:field?[field]:compositionFields(e,c.fullSchema!.schema)??[...names],severity:'ERROR',category:'field',source:'local',autoFixable:false};
+    if(!isPlatformFieldIssue(c.listingProgram,issue))issues.push(issue);
   }
   return issues;
 }

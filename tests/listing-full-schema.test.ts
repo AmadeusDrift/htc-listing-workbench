@@ -230,3 +230,12 @@ test('Haul adoption omits unsupported fields while retaining raw response, unrel
   assert.equal((await listing.adopt(input)).revision,adopted.revision);assert.equal(f.requests.length,1);
   assert.doesNotThrow(()=>assertListingHistory(adopted,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c]))));
 });
+
+test('Haul preserves sendable native enum candidates for platform feedback while retaining structural and source guards',async t=>{
+  const f=await fixture(t,{choice:{type:'array',items:{type:'object',properties:{value:{enum:['A']}},required:['value']}}});
+  const context=buildListingContext(f.draft,f.product,0),output=parseFullGeneration({kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'choice',nativeValue:[{value:'B'}],evidenceIds:[]}],missing:[]},context);
+  assert.ok(nativeCandidateIssues(output,context).some(i=>i.code==='LOCAL_enum'));
+  assert.deepEqual(nativeCandidateIssues(output,{...context,listingProgram:'haul'}),[]);
+  const broken={...output,candidates:output.candidates.map(c=>({...c,nativeValue:'broken'}))};
+  assert.ok(nativeCandidateIssues(broken,{...context,listingProgram:'haul'}).some(i=>i.code==='LOCAL_type'));
+});

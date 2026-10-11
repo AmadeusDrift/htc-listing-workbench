@@ -1,3 +1,4 @@
+import { canSendToPreview, isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import { cleanHaulAttributes } from '../amazon/listing-program.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -205,7 +206,7 @@ export class ExecutionService {
       const beforeUpload = this.amazon.getDraft(item.draftId);
       if (!submitted(beforeUpload) && item.steps.find(value => value.name === 'upload')?.status !== 'DONE') {
         const draft = this.current(item);
-        if (validateAttributes(draft.schema.schema, draft.attributes, draft.schema.metaSchema).some(issue => issue.severity === 'ERROR' && !isDeferredImageIssue(draft,issue,item.assets.length))) {
+        if (validateAttributes(draft.schema.schema, draft.attributes, draft.schema.metaSchema,Infinity).some(issue => issue.severity === 'ERROR' && !isDeferredImageIssue(draft,issue,item.assets.length) && !isPlatformFieldIssue(draft.listingProgram,issue))) {
           step = item.steps.find(value => value.name === 'validate')!;
           step.attempts++;
           const checked = await this.amazon.validateDraft(ref(draft)); item.listingState = checked.state;
@@ -282,7 +283,7 @@ export class ExecutionService {
     }
     if (step.name === 'validate') {
       const result = await this.amazon.validateDraft(ref(draft)); item.listingState = result.state;
-      if (result.state !== 'LOCAL_VALIDATED') throw new UserFacingError('本地校验未通过，请在草稿中查看问题；修正后建立新任务'); return;
+      if (result.state !== 'LOCAL_VALIDATED' && !canSendToPreview(result)) throw new UserFacingError('本地校验未通过，请在草稿中查看问题；修正后建立新任务'); return;
     }
     if (step.name === 'preview') {
       await this.verifyImages(task, item); if (!this.running(task)) throw new UserFacingError('任务已暂停或取消');

@@ -77,11 +77,11 @@ function issue(error: ErrorObject): ListingIssue {
   return { code: `LOCAL_${error.keyword}`, message: `${[...path, ...(property ? [property] : [])].join('.') || 'attributes'}：${labels[error.keyword] || '不满足当前 Schema 约束'}`,
     severity: 'ERROR', attributeNames: name ? [name] : [], category: name?.includes('image') ? 'image' : 'field', source: 'local', autoFixable: false };
 }
-export function validateAttributes(schema: JsonObject, attributes: JsonObject, metaSchema: JsonObject = {}): ListingIssue[] {
+export function validateAttributes(schema: JsonObject, attributes: JsonObject, metaSchema: JsonObject = {}, maxIssues = 100): ListingIssue[] {
   try {
     const validate = compileAttributesSchema(schema, metaSchema);
     if (validate(attributes)) return [];
-    return (validate.errors || []).slice(0, 100).map(issue);
+    return (validate.errors || []).slice(0, maxIssues).map(issue);
   } catch {
     return [{ code: 'SCHEMA_UNSUPPORTED', message: '当前 Schema 包含未支持或无效的约束，已阻止上架；请刷新 Schema 或升级 HTC',
       severity: 'ERROR', attributeNames: [], category: 'field', source: 'local', autoFixable: false }];

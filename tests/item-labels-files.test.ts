@@ -30,3 +30,17 @@ test('a catalog cannot replace a missing or invalid declared document trailer',a
   await assert.rejects(async()=>validateLabelPdf(Buffer.from(bytes.toString().replace('trailer','garbage'))));
   await assert.rejects(async()=>validateLabelPdf(Buffer.from(bytes.toString().replace('/Root 1 0 R','/Root 9 0 R'))));
 });
+
+function unusedEntryPdf(generation=65536,referenced=false){
+  const bytes=pdf(['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Count 1 /Kids [3 0 R] >>',`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] ${referenced?'/Resources 4 0 R':''} >>`]);
+  return Buffer.from(bytes.toString().replace('xref\n0 4\n','xref\n0 5\n').replace('trailer\n<< /Size 4','0000000000 '+String(generation).padStart(5,'0')+' n \ntrailer\n<< /Size 5'));
+}
+test('Amazon label exporter unused zero-offset generation-65536 entries do not invalidate printable pages',async()=>{
+  await validateLabelPdf(unusedEntryPdf());
+});
+test('an exporter placeholder cannot stand in for an object referenced by the page',async()=>{
+  await assert.rejects(()=>validateLabelPdf(unusedEntryPdf(65536,true)));
+});
+test('ordinary in-use zero offsets remain invalid',async()=>{
+  await assert.rejects(()=>validateLabelPdf(unusedEntryPdf(0)));
+});

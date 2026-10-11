@@ -6,8 +6,22 @@ import type { ItemLabelFile } from '../../shared/item-label-contracts.ts';
 import { identifier } from '../../shared/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 
+function usedObjectNumbers(context:PDFContext):Set<number>{
+  const numbers=new Set<number>(),seen=new Set<PDFObject>(),pending:PDFObject[]=[];
+  for(const [reference,value] of context.enumerateIndirectObjects()){numbers.add(reference.objectNumber);pending.push(value);}
+  for(const value of Object.values(context.trailerInfo))if(value)pending.push(value);
+  while(pending.length){
+    const value=pending.pop()!;if(seen.has(value))continue;seen.add(value);
+    if(seen.size>200000)throw Error('object graph limit');
+    if(value instanceof PDFRef)numbers.add(value.objectNumber);
+    else if(value instanceof PDFDict)pending.push(...value.values());
+    else if(value instanceof PDFArray)pending.push(...value.asArray());
+    else if(value instanceof PDFRawStream)pending.push(value.dict);
+  }
+  return numbers;
+}
 function declaredRoot(bytes:Buffer,offset:number,context:PDFContext):PDFRef{
-  const seen=new Set<number>();
+  const seen=new Set<number>();let used:Set<number>|undefined;
   while(!seen.has(offset)&&seen.size<64){
     seen.add(offset);const source=bytes.subarray(offset).toString('latin1');let trailer:PDFDict;
     if(/^xref\s/.test(source)){
@@ -18,7 +32,14 @@ function declaredRoot(bytes:Buffer,offset:number,context:PDFContext):PDFRef{
         remaining=remaining.slice(section[0].length);
         for(let i=0;i<count;i++){
           const entry=/^(\d{10})\s+(\d{5})\s+([nf])\s+/.exec(remaining);if(!entry)throw Error('xref entry');
-          if(entry[3]==='n'){const address=Number(entry[1]),object=new RegExp('^'+(first+i)+'\\s+'+Number(entry[2])+'\\s+obj\\b');if(address<8||address>=bytes.length||!object.test(bytes.subarray(address,address+64).toString('latin1')))throw Error('xref offset');}
+          if(entry[3]==='n'){
+            const address=Number(entry[1]),generation=Number(entry[2]);
+            // Amazon's label exporter emits unused placeholders with this exact tuple.
+            // Accept only absent, unreferenced objects; real object offsets stay strict.
+            const unusedPlaceholder=address===0&&generation===65536&&first+i>0&&!(used??=usedObjectNumbers(context)).has(first+i);
+            const object=new RegExp('^'+(first+i)+'\\s+'+generation+'\\s+obj\\b');
+            if(!unusedPlaceholder&&(address<8||address>=bytes.length||!object.test(bytes.subarray(address,address+64).toString('latin1'))))throw Error('xref offset');
+          }
           remaining=remaining.slice(entry[0].length);
         }
       }

@@ -1,6 +1,6 @@
 {
   "name": "htc-listing-workbench",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "HTC 独立商品上架工作台",
   "type": "module",

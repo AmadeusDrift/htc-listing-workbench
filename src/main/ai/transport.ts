@@ -3,6 +3,7 @@ import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
+  thinking?: boolean;
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;
   onMetadata?: (metadata: ProviderMetadata) => void;
   /** Secret-checked JSON only; still unapproved and never eligible for adoption. */

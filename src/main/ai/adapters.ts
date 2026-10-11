@@ -90,7 +90,7 @@ const TEXT_SYSTEM = 'Produce JSON product copy suggestions using only the suppli
 export async function requestDeepSeekJson(payload: unknown, system: string, model: DeepSeekModel, credentials: DeepSeekCredentials, signal: AbortSignal, context: AdapterContext, maxTokens = 4096, images: readonly DeepSeekReferenceImage[] = []): Promise<ProviderMetadata & { content: unknown }> {
   modelFor('deepseek', model);
   if (images.length && model !== 'deepseek-flash') throw new AiError('INVALID_CONFIG');
-  const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: 'disabled' }, temperature: 0, stream: false, max_tokens: maxTokens, response_format: { type: 'json_object' } });
+  const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: context.thinking ? 'enabled' : 'disabled' }, ...(context.thinking?{reasoning_effort:'high'}:{temperature:0}), stream: false, max_tokens: context.thinking ? Math.max(maxTokens,32768) : maxTokens, response_format: { type: 'json_object' } });
   if (Buffer.byteLength(body) > MAX_VISION_REQUEST_BYTES) throw new AiError('IMAGE_INVALID');
   const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, context, data => failureMetadata(data, 'text', credentials, context));
   return outputError(() => {

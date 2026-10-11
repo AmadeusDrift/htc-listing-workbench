@@ -106,8 +106,10 @@ export class AiService {
   private closed = false;
   private closing?: Promise<void>;
   private imageGenerationCapability?: () => AiCapabilityInfo;
+  private thinkingTimeoutMs: number;
   constructor(directory: string, store: WorkspaceStore, hosting: HostingService, storage: SecretStorage, dependencies: AiDependencies = {}) {
     this.imageGenerationCapability = dependencies.imageGenerationCapability;
+    this.thinkingTimeoutMs=integer(dependencies.timeoutMs??300000,1,600000);
     this.directory = directory; this.store = store; this.hosting = hosting; this.vault = new AiVault(directory, storage);
     this.requests = new AiRequestControl(integer(dependencies.maxConcurrency ?? 2, 1, 8), integer(dependencies.timeoutMs ?? 120000, 1, 600000));
     this.context = { fetch: dependencies.fetch ?? globalThis.fetch, now: dependencies.now ?? (() => new Date()), nonce: dependencies.nonce ?? randomUUID, maxResponseBytes: integer(dependencies.maxResponseBytes ?? 2 * 1024 * 1024, 1024, 16 * 1024 * 1024) };
@@ -222,11 +224,13 @@ export class AiService {
     return this.saveSharedConnection(aiVendorFor(input.id), input.credentials, { id: input.id, model: input.model });
   }
   saveFunctionSettings(raw: unknown): AiConnection {
-    this.ensureOpen(); const o = keys(raw, ['id', 'model', 'enabled']), id = providerId(o.id), model = modelFor(id, o.model);
+    this.ensureOpen(); const o = keys(raw, ['id', 'model', 'enabled'], ['thinking']), id = providerId(o.id), model = modelFor(id, o.model);
+    if(o.thinking!==undefined&&(typeof o.thinking!=='boolean'||!isDeepSeek(id)))throw new AiError('INVALID_INPUT');
     if (typeof o.enabled !== 'boolean') throw new AiError('INVALID_INPUT');
     const previous = this.storedProfile(id); if (o.enabled && !this.getProfile(id).configured) throw new AiError('NOT_CONFIGURED');
-    const modelChanged = model !== previous.model;
-    const profile = { ...previous, model, enabled: o.enabled, generation: modelChanged ? integer(previous.generation + 1, 1, Number.MAX_SAFE_INTEGER - 1) : previous.generation };
+    const thinking = o.thinking===undefined ? previous.thinking : o.thinking as boolean;
+    const modelChanged = model !== previous.model || !!thinking !== !!previous.thinking;
+    const profile = { ...previous, model, ...(thinking===undefined?{}:{thinking}), enabled: o.enabled, generation: modelChanged ? integer(previous.generation + 1, 1, Number.MAX_SAFE_INTEGER - 1) : previous.generation };
     let credentials: AiCredentials | undefined;
     if (modelChanged && previous.configured) {
       credentials = this.vault.read(id, previous.generation);
@@ -659,7 +663,7 @@ export class AiService {
         throwIfAborted(activeSignal);
         const prepared = await abortable(prepare(activeSignal), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         const credentials = this.vault.read(profile.id, profile.generation);
-        const reply = await abortable(prepared.invoke(credentials, { ...this.context,
+        const reply = await abortable(prepared.invoke(credentials, { ...this.context, thinking:profile.thinking,
           beforeSend: body => {
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
@@ -670,7 +674,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = this.usage.reserve({ id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
+            call = this.usage.reserve({ id, ...(isDeepSeek(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: value => { if (call && !finished && !activeSignal.aborted) untrustedOutput = { value }; },
@@ -703,7 +707,7 @@ export class AiService {
         }
         throw safe;
       } finally { finished = true; }
-    }, signal);
+    }, signal, profile.thinking ? this.thinkingTimeoutMs : undefined);
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;

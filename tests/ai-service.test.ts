@@ -1,4 +1,21 @@
 import test from 'node:test';
+
+test('DeepSeek thinking preference reaches the paid request and call record and survives restart', async t => {
+  const f = await fixture(t);
+  f.enable('deepseek');
+  const profile = f.service.getProfile('deepseek');
+  f.service.saveFunctionSettings({id:'deepseek',model:profile.model,enabled:true,thinking:true});
+  const product = f.store.getProduct(f.input.productId);
+  await f.service.suggest({productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,ocrResultIds:[]});
+  const body = JSON.parse(String(f.requests.at(-1)!.options?.body));
+  assert.deepEqual(body.thinking,{type:'enabled'});
+  assert.ok(body.max_tokens >= 16384);
+  assert.equal(f.service.listCalls().at(-1)!.thinking,true);
+  await f.service.close();
+  const reopened = new AiService(f.directory,f.store,f.hosting,storage);
+  try { assert.equal(reopened.getProfile('deepseek').thinking,true); }
+  finally { await reopened.close(); }
+});
 import assert from 'node:assert/strict';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';

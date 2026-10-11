@@ -16,13 +16,13 @@ export class AiRequestControl {
   private timeoutMs: number;
   constructor(maxConcurrency: number, timeoutMs: number) { this.maxConcurrency = maxConcurrency; this.timeoutMs = timeoutMs; }
   get busy(): boolean { return this.operations.size > 0; }
-  run(key: string, providerId: AiProviderId, execute: (signal: AbortSignal) => Promise<AiResult>, signal?: AbortSignal): Promise<AiResult> {
+  run(key: string, providerId: AiProviderId, execute: (signal: AbortSignal) => Promise<AiResult>, signal?: AbortSignal, timeoutMs = this.timeoutMs): Promise<AiResult> {
     if (signal) throwIfAborted(signal);
     let operation = this.operations.get(key);
     if (operation?.controller.signal.aborted) throw new AiError('BUSY');
     if (!operation) {
       if (this.operations.size >= this.maxConcurrency) throw new AiError('BUSY');
-      const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AiError('TIMEOUT')), this.timeoutMs);
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AiError('TIMEOUT')), timeoutMs);
       operation = { providerId, controller, waiters: 0, promise: Promise.resolve().then(() => execute(controller.signal)) };
       // No await before registration: duplicates join before concurrency accounting.
       this.operations.set(key, operation);

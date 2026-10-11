@@ -3,10 +3,10 @@ import type { SettingsStatusTone } from './SettingsStatusBadge.tsx';
 import type { AiConnection, AiFunctionSettingsInput } from '../shared/ai-connection-contracts.ts';
 import type { AiProfile, AiProviderId } from '../shared/ai-contracts.ts';
 
-export function aiFunctionSettingsInput(connection: AiConnection, id: AiProviderId, change: Partial<Pick<AiProfile, 'model' | 'enabled'>>): AiFunctionSettingsInput {
+export function aiFunctionSettingsInput(connection: AiConnection, id: AiProviderId, change: Partial<Pick<AiProfile, 'model' | 'enabled' | 'thinking'>>): AiFunctionSettingsInput {
   const profile = connection.profiles.find(item => item.id === id), credential = connection.credentials.find(item => item.id === id);
   if (!profile || !credential) throw new Error('功能设置未加载，请重新打开连接设置');
-  return { id, model: change.model ?? profile.model, enabled: change.enabled ?? credential.storedEnabled };
+  return { id, model: change.model ?? profile.model, enabled: change.enabled ?? credential.storedEnabled, ...((change.thinking??profile.thinking)===undefined?{}:{thinking:change.thinking??profile.thinking}) };
 }
 
 export function credentialPresentation(status: CredentialStatus): { label: string; tone: SettingsStatusTone; detail: string } {

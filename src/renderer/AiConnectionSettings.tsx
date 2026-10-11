@@ -52,7 +52,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
       setNotice('共享密钥已加密保存。下方可分别启用功能、选择模型；保存不会发起调用。');
     });
   }
-  async function configure(profile: AiProfile, change: Partial<Pick<AiProfile, 'model' | 'enabled'>>) {
+  async function configure(profile: AiProfile, change: Partial<Pick<AiProfile, 'model' | 'enabled' | 'thinking'>>) {
     if (!connection) return;
     await action(async () => {
       apply(await window.red.saveAiFunctionSettings(aiFunctionSettingsInput(connection, profile.id, change)));
@@ -96,6 +96,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
           {textVendor ? <label className="field"><span>模型</span><select aria-label={`${AI_FUNCTION_NAMES[profile.id]}模型`} value={profile.model} disabled={disabled} onChange={event => void configure(profile, { model: event.target.value })}>
             <option value="deepseek-flash">deepseek-flash</option><option value="deepseek-v4-pro">deepseek-v4-pro</option>
           </select></label> : <p className="settings-help">{profile.id === 'aliyun-ocr' ? '识别来源图片中的文字。' : profile.id==='aliyun-image-risk' ? '使用 aigcViolationDetection 检查生成图片；需开通图片审核增强版及访问权限。图片临时上传至阿里云检测空间，约 30 分钟后由服务清理。未检出风险不等于法律上的无侵权认定。' : '移除图片背景，保留商品主体。'}</p>}
+          {textVendor && <label className="field"><span>思考模式</span><select aria-label={`${AI_FUNCTION_NAMES[profile.id]}思考模式`} value={profile.thinking?'on':'off'} disabled={disabled} onChange={event=>void configure(profile,{thinking:event.target.value==='on'})}><option value="off">关闭</option><option value="on">开启</option></select><small>用于该功能的分类、识别或填写请求；开启后耗时和用量可能增加。</small></label>}
           <button type="button" className="button secondary" disabled={disabled || !profile.configured && !credential.storedEnabled} onClick={() => void configure(profile, { enabled: !credential.storedEnabled })}>{credential.storedEnabled ? '暂停' : '启用'}{AI_FUNCTION_NAMES[profile.id]}</button>
         </div>
       </div>; })}

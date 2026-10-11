@@ -75,6 +75,16 @@ try {
   for (const theme of ['light', 'dark']) for (const width of [1480, 1024, 820]) {
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; document.documentElement.dataset.motion = 'reduced'; }, theme);
     await page.setViewportSize({ width, height: 1050 });
+    const decorations = await page.evaluate(() => {
+      const notice = getComputedStyle(document.querySelector('.automatic-target-setup .workflow-notice'));
+      const connection = getComputedStyle(document.querySelector('.automatic-connections'));
+      const tab = getComputedStyle(document.querySelector('.automatic-queue-tabs button[aria-selected="true"]'));
+      const tabs = getComputedStyle(document.querySelector('.automatic-queue-tabs'));
+      return { notice: notice.borderLeftWidth, connection: connection.borderLeftWidth === connection.borderRightWidth && connection.borderLeftColor === connection.borderRightColor, tabShadow: tab.boxShadow, tabBackground: tab.backgroundColor, top: tabs.borderTopWidth, bottom: tabs.borderBottomWidth };
+    });
+    assert.equal(decorations.notice, '0px'); assert.equal(decorations.connection, true);
+    assert.equal(decorations.tabShadow, 'none'); assert.notEqual(decorations.tabBackground, 'rgba(0, 0, 0, 0)');
+    assert.equal(decorations.top, '0px'); assert.equal(decorations.bottom, '0px');
     await page.locator('.main-content').evaluate(el => { el.scrollTop = 0; });
     const overflow = await page.evaluate(() => [...document.querySelectorAll('.main-content,.automatic-workspace,.automatic-preparation,.automatic-unified-queue')].filter(el => el.scrollWidth > el.clientWidth + 2).map(el => el.className));
     assert.deepEqual(overflow, [], `${theme} ${width} overflow`);

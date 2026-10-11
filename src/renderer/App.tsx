@@ -20,7 +20,6 @@ import { WorkspaceNavigation, viewDescriptions, viewLabels } from './WorkspaceNa
 import { productsInLane } from './workspace-model';
 import { DesktopTitleBar } from './AppearanceSettings';
 import { useAppearance } from './useAppearance';
-import { useGlassLighting } from './useGlassLighting';
 import type { SettingsModule } from './settings-navigation';
 
 type PendingAction = () => void | Promise<unknown>;
@@ -28,7 +27,6 @@ type PendingAction = () => void | Promise<unknown>;
 export default function App() {
   const api = window.red;
   const appearance = useAppearance();
-  useGlassLighting(appearance.preferences.motion === 'reduced');
   const [settingsRequest, setSettingsRequest] = useState<{ module: SettingsModule; token: number }>({ module: 'amazon', token: 0 });
   const [products, setProducts] = useState<ProductSummary[]>([]);
   const [product, setProduct] = useState<ProductDetail | null>(null);

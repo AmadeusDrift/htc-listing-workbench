@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { launchGuarded } from './release-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -20,8 +20,6 @@ const build = {
   rendererAssets: [...(await readFile('dist/index.html', 'utf8')).matchAll(/(?:src|href)="([^\"]+)"/g)].map(match => match[1]),
 };
 const require = createRequire(import.meta.url), executablePath = process.env.RED_E2E_EXECUTABLE || require('electron');
-const env = { ...process.env, RED_DATA_DIR: dataRoot, RED_E2E: '1' };
-delete env.ELECTRON_RUN_AS_NODE; delete env.RED_DEV_SERVER_URL;
 process.env.electron_config_cache = resolve('.cache/electron');
 const defaults = { theme: 'light', density: 'comfortable', motion: 'full' };
 const views = ['采集箱', '手动上架', '自动上架', '上架进度', '商品数据', '采购备货', '发货与标签', '上架类目库', '操作记录', '设置'];
@@ -33,7 +31,7 @@ const pass = message => { checks.push(message); console.log(`PASS ${message}`); 
 const button = name => page.getByRole('button', { name, exact: true });
 
 async function launch() {
-  app = await electron.launch({ executablePath, args: process.env.RED_E2E_EXECUTABLE ? [] : ['.'], cwd: root, env, timeout: 35000 });
+  app = await launchGuarded({ executable: executablePath, args: process.env.RED_E2E_EXECUTABLE ? [] : ['.'], cwd: root, dataRoot, guardPath: resolve('scripts/release-network-guard.cjs') });
   app.process().stderr.on('data', chunk => processLog.push(chunk.toString()));
   page = await app.firstWindow();
   page.setDefaultTimeout(10000);
@@ -190,16 +188,10 @@ try {
   const glow = page.locator('.titlebar-theme'), box = await glow.boundingBox();
   assert.ok(box);
   await page.mouse.move(box.x + box.width * .2, box.y + box.height * .25);
-  await expect(glow).toHaveAttribute('data-glass-lit', '');
-  await expect.poll(() => glow.evaluate(element => parseFloat(element.style.getPropertyValue('--light-x')))).toBeLessThan(35);
-  const firstX = await glow.evaluate(element => parseFloat(element.style.getPropertyValue('--light-x')));
-  await page.mouse.move(box.x + box.width * .8, box.y + box.height * .75);
-  await expect.poll(() => glow.evaluate(element => parseFloat(element.style.getPropertyValue('--light-x')))).toBeGreaterThan(65);
-  assert.ok(firstX < 35);
+  await expect(glow).not.toHaveAttribute('data-glass-lit');
+  const flat = await glow.evaluate(element => { const style = getComputedStyle(element); return { radius: style.borderRadius, background: style.backgroundImage, shadow: style.boxShadow }; });
+  assert.deepEqual(flat, { radius: '4px', background: 'none', shadow: 'none' });
   await page.keyboard.press('Tab'); await expect(glow).not.toHaveAttribute('data-glass-lit');
-  await page.mouse.move(box.x + box.width * .2, box.y + box.height * .2);
-  await expect(glow).toHaveAttribute('data-glass-lit', '');
-  await expect(page.locator('html')).toHaveAttribute('data-input-mode', 'pointer');
   await appearanceRadio('动态效果', '减少动态');
   await page.mouse.move(box.x + box.width * .3, box.y + box.height * .3);
   await expect(glow).not.toHaveAttribute('data-glass-lit');
@@ -211,7 +203,7 @@ try {
   await expect(glow).not.toHaveAttribute('data-glass-lit');
   assert.equal(await glow.evaluate(element => getComputedStyle(element, '::after').display), 'none');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  pass('mouse light follows pointer under production CSP; keyboard, preference and OS reduced motion disable it');
+  pass('flat controls have no pointer lighting; keyboard, preference and OS reduced motion remain supported');
 
   // Force a genuine AppearanceStore filesystem failure only inside this test's
   // fresh mkdtemp directory; rmdir removes only this exact empty fixture folder.
@@ -267,19 +259,17 @@ try {
   }, { productId: source.id, targetId: sample.target.id });
   await nav('自动上架');
   const automatic = page.locator('[aria-label="启动自动上架"]');
-  await automatic.locator('label.sku-checkbox').filter({ hasText: source.title }).locator('input').check();
+  await automatic.getByTestId(`automatic-select-${source.id}`).check();
   await automatic.getByRole('combobox', { name: /目标店铺与站点/ }).selectOption(sample.target.id);
-  await automatic.getByRole('checkbox', { name: /我已确认所选商品属于上述同一商品类型/ }).check();
   await expect(automatic.getByRole('button', { name: '启动并自动发布', exact: true })).toBeDisabled();
-  // Full automation now includes image generation and publishing; this appearance
-  // fixture has no provider credentials. Preserve the real preview regression
-  // through its narrow IPC and cover persistent task controls in their own suite.
-  for (const draft of seeded) await page.evaluate(input => window.red.completeAmazonFields(input), { draftId: draft.id, draftRevision: draft.revision });
+  // This fixture has no confirmed source-image evidence or provider credentials.
+  // The current service must reject field completion before spending or publishing.
+  for (const draft of seeded) await assert.rejects(page.evaluate(input => window.red.completeAmazonFields(input), { draftId: draft.id, draftRevision: draft.revision }), /当前来源图片与规格尚未确认一致/);
   const validated = await page.evaluate(id => window.red.listAmazonDrafts(id), source.id);
-  assert.equal(validated.length, seeded.length); assert.ok(validated.every(draft => draft.state === 'AMAZON_VALIDATED' && draft.submittedAt === null));
+  assert.equal(validated.length, seeded.length); assert.ok(validated.every(draft => draft.state === seeded.find(original => original.id === draft.id).state && draft.submittedAt === null));
   assert.equal((await page.evaluate(() => window.red.listAiCalls())).length, 0);
   assert.equal((await page.evaluate(() => window.red.listAutomaticListingTasks())).length, 0);
-  pass('automatic start remains gated without global connections; real demo field preview preserves drafts and makes no AI calls');
+  pass('automatic start remains gated; missing source-image confirmation blocks field completion, preserves drafts and makes no AI calls');
 
   await nav('设置'); await module('appearance');
   await appearanceRadio('界面主题', '夜间'); await appearanceRadio('信息密度', '紧凑'); await appearanceRadio('动态效果', '减少动态');

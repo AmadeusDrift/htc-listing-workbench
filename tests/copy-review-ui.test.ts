@@ -33,7 +33,7 @@ test('copy review setting saves independently, refreshes automatic status and pr
       listAiCapabilities: async () => ['text','image-generation','ocr','image-risk'].map(capability=>({capability,available:true})),
       getListingRules: async () => defaultListingRules(), listFtpProfiles: async () => [], listAutomaticListingTasks: async () => []
     };
-    createRoot(document.getElementById('root')).render(<><ImageGenerationSettings visible={true} busy={false} onAiSettings={()=>{}}/><AutomaticPreparationPanel products={[]} targets={[]} busy={false} onManual={()=>{}} onSettings={()=>{}} onRunningChange={()=>{}}/></>);
+    createRoot(document.getElementById('root')).render(<><ImageGenerationSettings visible={true} busy={false} onAiSettings={()=>{}}/><AutomaticPreparationPanel products={[]} taskProducts={[]} targets={[]} targetId="" onTargetChange={()=>{}} queue={null} queueLoading={false} queueError="" onRefreshQueue={()=>{}} busy={false} onManual={()=>{}} onSettings={()=>{}} onExamples={()=>{}} onInbox={()=>{}}/></>);
   `);
   await build({ entryPoints: [join(root, 'fixture.tsx')], bundle: true, outfile: join(root, 'fixture.js'), platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.woff2': 'dataurl', '.woff': 'dataurl' }, logLevel: 'silent' });
   await writeFile(join(root, 'index.html'), '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><body><div id="root"></div><script src="fixture.js"></script></body></html>');
@@ -47,7 +47,8 @@ test('copy review setting saves independently, refreshes automatic status and pr
   page.on('pageerror', error => errors.push(error.message));
   const copySwitch = page.getByRole('switch', { name: '启用文案复核', exact: true });
   const riskSwitch = page.getByRole('switch', { name: '启用图片风险拦截', exact: true });
-  const automatic = page.getByRole('region', { name: '全局自动化连接', exact: true });
+  const automatic = page.getByRole('group', { name: '全局自动化连接', exact: true });
+  await expect(automatic).toHaveAttribute('open');
   await expect(copySwitch).toBeChecked();
   await expect(riskSwitch).toBeChecked();
   await expect(automatic).toContainText('文案复核：已开启');

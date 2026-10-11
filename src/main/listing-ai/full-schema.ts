@@ -12,6 +12,7 @@ import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
 
 export const isFullSchema=(context:{contract?:string}|undefined)=>context?.contract===FULL_SCHEMA_CONTRACT;
 export const evidenceVersion=(context:{contract?:string}|undefined)=>isFullSchema(context)?'listing-evidence/v4' as const:'listing-evidence/v3' as const;
+export const imageEvidenceVersion=(context:{contract?:string}|undefined)=>isFullSchema(context)?'listing-evidence/v4' as const:'listing-evidence/v5' as const;
 const fail=(reason:string):never=>{throw new ListingValidationError(reason);};
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 function json(value:unknown):value is JsonValue {return value===null||typeof value==='string'||typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value)||Array.isArray(value)&&value.every(json)||object(value)&&Object.entries(value).every(([k,v])=>!['__proto__','prototype','constructor'].includes(k)&&json(v));}

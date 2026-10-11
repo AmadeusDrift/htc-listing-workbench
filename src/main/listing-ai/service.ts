@@ -1,3 +1,4 @@
+import { currentPolicyRemaining } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
@@ -97,6 +98,15 @@ export class ListingAiService {
       context.evidence.push({id:`${draft.variantId}:source-color:${result.id}`,name:'Product color observed in original SKU image',value:result.output.colors.join(', '),meaning:'color',source:'source_image',imageObservation:{resultId:result.id,context:structuredClone(result.sourceColorContext),colors:[...result.output.colors]}});
     }
     return validateListingContext(context);
+  }
+  /** Authorization aliases do not alter frozen request context fingerprints. */
+  currentAuthorizationContext(draft:AmazonDraft,product:ProductDetail,generation:number,legacyImage?:ListingAiContext):ListingAiContext {
+    const context=this.currentContext(draft,product,generation);
+    if(!isFullSchema(context))return context;
+    if((!legacyImage||isFullSchema(legacyImage))&&!draft.fieldAdoptions?.some(adoption=>{const result=this.ai.getResult(adoption.suggestionResultId);return result?.listingContext&&!isFullSchema(result.listingContext);}))return context;
+    const legacy=this.currentContext(draft,product,generation,true);
+    for(const evidence of legacy.evidence)if(!context.evidence.some(item=>item.id===evidence.id))context.evidence.push(evidence);
+    return context;
   }
   /** Cache all conclusive/uncertain observations by exact original-image context; never retry an unknown call. */
   async prepareSourceColors(raw:unknown,signal?:AbortSignal,repairIssues:readonly ListingIssue[]=[]):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}> {
@@ -226,7 +236,7 @@ export class ListingAiService {
     const reference = input(raw, 'suggest'), { draft, context } = this.current(reference);
     signal?.throwIfAborted();
     const snapshot = currentImageListingSnapshot(draft, context);
-    const evidenceIssues=currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id));
+    const evidenceIssues=currentDraftEvidenceIssues(draft,isFullSchema(context)?this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),context.targetGeneration):context,id=>this.ai.getResult(id));
     if(evidenceIssues.length)throw new UserFacingError(evidenceIssues.join('；').slice(0,2000));
     if (!snapshot.currentListingCopy.length) throw new UserFacingError('草稿还没有文案，请先完成文案');
     await this.fresh(reference, context); signal?.throwIfAborted();
@@ -241,7 +251,7 @@ export class ListingAiService {
     const reference = input(raw, 'suggest'), { draft, context } = this.current(reference);
     const snapshot = currentImageListingSnapshot(draft,context), currentListingCopy = snapshot.currentListingCopy;
     if (!currentListingCopy.length) throw new UserFacingError('草稿还没有可审核文案，请先完成文案');
-    const evidenceIssues=currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id));
+    const evidenceIssues=currentDraftEvidenceIssues(draft,isFullSchema(context)?this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),context.targetGeneration):context,id=>this.ai.getResult(id));
     if(evidenceIssues.length)throw new UserFacingError(evidenceIssues.join('；').slice(0,2000));
     const assertFresh = async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); const current=this.current(reference); if (listingFingerprint(currentImageListingSnapshot(current.draft,current.context)) !== listingFingerprint(snapshot)) throw new UserFacingError('草稿文案已变化，请重新审核'); };
     await assertFresh(); signal?.throwIfAborted();
@@ -336,11 +346,11 @@ export class ListingAiService {
     const checkpoint=()=>{operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);journal.save(operation);};
     const currentRemaining=(remaining:string[])=>{
       const context=operationContext({draftId:draft.id,draftRevision:draft.revision}).context;
-      return [...new Set([...remaining,...currentDraftEvidenceIssues(draft,context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
+      return [...new Set([...remaining,...currentDraftEvidenceIssues(draft,isFullSchema(context)?this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),context.targetGeneration):context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
     };
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
-    refresh();if(operation.state==='DONE')return{draft,aiCalls,previewAttempts,remaining:currentRemaining(operation.remaining),rejections:rejections()};
+    refresh();if(operation.state==='DONE'){const context=this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);return{draft,aiCalls,previewAttempts,remaining:isFullSchema(context)?currentPolicyRemaining(draft,context,id=>this.ai.getResult(id)):currentRemaining(operation.remaining),rejections:rejections()};}
     if(!operation.rounds.length){
       this.amazon.assertPricingForPaid(draft.id);
       aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;

@@ -6,7 +6,7 @@ import { listingFingerprint } from '../listing-ai/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { validateSalesRecipe } from '../sales-plans/records.ts';
 
-export function compatibleApprovalRecipe(run:ImageWorkflowRun,raw:unknown):boolean {
+export function compatibleApprovalRecipe(run:Pick<ImageWorkflowRun,'variantId'|'imageContext'|'imageRecipeSha256'>,raw:unknown):boolean {
   const recipe=raw===null?null:validateSalesRecipe(raw);
   if(run.imageRecipeSha256)return listingFingerprint(recipe)===run.imageRecipeSha256;
   const base=run.imageContext,counts=base?.listing.evidence.filter(item=>item.id===`${run.variantId}:sale-count`)??[];

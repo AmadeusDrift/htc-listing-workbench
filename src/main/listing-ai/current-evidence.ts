@@ -112,3 +112,9 @@ export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiCo
   }
   return [...new Set(issues)];
 }
+
+/** Current image authorization is independent of the historical listing projection. */
+export function assertCurrentImageCopyEvidence(copy:CurrentListingCopy[],context:ListingAiContext):void {
+  const issues=copy.flatMap(item=>item.values.flatMap(value=>explicitCategoryConflicts(item.field,value,context)));
+  if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
+}

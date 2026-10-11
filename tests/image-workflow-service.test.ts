@@ -1073,3 +1073,35 @@ test('QUALITY: correction during final adoption freshness retains paid candidate
   };
   try{const result=await f.run();assert.ok(changed);assert.equal(result.workflow.status,'BLOCKED');assert.equal(f.calls.filter(c=>c==='generate').length,1);assert.equal(result.workflow.candidateIds.length,1);assert.ok(await f.generation.readCandidate(result.workflow.candidateIds[0]));assert.equal(result.workflow.approvedAssetId,null);assert.equal(result.workflow.slots!.some(s=>s.status==='PASSED'),false);}finally{db.close();}
 });
+
+test('legacy partial paid slots continue after full-schema policy upgrade and restart without changing frozen hashes or requests',async t=>{
+  const f=await fixture(t);f.service.saveCopyReviewSettings({enabled:false});
+  const current=(draft:AmazonDraft,product:typeof f.product,generation:number)=>buildListingContext(draft,product,generation,true);
+  (f.listing as any).currentContext=current;
+  (f.listing as any).snapshotCurrentForImages=async()=>{const d=f.amazon.getDraft(f.draft.id),context=current(d,f.store.getProduct(f.product.id),f.amazon.executionTargetScope(d.targetId).generation);return currentImageListingSnapshot(d,context);};
+  const plan=f.ai.imagePlan;let interrupted=false;
+  f.ai.imagePlan=async context=>{if(context.slot?.index===3&&!interrupted){interrupted=true;throw new AiError('PROVIDER_ERROR');}return plan(context);};
+  const first=await f.run();assert.equal(first.workflow.slots?.filter(s=>s.status==='PASSED').length,2);
+  const frozen=structuredClone(first.workflow.imageContext),slots=structuredClone(first.workflow.slots!.slice(0,2)),request=first.workflow.slots![2].attempts[0].requestId;
+  await f.service.close();
+  (f.listing as any).currentContext=(draft:AmazonDraft,product:typeof f.product,generation:number)=>buildListingContext(draft,product,generation);
+  const resumed=f.reopen();
+  try{const result=await resumed.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});
+    assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(result.workflow.id,first.workflow.id);
+    assert.deepEqual(result.workflow.imageContext,frozen);assert.deepEqual(result.workflow.slots!.slice(0,2),slots);assert.equal(result.workflow.slots![2].attempts[0].requestId,request);
+    assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.ok(result.workflow.policyReevaluation);
+  }finally{await resumed.close();}
+});
+
+
+test('new permissive legacy set plan survives persisted workflow reload with image v5',async t=>{
+  const f=await fixture(t);f.service.saveCopyReviewSettings({enabled:false});
+  const current=(draft:AmazonDraft,product:typeof f.product,generation:number)=>buildListingContext(draft,product,generation,true);
+  (f.listing as any).currentContext=current;
+  (f.listing as any).snapshotCurrentForImages=async()=>{const d=f.amazon.getDraft(f.draft.id);return currentImageListingSnapshot(d,current(d,f.store.getProduct(f.product.id),f.amazon.executionTargetScope(d.targetId).generation));};
+  const plan=f.ai.imagePlan;
+  f.ai.imagePlan=async context=>{if(context.slot)throw new AiError('PROVIDER_ERROR');const result=await plan(context);const set=(result.output as {setPlan:ReturnType<typeof sceneSet>}).setPlan;if(!set)return result;set.slots[1].textMode='planned';set.slots[1].expectedText=[{text:'An inviting everyday accent',evidenceIds:[]}];return result;};
+  const first=await f.run();assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v5');assert.deepEqual(first.workflow.setPlan?.slots[1].expectedText,[{text:'An inviting everyday accent',evidenceIds:[]}],first.workflow.error??'');
+  await f.service.close();const db=openDatabase(f.root);
+  try{const {workflowRuns}=await import('../src/main/image-workflow/records.ts');const restored=workflowRuns(db,f.draft.id).find(r=>r.id===first.workflow.id)!;assert.ok(restored);assert.deepEqual(restored.setPlan,first.workflow.setPlan);assert.deepEqual(restored.imageContext,first.workflow.imageContext);}finally{db.close();}
+});

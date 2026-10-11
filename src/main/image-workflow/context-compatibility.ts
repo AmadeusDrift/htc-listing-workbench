@@ -1,3 +1,4 @@
+import { compatibleApprovalRecipe } from './approval-reuse.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import { isFullSchema } from '../listing-ai/full-schema.ts';
@@ -15,4 +16,21 @@ export function imageListingContextsMatch(stored:ListingAiContext,current:Listin
     return value;
   };
   return listingFingerprint(comparable(stored))===listingFingerprint(comparable(current));
+}
+import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
+import type { ProductImageContext } from '../../shared/image-ai-contracts.ts';
+import { imageRiskSourceSnapshot } from '../ai/image-validation.ts';
+
+/** A historical image context is immutable. Compatibility is proved from source
+ * inputs, not its finite field projection or the current policy's evidence IDs. */
+export function imageActualInputsMatch(base:ProductImageContext,draft:AmazonDraft,product:ProductDetail,current:ListingAiContext,recipeHash?:string):boolean {
+  if(isFullSchema(base.listing)||!isFullSchema(current))return imageListingContextsMatch(base.listing,{...current,draftRevision:base.listing.draftRevision});
+  const identity=['draftId','productId','productRevision','variantId','sku','targetId','targetGeneration','listingProgram','productType','marketplaceId','locale','requirements','parentageLevel','schemaChecksum','schemaVersion','schemaSha256','unverifiedSourceTitle'] as const;
+  if(identity.some(key=>listingFingerprint(base.listing[key]??null)!==listingFingerprint(current[key]??null)))return false;
+  if(!base.ipSource)return false;
+  const raw=(source:NonNullable<ProductImageContext['ipSource']>)=>({...source,facts:source.facts.map(({id:_id,...fact})=>fact)});
+  if(listingFingerprint(raw(base.ipSource))!==listingFingerprint(raw(imageRiskSourceSnapshot(product,draft.variantId))))return false;
+  if(!compatibleApprovalRecipe({variantId:base.listing.variantId,imageContext:base,...(recipeHash?{imageRecipeSha256:recipeHash}:{})},draft.salesPlan?.recipe??null))return false;
+  return true;
 }

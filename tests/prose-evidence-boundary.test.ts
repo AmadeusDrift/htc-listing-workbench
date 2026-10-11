@@ -97,7 +97,7 @@ for(const boundary of ['candidate','current copy','split review','caption'] as c
       assert.throws(()=>assertListingReview(validateListingReviewOutput(review),output,context),field+': '+text);
     }
     if(boundary==='caption'){
-      assert.throws(()=>assertImagePlan({expectedText:[{text,evidenceIds:[source.id]}],textMode:'short'} as any,{listing:context,policyVersion:'product-image/v1',purpose:'detail'} as any),text);
+      assert.throws(()=>assertImagePlan({expectedText:[{text,evidenceIds:[source.id]}],textMode:'short'} as any,{listing:context,policyVersion:'product-image/v1',purpose:'detail'} as any,{storedVersion:'listing-evidence/v3'}),text);
       assert.throws(()=>assertCurrentImageCategoryExclusions(context,{plans:[{output:{kind:'image-plan',expectedText:[{text,evidenceIds:[source.id]}]}} as any]}),text);
     }
   }
@@ -137,7 +137,7 @@ for(const boundary of ['candidate','current copy','split review','caption'] as c
       assert.throws(()=>assertListingReview(validateListingReviewOutput(review),output,context),text);
     }
     if(boundary==='caption'){
-      assert.throws(()=>assertImagePlan({expectedText:[{text,evidenceIds:[source.id]}],textMode:'short'} as any,{listing:context,policyVersion:'product-image/v1',purpose:'detail'} as any),text);
+      assert.throws(()=>assertImagePlan({expectedText:[{text,evidenceIds:[source.id]}],textMode:'short'} as any,{listing:context,policyVersion:'product-image/v1',purpose:'detail'} as any,{storedVersion:'listing-evidence/v3'}),text);
       assert.throws(()=>assertCurrentImageCategoryExclusions(context,{plans:[{output:{kind:'image-plan',expectedText:[{text,evidenceIds:[source.id]}]}} as any]}),text);
     }
   }
@@ -189,7 +189,7 @@ test('PASS checks, split claims, current reviews and captions retain category ci
   assert.throws(()=>assertListingReview(review,output,context));
   const unknown=fact('适用年龄','三岁以上'),unknownContext=scope([material,unknown]),bad=candidate('item_name','Adult Cleaner',[material]);
   assert.throws(()=>assertCurrentListingReview(reviewFor({candidate:bad}) as any,[{field:'item_name',values:['Adult Cleaner']}],unknownContext));
-  assert.throws(()=>assertImagePlan({expectedText:[{text:'Adult Cleaner',evidenceIds:[material.id]}],textMode:'short'} as any,{listing:unknownContext,policyVersion:'product-image/v1',purpose:'detail'} as any));
+  assert.throws(()=>assertImagePlan({expectedText:[{text:'Adult Cleaner',evidenceIds:[material.id]}],textMode:'short'} as any,{listing:unknownContext,policyVersion:'product-image/v1',purpose:'detail'} as any,{storedVersion:'listing-evidence/v3'}));
   const excluded=fact('适用年龄','不适合儿童'),negative=candidate('item_name','Not for children',[excluded]),negativeReview=reviewFor({candidate:negative}) as any;
   negativeReview.checks[0].claims=[{text:'Not for',verdict:'SUPPORTED',evidenceIds:[excluded.id],reason:'Scope'},{text:'children',verdict:'SUPPORTED',evidenceIds:[excluded.id],reason:'Same negative claim'}];
   assert.doesNotThrow(()=>assertListingReview(negativeReview,negative,scope([excluded])));

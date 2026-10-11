@@ -1,8 +1,8 @@
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { AiCall } from '../../shared/ai-contracts.ts';
 
-const MAX_BYTES = 200000, MAX_FILES = 50;
+const MAX_BYTES = 200000, MAX_FILES = 10000, MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const managedName = /^\d{17}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 const canonical = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
 export type AiOutputRejectionStage = 'operation-output-validation' | 'source-freshness' | 'result-record-validation';
@@ -29,7 +29,7 @@ function diagnosticOutput(value: unknown, depth = 0): unknown {
   return value;
 }
 
-/** Local failed-output evidence only. Never read by result/adoption APIs or included in requests. */
+/** Failed-output evidence. Recovery must explicitly revalidate it; never adopt as a successful paid call. */
 export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; output: unknown }): void {
   let destination: string | undefined, file: number | undefined, complete = false;
   try {
@@ -50,11 +50,14 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
     safeDirectory(folder);
     // Only delete this helper's regular files; never traverse a link or delete a directory.
     const existing = readdirSync(folder).filter(entry=>managedName.test(entry)).sort();
-    for (const entry of existing.slice(0,Math.max(0,existing.length-MAX_FILES+1))) {
+    let total=Buffer.byteLength(json,'utf8')+existing.reduce((sum,entry)=>sum+lstatSync(join(folder,entry)).size,0),remaining=existing.length+1;
+    for (const entry of existing) {
+      if(remaining<=MAX_FILES&&total<=MAX_TOTAL_BYTES)break;
       const path = join(folder,entry), info = lstatSync(path);
       safeDirectory(root); safeDirectory(folder);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || canonical(realpathSync(path)) !== canonical(path)) return;
       unlinkSync(path);
+      remaining--;total-=info.size;
     }
     safeDirectory(root); safeDirectory(folder);
     const path = join(folder,name);
@@ -65,4 +68,22 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
     if (file !== undefined) try { closeSync(file); } catch { /* Best effort only. */ }
     if (destination && !complete) try { safeDirectory(resolve(directory)); safeDirectory(join(resolve(directory),'ai-diagnostics')); unlinkSync(destination); } catch { /* Remove only this incomplete file. */ }
   }
+}
+
+/** Only this call's bounded regular diagnostic files, with exact request identity. No network. */
+export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
+  if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return [];
+  const values:unknown[]=[];
+  try{
+    const root=resolve(directory),folder=join(root,'ai-diagnostics');safeDirectory(root);safeDirectory(folder);
+    for(const entry of readdirSync(folder).filter(name=>managedName.test(name)&&name.endsWith(`-${call.id}.json`)).sort().reverse()){
+      try{
+        const path=join(folder,entry),info=lstatSync(path);
+        if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>MAX_BYTES||canonical(realpathSync(path))!==canonical(path))continue;
+        const raw=JSON.parse(readFileSync(path,'utf8'));
+        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&raw.rejectionStage==='operation-output-validation'&&raw.output!==null&&raw.output!==undefined)values.push(raw.output);
+      }catch{/* A damaged diagnostic does not hide another retained response. */}
+    }
+  }catch{/* Missing evidence remains an explicit unrecoverable output. */}
+  return values;
 }

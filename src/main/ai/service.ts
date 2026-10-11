@@ -2,9 +2,9 @@ import { assertPresentationResultOwner } from './presentation-history.ts';
 import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
 import { validateConsistencyContext,resolveConsistencyContext,consistencyScopeKey } from '../source-image-consistency/scope.ts';
-import { reserveConsistencyAttempt,recordConsistencyAssessment,validateConsistencyAttempt,assertConsistencyHistory } from '../source-image-consistency/history.ts';
+import { reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,validateConsistencyAttempt,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
-import { readConsistencyView,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
+import { readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
@@ -58,7 +58,7 @@ import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.t
 import { referenceMeasurementEvidence } from '../image-workflow/image-facts.ts';
 import { currentSourceImageMeasurements } from '../image-workflow/source-measurements.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
-import { recordInvalidAiOutput } from './output-diagnostics.ts';
+import { recordInvalidAiOutput,readInvalidAiOutputs } from './output-diagnostics.ts';
 import type { AiOutputRejectionStage } from './output-diagnostics.ts';
 import { readCopyReviewSettings } from '../listing-ai/review-settings.ts';
 import { SOURCE_COLOR_POLICY_VERSION } from '../../shared/source-color-contracts.ts';
@@ -507,6 +507,7 @@ export class AiService {
     this.ensureOpen();return resolveConsistencyContext(this.db,this.store,this.directory,input);
   }
   getSourceConsistency(raw:unknown){const o=keys(raw,['productId','productRevision','variantId']);return readConsistencyView(this.db,this.sourceConsistencyContext({productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId)}));}
+  sourceObservationEvidence(input:{productId:string;productRevision:number;variantId:string}){return readSourceObservationEvidence(this.db,this.sourceConsistencyContext(input));}
   decideSourceConsistency(raw:unknown){return saveConsistencyDecision(this.db,this.store,this.directory,raw);}
   async prepareSourceConsistency(raw:unknown,signal?:AbortSignal,assertFresh:()=>void=()=>{}){
     const view=this.getSourceConsistency(raw);
@@ -523,14 +524,28 @@ export class AiService {
     if(listingFingerprint(this.sourceConsistencyContext(context))!==listingFingerprint(context))throw new AiError('SOURCE_CHANGED');
   }
   /** Explicit preparation only; unique durable send scope is reserved by the existing usage ledger. */
-  async observeSourceConsistency(raw:SourceConsistencyContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,assertBeforeSend?:()=>void):Promise<AiResult> {
+  async observeSourceConsistency(raw:SourceConsistencyContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,assertBeforeSend?:()=>void):Promise<AiResult|{id:string;callId:string;recovered:true;output:import('../../shared/source-image-consistency-contracts.ts').SourceConsistencyOutput;sourceConsistencyRequestBytes?:number}> {
     this.ensureOpen();const context=validateConsistencyContext(raw);
     throwIfAborted(signal??new AbortController().signal);await assertContextFresh();this.assertConsistencyFresh(context);
     const attemptRow=this.db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(context));
     if(attemptRow){
       const attempt=validateConsistencyAttempt(JSON.parse(String(attemptRow.record_json)));
       const saved=this.db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").get(attempt.callId);
-      if(!saved){const call=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId);const value=call?validateAiCall(JSON.parse(String(call.record_json))):null;throw new AiError(value?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');}
+      if(!saved){
+        const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
+        const view=readConsistencyView(this.db,context);
+        if(call?.errorCode==='OUTPUT_INVALID'){
+          if(view.observations&&view.assessmentId)return{id:view.assessmentId,callId:call.id,recovered:true,output:view.observations};
+          for(const output of readInvalidAiOutputs(this.directory,call,'source-image-consistency')){
+            this.db.exec('BEGIN IMMEDIATE');
+            try{
+              const assessment=recordRecoveredConsistency(this.db,call,output);assertConsistencyHistory(this.db,this.directory);this.assertConsistencyFresh(context);this.db.exec('COMMIT');
+              return{id:assessment.id,callId:call.id,recovered:true,output:assessment.recovery!.output};
+            }catch{this.db.exec('ROLLBACK');}
+          }
+        }
+        throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');
+      }
       const result=validateStoredAiResult(JSON.parse(String(saved.record_json)));
       if(result.output.kind!=='source-image-consistency'||!result.sourceConsistencyContext||consistencyScopeKey(result.sourceConsistencyContext)!==consistencyScopeKey(context))throw new AiError('INVALID_CONFIG');
       this.successfulResult(result);this.db.exec('BEGIN IMMEDIATE');try{recordConsistencyAssessment(this.db,result);assertConsistencyHistory(this.db,this.directory);this.db.exec('COMMIT');}catch(error){this.db.exec('ROLLBACK');throw error;}

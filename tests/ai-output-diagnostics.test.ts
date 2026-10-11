@@ -91,13 +91,13 @@ test('a multibyte response larger than 200 KB keeps bounded metadata instead of 
   assert.ok(saved.outputByteLength>200000); assert.equal(f.requests.length,1);
 });
 
-test('failure diagnostics retain at most fifty files and leave unrelated local files untouched', async t => {
+test('failure diagnostics retain batch evidence beyond fifty files and leave unrelated local files untouched', async t => {
   const f=await fixture(t); mkdirSync(join(f.directory,'ai-diagnostics')); writeFileSync(join(f.directory,'ai-diagnostics','notes.txt'),'retain me');
   f.respond(()=>chat(invalidOutput));
   for(let index=0;index<53;index++) await assert.rejects(f.listing.suggest(f.reference),outputInvalid);
   const files=diagnosticFiles(f.directory),saved=diagnostics(f.directory),calls=f.ai.listCalls();
-  assert.equal(files.length,50); assert.equal(f.requests.length,53); assert.equal(f.ai.listResults(f.product.id).length,0);
-  assert.equal(saved.some(record=>record.callId===calls[0].id),false);
+  assert.equal(files.length,53); assert.equal(f.requests.length,53); assert.equal(f.ai.listResults(f.product.id).length,0);
+  assert.equal(saved.some(record=>record.callId===calls[0].id),true);
   assert.equal(saved.some(record=>record.callId===calls.at(-1)!.id),true);
   assert.equal(readFileSync(join(f.directory,'ai-diagnostics','notes.txt'),'utf8'),'retain me');
 });

@@ -1150,10 +1150,11 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
   };
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const first=f.service.get(task.id),healthy=first.items[0],blocked=first.items[1];
-  assert.equal(healthy.status,'DONE',healthy.error??'');assert.equal(blocked.outcome?.kind,outcome==='unknown'?'UNKNOWN':'NEEDS_INPUT');
-  assert.equal(f.calls.sources,1);assert.equal(f.calls.images,1);assert.equal(sends,2);
+  assert.equal(healthy.status,'DONE',healthy.error??'');if(outcome==='unknown')assert.equal(blocked.outcome?.kind,'UNKNOWN');else assert.equal(blocked.status,'DONE',blocked.error??'');
+  assert.equal(f.calls.sources,1);assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(sends,2);
   const proofInput={productId:f.product.id,productRevision:f.product.revision,variantId:second.id},view=await ai.getSourceConsistency(proofInput);
   assert.equal(sends,2,'read projection never sends');
+  if(outcome==='mismatch'){assert.ok(ai.sourceObservationEvidence(proofInput).conflicts.length>0);assert.equal(first.status,'COMPLETED');return;}
   const confirm=()=>ai.decideSourceConsistency({...proofInput,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Synthetic independent human checked this exact visual association'});
   if(outcome==='unknown')await assert.rejects(confirm());else await confirm();
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
@@ -1197,15 +1198,15 @@ test('release mixed synthetic sample separates rule, missing facts, wrong source
   f.dependencies.images.complete=async input=>{const draft=f.drafts.get((input as {draftId:string}).draftId)!;if(draft.localIssues.length){f.workflow.set(draft.id,{status:'BLOCKED',slots:[],error:'Synthetic known facts are missing'});throw new UserFacingError('Synthetic known facts are missing');}return complete(input);};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const first=f.service.get(task.id),row=(index:number)=>first.items.find(i=>i.variantId===f.product.variants[index].id)!;
-  assert.equal(row(0).status,'DONE',JSON.stringify({sends,rows:first.items.map(r=>({sku:r.sku,error:r.error,outcome:r.outcome?.kind}))}));assert.equal(row(1).outcome?.kind,'NEEDS_INPUT');assert.equal(row(2).outcome?.kind,'UNKNOWN');assert.equal(row(3).outcome?.kind,'NEEDS_INPUT');assert.equal(row(3).outcome?.code,'FACT_AUTHORITY_REQUIRED');assert.equal(row(4).outcome?.kind,'RULE_FILTERED');
-  assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+  assert.equal(row(0).status,'DONE',JSON.stringify({sends,rows:first.items.map(r=>({sku:r.sku,error:r.error,outcome:r.outcome?.kind}))}));assert.equal(row(1).status,'DONE');assert.equal(row(2).outcome?.kind,'UNKNOWN');assert.equal(row(3).outcome?.kind,'NEEDS_INPUT');assert.equal(row(3).outcome?.code,'FACT_AUTHORITY_REQUIRED');assert.equal(row(4).outcome?.kind,'RULE_FILTERED');
+  assert.equal(sends,5);assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,2);
   const preserved=JSON.stringify(f.workflow.get(row(0).draftId!)),history=JSON.stringify(ai.listResults(f.product.id));
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try{
     const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});
     assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.filter(r=>r.kind==='UNKNOWN').length,1);
     restored.startAuthorized(restored.prepareStart(task.id));await restored.waitForIdle();
-    assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+    assert.equal(sends,5);assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,2);
     assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
   }finally{await restored.close();}
 });
@@ -1235,6 +1236,43 @@ for (const submittedBeforeUpgrade of [false, true]) test(`legacy prepared source
   assert.equal(f.calls.images, submittedBeforeUpgrade ? 0 : 1);
   assert.equal(f.calls.submissions, submittedBeforeUpgrade ? 0 : 1);
   assert.equal(after.draftId, row.draftId);
+});
+
+test('a format-failed source sibling resumes from diagnostics after a healthy sibling froze source delivery',async t=>{
+  const f=fixture(t);f.rules.product.variantLimit=2;
+  f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-BLUE',originalSpec:'Blue',normalizedSpec:'Blue',sourceSpec:'Blue'});
+  const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
+  const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{
+    sends++;const p=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text);
+    return chat(p.claims.some((c:any)=>c.value==='Blue')?{bad:true}:{kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Red'],appearance:[],claims:[]}))});
+  }});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-sibling-recovery'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
+  f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{materializeSourceSnapshot(f.directory,f.product,input.variantIds);for(const variantId of input.variantIds)await ai.prepareSourceConsistency({productId:input.productId,productRevision:input.productRevision,variantId},signal,fresh);};
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const first=f.service.get(task.id),healthy=first.items[0],failed=first.items[1];assert.equal(healthy.status,'DONE');assert.equal(failed.sourcesPrepared,false);assert.equal(sends,2);
+  const call=ai.listCalls().find(c=>c.errorCode==='OUTPUT_INVALID')!;assert.ok(call);
+  const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');
+  recordInvalidAiOutput(f.directory,{call,operation:'source-image-consistency',createdAt:new Date(Date.parse(call.finishedAt!)+1).toISOString(),rejectionStage:'operation-output-validation',output:{type:'json_object',assets:call.sourceConsistencyContext!.referenceAssets.map(a=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:[],claims:[]}))}});
+  await f.service.close();const restarted=new AutomaticListingService(f.directory,f.dependencies);
+  try{restarted.startAuthorized(restarted.prepareStart(task.id));await restarted.waitForIdle();const after=restarted.get(task.id);assert.equal(after.status,'COMPLETED',after.items[1].error??'');assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,2);assert.equal(f.calls.sources,1);assert.equal(f.calls.images,2);assert.equal(ai.listCalls().find(c=>c.id===call.id)!.status,'FAILED');}finally{await restarted.close();}
+});
+
+test('legacy sourcesPrepared row recovers an OUTPUT_INVALID diagnostic locally and continues without another source call',async t=>{
+  const f=fixture(t,'live');materializeSourceSnapshot(f.directory,f.product,[f.product.variants[0].id]);
+  const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
+  const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async()=>{sends++;return chat({bad:true});}});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-recovery-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
+  const input={productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id},context=ai.sourceConsistencyContext(input);
+  await assert.rejects(ai.observeSourceConsistency(context,()=>{}));const call=ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');
+  const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');
+  recordInvalidAiOutput(f.directory,{call,operation:'source-image-consistency',createdAt:new Date(Date.parse(call.finishedAt!)+1).toISOString(),rejectionStage:'operation-output-validation',output:{type:'json_object',assets:context.referenceAssets.map(a=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Red'],appearance:['Rounded'],claims:[]}))}});
+  const task=await f.create(),saved=(f.service as any).tasks.get(task.id),row=saved.items[0];row.sourcesPrepared=true;row.stage='DRAFT';
+  let prepared=0;
+  f.dependencies.prepareSourceConsistency=async(raw,signal,fresh)=>{prepared++;for(const variantId of raw.variantIds)await ai.prepareSourceConsistency({productId:raw.productId,productRevision:raw.productRevision,variantId},signal,fresh);};
+  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const after=f.service.get(task.id).items[0];assert.equal(after.status,'WAITING',after.error??'');assert.equal(prepared,1);assert.equal(sends,1);assert.equal(f.calls.sources,0);assert.equal(f.calls.images,1);assert.equal(ai.listCalls()[0].status,'FAILED');assert.equal(ai.listResults(f.product.id).length,0);
 });
 
 test('synchronous image source preflight rejection is not an unknown paid request and can resume after restart', async t => {

@@ -117,6 +117,49 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
     holdImages: (callback: () => void) => { started = callback; }, releaseImages: () => release?.() };
 }
 
+test('batch failures let the event loop process pause before the next SKU', async t => {
+  const f = fixture(t);
+  f.product.variants.push({ ...f.product.variants[0], id: randomUUID(), sku: 'SKU-TWO' });
+  const task = await f.create();
+  assert.equal(task.items.length, 2);
+  let attempts = 0;
+  f.dependencies.images.prepareSources = async () => {
+    attempts++;
+    if (attempts === 1) setImmediate(() => f.service.pause(task.id));
+    throw new Error('local source preparation failure');
+  };
+  f.service.startAuthorized(f.service.prepareStart(task.id));
+  await f.service.waitForIdle();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(attempts, 1, 'pause must be serviced between SKUs, even when promises reject immediately');
+  assert.equal(f.service.get(task.id).status, 'PAUSED');
+  assert.equal(f.calls.submissions, 0);
+});
+
+test('readback observation lets pause run before inspecting another SKU', async t => {
+  const f = fixture(t, 'live');
+  f.product.variants.push({ ...f.product.variants[0], id: randomUUID(), sku: 'SKU-TWO' });
+  const task = await f.create();
+  const saved = (f.service as any).tasks.get(task.id);
+  saved.status = 'WAITING';
+  for (const row of saved.items) {
+    const result = await f.dependencies.amazon.prepareDrafts({ items: [{ variantId: row.variantId }] });
+    row.draftId = result.items[0].draft!.id;
+    row.stage = 'READBACK'; row.status = 'WAITING';
+  }
+  let inspected = 0;
+  const getDraft = f.dependencies.amazon.getDraft;
+  f.dependencies.amazon.getDraft = id => {
+    inspected++;
+    if (inspected === 1) setImmediate(() => f.service.pause(task.id));
+    return getDraft(id);
+  };
+  await f.service.refreshWaiting();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(inspected, 1, 'background observation must yield between SKUs');
+  assert.equal(f.service.get(task.id).status, 'PAUSED');
+});
+
 test('confirmed pricing rejection is terminal and excluded only in the same target queue', async t => {
   const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;
   const prepare=f.dependencies.amazon.prepareDrafts;

@@ -6,6 +6,7 @@ import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AutomaticListingItem, AutomaticListingTask } from '../../shared/automatic-listing-contracts.ts';
 import { FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_POLICY_VERSION } from '../../shared/automatic-listing-contracts.ts';
@@ -374,6 +375,9 @@ export class AutomaticListingService {
         this.activeId = task.id; this.controller = new AbortController(); task.status = 'RUNNING'; this.save(task);
         try {
           for (const row of task.items) {
+            // Immediately settled promises do not service Electron's window/IPC loop.
+            // Yield between SKUs, then recheck pause/cancel before touching the next one.
+            await yieldToEventLoop();
             if (!this.running(task)) break;
             if (['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
             try { await this.prepareItem(task, row); }
@@ -726,6 +730,9 @@ export class AutomaticListingService {
         if (!canObserve()) continue;
         let resumeParents=false,interrupted=false;
         for (const row of task.items) {
+          const beforeYield = task.revision;
+          await yieldToEventLoop();
+          if (task.revision !== beforeYield) { interrupted = true; break; }
           if(!canObserve())break;
           if(row.stage==='PARENT'&&row.parentDraftId&&row.status==='WAITING'){
             const parent=this.deps.followup.get(row.parentDraftId);

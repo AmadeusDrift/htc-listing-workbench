@@ -1,3 +1,4 @@
+import { resultHasOwner } from './result-owner.ts';
 import { evidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
 import { assertPresentationResultOwner } from './presentation-history.ts';
 import { readManagedImageSync } from './source.ts';
@@ -114,7 +115,7 @@ export class AiService {
     this.requests = new AiRequestControl(integer(dependencies.maxConcurrency ?? 2, 1, 8), integer(dependencies.timeoutMs ?? 120000, 1, 600000));
     this.context = { fetch: dependencies.fetch ?? globalThis.fetch, now: dependencies.now ?? (() => new Date()), nonce: dependencies.nonce ?? randomUUID, maxResponseBytes: integer(dependencies.maxResponseBytes ?? 2 * 1024 * 1024, 1024, 16 * 1024 * 1024) };
     this.db = openDatabase(directory);
-    this.completionJournal = new CompletionJournal(this.db);
+    this.completionJournal = new CompletionJournal(this.db,this.directory);
     this.records = new RecordReader(this.db);
     this.usage = new AiUsageLedger(this.db, this.context.now);
     try {
@@ -280,7 +281,7 @@ export class AiService {
     if (!profile.configured) throw new AiError('NOT_CONFIGURED'); if (!profile.enabled) throw new AiError('DISABLED'); return profile;
   }
   listCalls(): AiCall[] { this.ensureOpen(); return this.records.list('ai_calls', {}, validateAiCall); }
-  private readPresentationResult=(raw:unknown):AiResult=>{const result=validateStoredAiResult(raw);assertPresentationResultOwner(result,this.getCall(result.callId));return result;};
+  private readPresentationResult=(raw:unknown):AiResult=>{const result=validateStoredAiResult(raw);assertPresentationResultOwner(result,this.getCall(result.callId),this.db);return result;};
   listResults(rawProductId: string): AiResult[] { this.ensureOpen(); return this.records.list('ai_results', { productId: uuid(rawProductId) }, this.readPresentationResult); }
   getCall(id: string): AiCall | undefined { this.ensureOpen(); return this.records.get('ai_calls', id, validateAiCall); }
   getResult(id: string): AiResult | undefined { this.ensureOpen(); return this.records.get('ai_results', id, this.readPresentationResult); }
@@ -361,7 +362,7 @@ export class AiService {
   }
   private successfulResult(result: AiResult): void {
     const call = this.getCall(result.callId);
-    if (!call || call.status !== 'SUCCEEDED' || call.providerId !== result.providerId || call.productId !== result.productId || call.productRevision !== result.productRevision || call.model !== result.model || call.finishedAt !== result.createdAt) throw new AiError('SOURCE_CHANGED');
+    if (!call || !resultHasOwner(result,call) || call.providerId !== result.providerId || call.productId !== result.productId || call.productRevision !== result.productRevision || call.model !== result.model) throw new AiError('SOURCE_CHANGED');
   }
   private reviewSnapshot(input: ReviewContentInput): { suggestion: StoredSuggestion; snapshot: TextSnapshot; textInput: SuggestContentInput; payload: ReviewPayload } {
     const result = this.getResult(input.suggestionResultId);
@@ -713,7 +714,7 @@ export class AiService {
         if (call) {
           safe.callId=call.id;
           const finishedAt = this.finishedAt(call.startedAt); this.db.exec('BEGIN IMMEDIATE');
-          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
+          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(safe.code==='OUTPUT_INVALID'&&untrustedOutput?{responseReceived:true as const}:{}), ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
           if (safe.code === 'OUTPUT_INVALID' && untrustedOutput) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;

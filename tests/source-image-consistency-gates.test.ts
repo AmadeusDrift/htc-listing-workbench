@@ -16,7 +16,7 @@ test('complete, recheck, direct listing completion, approved asset getter and ma
   const workflow=Object.assign(Object.create(ImageWorkflowService.prototype),{closed:false,active:new Map(),activeSources:new Map(),store:f.store,db:f.db,amazon:{getDraft:()=>draft}});
   assert.throws(()=>workflow.complete(input),SourceConsistencyError);
   await assert.rejects(async()=>workflow.recheck({...input,sourceWorkflowId:randomUUID()}),SourceConsistencyError);
-  const listing=Object.assign(Object.create(ListingAiService.prototype),{store:f.store,amazon:{getDraft:()=>draft},ai:{}});
+  const listing=Object.assign(Object.create(ListingAiService.prototype),{store:f.store,amazon:{getDraft:()=>draft},ai:{completionJournal:{list:()=>[]}}});
   await assert.rejects(listing.complete(input),SourceConsistencyError);
   assert.throws(()=>approvedWorkflowAssets(f.db,draft as never,p),SourceConsistencyError);
   const execution=Object.assign(Object.create(ExecutionService.prototype),{store:f.store,db:f.db,amazon:{getDraft:()=>draft}});

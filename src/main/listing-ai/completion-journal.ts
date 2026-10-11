@@ -1,3 +1,4 @@
+import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
@@ -7,7 +8,8 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { boundedText, date, integer, keys, sha256, uuid, validateAiCall, validateStoredAiResult } from '../ai/validation.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { validateAiUsageRecord } from '../ai/usage.ts';
-import { isFullSchema,nativeCandidateIssues,fullCopyPolicyIssues } from './full-schema.ts';
+import { isFullSchema,nativeCandidateIssues,fullCopyPolicyIssues,parseFullGeneration,retainValidNativeCandidates } from './full-schema.ts';
+import { hasInvalidAiResponse,readInvalidAiOutputs } from '../ai/output-diagnostics.ts';
 
 export interface CompletionCall { id:string; sent:boolean; resultId:string|null }
 export interface CompletionRound {
@@ -63,7 +65,8 @@ function save(db:DatabaseSync,raw:CompletionOperation):CompletionOperation {
 }
 export class CompletionJournal {
   private db:DatabaseSync;
-  constructor(db:DatabaseSync){this.db=db;}
+  private directory:string|undefined;
+  constructor(db:DatabaseSync,directory?:string){this.db=db;this.directory=directory;}
   get(id:string):CompletionOperation { const row=this.db.prepare('SELECT record_json FROM listing_completion_operations WHERE id=?').get(uuid(id));if(!row)invalid();const op=validateCompletionOperation(JSON.parse(String(row.record_json)));if(op.id!==id)invalid();return op; }
   list(draftId:string):CompletionOperation[]{return completionOperations(this.db,draftId);}
   saleOperations(input:ReturnType<typeof completionSafetyIdentity>):CompletionOperation[]{
@@ -100,13 +103,54 @@ export class CompletionJournal {
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;if(!entry.sent||entry.resultId)invalid();entry.resultId=result.id;this.save(op);
   }
   unknown(id:string):boolean {
-    const op=this.get(id);return op.state==='GUARD'||op.rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!this.result(call,r)));
+    const op=this.get(id);return op.state==='GUARD'||op.rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!this.result(call,r)&&!this.received(call,r)));
+  }
+  private received(entry:CompletionCall,round:CompletionRound):AiCall|undefined {
+    const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
+    if(!row)return;
+    const call=validateAiCall(JSON.parse(String(row.record_json))),kind=entry.id===round.candidate.id?'amazon-fields':'amazon-fields-review';
+    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||call.providerId!==(kind==='amazon-fields'?'deepseek':'deepseek-review')||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return;
+    const p=call.presentationContext;
+    if(p&&(p.kind!=='listing'||p.draftId!==round.context.draftId||p.variantId!==round.context.variantId||p.sourceSha256!==round.contextHash))return;
+    if(call.responseReceived||call.rejection||this.directory&&hasInvalidAiResponse(this.directory,call,kind))return call;
+  }
+  /** Explicit continuation only. No provider, usage reservation, or call mutation. */
+  recoverReceived(id:string):void {
+    const op=this.get(id);if(op.state!=='ACTIVE')return;
+    for(const round of op.rounds){
+      const entry=round.candidate;
+      if(entry.sent&&!entry.resultId&&this.received(entry,round))this.recover({operationId:op.id,callId:entry.id,contextHash:round.contextHash});
+    }
+  }
+  /** Atomically persist a frozen response; current-source adoption is a separate check. */
+  recover(request:CompletionRequest):AiResult {
+    this.db.exec('BEGIN IMMEDIATE');
+    try{
+      const op=this.get(request.operationId),round=op.rounds.find(r=>[r.candidate.id,r.review?.id].includes(request.callId));
+      if(op.state!=='ACTIVE'||!round||round.contextHash!==request.contextHash)invalid();
+      const entry=round.candidate.id===request.callId?round.candidate:round.review!;
+      const existing=this.result(entry,round);if(existing){this.db.exec('COMMIT');return existing;}
+      if(!entry.sent)invalid();const call=this.received(entry,round);if(!call)unknownCompletion();
+      const unavailable=()=>{throw new UserFacingError('已收到响应，无法本地恢复：原文缺失、不完整或仍不符合字段格式；原请求和费用已保留，未自动重发');};
+      if(!this.directory||entry!==round.candidate||!isFullSchema(round.context))unavailable();
+      for(const rawOutput of readInvalidAiOutputs(this.directory!,call!,'amazon-fields')){
+        let result:AiResult;
+        try{
+          const output=retainValidNativeCandidates(parseFullGeneration(rawOutput,round.context),round.context),recoveredAt=[new Date().toISOString(),call!.finishedAt!].sort()[1];
+          result=validateStoredAiResult({id:randomUUID(),callId:call!.id,providerId:call!.providerId,productId:call!.productId,productRevision:call!.productRevision,variantId:round.context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call!.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:round.context,sourceSha256:round.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',localRecovery:{parserVersion:'full-schema-recovery/v1',operationId:op.id,contextSha256:round.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
+        }catch{continue;}
+        this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));
+        this.recordResult(request,result);this.db.exec('COMMIT');return result;
+      }
+      return unavailable();
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
   result(call:CompletionCall,round:CompletionRound):AiResult|undefined {
     if(!call.resultId)return undefined;
     const row=this.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(call.resultId),callRow=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
     if(!row||!callRow)invalid();const result=validateStoredAiResult(JSON.parse(String(row.record_json))),saved=validateAiCall(JSON.parse(String(callRow.record_json)));
-    if(result.id!==call.resultId||result.callId!==call.id||saved.id!==call.id||saved.status!=='SUCCEEDED'||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==result.providerId||saved.model!==result.model||saved.finishedAt!==result.createdAt||!result.listingContext||result.sourceSha256!==round.contextHash||listingFingerprint(result.listingContext)!==round.contextHash||result.output.kind!==(call.id===round.candidate.id?'amazon-fields':'amazon-fields-review')||call.id!==round.candidate.id&&result.sourceResultIds[0]!==round.candidate.resultId)invalid();return result;
+    if(result.localRecovery){const owner=this.get(result.localRecovery.operationId);if(!owner.rounds.some(r=>r.contextHash===round.contextHash&&r.candidate.id===call.id&&r.candidate.resultId===result.id))invalid();}
+    if(result.id!==call.resultId||result.callId!==call.id||saved.id!==call.id||!resultHasOwner(result,saved)||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==result.providerId||saved.model!==result.model||!result.listingContext||result.sourceSha256!==round.contextHash||listingFingerprint(result.listingContext)!==round.contextHash||result.output.kind!==(call.id===round.candidate.id?'amazon-fields':'amazon-fields-review')||call.id!==round.candidate.id&&result.sourceResultIds[0]!==round.candidate.resultId)invalid();return result;
   }
 }
 

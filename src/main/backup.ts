@@ -276,7 +276,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 6) {
       const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateStoredAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
       const calls = new Map(database.prepare('SELECT record_json FROM ai_calls').all().map(row => { const call = validateAiCall(JSON.parse(String(row.record_json))); return [call.id, call] as const; }));
-      for(const result of results.values())assertPresentationResultOwner(result,calls.get(result.callId));
+      for(const result of results.values())assertPresentationResultOwner(result,calls.get(result.callId),database);
       for(const asset of assertSourceColorHistory(database,results,calls))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
       if (version >= 15) assertImageWorkflowHistory(database, results, calls);
       if(version>=16)for(const row of database.prepare('SELECT record_json FROM automatic_listing_tasks').all())assertAutomaticRejectionHistory(database,validateAutomaticListingTask(JSON.parse(String(row.record_json))));

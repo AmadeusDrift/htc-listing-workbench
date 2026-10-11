@@ -29,9 +29,10 @@ export function listingFieldPolicy(field:string):'copy'|'source_attribute'|'prod
 export interface ListingFieldCandidate {
   field: CandidateField;
   nativeValue?: JsonValue;
-  items: { value: string; evidenceIds: string[]; transformation: 'copy' | 'translate' | 'compose' | 'enum_map' | 'infer'; inferenceReason?: string }[];
+  normalizationNotes?: string[];
+  items: { value: string; evidenceIds: string[]; transformation: 'copy' | 'translate' | 'compose' | 'enum_map' | 'infer' | 'unclassified'; transformationOriginal?: string; inferenceReason?: string }[];
 }
-export interface ListingFieldsOutput { kind: 'amazon-fields'; contract?: typeof FULL_SCHEMA_CONTRACT; candidates: ListingFieldCandidate[]; rejectedCandidates?:ListingFieldCandidate[]; missing: { field: CandidateField; reason: string }[] }
+export interface ListingFieldsOutput { kind: 'amazon-fields'; contract?: typeof FULL_SCHEMA_CONTRACT; candidates: ListingFieldCandidate[]; rejectedCandidates?:ListingFieldCandidate[]; missing: { field: CandidateField; reason: string; omitted?: boolean }[] }
 export interface ListingClaim { text: string; verdict: 'SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED'; evidenceIds: string[]; reason: string }
 export interface ListingFieldsReviewOutput {
   contract?: typeof FULL_SCHEMA_CONTRACT;

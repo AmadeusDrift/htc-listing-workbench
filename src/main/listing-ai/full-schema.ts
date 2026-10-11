@@ -1,5 +1,6 @@
 import type { ValidateFunction, ErrorObject } from 'ajv';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { AmazonSchema, JsonValue, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { ListingAiContext, ListingFieldsOutput, ListingFieldCandidate, ListingFieldsReviewOutput } from '../../shared/listing-ai-contracts.ts';
 import { FULL_SCHEMA_CONTRACT } from '../../shared/listing-ai-contracts.ts';
@@ -23,28 +24,88 @@ export function nativeText(field:string,value:JsonValue):string[]{
 export function candidateNative(candidate:ListingFieldCandidate,schema:AmazonSchema,marketplaceId:string,existing?:JsonValue):JsonValue {
   return Object.hasOwn(candidate,'nativeValue')?structuredClone(candidate.nativeValue!):wrapCandidateValues(schema,marketplaceId,candidate.field,candidate.items.map(i=>i.value),existing);
 }
+function parseNativeCandidate(value:unknown):ListingFieldCandidate {
+  if(!object(value)||typeof value.field!=='string'||!value.field||!Object.hasOwn(value,'nativeValue')||!json(value.nativeValue))fail('候选必须包含字段名与原生 JSON 值');
+  const c=value as Record<string,unknown>,field=c.field as string,nativeValue=c.nativeValue as JsonValue;
+  const original=Array.isArray(c.items)?c.items.filter(object):[];
+  const values=nativeText(field,nativeValue),texts=values.length?values:[JSON.stringify(nativeValue)];
+  const projected=original.length===texts.length&&original.every((item,index)=>item.value===texts[index]);
+  const items=texts.map((value,index)=>{
+    const source=original[projected?index:0];
+    const evidenceIds=c.evidenceIds??source?.evidenceIds??[];
+    if(!Array.isArray(evidenceIds)||evidenceIds.some(id=>typeof id!=='string'))fail('来源引用格式无效');
+    const raw=c.transformation??source?.transformation??'unclassified';
+    const normalized=typeof raw==='string'?raw.trim().toLowerCase():'';
+    const transformation=(['copy','translate','compose','enum_map','infer'].includes(normalized)?normalized:'unclassified') as ListingFieldCandidate['items'][number]['transformation'];
+    const transformationOriginal=typeof source?.transformationOriginal==='string'?source.transformationOriginal:typeof raw==='string'&&raw!==transformation?raw:undefined;
+    const reason=c.inferenceReason??source?.inferenceReason;
+    return {value,evidenceIds:[...new Set(evidenceIds as string[])],transformation,...(transformationOriginal?{transformationOriginal}:{}),...(typeof reason==='string'?{inferenceReason:reason}:{})};
+  });
+  return {field,nativeValue:structuredClone(nativeValue),items,...(Array.isArray(c.normalizationNotes)?{normalizationNotes:c.normalizationNotes.filter((n):n is string=>typeof n==='string')}:{})};
+}
 export function parseFullOutput(raw:unknown):ListingFieldsOutput {
   if(!object(raw)||raw.kind!=='amazon-fields'||raw.contract!==FULL_SCHEMA_CONTRACT||!Array.isArray(raw.candidates)||!Array.isArray(raw.missing))fail('完整字段响应需要 candidates 与 missing 数组');
-  const candidates=((raw as Record<string,unknown>).candidates as unknown[]).map(value=>{
-    if(!object(value)||typeof value.field!=='string'||!value.field||!Object.hasOwn(value,'nativeValue')||!json(value.nativeValue))fail('候选必须包含字段名与原生 JSON 值');
-    const c=value as Record<string,unknown>,field=c.field as string,nativeValue=c.nativeValue as JsonValue;
-    const original=Array.isArray(c.items)?c.items:[];
-    const evidenceIds=c.evidenceIds??(original.length?original[0].evidenceIds:[]);
-    if(!Array.isArray(evidenceIds)||evidenceIds.some(id=>typeof id!=='string')||new Set(evidenceIds).size!==evidenceIds.length)fail('来源引用格式无效');
-    const transformation=c.transformation??original[0]?.transformation??'compose';
-    if(!['copy','translate','compose','enum_map','infer'].includes(String(transformation)))fail('转换类型无效');
-    const reason=c.inferenceReason??original[0]?.inferenceReason;
-    const values=nativeText(field,nativeValue),texts=values.length?values:[JSON.stringify(nativeValue)];
-    const items=texts.map(value=>({value,evidenceIds:[...evidenceIds] as string[],transformation:transformation as ListingFieldCandidate['items'][number]['transformation'],...(typeof reason==='string'?{inferenceReason:reason}:{})}));
-    if(original.length&&JSON.stringify(original)!==JSON.stringify(items))fail('候选展示投影与原生值不一致');
-    return {field,nativeValue:structuredClone(nativeValue),items};
+  const root=raw as Record<string,unknown>,result:ListingFieldsOutput={kind:'amazon-fields',contract:FULL_SCHEMA_CONTRACT,candidates:[],missing:[]};
+  const conflicts=new Set<string>();
+  for(const [index,value] of (root.candidates as unknown[]).entries()){
+    try{
+      const candidate=parseNativeCandidate(value),previous=result.candidates.find(c=>c.field===candidate.field);
+      if(conflicts.has(candidate.field)){(result.rejectedCandidates??=[]).push(candidate);continue;}
+      if(previous){
+        if(isDeepStrictEqual(previous.nativeValue,candidate.nativeValue)){
+          for(const item of previous.items)item.evidenceIds=[...new Set([...item.evidenceIds,...candidate.items.flatMap(i=>i.evidenceIds)])];
+          const annotations=[...(candidate.normalizationNotes??[]),...candidate.items.flatMap(i=>[i.transformationOriginal,i.inferenceReason].filter((v):v is string=>typeof v==='string'))];
+          if(annotations.length)previous.normalizationNotes=[...new Set([...(previous.normalizationNotes??[]),...annotations])];
+          continue;
+        }
+        conflicts.add(candidate.field);result.candidates=result.candidates.filter(c=>c!==previous);
+        (result.rejectedCandidates??=[]).push(previous,candidate);result.missing.push({field:candidate.field,reason:'[FIELD_CONFLICT] 同字段原生值冲突，已保留两个候选供核对'});continue;
+      }
+      result.candidates.push(candidate);
+    }catch(error){result.missing.push({field:object(value)&&typeof value.field==='string'?value.field:`candidate[${index}]`,reason:`[FIELD_FORMAT] ${error instanceof ListingValidationError?error.validationReason:String(error)}；已保留其他可用字段`});}
+  }
+  // Even a malformed citation cannot make a different native value silently win.
+  for(const value of root.candidates as unknown[]){
+    if(!object(value)||typeof value.field!=='string'||!json(value.nativeValue)||conflicts.has(value.field))continue;
+    const previous=result.candidates.find(c=>c.field===value.field);
+    if(!previous||isDeepStrictEqual(previous.nativeValue,value.nativeValue))continue;
+    const rejected=parseNativeCandidate({...value,evidenceIds:[],normalizationNotes:['原候选来源引用格式无效；原生值保留供冲突核对']});
+    conflicts.add(value.field);result.candidates=result.candidates.filter(c=>c!==previous);
+    (result.rejectedCandidates??=[]).push(previous,rejected);
+    result.missing.push({field:value.field,reason:'[FIELD_CONFLICT] 同字段原生值冲突，已保留两个候选供核对'});
+  }
+  result.missing=result.missing.filter(m=>{
+    const candidate=result.candidates.find(c=>c.field===m.field);
+    if(!candidate)return true;(candidate.normalizationNotes??=[]).push(m.reason);return false;
   });
-  const missing=((raw as Record<string,unknown>).missing as unknown[]).map(value=>{if(!object(value)||typeof value.field!=='string'||typeof value.reason!=='string')fail('未填写字段说明无效');const m=value as Record<string,unknown>;return {field:m.field as string,reason:m.reason as string};});
-  const names=[...candidates,...missing].map(c=>c.field);if(new Set(names).size!==names.length)fail('候选字段重复');
-  const rejectedRaw=(raw as Record<string,unknown>).rejectedCandidates;
-  const rejectedCandidates=rejectedRaw===undefined?undefined:parseFullOutput({kind:'amazon-fields',contract:FULL_SCHEMA_CONTRACT,candidates:rejectedRaw,missing:[]}).candidates;
-  if(rejectedCandidates?.some(candidate=>!missing.some(m=>m.field===candidate.field)))fail('被拒候选必须保留对应问题');
-  return {kind:'amazon-fields',contract:FULL_SCHEMA_CONTRACT,candidates,missing,...(rejectedCandidates?.length?{rejectedCandidates}:{})};
+  for(const value of root.missing as unknown[])if(object(value)&&typeof value.field==='string'&&typeof value.reason==='string'&&!result.candidates.some(c=>c.field===value.field)&&!result.missing.some(m=>m.field===value.field))result.missing.push({field:value.field,reason:value.reason,...(value.omitted===true?{omitted:true}:{})});
+  if(Array.isArray(root.rejectedCandidates))for(const value of root.rejectedCandidates){
+    try{const candidate=parseNativeCandidate(value);if(result.missing.some(m=>m.field===candidate.field))(result.rejectedCandidates??=[]).push(candidate);}catch{/* Historic malformed rejected data must not discard usable fields. */}
+  }
+  return result;
+}
+/** Resolve explicit current-SKU aliases only; never match another variant by text. */
+function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext):void {
+  const ids=new Set(c.evidence.map(e=>e.id));
+  for(const candidate of [...output.candidates]){
+    const bad:string[]=[];
+    for(const item of candidate.items)item.evidenceIds=[...new Set(item.evidenceIds.flatMap(id=>{
+      if(ids.has(id))return [id];
+      if((id===c.variantId||id===c.sku)&&ids.has(`${c.variantId}:spec`))return [`${c.variantId}:spec`];
+      if(id.startsWith(`${c.sku}:`)){const mapped=c.variantId+id.slice(c.sku.length);if(ids.has(mapped))return [mapped];}
+      bad.push(id);return [];
+    }))];
+    const properties=c.fullSchema?.schema.properties;
+    const unknown=properties&&(!object(properties)||!Object.hasOwn(properties,candidate.field));
+    if(!bad.length&&!unknown)continue;
+    const reason=unknown?`Schema 未定义字段 ${candidate.field}`:`${candidate.field} 的来源引用无法对应当前规格：${[...new Set(bad)].join('、')}`;
+    (candidate.normalizationNotes??=[]).push(reason);
+    // A valid direct reference already supplied for this field remains usable.
+    if(!unknown&&candidate.items.every(item=>item.evidenceIds.some(id=>c.evidence.some(e=>e.id===id&&(e.meaning===candidate.field||e.name===candidate.field||e.id===`${c.variantId}:spec`)))))continue;
+    output.candidates=output.candidates.filter(item=>item!==candidate);
+    (output.rejectedCandidates??=[]).push(candidate);
+    output.missing.push({field:candidate.field,reason:`[FIELD_REFERENCE] ${reason}；待补资料，已保留其他可用字段`});
+  }
 }
 /** Accept the previous text envelope as an input convenience; persist only native values. */
 export function parseFullGeneration(raw:unknown,c:ListingAiContext):ListingFieldsOutput {
@@ -52,14 +113,16 @@ export function parseFullGeneration(raw:unknown,c:ListingAiContext):ListingField
   const root=raw as Record<string,unknown>;
   const candidates=Array.isArray(root.candidates)?root.candidates.map(value=>{
     if(!object(value)||Object.hasOwn(value,'nativeValue'))return value;
-    if(typeof value.field!=='string'||!Array.isArray(value.items))return value;
+    if(typeof value.field!=='string'||!Array.isArray(value.items)||value.items.some(i=>!object(i)||typeof i.value!=='string'))return value;
+    try{
     const items=value.items;
     const schema={...c, schema:c.fullSchema!.schema,metaSchema:c.fullSchema!.metaSchema,propertyGroups:{}} as unknown as AmazonSchema;
     const nativeValue=wrapCandidateValues(schema,c.marketplaceId,value.field,items.map(i=>i.value),c.currentAttributes?.[value.field]);
     return {field:value.field,nativeValue,evidenceIds:[...new Set(items.flatMap(i=>i.evidenceIds??[]))],transformation:items[0]?.transformation??'compose',...(items[0]?.inferenceReason?{inferenceReason:items[0].inferenceReason}:{})};
+    }catch{return value;}
   }):root.candidates;
   const output=parseFullOutput({kind:'amazon-fields',contract:FULL_SCHEMA_CONTRACT,candidates,missing:root.missing??[]});
-  assertFullEvidence(output,c);return output;
+  normalizeFullEvidence(output,c);assertFullEvidence(output,c);return output;
 }
 export function validateFullContext(raw:unknown):ListingAiContext {
   if(!object(raw)||raw.contract!==FULL_SCHEMA_CONTRACT||!object(raw.fullSchema)||!object(raw.fullSchema.schema)||!object(raw.fullSchema.metaSchema)||!object(raw.currentAttributes)||!object(raw.businessValues)||!object(raw.sourceProduct)||!Array.isArray(raw.fields)||!Array.isArray(raw.evidence))fail('完整 Schema 上下文不完整');
@@ -77,7 +140,7 @@ export function assertFullEvidence(output:ListingFieldsOutput,context:Pick<Listi
     if(properties&&(!object(properties)||!Object.hasOwn(properties,c.field)))fail(`Schema 未定义字段 ${c.field}`);
     for(const item of c.items)for(const id of item.evidenceIds)if(!context.evidence.some(e=>e.id===id))fail(`字段 ${c.field} 引用不存在的来源 ${id}`);
   }
-  for(const m of output.missing)if(properties&&(!object(properties)||!Object.hasOwn(properties,m.field)))fail(`Schema 未定义字段 ${m.field}`);
+
 }
 export function parseFullReview(raw:unknown):ListingFieldsReviewOutput {
   if(!object(raw)||raw.kind!=='amazon-fields-review'||!['PASS','NEEDS_CHANGES','BLOCKED'].includes(String(raw.verdict))||!Array.isArray(raw.checks)||!Array.isArray(raw.issues))fail('复核格式无效');
@@ -106,6 +169,25 @@ export function assertFullReview(review:ListingFieldsReviewOutput,candidate:List
 const validators=new Map<string,ValidateFunction>();
 function compiled(c:ListingAiContext){let v=validators.get(c.schemaSha256);if(!v){v=compileAttributesSchema(c.fullSchema!.schema,c.fullSchema!.metaSchema);if(validators.size>=32)validators.delete(validators.keys().next().value!);validators.set(c.schemaSha256,v);}return v;}
 const errorKey=(e:ErrorObject)=>JSON.stringify([e.instancePath,e.schemaPath,e.keyword,e.params]);
+function compositionFields(error:ErrorObject,schema:unknown):string[]|undefined {
+  if(!['if','anyOf','oneOf','allOf','not'].includes(error.keyword))return undefined;
+  let node:unknown=schema;
+  for(const part of error.schemaPath.replace(/^#\//,'').split('/')){
+    if(!node||typeof node!=='object')return [];
+    node=(node as Record<string,unknown>)[part.replaceAll('~1','/').replaceAll('~0','~')];
+  }
+  const fields=new Set<string>(),visited=new Set<object>();
+  const visit=(value:unknown):void=>{
+    if(!value||typeof value!=='object'||visited.has(value))return;visited.add(value);
+    if(Array.isArray(value)){value.forEach(visit);return;}if(!object(value))return;
+    if(object(value.properties))Object.keys(value.properties).forEach(name=>fields.add(name));
+    if(Array.isArray(value.required))value.required.forEach(name=>{if(typeof name==='string')fields.add(name);});
+    if(object(value.dependentRequired))for(const [key,names] of Object.entries(value.dependentRequired)){fields.add(key);if(Array.isArray(names))names.forEach(name=>{if(typeof name==='string')fields.add(name);});}
+    for(const key of ['if','then','else','anyOf','oneOf','allOf','not'])visit(value[key]);
+    if(typeof value.$ref==='string'&&value.$ref.startsWith('#/')){let ref:unknown=schema;for(const part of value.$ref.slice(2).split('/'))ref=object(ref)?ref[part.replaceAll('~1','/').replaceAll('~0','~')]:undefined;if(ref!==value)visit(ref);}
+  };
+  visit(node);return [...fields];
+}
 export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiContext):ListingIssue[]{
   const attributes={...c.currentAttributes},names=new Set(output.candidates.map(c=>c.field)),issues:ListingIssue[]=[];
   for(const candidate of output.candidates){
@@ -124,7 +206,7 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
   for(const e of validate.errors??[]){
     const field=e.instancePath.split('/')[1]?.replaceAll('~1','/').replaceAll('~0','~')||String(e.params.missingProperty??e.params.additionalProperty??'');
     if(!names.has(field)&&prior.has(errorKey(e)))continue;
-    issues.push({code:`LOCAL_${e.keyword}`,message:JSON.stringify({instancePath:e.instancePath,schemaPath:e.schemaPath,keyword:e.keyword,params:e.params,message:e.message}),attributeNames:field?[field]:[...names],severity:'ERROR',category:'field',source:'local',autoFixable:false});
+    issues.push({code:`LOCAL_${e.keyword}`,message:JSON.stringify({instancePath:e.instancePath,schemaPath:e.schemaPath,keyword:e.keyword,params:e.params,message:e.message}),attributeNames:e.keyword==='dependentRequired'?[String(e.params.property)]:field?[field]:compositionFields(e,c.fullSchema!.schema)??[...names],severity:'ERROR',category:'field',source:'local',autoFixable:false});
   }
   return issues;
 }
@@ -133,12 +215,23 @@ export function retainValidNativeCandidates(output:ListingFieldsOutput,c:Listing
   const result=structuredClone(output);
   for(;;){
     const errors=[...nativeCandidateIssues(result,c),...fullCopyPolicyIssues(result)];
-    if(!errors.length||!result.candidates.length)return result;
+    if(!errors.length||!result.candidates.length)return markOptionalOmissions(result,c);
     const fields=new Set(errors.flatMap(e=>e.attributeNames)),affected=result.candidates.filter(item=>fields.has(item.field));
-    const removed=affected.length?affected:result.candidates;
+    if(!affected.length)return markOptionalOmissions(result,c);
+    const removed=affected;
     for(const item of removed){const reasons=errors.filter(e=>e.attributeNames.includes(item.field));result.missing.push({field:item.field,reason:(reasons.length?reasons:errors).map(e=>`[${e.code}] ${e.message}`).join('；')});(result.rejectedCandidates??=[]).push(item);}
     result.candidates=result.candidates.filter(item=>!removed.includes(item));
   }
+}
+/** Omitted optional suggestions are diagnostics, not a reason to repair the product. */
+function markOptionalOmissions(output:ListingFieldsOutput,c:ListingAiContext):ListingFieldsOutput {
+  const attributes={...c.currentAttributes};for(const candidate of output.candidates)attributes[candidate.field]=candidate.nativeValue!;
+  const validate=compiled(c);validate(attributes);
+  const blocking=new Set((validate.errors??[]).flatMap(e=>[e.instancePath.split('/')[1]?.replaceAll('~1','/').replaceAll('~0','~'),String(e.params.missingProperty??'')]));
+  for(const issue of c.repairRequest?.issues??[])blocking.add(issue.field);
+  for(const field of c.fields)if(field.requirement==='required')blocking.add(field.name);
+  output.missing=output.missing.map(m=>{const {omitted,...rest}=m;return blocking.has(m.field)?rest:{...rest,omitted:true};});
+  return output;
 }
 /** Approved writing rules only; all Amazon constraints use the original schema above. */
 export function fullCopyPolicyIssues(output:ListingFieldsOutput):ListingIssue[]{

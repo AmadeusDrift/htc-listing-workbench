@@ -5,6 +5,7 @@ import { assertConsistencyView, assertProductConsistency } from '../src/main/sou
 import { materializeSourceSnapshot,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import test from 'node:test';
+import { installAutomaticListingIpc } from '../src/main/automatic-listing-ipc.ts';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -116,6 +117,32 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
     setReady: () => { ready = true; }, failImages: () => { imageFailure = true; },
     holdImages: (callback: () => void) => { started = callback; }, releaseImages: () => release?.() };
 }
+
+test('resume IPC survives background observation while its confirmation dialog is open', async t => {
+  const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id);
+  saved.status='NEEDS_ATTENTION';saved.items[0].status='FAILED';saved.items[0].error='source failed';
+  const handlers=new Map<string,(...args:any[])=>any>();let audited=0;
+  installAutomaticListingIpc(f.service,(name,_count,callback)=>handlers.set(name,callback),{
+    confirm:async approved=>{await f.service.refreshWaiting();await f.service.refreshWaiting();assert.deepEqual(f.service.get(task.id),approved);return true;},
+    audit:()=>{audited++;},
+  });
+  const result=await handlers.get('red:automatic-listing:resume')!(task.id);
+  assert.equal(result.status,'QUEUED');assert.equal(audited,1);
+  await f.service.waitForIdle();assert.ok(f.calls.sources>0,'confirmation must reach the real worker');
+});
+for(const answer of ['cancel','throw','changed'] as const)test(`resume confirmation releases observation after ${answer} and preserves cancellation`,async t=>{
+  const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id);
+  saved.status='NEEDS_ATTENTION';saved.items[0].status='FAILED';saved.items[0].error='source failed';
+  const handlers=new Map<string,(...args:any[])=>any>();let audited=0;
+  installAutomaticListingIpc(f.service,(name,_count,callback)=>handlers.set(name,callback),{
+    confirm:async()=>{await f.service.refreshWaiting();if(answer==='throw')throw Error('dialog failed');if(answer==='changed')f.service.cancel(task.id);return answer!=='cancel';},audit:()=>{audited++;},
+  });
+  if(answer==='cancel')assert.equal(await handlers.get('red:automatic-listing:resume')!(task.id),null);
+  else await assert.rejects(()=>handlers.get('red:automatic-listing:resume')!(task.id),answer==='throw'?/dialog failed/:/确认期间/);
+  assert.equal(audited,0);assert.equal(f.calls.sources,0);
+  if(answer==='changed')assert.equal(f.service.get(task.id).status,'CANCELLED');
+  else {const before=f.service.get(task.id).revision;await f.service.refreshWaiting();assert.ok(f.service.get(task.id).revision>before,'observation resumes after dismissed dialog');}
+});
 
 test('batch failures let the event loop process pause before the next SKU', async t => {
   const f = fixture(t);

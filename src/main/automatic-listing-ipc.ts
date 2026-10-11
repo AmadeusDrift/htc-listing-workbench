@@ -6,9 +6,8 @@ import { identifier } from '../shared/validation.ts';
 interface Hooks { confirm(task: AutomaticListingTask): Promise<boolean>; audit(action: string, summary: string): void }
 export function installAutomaticListingIpc(service: AutomaticListingService, handle: IpcHandler, hooks: Hooks): void {
   const start = async (id: string) => {
-    const approved = service.prepareStart(id);
-    if (!await hooks.confirm(approved)) return null;
-    const task = service.startAuthorized(approved);
+    const task = await service.confirmStart(id,hooks.confirm);
+    if (!task) return null;
     hooks.audit('automatic-listing.started', `启动 ${task.items.length} 个 SKU 的自动流程（${task.targetName}）`);
     return task;
   };

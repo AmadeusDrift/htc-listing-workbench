@@ -1,3 +1,4 @@
+import { imageListingCopyMatches } from './context-compatibility.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
@@ -292,6 +293,7 @@ export class ImageWorkflowService {
     }
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
+    if(hasSevenApprovedImages(prior)&&draft.listingProgram==='haul'&&prior!.draftSha256!==imageWorkflowDraftStamp(draft)&&this.currentContextMatches(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
     if(hasSevenApprovedImages(prior)&&this.canRecheckImageContent(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
     if(hasSevenApprovedImages(prior)&&this.listing.prepareSourceColors
       &&(nonDeferredImageIssues(draft).some(issue=>issue.attributeNames.includes('color'))||!this.currentContextMatches(prior!,draft)))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
@@ -301,6 +303,20 @@ export class ImageWorkflowService {
     if (hasSevenApprovedImages(prior)) {
       try { approvedWorkflowAsset(this.db, draft, this.store.getProduct(draft.productId)); return Promise.resolve({ draft, aiCalls:0, previewAttempts:0, remaining:remaining(draft), workflow:prior! }); }
       catch { /* Source or copy changed: the explicit preparation action creates a new snapshot. */ }
+    }
+    // A listing-only rule refresh must not discard already paid partial slots.
+    // Preserve every frozen context/attempt; only rebind the mutable run checkpoint
+    // after proving source, recipe, current copy and source measurements unchanged.
+    if(prior?.slots&&prior.status!=='COMPLETED'&&prior.imageContext&&isFullSchema(prior.imageContext.listing)&&draft.listingProgram==='haul'&&prior.draftSha256!==imageWorkflowDraftStamp(draft)){
+      const product=this.store.getProduct(draft.productId),context=this.currentContext(draft,product,this.amazon.executionTargetScope(draft.targetId).generation);
+      const snapshot=currentImageListingSnapshot(draft,context),base=prior.imageContext;
+      if(imageActualInputsMatch(base,draft,product,snapshot.context,prior.imageRecipeSha256)
+        &&imageListingCopyMatches(base.listing,snapshot.context,base.currentListingCopy,snapshot.currentListingCopy)
+        &&listingFingerprint(imageRiskSourceSnapshot(product,draft.variantId))===listingFingerprint(base.ipSource)
+        &&listingFingerprint(currentSourceImageMeasurements(this.db,draft))===listingFingerprint(base.sourceMeasurements??[])){
+        const previous=prior.draftSha256;prior.draftSha256=imageWorkflowDraftStamp(draft);this.save(prior);
+        this.store.recordWorkspaceEvent('image.workflow.rule-rebound','业务填报规则更新；继续原图片流程，保留已完成图片、请求与尝试次数',{workflowId:prior.id,draftId:draft.id,previousDraftStamp:previous,draftStamp:prior.draftSha256});
+      }
     }
     const now = new Date().toISOString();
     const reusable=prior?.slots&&prior.status!=='COMPLETED'&&prior.productId===draft.productId&&prior.productRevision===draft.productRevision&&prior.variantId===draft.variantId&&prior.sku===draft.sku&&(!prior.draftSha256||prior.draftSha256===imageWorkflowDraftStamp(draft));
@@ -556,7 +572,7 @@ export class ImageWorkflowService {
         if(draft.revision===base.listing.draftRevision&&!this.listing.currentContext)return;
         const snapshot=currentImageListingSnapshot(draft,this.currentContext(draft,this.store.getProduct(run.productId),targetGeneration));
         if(!imageActualInputsMatch(base,draft,this.store.getProduct(run.productId),snapshot.context,run.imageRecipeSha256)
-          ||draft.revision!==base.listing.draftRevision&&listingFingerprint(snapshot.currentListingCopy)!==listingFingerprint(base.currentListingCopy))throw new AiError('SOURCE_CHANGED');
+          ||draft.revision!==base.listing.draftRevision&&!imageListingCopyMatches(base.listing,snapshot.context,base.currentListingCopy,snapshot.currentListingCopy))throw new AiError('SOURCE_CHANGED');
       };
       const fresh=async()=>{
         this.assertSourceConsistency(run.draftId);

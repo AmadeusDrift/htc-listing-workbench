@@ -1264,3 +1264,47 @@ for(const code of ['EMPTY_PROMPT','UNSUPPORTED_MEASUREMENT','SOURCE_OBSERVATION_
   }finally{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(rawCall,call.id);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(rawRun,result.workflow.id);db.close();}
  }
 });
+
+test('Haul rules reuse seven frozen approvals and hosted URLs survive paused execution without new generation',async t=>{
+  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
+  r.draft.listingProgram='haul';r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:market}];r.draft.attributes.purchasable_offer=[{audience:'BZR',currency:'USD',marketplace_id:market,our_price:[{schedule:[{value_with_tax:2.5}]}]}];r.draft.attributes.merchant_suggested_asin=[];
+  for(const field of ['item_name','material','color'])r.draft.attributes[field][0].marketplace_id=market;
+  Object.assign(r.draft.schema.schema.properties,{is_value_stores_item:{type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}},manufacturer:{type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'}},required:['value']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']},marketplace_id:{type:'string'}},required:['value','unit']}}});
+  r.draft.schema.checksum=createHash('md5').update(JSON.stringify(r.draft.schema.schema)).digest('base64');p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
+  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  f.cleanup(async()=>{await workflow.close();await generation.close();});
+  const first=await workflow.complete({draftId:f.draft.id,draftRevision:r.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');const frozen=p.db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id).record_json,calls=f.requests.length;
+  const fixed=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));assert.equal((fixed.attributes.item_package_weight as any)[0].value,.22);
+  const reused=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});
+  assert.equal(reused.workflow.approvalReuse?.sourceRunId,first.workflow.id,reused.workflow.error??'');assert.equal(f.requests.length,calls);assert.equal(images,7);assert.deepEqual(reused.workflow.slots,first.workflow.slots);
+  const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json,frozen);}finally{db.close();}
+  const {ExecutionService}=await import('../src/main/execution/service.ts');const remote=new Map<string,number>();let uploads=0,paused=false,taskId='',execution:InstanceType<typeof ExecutionService>;
+  const hosting=new HostingService(f.directory,f.store,mockStorage,{transport:{async size(_p,_c,path){return remote.get(path)??null;},async upload(_p,_c,path,data){uploads++;remote.set(path,data.length);if(uploads===3&&!paused){paused=true;execution.pause(taskId);}return data.length;},async close(){}},probe:async()=>{}});
+  hosting.importProfile({id:'alpha',host:'fixture.example.test',port:2121,secure:false,username:'fixture-user',password:'synthetic-password',remoteRoot:'/',publicBaseUrl:'https://htc.185858.xyz/AAA/'});hosting.setEnabled({id:'alpha',enabled:true});
+  execution=new ExecutionService(f.directory,f.store,f.amazon,hosting);f.cleanup(async()=>{await execution.close();await hosting.close();});
+  const task=execution.create({draftIds:[fixed.id],profileId:'alpha'});taskId=task.id;execution.startAuthorized(execution.prepareStart(task.id));await execution.waitForIdle();assert.equal(uploads,3);assert.equal(execution.get(task.id).status,'PAUSED');
+  await execution.close();execution=new ExecutionService(f.directory,f.store,f.amazon,hosting);execution.startAuthorized(execution.prepareStart(task.id));await execution.waitForIdle();
+  const done=execution.get(task.id),item=done.items[0];assert.equal(uploads,7);assert.equal(images,7);assert.equal(f.requests.length,calls);assert.equal(item.uploads.length,7);assert.equal(item.steps.find(s=>s.name==='images')!.status,'DONE');
+  const actual=f.amazon.getDraft(fixed.id);for(const [i,asset] of item.assets.entries()){const field=i===0?'main_product_image_locator':`other_product_image_locator_${i}`,url=item.uploads.find(u=>u.assetId===asset.id)!.publicUrl;assert.deepEqual(actual.attributes[field],[{marketplace_id:market,media_location:url}]);}
+  const preview=p.record(fixed.id).exchanges.find((e:any)=>e.operation==='preview');assert.ok(preview,'hosted attributes reached a validation preview');assert.deepEqual(preview.request.attributes,actual.attributes);
+});
+
+for(const unknown of [false,true])test(`Haul partial seven-image continuation preserves slots and ${unknown?'unknown request':'attempt budget'} after business defaults`,async t=>{
+  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
+  r.draft.listingProgram='haul';r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:market}];r.draft.attributes.purchasable_offer=[{audience:'BZR',currency:'USD',marketplace_id:market,our_price:[{schedule:[{value_with_tax:2.5}]}]}];
+  (r.draft.schema.schema.properties as any).is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
+  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;if(unknown&&images===3)throw Error('synthetic lost response');return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+  const listing={currentContext:(...args:Parameters<ListingAiService['currentContext']>)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input:any,signal?:AbortSignal)=>f.listing.reviewCurrentForImages(input,signal)};
+  let workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});f.cleanup(async()=>{await workflow.close();await generation.close();});
+  const plan=f.ai.imagePlan.bind(f.ai);let interrupted=false;f.ai.imagePlan=async(...args:Parameters<AiService['imagePlan']>)=>{if(!unknown&&args[0].slot?.index===3&&!interrupted){interrupted=true;throw new AiError('PROVIDER_ERROR');}return plan(...args);};
+  const first=await workflow.complete({draftId:f.draft.id,draftRevision:r.draft.revision});assert.equal(first.workflow.slots!.filter(s=>s.status==='PASSED').length,2);const frozen=structuredClone(first.workflow.slots!.slice(0,2)),context=structuredClone(first.workflow.imageContext),attempt=first.workflow.slots![2].attempts[0];
+  const fixed=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));
+  // This synthetic image fixture has no procurement input; pricing guards are tested separately.
+  const priced=p.record(fixed.id);delete priced.draft.businessRules.pricingDecision;priced.draft.businessRules.notices=[];p.putRecord(priced);
+  await workflow.close();workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});
+  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});if(!unknown)assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');else assert.equal(resumed.workflow.slots![2].attempts[0].state,'UNKNOWN');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?3:7);
+  await createWorkspaceBackup(f.directory,join(f.directory,'partial-rule-reuse.htcbackup'),'synthetic partial rules backup');
+});

@@ -101,6 +101,7 @@ export class AutomaticListingService {
   private deps: AutomaticListingDependencies;
   private tasks = new Map<string, AutomaticListingTask>();
   private grants = new Set<string>();
+  private confirming = new Set<string>();
   private worker: Promise<void> | null = null;
   private observing: Promise<void> | null = null;
   private controller: AbortController | null = null;
@@ -343,6 +344,15 @@ export class AutomaticListingService {
     const task = this.task(id);
     if (!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status) || this.activeId === id) throw new UserFacingError('此任务正在运行、等待平台或已经结束');
     this.assertScope(task,undefined,true); return structuredClone(task);
+  }
+  async confirmStart(id:string,confirm:(task:AutomaticListingTask)=>Promise<boolean>):Promise<AutomaticListingTask|null>{
+    const approved=this.prepareStart(id);
+    if(this.confirming.has(approved.id))throw new UserFacingError('此任务正在等待启动确认');
+    this.confirming.add(approved.id);
+    try{
+      if(!await confirm(approved))return null;
+      return this.startAuthorized(approved);
+    }finally{this.confirming.delete(approved.id);}
   }
   startAuthorized(approved: AutomaticListingTask): AutomaticListingTask {
     const task = this.task(approved.id);
@@ -749,7 +759,7 @@ export class AutomaticListingService {
     this.observing = Promise.resolve().then(async () => {
       const candidates = new Map(this.deps.procurement.candidates().map(value => [value.draftId, value]));
       for (const task of this.tasks.values()) {
-        const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
+        const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
         if (!canObserve()) continue;
         let resumeParents=false,interrupted=false;
         for (const row of task.items) {

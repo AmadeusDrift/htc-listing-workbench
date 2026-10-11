@@ -532,8 +532,12 @@ export class AutomaticListingService {
       if (!this.imageReady(prior)) {
         const changedRiskPolicy=!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
         if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
+        // complete rejects local preflight synchronously and defers admitted work.
+        // Save the conservative unknown marker before awaiting that work, not before
+        // the no-send entry checks; a rejected entry must remain recoverable.
+        const operation = this.deps.images.complete({ draftId: draft.id, draftRevision: draft.revision });
         row.imageStarted = true; this.save(task);
-        const result = await this.deps.images.complete({ draftId: draft.id, draftRevision: draft.revision });
+        const result = await operation;
         if(result.workflow.rejection)row.rejection={workflowId:result.workflow.id,detail:structuredClone(result.workflow.rejection)};else delete row.rejection;
         row.imageAttempts = result.workflow.attempt; this.save(task);
         if (!this.imageReady(result.workflow)) throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');

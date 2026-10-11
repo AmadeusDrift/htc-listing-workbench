@@ -38,7 +38,8 @@ async function launch() {
 }
 async function openAiSettings(page) {
   await page.getByRole('button',{name:'设置',exact:true}).click();
-  const nav=page.locator('#settings-nav-ai');
+  await expect(page.locator('.settings-panel')).toBeVisible();
+  const nav=page.locator('#settings-nav-ai');await expect(nav).toBeAttached();
   if(await nav.isVisible())await nav.click();else await page.locator('.settings-module-select select').selectOption('ai');
   await page.getByLabel('AI 连接供应商',{exact:true}).selectOption('deepseek');
 }

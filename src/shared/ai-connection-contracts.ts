@@ -20,7 +20,7 @@ export interface AiConnection {
 export type AiConnectionInput =
   | { id: 'deepseek'; apiKey: string }
   | { id: 'aliyun'; accessKeyId: string; accessKeySecret: string; securityToken?: string };
-export interface AiFunctionSettingsInput { id: AiProviderId; model: string; enabled: boolean }
+export interface AiFunctionSettingsInput { id: AiProviderId; model: string; enabled: boolean; thinking?: boolean }
 export interface AiConnectionApi {
   listAiConnections(): Promise<AiConnection[]>;
   saveAiConnection(input: AiConnectionInput): Promise<AiConnection>;

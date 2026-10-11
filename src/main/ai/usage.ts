@@ -46,15 +46,16 @@ function add(a: number, b: number): number { return integer(a + b, 0, Number.MAX
 export function requestTokenReservation(id: AiProviderId, body: string | Buffer): number {
   if (!isDeepSeek(id)) return 0;
   if (typeof body !== 'string') throw new AiError('INVALID_CONFIG');
-  const parsed = JSON.parse(body) as { max_tokens?: unknown; messages?: {content?: unknown}[] };
-  const maximum = integer(parsed.max_tokens, 1, 16384);
+  const parsed = JSON.parse(body) as { max_tokens?: unknown; thinking?: {type?:string}; messages?: {content?: unknown}[] };
+  const thinking=parsed.thinking?.type==='enabled';
+  const maximum = integer(parsed.max_tokens, 1, thinking?32768:16384);
   let setPlanning=false;
   if(id==='deepseek'&&maximum===16384){
     for(const message of parsed.messages??[])if(Array.isArray(message.content))for(const part of message.content)if(part.type==='text'&&typeof part.text==='string'){
       try{const payload=JSON.parse(part.text);if(payload.operation==='image-plan'&&payload.setPolicy==='seven-product-v2'&&!payload.slot)setPlanning=true;}catch{/* Ordinary text is not a planning request. */}
     }
   }
-  if (maximum !== (id === 'deepseek-review'||setPlanning ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
+  if (maximum !== (thinking ? 32768 : id === 'deepseek-review'||setPlanning ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
   let imageTokens = 0;
   for (const message of parsed.messages ?? []) if (Array.isArray(message.content)) {
     for (const part of message.content) if (part.type === 'image_url') {

@@ -13,6 +13,7 @@ export type AiProviderId = typeof AI_PROVIDER_IDS[number];
 export type AiCapability = 'ocr' | 'segmentation' | 'text' | 'text-review' | 'image-generation' | 'image-risk';
 /** Returned connection metadata only. Saved credentials are never returned. */
 export interface AiProfile {
+  thinking?: boolean;
   id: AiProviderId;
   capability: Exclude<AiCapability, 'image-generation'>;
   model: string;
@@ -34,6 +35,7 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  thinking?: boolean;
   rejection?: import('./rejection-presentation.ts').OutputRejection;
   presentationContext?: {workflowId?:string;kind:'image'|'listing';draftId:string;variantId:string;sourceSha256:string;slot:number};
   id: string; providerId: AiProviderId; productId: string; productRevision: number;

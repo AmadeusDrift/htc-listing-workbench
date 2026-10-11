@@ -66,10 +66,11 @@ export function parseConnectionInput(raw: unknown): { id: AiVendorId; credential
   return { id, credentials: parsed.credentials };
 }
 export function validateAiProfile(raw: unknown): AiProfile {
-  const o = keys(raw, ['id', 'capability', 'model', 'enabled', 'configured', 'generation']), id = providerId(o.id);
+  const o = keys(raw, ['id', 'capability', 'model', 'enabled', 'configured', 'generation'], ['thinking']), id = providerId(o.id);
   const enabled = flag(o.enabled), configured = flag(o.configured), generation = integer(o.generation, 0, Number.MAX_SAFE_INTEGER - 1);
   if (o.capability !== CAPABILITIES[id] || (enabled && !configured) || (configured && !generation)) invalid();
-  return { id, capability: CAPABILITIES[id], model: modelFor(id, o.model), enabled, configured, generation };
+  if(o.thinking!==undefined&&(!isDeepSeek(id)||typeof o.thinking!=='boolean'))invalid();
+  return { id, capability: CAPABILITIES[id], model: modelFor(id, o.model), enabled, configured, generation, ...(o.thinking===undefined?{}:{thinking:flag(o.thinking)}) };
 }
 export function validateUsage(raw: unknown): AiUsage {
   const o = keys(raw, ['promptTokens', 'completionTokens', 'processedImages']);
@@ -77,10 +78,11 @@ export function validateUsage(raw: unknown): AiUsage {
 }
 export function requestId(raw: unknown): string | null { if (raw === null || raw === undefined) return null; if (typeof raw !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw)) invalid(); return raw; }
 export function validateAiCall(raw: unknown): AiCall {
-  const o = keys(raw, ['id', 'providerId', 'productId', 'productRevision', 'status', 'errorCode', 'requestId', 'model', 'generation', 'startedAt', 'finishedAt', 'usage'], ['sourceColorContext','sourceConsistencyContext','rejection','presentationContext']), id = providerId(o.providerId);
+  const o = keys(raw, ['id', 'providerId', 'productId', 'productRevision', 'status', 'errorCode', 'requestId', 'model', 'generation', 'startedAt', 'finishedAt', 'usage'], ['sourceColorContext','sourceConsistencyContext','rejection','presentationContext','thinking']), id = providerId(o.providerId);
   if (typeof o.status !== 'string' || !['RUNNING', 'SUCCEEDED', 'FAILED'].includes(o.status) || (o.errorCode !== null && !AI_ERROR_CODES.includes(o.errorCode as AiErrorCode))) invalid();
   const startedAt = date(o.startedAt), finishedAt = o.finishedAt === null ? null : date(o.finishedAt);
   if ((o.status === 'RUNNING' && (finishedAt !== null || o.errorCode !== null)) || (o.status === 'SUCCEEDED' && (!finishedAt || o.errorCode !== null)) || (o.status === 'FAILED' && (!finishedAt || o.errorCode === null)) || (finishedAt && finishedAt < startedAt)) invalid();
+  if(o.thinking!==undefined&&(!isDeepSeek(id)||typeof o.thinking!=='boolean'))invalid();
   let presentationContext:AiCall['presentationContext'];
   if(o.presentationContext!==undefined){const c=keys(o.presentationContext,['kind','draftId','variantId','sourceSha256','slot'],['workflowId']);if(!['image','listing'].includes(String(c.kind)))invalid();presentationContext={...(c.workflowId===undefined?{}:{workflowId:uuid(c.workflowId)}),kind:c.kind as 'image'|'listing',draftId:uuid(c.draftId),variantId:uuid(c.variantId),sourceSha256:sha256(c.sourceSha256),slot:integer(c.slot,0,7)};if(c.kind==='listing'&&(c.slot!==0||c.workflowId!==undefined))invalid();}
   const rejection=o.rejection===undefined?undefined:validateOutputRejection(o.rejection);
@@ -89,7 +91,7 @@ export function validateAiCall(raw: unknown): AiCall {
   const sourceConsistencyContext=o.sourceConsistencyContext===undefined?undefined:validateConsistencyContext(o.sourceConsistencyContext);
   if(sourceConsistencyContext&&(sourceColorContext||id!=='deepseek'||o.model!=='deepseek-flash'||sourceConsistencyContext.productId!==o.productId||sourceConsistencyContext.productRevision!==o.productRevision))invalid();
   if(sourceColorContext&&(id!=='deepseek'||o.model!=='deepseek-flash'||sourceColorContext.productId!==o.productId||sourceColorContext.productRevision!==o.productRevision))invalid();
-  return { ...(presentationContext?{presentationContext}:{}), ...(rejection?{rejection}:{}), id: uuid(o.id), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), status: o.status as AiCall['status'], errorCode: o.errorCode as AiCall['errorCode'], requestId: requestId(o.requestId), model: modelFor(id, o.model), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), startedAt, finishedAt, usage: validateUsage(o.usage), ...(sourceColorContext?{sourceColorContext}:{}), ...(sourceConsistencyContext?{sourceConsistencyContext}:{}) };
+  return { ...(o.thinking===undefined?{}:{thinking:flag(o.thinking)}), ...(presentationContext?{presentationContext}:{}), ...(rejection?{rejection}:{}), id: uuid(o.id), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), status: o.status as AiCall['status'], errorCode: o.errorCode as AiCall['errorCode'], requestId: requestId(o.requestId), model: modelFor(id, o.model), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), startedAt, finishedAt, usage: validateUsage(o.usage), ...(sourceColorContext?{sourceColorContext}:{}), ...(sourceConsistencyContext?{sourceConsistencyContext}:{}) };
 }
 export function ossImageUrl(raw: unknown): string {
   const value = boundedText(raw, 8192);

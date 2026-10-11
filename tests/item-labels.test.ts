@@ -149,3 +149,17 @@ test('suspending scheduling leaves queued records intact until scheduling resume
   assert.equal(f.requests.length,0);assert.equal(f.service.get(row.id).status,'QUEUED');assert.equal(f.service.get(row.id).paused,false);
   f.service.resume();await new Promise(resolve=>setTimeout(resolve,35));assert.equal(f.requests.length,1);await f.service.runDue();
 });
+
+for(const failure of ['download','pdf','response','unexpected'] as const)test(`label failure preserves safe ${failure} detail across restart without automatic re-request`,async t=>{
+  const f=fixture(t),batch=f.batch();
+  if(failure==='download')f.setDownload(async()=>{throw new (await import('../src/shared/errors.ts')).UserFacingError('标签下载地址解析失败或超时');});
+  if(failure==='pdf')f.setDownload(async()=>Buffer.from('not a PDF'));
+  if(failure==='response')f.setCreate(async()=>({data:{},status:200,requestId:'local-test'}));
+  if(failure==='unexpected')f.setDownload(async()=>{throw new Error('private signed URL secret');});
+  const [row]=f.service.syncBatch(batch.id);await f.service.runDue();
+  const failed=f.service.get(row.id);
+  assert.equal(failed.status,'FAILED');
+  assert.match(failed.message,failure==='download'?/解析失败或超时/:failure==='pdf'?/不是有效 PDF/:failure==='response'?/没有返回完整标签文件列表/:/标签文件下载失败/);
+  assert.equal(failed.message.includes('secret'),false);
+  await f.reopen();await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(row.id).message,failed.message);
+});

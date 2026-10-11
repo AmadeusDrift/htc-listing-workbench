@@ -442,7 +442,8 @@ for(const action of ['pause','cancel'] as const)for(const resumeParents of [fals
     (f.service as any).grants.add(task.id);
   }
   let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>entered=resolve),held=new Promise<null>(resolve=>release=()=>resolve(null));
-  f.dependencies.images.getRuleFilterEvidence=async()=>{entered();return held;};
+  const classify=(f.service as any).classifyFailure.bind(f.service);
+  (f.service as any).classifyFailure=async(...args:any[])=>{await classify(...args);entered();await held;};
   f.dependencies.labels.syncBatch=()=>{f.calls.labels++;throw new UserFacingError('Local label fixture failure');};
   f.setReady();const pending=f.service.refreshWaiting();await started;
   f.service[action](task.id);const stopped=f.service.get(task.id),calls=structuredClone(f.calls);release();await pending;await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
@@ -1241,4 +1242,19 @@ test('synchronous image source preflight rejection is not an unknown paid reques
     assert.equal(f.calls.images, 1); assert.equal(f.calls.submissions, 1);
     assert.equal(restored.get(task.id).items[0].draftId, row.draftId);
   } finally { await restored.close(); }
+});
+
+for(const stage of ['READBACK','LABELS'] as const)test(`submitted ${stage} failure retains its own cause without requiring legacy source proof`,async t=>{
+  const f=fixture(t,'live'),task=await f.create();
+  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const db=openDatabase(f.directory);try{db.exec('DELETE FROM source_consistency_decisions');}finally{db.close();}
+  if(stage==='LABELS'){f.setReady();f.dependencies.labels.syncBatch=()=>{throw new UserFacingError('PDF 标签文件不完整');};}
+  else f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'平台回读确认缺少必填属性'} as any);
+  await f.service.refreshWaiting();
+  const row=f.service.get(task.id).items[0];
+  assert.equal(row.outcome?.code,stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED');
+  assert.equal(row.outcome?.kind,'SYSTEM_REPAIR');
+  assert.match(row.outcome!.message,stage==='LABELS'?/PDF 标签文件不完整/:/平台回读确认缺少必填属性/);
+  assert.equal(f.calls.submissions,1);assert.equal(f.calls.images,1);
+  assert.deepEqual(validateAutomaticListingTask(f.service.get(task.id)),f.service.get(task.id));
 });

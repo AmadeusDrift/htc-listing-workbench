@@ -1,9 +1,10 @@
+// Historical v0-v3 contract compatibility; new production behavior is covered by listing-full-schema tests.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { fixture, chat, reviewFor } from './fixtures/listing-ai.ts';
-import { buildListingContext, listingModelPayload } from '../src/main/listing-ai/context.ts';
+import { legacyFixture as fixture, chat, reviewFor } from './fixtures/listing-ai.ts';
+import { buildListingContext, listingModelPayload } from './helpers/legacy-listing-context.ts';
 import { assertListingEvidence, assertListingReview, listingFingerprint, validateListingFieldsOutput, validateListingReviewOutput } from '../src/main/listing-ai/validation.ts';
 import { sourceAttributes, sourceFieldName, sourceMappingReport } from '../src/main/amazon/demo.ts';
 import { candidateTextValues, validateFieldValues, wrapCandidateValues } from '../src/main/amazon/field-mapping.ts';

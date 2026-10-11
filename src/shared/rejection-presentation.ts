@@ -17,7 +17,7 @@ export function validateOutputRejection(raw:unknown):OutputRejection{
 export function validateFieldRejections(raw:unknown,output:ListingFieldsOutput,context:ListingAiContext):FieldRejections{
  const o=object(raw,['version','entries']);if(o.version!==REJECTION_VERSION||!Array.isArray(o.entries)||o.entries.length!==output.missing.length)invalid();
  const entries=(o.entries as unknown[]).map(raw=>{const e=object(raw,['field','origin','code']);
-  if(!LISTING_CANDIDATE_FIELDS.includes(e.field as CandidateField)||!FIELD_REJECTION_CODES.includes(e.code as FieldRejection['code'])||!['model-missing','local-validation'].includes(String(e.origin))||(e.origin==='model-missing')!==(e.code==='FIELD_CANDIDATE_ABSENT')||!output.missing.some(m=>m.field===e.field)||!context.fields.some(f=>f.name===e.field))invalid();
+  if(!(context.contract?Object.hasOwn(context.fullSchema!.schema.properties as object??{},String(e.field)):LISTING_CANDIDATE_FIELDS.includes(e.field as CandidateField))||!FIELD_REJECTION_CODES.includes(e.code as FieldRejection['code'])||!['model-missing','local-validation'].includes(String(e.origin))||(e.origin==='model-missing')!==(e.code==='FIELD_CANDIDATE_ABSENT')||!output.missing.some(m=>m.field===e.field)||!(context.contract?Object.hasOwn(context.fullSchema!.schema.properties as object??{},String(e.field)):context.fields.some(f=>f.name===e.field)))invalid();
   return {field:e.field as CandidateField,origin:e.origin as FieldRejection['origin'],code:e.code as FieldRejection['code']};});
  if(new Set(entries.map(e=>e.field)).size!==entries.length)invalid();return {version:REJECTION_VERSION,entries};
 }

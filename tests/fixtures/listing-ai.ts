@@ -14,7 +14,7 @@ export const saveInput = (p:ProductDetail): SaveProductInput => ({id:p.id,revisi
 export const mockStorage = {isEncryptionAvailable:()=>true,encryptString:(s:string)=>Buffer.from(`fixture:${s}`),decryptString:(b:Buffer)=>b.toString().slice(8)};
 export const chat = (value:unknown,finish='stop')=>new Response(JSON.stringify({id:'listing-fixture',choices:[{finish_reason:finish,message:{content:JSON.stringify(value)}}],usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150}}));
 export function candidateFor(payload:any) {
-  const material=payload.evidence.find((e:any)=>e.meaning==='material'), color=payload.evidence.find((e:any)=>e.meaning==='color');
+  const material=payload.evidence.find((e:any)=>e.meaning==='material'), color=payload.evidence.find((e:any)=>e.meaning==='color')??payload.evidence.find((e:any)=>e.id.endsWith(':spec'));
   const values: Record<string,[string,string[]]>= {item_name:['Blue Silicone Coaster',[material.id,color.id]],material:['Silicone',[material.id]],color:['Blue',[color.id]],product_description:['A blue silicone coaster.',[material.id,color.id]]};
   return {kind:'amazon-fields',candidates:payload.fields.filter((f:any)=>values[f.name]).map((f:any)=>({field:f.name,items:[{value:values[f.name][0],evidenceIds:values[f.name][1],transformation:'translate'}]})),missing:payload.fields.filter((f:any)=>!values[f.name]).map((f:any)=>({field:f.name,reason:'More verified facts needed.'}))};
 }
@@ -33,4 +33,10 @@ export async function fixture(t:TestContext, extraSchemaFields:JsonObject={}) {
   ai.saveConnection({id:'deepseek',apiKey:'fixture-shared-listing-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:true});
   const listing=new ListingAiService(store,amazon,ai);t.after(async()=>{await ai.close();await hosting.close();amazon.close();store.close();rmSync(directory,{recursive:true,force:true});});
   return{directory,store,amazon,hosting,ai,listing,product,draft,requests,reference:{draftId:draft.id,draftRevision:draft.revision},respond:(fn:typeof respond)=>{respond=fn;}};
+}
+/** Explicit v3 compatibility fixture. Production always uses the full-schema context. */
+export async function legacyFixture(t:TestContext,extraSchemaFields:JsonObject={}){
+  const f=await fixture(t,extraSchemaFields),current=f.listing.currentContext.bind(f.listing);
+  f.listing.currentContext=(draft,product,generation)=>current(draft,product,generation,true);
+  return f;
 }

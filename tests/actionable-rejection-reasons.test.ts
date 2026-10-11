@@ -60,7 +60,7 @@ import {buildListingContext} from '../src/main/listing-ai/context.ts';
 
 test('real AI failure persists fixed reason through restart and exact workflow ownership and backup without another request',async t=>{
  t.mock.method(globalThis,'fetch',()=>{throw Error('Network forbidden');});
- const f=await fixture(t);f.respond(payload=>{const output=candidateFor(payload);output.candidates[0].items[0].value='中文';return chat(output);});
+ const f=await fixture(t);f.respond(()=>chat({kind:'amazon-fields',candidates:null,missing:[]}));
  const operation=f.listing.beginCompletion(f.reference),context=f.listing.currentContext(f.draft,f.product,1),contextHash=listingFingerprint(context),candidateId=randomUUID();
  operation.rounds.push({context,contextHash,candidate:{id:candidateId,sent:false,resultId:null},review:operation.copyReviewEnabled?{id:randomUUID(),sent:false,resultId:null}:null,resolved:false,adoptionId:null});f.ai.completionJournal.save(operation);
  let caught:any;try{await f.ai.listingFields(context,async()=>{},undefined,undefined,{operationId:operation.id,callId:candidateId,contextHash});}catch(e){caught=e;}
@@ -98,6 +98,7 @@ test('real partial AI result persists local and model provenance, verifies owner
  const context=buildListingContext(f.draft,f.product,1);context.repairRequest={issues:[],currentValues:{}};
  f.respond(payload=>{const output=candidateFor(payload);output.candidates[0].items[0].value='中文';const omitted=output.candidates.pop()!;output.missing.push({field:omitted.field,reason:'missing'});for(const m of output.missing)m.reason='https://untrusted.invalid/?token=secret';return chat(output);});
  const result=await f.ai.listingFields(context,async()=>{});assert.ok(result.fieldRejections?.entries.some(e=>e.origin==='local-validation'));assert.ok(result.fieldRejections?.entries.some(e=>e.origin==='model-missing'));
+ assert.equal(result.output.kind,'amazon-fields');if(result.output.kind==='amazon-fields'){assert.ok(result.output.candidates.length>0,'valid native candidates survive another field failing copy policy');assert.ok(result.output.rejectedCandidates?.length);assert.ok(result.output.missing.some(m=>m.reason.includes('POLICY_LANGUAGE')));}
  assert.deepEqual(f.ai.getResult(result.id),result);const db=openDatabase(f.directory),raw=String(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json),call=f.ai.getCall(result.callId)!;
  const file=join(f.directory,'fields.htcbackup'),target=join(f.directory,'restored');await createWorkspaceBackup(f.directory,file,'synthetic-fields-passphrase');await commitWorkspaceRestore(target,await prepareWorkspaceRestore(target,file,'synthetic-fields-passphrase'));
  const restored=openDatabase(target);assert.equal(String(restored.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json),raw);restored.close();

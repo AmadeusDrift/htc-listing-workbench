@@ -1,10 +1,10 @@
+import { isFullSchema,candidateNative } from './full-schema.ts';
 import { assertStoredListingEvidence, assertStoredListingReview } from './stored-evidence.ts';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { LISTING_CANDIDATE_FIELDS } from '../../shared/listing-ai-contracts.ts';
 import { attributesObject } from '../amazon/context.ts';
-import { wrapCandidateValues } from '../amazon/field-mapping.ts';
 import { listingFingerprint } from './validation.ts';
 import { validateSalesPlan } from '../sales-plans/records.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -143,10 +143,11 @@ export function assertListingHistory(draft: AmazonDraft, results: Map<string,AiR
     if (!a || typeof a !== 'object' || Object.keys(a).sort().join() !== ['id','at','suggestionResultId','reviewResultId','contextSha256','fromRevision','toRevision','fields','changes', ...(hasDisposition ? ['reviewDisposition'] : [])].sort().join() || !Number.isFinite(Date.parse(a.at)) || !Number.isSafeInteger(a.fromRevision) || a.fromRevision <= previous || a.toRevision !== a.fromRevision + 1 || a.toRevision > draft.revision || ids.has(a.id)) invalid();
     if (hasDisposition && (a.reviewDisposition !== 'SKIPPED_DISABLED' || a.reviewResultId !== null)) invalid();
     ids.add(a.id); previous = a.fromRevision;
-    if (!Array.isArray(a.fields) || !a.fields.length || a.fields.length > LISTING_CANDIDATE_FIELDS.length || new Set(a.fields).size !== a.fields.length || a.fields.some(f=>!LISTING_CANDIDATE_FIELDS.includes(f)) || !Array.isArray(a.changes) || a.changes.length !== a.fields.length) invalid();
+    if (!Array.isArray(a.fields) || !a.fields.length || new Set(a.fields).size !== a.fields.length || a.fields.some(f=>typeof f!=='string') || !Array.isArray(a.changes) || a.changes.length !== a.fields.length) invalid();
     const suggestion = results.get(a.suggestionResultId), review = a.reviewResultId === null ? undefined : results.get(a.reviewResultId);
     if (!suggestion || suggestion.output.kind !== 'amazon-fields' || !suggestion.listingContext) return invalid();
     const c = suggestion.listingContext;
+    if(a.fields.some(f=>isFullSchema(c)?!Object.hasOwn(c.fullSchema!.schema.properties as object??{},f):!LISTING_CANDIDATE_FIELDS.includes(f)))invalid();
     if (a.reviewResultId === null) { if (!hasDisposition && c.policyVersion !== OPTIONAL_REVIEW_POLICY) invalid(); }
     else {
       if (!review || review.output.kind !== 'amazon-fields-review' || review.output.verdict !== 'PASS' || review.sourceResultIds[0] !== suggestion.id || review.sourceSha256 !== a.contextSha256) return invalid();
@@ -162,7 +163,8 @@ export function assertListingHistory(draft: AmazonDraft, results: Map<string,AiR
     for(const change of a.changes){
       const candidate=suggestion.output.candidates.find(candidate=>candidate.field===change.field);if(!candidate||!a.fields.includes(change.field))return invalid();
       attributesObject({before:change.before,after:change.after});
-      const expected=wrapCandidateValues(schema,draft.marketplaceId,change.field,candidate.items.map(item=>item.value),change.before??undefined);
+      if(isFullSchema(c)&&JSON.stringify(c.currentAttributes?.[change.field]??null)!==JSON.stringify(change.before))invalid();
+      const expected=candidateNative(candidate,schema,draft.marketplaceId,change.before??undefined);
       const evidenceIds=new Set(candidate.items.flatMap(item=>item.evidenceIds));
       if(JSON.stringify(expected)!==JSON.stringify(change.after)||JSON.stringify(c.evidence.filter(e=>evidenceIds.has(e.id)))!==JSON.stringify(change.evidence))invalid();
     }

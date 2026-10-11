@@ -10,6 +10,8 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { listingFingerprint, validateListingContext } from './validation.ts';
 import { projectSalesProduct } from '../sales-plans/records.ts';
 import { evidenceRole } from './evidence-contract-v2.ts';
+import { FULL_SCHEMA_CONTRACT } from '../../shared/listing-ai-contracts.ts';
+import { isFullSchema } from './full-schema.ts';
 
 function meaning(name: string): ListingEvidence['meaning'] {
   const n = name.toLowerCase().replace(/[\s_-]/g, '');
@@ -19,11 +21,19 @@ function meaning(name: string): ListingEvidence['meaning'] {
   if (/^(护理说明|清洗说明|清洁方式|洗涤说明|careinstructions|care)$/.test(n)) return 'care_instructions';
   return 'general';
 }
-export function buildListingContext(draft: AmazonDraft, product: ProductDetail, targetGeneration: number): ListingAiContext {
+export function buildListingContext(draft: AmazonDraft, product: ProductDetail, targetGeneration: number, legacy=false): ListingAiContext {
+  const originalProduct=product;
   product=projectSalesProduct(product,draft.salesPlan,draft.variantId);
   const variant = product.variants.find(v => v.id === draft.variantId);
   if (!variant || product.revision !== draft.productRevision || variant.sku !== draft.sku) throw new UserFacingError('来源商品或 SKU 已变化，请建立新草稿');
   if (draft.schema.locale !== 'en_US' || draft.marketplaceId !== 'ATVPDKIKX0DER') throw new UserFacingError('AI 字段辅助当前支持美国站英文，请选择 en_US');
+  if(!legacy){
+    const fields=Object.entries(draft.schema.schema.properties??{}).map(([name,node])=>({name,title:node&&typeof node==='object'&&!Array.isArray(node)&&typeof node.title==='string'?node.title:name,requirement:Array.isArray(draft.schema.schema.required)&&draft.schema.schema.required.includes(name)?'required' as const:'optional' as const,closedEnum:false,allowedValues:[],suggestedValues:[]}));
+    const evidence:ListingEvidence[]=product.facts.filter(f=>f.value.trim()).map(f=>({id:f.id,name:f.name,value:f.value,meaning:meaning(f.name),source:f.state==='human_confirmed'?'human_confirmed':f.state==='source_confirmed'?'source_confirmed':'raw_source'}));
+    evidence.push({id:`${variant.id}:spec`,name:'Selected SKU specification',value:variant.normalizedSpec||variant.originalSpec||variant.sku,meaning:'general',source:'selected_sku'});
+    evidence.push({id:`${variant.id}:title`,name:'Original product title',value:product.title||draft.schema.productType,meaning:'general',source:'selected_sku'});
+    return validateListingContext({contract:FULL_SCHEMA_CONTRACT,draftId:draft.id,draftRevision:draft.revision,productId:product.id,productRevision:product.revision,variantId:variant.id,sku:variant.sku,targetId:draft.targetId,targetGeneration,listingProgram:draft.listingProgram??'standard',productType:draft.schema.productType,marketplaceId:draft.marketplaceId,locale:draft.schema.locale,requirements:draft.schema.requirements,parentageLevel:draft.schema.parentageLevel,schemaChecksum:draft.schema.checksum,schemaVersion:draft.schema.version,schemaSha256:listingFingerprint({schema:draft.schema.schema,metaSchema:draft.schema.metaSchema}),policyVersion:AMAZON_COPY_POLICY_VERSION,fields,evidence,unverifiedSourceTitle:product.title,fullSchema:{schema:draft.schema.schema,metaSchema:draft.schema.metaSchema},currentAttributes:structuredClone(draft.attributes),businessValues:Object.fromEntries(Object.entries(draft.businessRules?.fields??{}).map(([field,entry])=>[field,entry.value])),sourceProduct:{variants:originalProduct.variants,...(draft.salesPlan?{salesRecipe:draft.salesPlan}:{}),title:originalProduct.title,description:originalProduct.description,facts:originalProduct.facts,selectedSku:variant,assets:originalProduct.assets}});
+  }
   const requested=new Set([...draft.localIssues,...draft.previewIssues,...draft.listingIssues].filter(issue=>issue.severity==='ERROR').flatMap(issue=>issue.attributeNames));
   // Newly supported optional attributes must not invalidate already-paid image
   // contexts. Activate them only when required, present, or requested by validation.
@@ -85,6 +95,7 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
 }
 /** Shop identifiers, schema and connection generation stay in the main process. */
 export function listingModelPayload(context: ListingAiContext) {
+  if(isFullSchema(context))return {contract:FULL_SCHEMA_CONTRACT,operation:'amazon-fields',targetLanguage:'US English',productType:context.productType,marketplaceId:context.marketplaceId,locale:context.locale,fullSchema:context.fullSchema,currentAttributes:context.currentAttributes,businessValues:context.businessValues,sourceProduct:context.sourceProduct,fields:context.fields.map(field=>({name:field.name,title:field.title,valueMode:undefined,options:undefined,suggestedOptions:undefined})),evidence:context.evidence,policy:{titleMaxCharacters:75,bulletCount:5,bulletMaxCharacters:500,descriptionMaxCharacters:500,keywordMaxUtf8Bytes:200},...(context.repairRequest?{repairRequest:context.repairRequest}:{})};
   return { targetLanguage: 'US English', productType: context.productType, policyVersion: context.policyVersion,
     policy: { titleMaxCharacters: 75, preferredTitleMaxCharacters: 70, bulletCount: 5, bulletMaxCharacters: 500, descriptionMaxCharacters: 500, keywordMaxUtf8Bytes: 200 },
     fields: context.fields.map(field=>({...field,valueMode:field.closedEnum?(field.allowedValues.length===1?'fixed' as const:'single_choice' as const):'free_text' as const,

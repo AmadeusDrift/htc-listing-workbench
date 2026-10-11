@@ -1,3 +1,4 @@
+import { assertFullEvidence,assertFullReview } from './full-schema.ts';
 /** Explicit history-only dispatch. Current authorization never selects rules from persisted metadata. */
 import * as legacy from './evidence-validation-v0.ts';
 import * as v1 from './evidence-validation-v1.ts';
@@ -10,6 +11,7 @@ export function assertStoredListingEvidence(output:Parameters<typeof v1.assertLi
   else if(version==='listing-evidence/v1')v1.assertListingEvidence(output,context);
   else if(version==='listing-evidence/v2')v2.assertListingEvidence(output,context);
   else if(version==='listing-evidence/v3')v3.assertListingEvidence(output,context);
+  else if(version==='listing-evidence/v4')assertFullEvidence(output,context);
   else throw new AiError('OUTPUT_INVALID');
 }
 export function assertStoredListingReview(review:Parameters<typeof v1.assertListingReview>[0],candidate:Parameters<typeof v1.assertListingReview>[1],context:Context,version?:string):void{
@@ -17,6 +19,7 @@ export function assertStoredListingReview(review:Parameters<typeof v1.assertList
   else if(version==='listing-evidence/v1')v1.assertListingReview(review,candidate,context);
   else if(version==='listing-evidence/v2')v2.assertListingReview(review,candidate,context);
   else if(version==='listing-evidence/v3')v3.assertListingReview(review,candidate,context);
+  else if(version==='listing-evidence/v4')assertFullReview(review,candidate,context);
   else throw new AiError('OUTPUT_INVALID');
 }
 
@@ -26,5 +29,6 @@ export function assertStoredImageEvidence(output:Parameters<typeof v1.assertList
   else if(version==='listing-evidence/v1')v1.assertListingEvidence(output,context);
   else if(version==='listing-evidence/v2')v2.assertListingEvidence(output,context);
   else if(version==='listing-evidence/v3')v3.assertListingEvidence(output,context);
+  else if(version==='listing-evidence/v4')assertFullEvidence(output,context);
   else throw new AiError('OUTPUT_INVALID');
 }

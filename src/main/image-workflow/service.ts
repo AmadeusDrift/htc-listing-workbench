@@ -10,7 +10,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
-import { LISTING_EVIDENCE_CONTRACT_VERSION } from '../../shared/listing-ai-contracts.ts';
+import { evidenceVersion } from '../listing-ai/full-schema.ts';
 import type { ProductImageContext } from '../../shared/image-ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY, IMAGE_TEXT_REVIEW_POLICY_VERSION } from '../../shared/image-ai-contracts.ts';
 import { assertCurrentListingReview, assertImageSetPlan, assertImagePlan, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../ai/image-validation.ts';
@@ -288,12 +288,12 @@ export class ImageWorkflowService {
     }
     const now = new Date().toISOString();
     const reusable=prior?.slots&&prior.status!=='COMPLETED'&&prior.productId===draft.productId&&prior.productRevision===draft.productRevision&&prior.variantId===draft.variantId&&prior.sku===draft.sku&&(!prior.draftSha256||prior.draftSha256===imageWorkflowDraftStamp(draft));
-    const run: ImageWorkflowRun = reusable?structuredClone(prior!):{ listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION,id:randomUUID(),draftId,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
+    const run: ImageWorkflowRun = reusable?structuredClone(prior!):{ listingEvidenceContractVersion:evidenceVersion(this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation)),id:randomUUID(),draftId,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
       status:'RUNNING',stage:'content',attempt:0,maxAttempts:integer(options.maxImageAttempts??3,1,3),contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:IMAGE_SET_POLICY,slots:newSlots(),categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION };
     if(!this.getRiskSettings().enabled)run.riskInterceptionEnabled=false;
     if(!this.getCopyReviewSettings().enabled)run.copyReviewEnabled=false;
     else if(!run.imageContext?.copyReviewBypass)delete run.copyReviewEnabled;
-    if(!run.imageContext)run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;
+    if(!run.imageContext)run.listingEvidenceContractVersion=evidenceVersion(this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation));
     run.status='RUNNING';run.error=null;delete run.rejection;
     this.save(run);
     const controller = new AbortController();
@@ -412,7 +412,7 @@ export class ImageWorkflowService {
     if(prior.slots&&!reusable){run.slots=newSlots();delete run.imageContext;delete run.activeSlot;delete run.copyRepairAttempts;delete run.approvalReuse;delete run.contentPreparation;delete run.copyReviewResultId;delete run.categoryFieldRepair;run.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;}
     if(prior.slots&&!this.getRiskSettings().enabled)run.riskInterceptionEnabled=false;else delete run.riskInterceptionEnabled;
     if(prior.slots&&!this.getCopyReviewSettings().enabled)run.copyReviewEnabled=false;else delete run.copyReviewEnabled;
-    if(!reusable||!run.imageContext)run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;
+    if(!reusable||!run.imageContext)run.listingEvidenceContractVersion=evidenceVersion(this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation));
     run.status='RUNNING';run.error=null;delete run.rejection;
     this.save(run);const controller=new AbortController();
     const promise=Promise.resolve().then(()=>prior.slots?this.runSeven(run,draft,controller.signal,prior):this.run(run,draft,controller.signal,prior)).finally(()=>this.active.delete(draftId));
@@ -522,7 +522,7 @@ export class ImageWorkflowService {
           }
         }
         run.imageContext=validateProductImageContext(base);
-        run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;
+        run.listingEvidenceContractVersion=evidenceVersion(run.imageContext.listing);
         run.imageRecipeSha256=listingFingerprint(result.draft.salesPlan?.recipe??null);
         run.contextSha256=listingFingerprint(run.imageContext);run.draftSha256=imageWorkflowDraftStamp(result.draft);this.save(run);
       }
@@ -558,7 +558,7 @@ export class ImageWorkflowService {
         if(!run.setPlanResultId){
           stage('planning');const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(base,fresh,undefined,signal,run.id));result.aiCalls++;
           if(plan.output.kind!=='image-plan'||!plan.output.setPlan)throw new AiError('OUTPUT_INVALID');
-          assertImagePlan(plan.output,base);run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
+          assertImagePlan(plan.output,base);run.listingEvidenceContractVersion=evidenceVersion(base.listing);run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
         }
         const planned=this.ai.getResult(run.setPlanResultId);
         if(!planned||planned.output.kind!=='image-plan'||listingFingerprint(planned.output.setPlan)!==listingFingerprint(run.setPlan))throw new AiError('SOURCE_CHANGED');
@@ -747,7 +747,7 @@ export class ImageWorkflowService {
           ||!imageListingContextsMatch({...previous.listing,draftRevision:0},{...context.listing,draftRevision:0})
           ||listingFingerprint(previous.referenceAssets)!==listingFingerprint(context.referenceAssets)||listingFingerprint(previous.ipSource)!==listingFingerprint(context.ipSource))throw new AiError('SOURCE_CHANGED');
       }
-      run.listingEvidenceContractVersion=LISTING_EVIDENCE_CONTRACT_VERSION;
+      run.listingEvidenceContractVersion=evidenceVersion(context.listing);
       run.contextSha256=listingFingerprint(context); run.draftSha256=imageWorkflowDraftStamp(result.draft); this.save(run);
       const fresh = async () => {
         this.assertSourceConsistency(run.draftId);

@@ -6,7 +6,7 @@ import { fixture, chat } from './fixtures/listing-ai.ts';
 import { AiError } from '../src/main/ai/errors.ts';
 import { requestDeepSeekJson } from '../src/main/ai/adapters.ts';
 
-const invalidOutput = { kind:'amazon-fields', candidates:[], missing:[], unexpected:'Unapproved response for offline diagnosis' };
+const invalidOutput = { kind:'amazon-fields', candidates:null, missing:[], unexpected:'Unapproved response for offline diagnosis' };
 const outputInvalid = (error: unknown) => error instanceof AiError && error.code === 'OUTPUT_INVALID';
 const diagnosticFiles = (directory: string) => existsSync(join(directory,'ai-diagnostics'))
   ? readdirSync(join(directory,'ai-diagnostics')).filter(name=>name.endsWith('.json')).sort() : [];

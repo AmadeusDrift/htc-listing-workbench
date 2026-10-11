@@ -20,6 +20,7 @@ import { readCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-a
 import { imageApprovalDraftSnapshot, validateApprovalReuse } from './approval-reuse.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
+import { isFullSchema } from '../listing-ai/full-schema.ts';
 
 export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = false, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
   if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
@@ -155,7 +156,7 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
   if (run.status !== 'COMPLETED' || run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || run.draftSha256 !== imageWorkflowDraftStamp(draft)) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
-  const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
+  const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0,!isFullSchema(run.imageContext?.listing));
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.
   const getResult=(id:string)=>{

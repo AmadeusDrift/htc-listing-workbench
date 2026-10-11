@@ -10,7 +10,8 @@ import { importImageFiles } from '../src/main/assets.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
-import { ListingAiService } from '../src/main/listing-ai/service.ts';
+// Keep the historical paid color resolver and its replay guards under the v3 contract.
+import { LegacyListingAiService as ListingAiService } from './helpers/legacy-listing-context.ts';
 import { AiError } from '../src/main/ai/errors.ts';
 import { validateAiCall, validateAiResult } from '../src/main/ai/validation.ts';
 import { openDatabase } from '../src/main/database.ts';

@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, candidateFor, chat, saveInput, reviewFor } from './fixtures/listing-ai.ts';
+import { fixture, legacyFixture, candidateFor, chat, saveInput, reviewFor } from './fixtures/listing-ai.ts';
 import { validateAiResult } from '../src/main/ai/validation.ts';
 test('generation and independent review share the connection and ledger without changing draft',async t=>{
   const f=await fixture(t),suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
   assert.equal(suggestion.output.kind,'amazon-fields');assert.equal(review.output.kind,'amazon-fields-review');assert.deepEqual(f.amazon.getDraft(f.draft.id),f.draft);
   assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,150);assert.equal(f.ai.getUsageSummary('deepseek-review').reportedTokens,150);
-  assert.equal(f.requests[0].max_tokens,4096);assert.equal(f.requests[1].max_tokens,16384);
-  const prompt=JSON.stringify(f.requests[0]);assert.ok(!prompt.includes('PRIVATE_BRAND'));assert.ok(!prompt.includes(f.draft.targetId));assert.ok(!prompt.includes('fixture-shared-listing-key'));
+  assert.equal(f.requests[0].max_tokens,16384);assert.equal(f.requests[1].max_tokens,16384);
+  const prompt=JSON.stringify(f.requests[0]);assert.ok(prompt.includes('PRIVATE_BRAND'));assert.ok(!prompt.includes(f.draft.targetId));assert.ok(!prompt.includes('fixture-shared-listing-key'));
   assert.deepEqual(validateAiResult(suggestion),suggestion);assert.throws(()=>validateAiResult({...suggestion,listingContext:{...suggestion.listingContext,draftRevision:999}}));
 });
 test('adoption is selective atomic versioned idempotent and allows an incomplete draft',async t=>{
@@ -26,14 +26,14 @@ test('changed source, cross-draft and rejected review cannot be adopted',async t
   await assert.rejects(f.listing.review({...f.reference,suggestionResultId:suggestion.id}));
 });
 test('invalid output is charged once and limits/cancellation prevent automatic retry',async t=>{
-  const f=await fixture(t);f.respond(p=>{const c=candidateFor(p);c.candidates[0].items[0].value='中文';return chat(c);});
+  const f=await fixture(t);f.respond(()=>chat({kind:'amazon-fields',candidates:null,missing:[]}));
   await assert.rejects(f.listing.suggest(f.reference));assert.equal(f.requests.length,1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);
   f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:1,dailyTokenLimit:null});await assert.rejects(f.listing.suggest(f.reference));assert.equal(f.requests.length,1);
   f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:null,dailyTokenLimit:null});const controller=new AbortController();controller.abort();await assert.rejects(f.listing.suggest(f.reference,controller.signal));assert.equal(f.requests.length,1);
 });
 
-test('an otherwise valid review with omitted words becomes actionable NEEDS_CHANGES and cannot be adopted', async t => {
-  const f = await fixture(t);
+test('legacy v3 review with omitted words becomes actionable NEEDS_CHANGES and cannot be adopted', async t => {
+  const f = await legacyFixture(t);
   f.respond(payload => {
     if (!payload.candidate) return chat(candidateFor(payload));
     const review = reviewFor(payload);

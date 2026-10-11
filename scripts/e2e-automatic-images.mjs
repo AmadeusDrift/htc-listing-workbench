@@ -26,6 +26,7 @@ const build = { packaged: Boolean(process.env.RED_E2E_EXECUTABLE), version: JSON
 const fakeKeys = { deepseek: 'automatic-e2e-fake-deepseek-key', image: 'automatic-e2e-fake-image-key', accessId: 'automatic-e2e-fake-access-id', accessSecret: 'automatic-e2e-fake-access-secret' };
 const checks = [], runs = [], sessions = [], screenshots = [], layouts = [], backups = [], errors = [], processLog = [];
 const startedAt = new Date().toISOString();
+const scope = process.env.RED_E2E_FULL_SCHEMA_ONLY === '1' ? 'full-schema-seven-images' : 'all-image-cases';
 let app, page, succeeded = false, failure = null;
 const pass = message => { checks.push(message); console.log(`PASS ${message}`); };
 
@@ -67,7 +68,7 @@ function installMockTransport(keys) {
     options.signal?.addEventListener('abort', () => { call.aborted = true; }, { once: true });
     if (address === 'https://api.deepseek.com/chat/completions') {
       const body = JSON.parse(options.body), content = body.messages[1].content, payload = JSON.parse(Array.isArray(content) ? content[0].text : content);
-      call.kind = payload.operation || (payload.candidate ? 'listing-fields-review' : 'listing-fields');
+      call.kind = payload.operation && payload.operation !== 'amazon-fields' ? payload.operation : (payload.candidate ? 'listing-fields-review' : 'listing-fields');
       call.evidence = payload.evidence?.map(({ name, value, source }) => ({ name, value, source }));
       call.model = body.model;
       if (new Headers(options.headers).get('authorization') !== `Bearer ${keys.deepseek}`) throw Error('Unexpected test text credential');
@@ -107,12 +108,19 @@ function installMockTransport(keys) {
         const evidenceIds = item.evidenceIds || idsFor(candidate.field);
         return { field: candidate.field, index, verdict: 'SUPPORTED', evidenceIds, reason: 'Matches confirmed product and selected SKU facts.', claims: [{ text: item.value, verdict: 'SUPPORTED', evidenceIds, reason: 'Matches the supplied facts.' }] };
       })), issues: [] });
-      const color = payload.evidence.find(value => value.meaning === 'color'), material = payload.evidence.find(value => value.meaning === 'material');
+      const color = payload.evidence.find(value => value.meaning === 'color') ?? payload.evidence.find(value => value.name === 'Selected SKU specification'), material = payload.evidence.find(value => value.meaning === 'material');
       const productType = payload.evidence.find(value => value.name === '产品类型');
       const title = productType && `${material ? `${material.value} ` : ''}${productType.value}`;
       const values = { color: color && ({ 米白: 'Off White', 灰色: 'Gray' }[color.value] || color.value), material: material?.value,
         item_name: title, product_description: title && `A ${title.toLowerCase()}.` };
-      return chat({ kind: 'amazon-fields', candidates: payload.fields.filter(field => values[field.name]).map(field => ({ field: field.name, items: [{ value: values[field.name], evidenceIds: idsFor(field.name), transformation: 'compose' }] })),
+      return chat({ kind: 'amazon-fields', ...(payload.contract?{contract:payload.contract}:{}), candidates: payload.fields.filter(field => values[field.name]).map(field => {
+        if(payload.contract==='listing-full-schema/v1'){
+          const schema=payload.fullSchema.schema.properties[field.name],props=schema.items?.properties,value=values[field.name];
+          const nativeValue=schema.type==='array'?[props?{value,...(props.marketplace_id?{marketplace_id:payload.marketplaceId}:{}),...(props.language_tag?{language_tag:payload.locale}:{})}:value]:value;
+          return {field:field.name,nativeValue,evidenceIds:idsFor(field.name),transformation:'compose'};
+        }
+        return { field: field.name, items: [{ value: values[field.name], evidenceIds: idsFor(field.name), transformation: 'compose' }] };
+      }),
         missing: payload.fields.filter(field => !values[field.name]).map(field => ({ field: field.name, reason: 'No fixture evidence for this field.' })) });
     }
     if (address === 'https://green-cip.cn-shanghai.aliyuncs.com/') {
@@ -304,6 +312,7 @@ async function createProduct(label) {
     const asset = product.assets.find(asset => !oldIds.includes(asset.id)); assert.ok(asset);
     product = await page.evaluate(input => window.red.updateAsset(input), { productId: product.id, revision: product.revision, assetId: asset.id, role: index ? 'gallery' : 'main', variantIds: [product.variants[index].id] });
   }
+  await page.evaluate(async product=>{for(const variant of product.variants){const input={productId:product.id,productRevision:product.revision,variantId:variant.id},view=await window.red.getSourceConsistency(input);await window.red.decideSourceConsistency({...input,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Synthetic image workflow fixture: checked original image correspondence for this test.'});}},product);
   return { product, sourceHashes };
 }
 async function importRemoteProduct() {
@@ -406,7 +415,7 @@ try {
   await page.evaluate(async () => { const rules = await window.red.getListingRules(); rules.product.variantLimit = 1; rules.pricing.bundleEnabled = false; await window.red.saveListingRules(rules); });
   const first = await createProduct('PASS');
   await selectProduct(first.product, target.id);
-  await expect(panel().getByRole('region', { name: '全局自动化连接' })).toContainText('请先完成全局连接配置');
+  await expect(panel().locator('details[aria-label="全局自动化连接"]')).toContainText('连接尚未就绪');
   await expect(button('启动并自动发布')).toBeDisabled();
   assert.deepEqual(await app.evaluate(() => globalThis.__automaticImagesE2E.calls), []);
   await configure();
@@ -453,6 +462,7 @@ try {
   await page.evaluate(id => window.red.cancelExecutionTask(id), task.id);
   pass('normal execution selects one approved main and six approved gallery images without changing source asset roles or submitting');
 
+  if(scope==='all-image-cases'){
   const repaired = await scenario(await createProduct('REPAIR'), target.id, 'repair', 'done', 2);
   assert.equal(repaired.workflow.status, 'COMPLETED'); assert.equal(repaired.workflow.attempt, 8);assert.equal(repaired.workflow.slots[0].attempts.length,2);
   assert.equal(repaired.calls.filter(call => call.kind === 'image-generation').length, 8);
@@ -560,7 +570,7 @@ try {
   assert.ok(skippedCopyResults.every(result=>!['amazon-fields-review','listing-current-review'].includes(result.output.kind)),'No skipped review may be persisted as PASS');
   const skippedCopyPlan=skippedCopyResults.find(result=>result.output.kind==='image-plan');
   assert.equal(skippedCopyPlan.imageContext.copyReviewBypass.policy,'copy-review-disabled/v1');
-  await expect(panel().getByRole('region',{name:'全局自动化连接'})).toContainText('文案复核：已关闭');
+  await expect(panel().locator('details[aria-label="全局自动化连接"]')).toContainText('文案复核：已关闭');
   pass('copy review switch saves through real UI/IPC, still generates required fields and skips both copy review calls while retaining independent risk and main no-text checks');
 
   await click(page.locator('nav').getByRole('button',{name:'设置',exact:true}));
@@ -718,10 +728,11 @@ try {
   assert.ok((await page.evaluate(() => window.red.listAiProviders())).every(profile => !profile.configured && !profile.enabled));
   assert.equal((await page.evaluate(() => window.red.getImageGenerationConnection('tyai'))).configured, false);
   await selectProduct(passed.product, target.id);
-  await expect(panel().getByRole('region', { name: '全局自动化连接' })).toContainText('请先完成全局连接配置');
+  await expect(panel().locator('details[aria-label="全局自动化连接"]')).toContainText('连接尚未就绪');
   await expect(button('启动并自动发布')).toBeDisabled();
   assert.deepEqual(await app.evaluate(() => globalThis.__automaticImagesE2E.calls), []);
   pass('encrypted backup/restore preserves both switches, explicit copy-skip history, approved PNGs and review/workflow provenance, excludes candidate caches and credentials, and returns the UI to setup-required state');
+  }
   await close();
   assert.deepEqual(sessions.flatMap(session => session.unexpected), []); assert.deepEqual(sessions.flatMap(session => session.remoteRequests), []);
   assert.deepEqual(sessions.flatMap(session => session.shownWindows), []); assert.deepEqual(errors, []); assertPrivate(processLog); assertPrivate(sessions);
@@ -738,7 +749,7 @@ try {
   }
 } finally {
   await close().catch(error => { errors.push(`cleanup: ${error.message}`); succeeded = false; });
-  const report = { passed: succeeded, startedAt, finishedAt: new Date().toISOString(), dataRoot, build, checks, runs, layouts, backups, screenshots, sessions, errors, failure, processLog,
+  const report = { passed: succeeded, scope, startedAt, finishedAt: new Date().toISOString(), dataRoot, build, checks, runs, layouts, backups, screenshots, sessions, errors, failure, processLog,
     environment: 'separate hidden production Electron; real preload/IPC/services/safeStorage; isolated data; fake keys; all provider transports mocked before initialization; renderer HTTP(S) blocked; no window.red mocks' };
   let serialized = JSON.stringify(report, null, 2);
   for (const key of Object.values(fakeKeys)) serialized = serialized.replaceAll(key, '[REDACTED FAKE KEY]');

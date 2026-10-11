@@ -61,7 +61,7 @@ test('disabled review keeps invalid candidate evidence out of adopted fields', a
   });
   const result = await listing.complete(f.reference);
   assert.equal(result.draft.fieldAdoptions?.length ?? 0, 0);
-  assert.ok(result.remaining.some(value => value.includes('依据')));
+  assert.ok(result.remaining.some(value => value.includes('矛盾')));
   assert.equal(f.ai.getUsageSummary('deepseek-review').attempts, 0);
 });
 

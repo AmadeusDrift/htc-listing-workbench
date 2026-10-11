@@ -22,6 +22,7 @@ import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore 
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { approvedWorkflowAsset, approvedWorkflowAssets, imageWorkflowDraftStamp, workflowRuns, validateImageWorkflowRun, validateStoredImageWorkflowRun } from '../src/main/image-workflow/records.ts';
 import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
+import { imageListingContextsMatch } from '../src/main/image-workflow/context-compatibility.ts';
 import { ImageGenerationService } from '../src/main/image-generation/service.ts';
 import { AiError } from '../src/main/ai/errors.ts';
 import { saveInput, mockStorage, chat } from './fixtures/listing-ai.ts';
@@ -46,7 +47,7 @@ function currentReview(payload: any) {
     return { field: item.field, index, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.', claims: [{ text: value.value, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.' }] };
   })), issues: [] };
 }
-async function fixture(t: test.TestContext, extraReference=false, withAge=false) {
+async function fixture(t: test.TestContext, extraReference=false, withAge=false, legacy=false) {
   mkdirSync(resolve('.test-data'), { recursive: true });
   const directory = mkdtempSync(resolve('.test-data/image-ai-')), store = new WorkspaceStore(directory);
   let product = store.createProduct();
@@ -95,11 +96,16 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false)
   ai.importProfile({ id: 'aliyun-image-risk', accessKeyId: 'image-fixture-key', accessKeySecret: 'image-fixture-secret' }); ai.setEnabled({ id: 'aliyun-image-risk', enabled: true });
   const cleanups:(()=>Promise<void>)[]=[];
   t.after(async () => { for(const cleanup of cleanups)await cleanup();await ai.close(); await hosting.close(); amazon.close(); store.close(); rmSync(directory,{ recursive:true, force:true }); });
-  const listing = new ListingAiService(store, amazon, ai), reviewed = await listing.reviewCurrentForImages({ draftId: draft.id, draftRevision: draft.revision });
+  const listing = new ListingAiService(store, amazon, ai);
+  if(legacy){const current=listing.currentContext.bind(listing);listing.currentContext=(draft,product,generation)=>current(draft,product,generation,true);}
+  const reviewed = await listing.reviewCurrentForImages({ draftId: draft.id, draftRevision: draft.revision });
   const context: ProductImageContext = { listing: reviewed.context, currentListingCopy: reviewed.currentListingCopy, listingReviewResultId: reviewed.review.id, referenceAssets: product.assets.map(asset=>({assetId:asset.id,sha256:store.getAssetRecord(asset.id)!.sha256,variantId:product.variants[0].id})), purpose: 'main', policyVersion: PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,product.variants[0].id) };
   const candidate: CandidateImageIdentity = { id: randomUUID(), sha256: createHash('sha256').update(bytes).digest('hex'), width: 256, height: 256 };
   return { directory, store, product, amazon, draft, ai, listing, context, candidate, bytes, requests, cleanup:(value:()=>Promise<void>)=>cleanups.push(value), respond: (value: typeof respond) => { respond = value; } };
 }
+
+// Historical records must contain the original limited-field context, not a v4 context with an old version stamp.
+const legacyFixture=(t:test.TestContext,extraReference=false,withAge=false)=>fixture(t,extraReference,withAge,true);
 
 test('image plan, candidate OCR and independent text review persist source-bound provenance and shared usage', async t => {
   const f = await fixture(t), fresh = () => {};
@@ -112,8 +118,37 @@ test('image plan, candidate OCR and independent text review persist source-bound
   assert.ok(!JSON.stringify(f.requests[1].payload).includes(f.draft.targetId));
 });
 
+test('v4 current-copy review accepts interpreted source wording without requiring claim substring coverage',async t=>{
+  const f=await fixture(t,false,true),context=structuredClone(f.context.listing);
+  const changedCopy=structuredClone(context);
+  changedCopy.currentAttributes!.item_name=[{value:'Reworded coaster'}];
+  assert.equal(imageListingContextsMatch(context,changedCopy),true);
+  for(const field of ['color','material']){
+    const changedFact=structuredClone(changedCopy);
+    changedFact.currentAttributes![field]=[{value:'Changed actual attribute'}];
+    assert.equal(imageListingContextsMatch(context,changedFact),false);
+  }
+  changedCopy.sourceProduct!.title='Different source product';
+  assert.equal(imageListingContextsMatch(context,changedCopy),false);
+  context.evidence.find(item=>item.name==='适用年龄')!.value='三岁以上';
+  assert.equal(imageListingContextsMatch(f.context.listing,context),false);
+  f.respond((operation,payload)=>{
+    if(operation!=='listing-current-review')return undefined;
+    const review=currentReview(payload);
+    review.checks.forEach((check:any)=>{check.claims=[];});
+    return chat(review);
+  });
+  const review=await f.ai.reviewCurrentListing(context,f.context.currentListingCopy,async()=>{});
+  assert.equal(review.listingEvidenceContractVersion,'listing-evidence/v4');
+  if(review.output.kind!=='listing-current-review')throw Error('Unexpected review');
+  assert.equal(review.output.verdict,'PASS');
+  assert.deepEqual(validateAiResult(review),review);
+  const plan=await f.ai.imagePlan({...f.context,listing:context,listingReviewResultId:review.id},()=>{});
+  assert.equal(plan.output.kind,'image-plan');
+});
+
 test('legacy PASS remains readable but cannot authorize a new image request with an unparsed direct source',async t=>{
-  const f=await fixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const f=await legacyFixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
   const evidence={id:randomUUID(),name:'适用年龄',value:'三岁以上',meaning:'general' as const,source:'source_confirmed' as const};
   context.listing.fields=[{name:'age_range_description',title:'Age',requirement:'required',closedEnum:false,allowedValues:[],suggestedValues:[]}];
   context.listing.evidence=[evidence];context.currentListingCopy=[{field:'age_range_description',values:['Adult']}];
@@ -137,13 +172,14 @@ function productionWorkflow(f:Awaited<ReturnType<typeof fixture>>,failAfter?:num
   }});
   generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation);
+  if(!f.context.listing.contract){const listing=(workflow as any).listing as ListingAiService,current=listing.currentContext.bind(listing);listing.currentContext=(draft,product,generation)=>current(draft,product,generation,true);}
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   return {workflow,posts:()=>posts};
 }
 
 for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)for(const proof of ['caption','adoption'] as const)
 test((version??'v0')+' old-builder '+proof+' cannot join missing saved category proof with a current matching value',async t=>{
-  const f=await fixture(t,false,true),{workflow,posts}=productionWorkflow(f);
+  const f=await legacyFixture(t,false,true),{workflow,posts}=productionWorkflow(f);
   const legacy=(workflow as any).listing as ListingAiService,strict=legacy.currentContext.bind(legacy);
   const omitAge=(context:ReturnType<ListingAiService['currentContext']>)=>({...context,evidence:context.evidence.filter(item=>item.name!=='适用年龄')});
   legacy.currentContext=(...args)=>omitAge(strict(...args));
@@ -196,7 +232,7 @@ test((version??'v0')+' old-builder '+proof+' cannot join missing saved category 
 });
 
 test('same-value prose citation repair permits rechecking seven valid legacy images without regeneration',async t=>{
-  const f=await fixture(t,false,true);
+  const f=await legacyFixture(t,false,true);
   const respondFields=(operation:string,payload:any)=>{
     if(operation==='ip-upload')return new Response(null,{status:200});
     if(!operation&&payload.fields)return chat(payload.candidate?currentReview(payload):{kind:'amazon-fields',candidates:[{field:'item_name',items:[{value:'Adult Coaster',evidenceIds:payload.evidence.filter((e:any)=>e.name==='适用年龄').map((e:any)=>e.id),transformation:'compose'}]}],missing:payload.fields.filter((field:any)=>field.name!=='item_name').map((field:any)=>({field:field.name,reason:'Outside this repair'}))});
@@ -248,7 +284,7 @@ test('same-value prose citation repair permits rechecking seven valid legacy ima
 });
 
 test('a cached legacy PASS with exact context and copy hashes cannot bypass current source parsing',async t=>{
-  const f=await fixture(t,false,true),review=structuredClone(f.ai.getResult(f.context.listingReviewResultId!)!);
+  const f=await legacyFixture(t,false,true),review=structuredClone(f.ai.getResult(f.context.listingReviewResultId!)!);
   const evidence=review.listingContext!.evidence.find(e=>e.name==='适用年龄')!;
   evidence.value='三岁以上';review.sourceSha256=listingFingerprint(review.listingContext);delete review.listingEvidenceContractVersion;
   const db=openDatabase(f.directory);try{
@@ -263,7 +299,7 @@ test('a cached legacy PASS with exact context and copy hashes cannot bypass curr
 });
 
 test('legacy caption and nested set-plan evidence remains readable and backup-stable but cannot authorize continuation',async t=>{
-  const f=await fixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
+  const f=await legacyFixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
   const saved=await f.ai.imagePlan(context,()=>{}),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
   const evidence={id:context.listing.variantId+':audience',name:'适用对象',value:'儿童',meaning:'general' as const,source:'selected_sku' as const};
   context.listing.evidence.push(evidence);
@@ -296,7 +332,7 @@ test('legacy caption and nested set-plan evidence remains readable and backup-st
 });
 
 for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)test(`${version??'v0'} negative-caption history preserves nested plans, run literals and backup bytes`,async t=>{
-  const f=await fixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
+  const f=await legacyFixture(t),context:ProductImageContext={...structuredClone(f.context),setPolicy:'seven-product-v2',referenceMeasurements:[]};
   const saved=await f.ai.imagePlan(context,()=>{}),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
   const evidence={id:context.listing.variantId+':age',name:'适用年龄',value:version==='listing-evidence/v2'?'儿童':'不适合儿童',meaning:'general' as const,source:'selected_sku' as const};
   context.listing.evidence.push(evidence);
@@ -344,7 +380,7 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
 });
 
 for(const version of [undefined,'listing-evidence/v1'] as const)test(`${version??'v0'} PASS review of an excluded category remains readable but authorizes no image calls`,async t=>{
-  const f=await fixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
+  const f=await legacyFixture(t),context=structuredClone(f.context),review=structuredClone(f.ai.getResult(context.listingReviewResultId!)!);
   const evidence={id:randomUUID(),name:'适用年龄',value:'不适合儿童',meaning:'general' as const,source:'source_confirmed' as const};
   context.listing.fields=[{name:'age_range_description',title:'Age',requirement:'required',closedEnum:false,allowedValues:[],suggestedValues:[]}];
   context.listing.evidence=[evidence];context.currentListingCopy=[{field:'age_range_description',values:['Child']}];
@@ -357,7 +393,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`${version?
 });
 
 for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as const)for(const resumeEmpty of [false,true])test(`a ${resumeEmpty?'resumed empty':'fresh'} ${version??'unmarked'} recheck versions its new context without rewriting old paid evidence`,async t=>{
-  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),material=f.context.listing.evidence.find(e=>e.meaning==='material')!;
+  const f=await legacyFixture(t),{workflow,posts}=productionWorkflow(f),material=f.context.listing.evidence.find(e=>e.meaning==='material')!;
   const sourceDb=openDatabase(f.directory);
   try{sourceDb.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(),f.product.id,'适用年龄','成人','manual','upgrade-era omitted conflict','conflicting',99);}finally{sourceDb.close();}
   // Recreate only the historical builder omission; source/IP facts stay identical.
@@ -422,14 +458,14 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
   f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:false});
   const before=f.requests.length,pending=workflow.complete(input),created=workflow.getProgress(f.draft.id)!;
   const failed=await pending;
-  assert.equal(created.id,old.id);assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v3');
-  assert.equal(failed.workflow.listingEvidenceContractVersion,'listing-evidence/v3');assert.equal(failed.workflow.imageContext,undefined);
+  assert.equal(created.id,old.id);assert.equal(created.listingEvidenceContractVersion,'listing-evidence/v4');
+  assert.equal(failed.workflow.listingEvidenceContractVersion,'listing-evidence/v4');assert.equal(failed.workflow.imageContext,undefined);
   assert.notEqual(failed.workflow.status,'COMPLETED');assert.match(failed.workflow.error??'',/配置并启用/);
   assert.equal(f.requests.length,before);assert.equal(posts(),0);
 });
 
 test('the legacy single-image path stamps a new current context and fresh recheck while preserving the old run',async t=>{
-  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),now=new Date().toISOString();
+  const f=await legacyFixture(t),{workflow,posts}=productionWorkflow(f),now=new Date().toISOString();
   (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
   const seed=validateStoredImageWorkflowRun({id:randomUUID(),draftId:f.draft.id,productId:f.product.id,productRevision:f.product.revision,variantId:f.draft.variantId,sku:f.draft.sku,status:'RUNNING',stage:'content',attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION});
   const first=await (workflow as any).run(seed,f.draft,new AbortController().signal);
@@ -491,7 +527,7 @@ test('current image authorization checks the approved slot plan and preserves su
 });
 
 for(const version of [undefined,'listing-evidence/v1'] as const)test(`old ${version??'unmarked'} captions contradicted by current selected exclusions authorize no images or paid recheck`,async t=>{
-  const f=await fixture(t),{workflow,posts}=productionWorkflow(f),db=openDatabase(f.directory);
+  const f=await legacyFixture(t),{workflow,posts}=productionWorkflow(f),db=openDatabase(f.directory);
   try{
     db.prepare('UPDATE variants SET source_spec=?,normalized_spec=? WHERE id=?').run('不适合儿童','Children Blue',f.product.variants[0].id);
   await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
@@ -528,7 +564,7 @@ for(const version of [undefined,'listing-evidence/v1'] as const)test(`old ${vers
 });
 
 test('real source-image color adoption keeps its citations through approved images and zero-call reuse',async t=>{
-  const f=await fixture(t,false,true),product=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.filter(fact=>fact.name!=='适用年龄'),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:'型号: 602Q',normalizedSpec:'602Q'}))});
+  const f=await legacyFixture(t,false,true),product=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.filter(fact=>fact.name!=='适用年龄'),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:'型号: 602Q',normalizedSpec:'602Q'}))});
   await confirmSourceConsistencyFixture(f.directory,f.store,product.id);
   let draft=await f.amazon.createDraft({productId:product.id,variantId:product.variants[0].id,targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   const market=draft.marketplaceId;
@@ -554,8 +590,8 @@ test('real source-image color adoption keeps its citations through approved imag
   await assert.rejects(f.listing.snapshotCurrentForImages(request));assert.equal(f.requests.length,before);
 });
 
-for(const incomplete of [false,true])test(`current conflicts block ${incomplete?'interrupted':'completed'} image continuation while preserving paid history`,async t=>{
-  const f=await fixture(t),{workflow,posts}=productionWorkflow(f,incomplete?1:undefined);
+for(const incomplete of [false,true])test(`legacy conflicts block ${incomplete?'interrupted':'completed'} image continuation while preserving paid history`,async t=>{
+  const f=await legacyFixture(t),{workflow,posts}=productionWorkflow(f,incomplete?1:undefined);
   const reference={draftId:f.draft.id,draftRevision:f.draft.revision},first=await workflow.complete(reference);
   assert.equal(first.workflow.status,incomplete?'FAILED':'COMPLETED',first.workflow.error??'');
   const db=openDatabase(f.directory);try{
@@ -718,8 +754,8 @@ test('text review enumerates the exact OCR summary and every nonempty original l
   await assert.rejects(f.ai.reviewGeneratedImage(context, plan, ocr, f.candidate, () => {}), (error: unknown) => error instanceof AiError && error.code === 'OUTPUT_INVALID');
 });
 
-test('current-copy review uses the shared item and claim verdict contract', async t => {
-  const f = await fixture(t);
+test('legacy current-copy review uses the shared item and claim verdict contract', async t => {
+  const f = await legacyFixture(t);
   assert.ok(f.requests[0].body.messages[0].content.includes(LISTING_REVIEW_OUTPUT_RULES));
 });
 
@@ -733,8 +769,8 @@ test('set planning states the existing dimension reason, unit and numeric eviden
   assert.match(system, /camera lenses, background props, or excluded unknown dimensions.*qualitatively/);
 });
 
-test('current-copy review reports omitted wording without granting image planning approval', async t => {
-  const f = await fixture(t);
+test('legacy current-copy review reports omitted wording without granting image planning approval', async t => {
+  const f = await legacyFixture(t);
   f.respond((operation, payload) => {
     if (operation !== 'listing-current-review') return undefined;
     const review = currentReview(payload);
@@ -777,7 +813,7 @@ test('seven images through production AI adapters retain auditable slot provenan
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return new Response(JSON.stringify({data:[{b64_json:bytes.toString('base64')}]}));}});
   generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
-  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');
   assert.equal(imageCount,7);const requests=f.requests.filter(item=>item.operation==='image-plan');assert.deepEqual(requests.map(item=>item.payload.slot?.index),[undefined,1,2,3,4,5,6,7]);
@@ -847,7 +883,7 @@ test('a source-image size, feature captions and optional scene copy survive the 
   const prompts:string[]=[];
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async(_url,init)=>{prompts.push(String(init?.body));const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
   generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
-  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
   assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(imageCount,7);
@@ -867,7 +903,7 @@ test('equivalent draft saves resume unknown candidates without changing historic
     generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
     const send=generation.generateForWorkflow.bind(generation);
     generation.generateForWorkflow=async(...args)=>{const candidate=await send(...args);if(posts===2&&loseResponse){loseResponse=false;throw new AiError('TIMEOUT');}return candidate;};
-    const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+    const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
     f.cleanup(async()=>{await workflow.close();await generation.close();});
     const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
     assert.equal(first.workflow.slots![0].status,'PASSED');assert.equal(first.workflow.slots![1].status,'UNKNOWN');
@@ -959,7 +995,7 @@ test('new slot OCR tolerates harmless markings and missing cosmetic captions but
   f.context.slot={index:1,total:7,provisional:true};
   if(ocr.output.kind!=='generated-image-ocr')throw new Error('Wrong OCR');
   ocr.output.text='blue!';ocr.output.lines=[{text:'blue!',confidence:0.8,box:null}];
-  const review:any={kind:'image-text-review',candidate:f.candidate,planResultId:plan.id,ocrResultId:ocr.id,verdict:'PASS',checks:['summary','line'].map(source=>({source,index:0,text:'blue!',verdict:'SUPPORTED',evidenceIds:[`${f.context.listing.variantId}:color`],reason:'Same actual color despite punctuation.'})),expectedTextChecks:[],noTextVerified:false,issues:[],visualReview:'not_performed'};
+  const review:any={kind:'image-text-review',candidate:f.candidate,planResultId:plan.id,ocrResultId:ocr.id,verdict:'PASS',checks:['summary','line'].map(source=>({source,index:0,text:'blue!',verdict:'SUPPORTED',evidenceIds:[f.context.listing.evidence.find(e=>e.name==='Selected SKU specification')!.id],reason:'Same actual color despite punctuation.'})),expectedTextChecks:[],noTextVerified:false,issues:[],visualReview:'not_performed'};
   assert.doesNotThrow(()=>assertImageTextReview(review,f.context,plan,ocr,f.candidate));
   f.context.purpose='detail';f.context.slot.index=2;f.context.listing.evidence.push({id:'measured',name:'Measured diameter',value:'8 cm',meaning:'general',source:'human_confirmed'});
   ocr.output.text='80 mm';ocr.output.lines=[{text:'80 mm',confidence:1,box:null}];
@@ -990,7 +1026,7 @@ test('default-backed weight is removed before independent image-copy review and 
   const start=f.requests.length,reviewed=await f.listing.reviewCurrentForImages({draftId:draft.id,draftRevision:draft.revision});
   const context:ProductImageContext={...f.context,listing:reviewed.context,currentListingCopy:reviewed.currentListingCopy,listingReviewResultId:reviewed.review.id,slot:{index:1,total:7,provisional:true}};
   await f.ai.imagePlan(context,()=>{});
-  assert.equal(JSON.stringify(context).includes('100 g'),false);assert.equal(JSON.stringify(f.requests.slice(start).map(request=>request.payload)).includes('100 g'),false);
+  assert.equal(JSON.stringify(context.currentListingCopy).includes('100 g'),false);assert.equal(JSON.stringify(f.requests.slice(start).map(request=>request.payload)).includes('100 g'),false);
   assert.equal((f.amazon.getDraft(draft.id).attributes.item_package_weight as any)[0].value,0.22);
 });
 
@@ -1051,10 +1087,10 @@ test('DeepSeek receives actual SKU image bytes, source identity and product cont
   assert.ok(plan.imageRequestBytes! > f.bytes.length);
 });
 
-test('IP source snapshot preserves explicit brand facts and raw SKU names filtered out of listing copy evidence',async t=>{
+test('IP source snapshot preserves explicit brand facts and raw SKU names alongside full source evidence',async t=>{
   const f=await fixture(t); await f.ai.imagePlan(f.context,()=>{});
   const payload=f.requests.find(request=>request.operation==='image-plan')!.payload;
-  assert.ok(!payload.evidence.some((fact:any)=>fact.name==='品牌'));
+  assert.ok(payload.evidence.some((fact:any)=>fact.name==='品牌'&&fact.value==='三丽鸥'));
   assert.equal(payload.unverifiedIpSource.originalSpec,'库洛米 蓝色');
   assert.equal(payload.unverifiedIpSource.normalizedSpec,'Blue');
   assert.equal(payload.unverifiedIpSource.description,f.product.description);
@@ -1156,7 +1192,7 @@ test('copy-only repairs reuse exact seven-image approvals without paid calls and
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
   generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
-  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
   const old=f.amazon.getDraft(f.draft.id),changed=f.amazon.saveDraft({id:old.id,revision:old.revision,attributes:{...old.attributes,item_name:[{value:'Blue Round Silicone Coaster'}]}}),before=f.requests.length;
@@ -1181,7 +1217,7 @@ test('interrupted IP rechecks reuse old approvals without calls but never overri
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
   generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'fixture'});
-  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED');
   const old=f.amazon.getDraft(f.draft.id),changed=f.amazon.saveDraft({id:old.id,revision:old.revision,attributes:{...old.attributes,item_name:[{value:'Blue Round Silicone Coaster'}]}});

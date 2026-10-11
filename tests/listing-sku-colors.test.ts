@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { fixture } from './fixtures/listing-ai.ts';
-import { buildListingContext } from '../src/main/listing-ai/context.ts';
+import { buildListingContext } from './helpers/legacy-listing-context.ts';
 import { assertListingEvidence, assertListingReview, validateListingFieldsOutput, validateListingReviewOutput } from '../src/main/listing-ai/validation.ts';
 import type { ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
 

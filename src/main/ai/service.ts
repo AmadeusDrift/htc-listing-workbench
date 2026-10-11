@@ -1,3 +1,4 @@
+import { evidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
 import { assertPresentationResultOwner } from './presentation-history.ts';
 import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
@@ -39,7 +40,6 @@ import type { ReviewPayload } from './review.ts';
 import { CAPABILITIES, MAX_OCR_TEXT, MODELS, boundedText, integer, isDeepSeek, keys, modelFor, object, parseConnectionInput, parseProfileImport, parseRecognizeInput, parseReviewInput, parseSegmentInput, parseSuggestInput, protectedAttribute, providerId, uuid, validateAiCall, validateAiProfile, validateAiResult, validateStoredAiResult, vendorId } from './validation.ts';
 import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from './validation.ts';
 import type { ListingAiContext, ListingFieldsOutput } from '../../shared/listing-ai-contracts.ts';
-import { LISTING_EVIDENCE_CONTRACT_VERSION } from '../../shared/listing-ai-contracts.ts';
 import { reviewListingFields, suggestListingFields } from './listing-adapters.ts';
 import { listingFingerprint } from '../listing-ai/validation.ts';
 import type { CandidateImageIdentity, CurrentListingCopy, ProductImageContext } from '../../shared/image-ai-contracts.ts';
@@ -424,7 +424,7 @@ export class AiService {
   }
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
-    this.ensureOpen();this.assertListingSource(context); const profile = this.assertProfile('deepseek-review'), currentCopy = validateCurrentListingCopy(copy);
+    this.ensureOpen();this.assertListingSource(context); const profile = this.assertProfile('deepseek-review'), currentCopy = validateCurrentListingCopy(copy,isFullSchema(context));
     assertCurrentCopyEvidence(currentCopy,context);
     return this.start(profile, context, { operation: 'listing-current-review', context, currentCopy }, async activeSignal => {
       const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal);this.assertListingSource(context); };
@@ -700,7 +700,7 @@ export class AiService {
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:LISTING_EVIDENCE_CONTRACT_VERSION, imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
+        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
           if(prepared.listingContext)this.assertListingSource(prepared.listingContext);

@@ -1,6 +1,7 @@
+// Historical v0-v3 contract compatibility; new production behavior is covered by listing-full-schema tests.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './fixtures/listing-ai.ts';
+import { legacyFixture as fixture } from './fixtures/listing-ai.ts';
 import { assertListingHistory } from '../src/main/listing-ai/history.ts';
 import { assertListingEvidence, listingFingerprint } from '../src/main/listing-ai/validation.ts';
 import { CATEGORY_INFERENCE_POLICY_VERSION } from '../src/shared/listing-ai-contracts.ts';

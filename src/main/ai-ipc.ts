@@ -4,7 +4,7 @@ import { open } from 'node:fs/promises';
 import type { IpcHandler } from './amazon-ipc.ts';
 import type { AiService } from './ai/service.ts';
 import type { WorkspaceStore } from './store.ts';
-import { keys, providerId, vendorId } from './ai/validation.ts';
+import { parseFunctionSettings, providerId, vendorId } from './ai/validation.ts';
 import type { AiConnection } from '../shared/ai-connection-contracts.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { identifier } from '../shared/validation.ts';
@@ -42,7 +42,8 @@ export function installAiIpc(window: BrowserWindow, ai: AiService, store: Worksp
     return connection;
   });
   handle('red:ai:function-settings', 1, raw => {
-    const connection = ai.saveFunctionSettings(raw), id = providerId(keys(raw, ['id', 'model', 'enabled']).id);
+    const input = parseFunctionSettings(raw), { id } = input;
+    const connection = ai.saveFunctionSettings(input);
     store.recordWorkspaceEvent('ai.function.saved', '已保存 AI 功能模型与启用设置', { providerId: id, generation: connection.profiles.find(profile => profile.id === id)!.generation });
     return connection;
   });

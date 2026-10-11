@@ -1,3 +1,4 @@
+import { parseFunctionSettings } from './validation.ts';
 import { resultHasOwner } from './result-owner.ts';
 import { evidenceVersion,imageEvidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
 import { assertPresentationResultOwner } from './presentation-history.ts';
@@ -38,7 +39,7 @@ import type { AdapterContext, ProviderMetadata } from './transport.ts';
 import { AiVault } from './vault.ts';
 import { assertCandidateEvidence, assertReviewEvidence, reviewWithDeepSeek, sourceFingerprint, suggestionFingerprint } from './review.ts';
 import type { ReviewPayload } from './review.ts';
-import { CAPABILITIES, MAX_OCR_TEXT, MODELS, boundedText, integer, isDeepSeek, keys, modelFor, object, parseConnectionInput, parseProfileImport, parseRecognizeInput, parseReviewInput, parseSegmentInput, parseSuggestInput, protectedAttribute, providerId, uuid, validateAiCall, validateAiProfile, validateAiResult, validateStoredAiResult, vendorId } from './validation.ts';
+import { CAPABILITIES, MAX_OCR_TEXT, MODELS, boundedText, integer, isDeepSeek, keys, object, parseConnectionInput, parseProfileImport, parseRecognizeInput, parseReviewInput, parseSegmentInput, parseSuggestInput, protectedAttribute, providerId, uuid, validateAiCall, validateAiProfile, validateAiResult, validateStoredAiResult, vendorId } from './validation.ts';
 import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from './validation.ts';
 import type { ListingAiContext, ListingFieldsOutput } from '../../shared/listing-ai-contracts.ts';
 import { reviewListingFields, suggestListingFields } from './listing-adapters.ts';
@@ -225,9 +226,7 @@ export class AiService {
     return this.saveSharedConnection(aiVendorFor(input.id), input.credentials, { id: input.id, model: input.model });
   }
   saveFunctionSettings(raw: unknown): AiConnection {
-    this.ensureOpen(); const o = keys(raw, ['id', 'model', 'enabled'], ['thinking']), id = providerId(o.id), model = modelFor(id, o.model);
-    if(o.thinking!==undefined&&(typeof o.thinking!=='boolean'||!isDeepSeek(id)))throw new AiError('INVALID_INPUT');
-    if (typeof o.enabled !== 'boolean') throw new AiError('INVALID_INPUT');
+    this.ensureOpen(); const o = parseFunctionSettings(raw), { id, model } = o;
     const previous = this.storedProfile(id); if (o.enabled && !this.getProfile(id).configured) throw new AiError('NOT_CONFIGURED');
     const thinking = o.thinking===undefined ? previous.thinking : o.thinking as boolean;
     const modelChanged = model !== previous.model || !!thinking !== !!previous.thinking;

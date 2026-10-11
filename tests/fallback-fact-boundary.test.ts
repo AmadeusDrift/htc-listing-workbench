@@ -29,19 +29,20 @@ const rules=defaultListingRules();
 const fact=(name:string,value:string,state:Fact['state']='human_confirmed'):Fact=>({id:randomUUID(),name,value,state,source:'manual',sourceRef:'Synthetic confirmed fact'});
 const run=(extra:Partial<Parameters<typeof applyBusinessRules>[0]>={})=>applyBusinessRules({product,variant,target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date('2026-10-10T00:00:00Z'),...extra},rules);
 
-test('Haul default estimates quote privately without inventing product claims',()=>{
+test('Haul approved defaults fill attributes without becoming measured facts',()=>{
   const result=run();
-  for(const field of ['brand','manufacturer','country_of_origin','import_designation','gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate','item_dimensions','item_package_dimensions','item_package_weight'])assert.equal(result.attributes[field],undefined,field);
+  for(const field of ['brand','manufacturer','country_of_origin','import_designation','gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate','item_dimensions','item_package_dimensions','item_package_weight'])if (Object.hasOwn(realAmazonSchema().schema.properties as JsonObject,field)) assert.ok(result.attributes[field],field);
   assert.ok(result.report.quote);assert.deepEqual(result.report.pricingDecision?.inputs,{costCny:2.4,dimensionsInches:[1.97,1.97,1.97],weightPounds:.22});
   assert.equal(result.report.pricingDecision?.version,2);
-  assert.deepEqual((result.report.pricingDecision as any).attributeInputs,{});
+  assert.deepEqual((result.report.pricingDecision as any).attributeInputs,Object.fromEntries(['item_package_dimensions','item_package_weight'].map(f=>[f,result.attributes[f]])));
 
 });
 
-test('existing partial measurements are preserved while their missing axes are only estimated',()=>{
+test('existing partial measurements preserve supplied axes and fill approved fallback axes',()=>{
   const attributes={item_package_dimensions:[{length:{value:9,unit:'inches'},marketplace_id:target.marketplaceId}]};
-  const result=run({attributes});assert.deepEqual(result.attributes.item_package_dimensions,attributes.item_package_dimensions);
-  assert.deepEqual((result.report.pricingDecision as any).attributeInputs,attributes);
+  const result=run({attributes});assert.deepEqual((result.attributes.item_package_dimensions as any)[0].length,attributes.item_package_dimensions[0].length);
+  assert.equal((result.attributes.item_package_dimensions as any)[0].width.value,1.97);
+  assert.deepEqual((result.report.pricingDecision as any).attributeInputs,Object.fromEntries(['item_package_dimensions','item_package_weight'].map(f=>[f,result.attributes[f]])));
   assert.deepEqual(result.report.pricingDecision?.inputs.dimensionsInches,[9,1.97,1.97]);
 });
 
@@ -90,7 +91,7 @@ test('same-valued real facts win over historical business labels and preserve th
   for(const [field,names] of [['country_of_origin',['原产国']],['item_package_dimensions',['包装长度','包装宽度','包装高度']],['item_package_weight',['包装重量']]] as const)
     assert.deepEqual(mapping.find(m=>m.field===field)!.sourceFactIds.sort(),facts.filter(f=>names.includes(f.name as never)).map(f=>f.id).sort());
   assert.equal((result.attributes.brand as any)[0].value,'Generic');assert.equal((result.attributes.import_designation as any)[0].value,'Imported');
-  assert.deepEqual(currentFactAuthority(p,schema,target,result.attributes).issues,[]);
+  assert.deepEqual(currentFactAuthority(p,schema,target,result.attributes,{},Object.fromEntries(Object.entries(result.report.fields).map(([f,e])=>[f,e.value]))).issues,[]);
   const changed={...p,facts:[...facts,fact('原产国','JP','conflicting')]};
   assert.ok(currentFactAuthority(changed,schema,target,result.attributes).issues.some(i=>i.code==='FACT_SOURCE_CONFLICT'&&i.attributeNames.includes('country_of_origin')));
 });
@@ -163,14 +164,14 @@ test('SQLite validate preserves legacy mixed attributes but blocks unsupported a
   const f=fixture(t),draft=await f.create(),attributes={...draft.attributes,brand:[{value:'Generic',marketplace_id:draft.marketplaceId}],item_package_dimensions:[{length:{value:9,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:draft.marketplaceId}]};
   const saved=f.service.saveDraft({...draft,attributes}),checked=await f.service.validateDraft(saved);
   assert.equal(checked.state,'BLOCKED');assert.deepEqual(checked.attributes,attributes);
-  const issues=checked.localIssues.filter(i=>i.code==='FACT_AUTHORITY_REQUIRED');assert.deepEqual(issues.flatMap(i=>i.attributeNames).sort(),['brand','item_package_dimensions']);
+  const issues=checked.localIssues.filter(i=>i.code==='FACT_AUTHORITY_REQUIRED');assert.deepEqual(issues.flatMap(i=>i.attributeNames).sort(),['item_package_dimensions']);
   assert.ok(issues.every(i=>i.source==='local'&&i.severity==='ERROR'&&!i.autoFixable));
   await assert.rejects(f.service.previewDraft(checked));assert.deepEqual(f.requests,[]);
 });
 
 for(const mode of ['demo','live'] as const)test(`SQLite ${mode} old preview submit and REUSED persist authority blocking before intent or outbound`,async t=>{
   const f=fixture(t);if(mode==='live')await f.live();let draft=await f.create();
-  assert.equal(draft.attributes.brand,undefined);assert.equal(draft.attributes.item_package_dimensions,undefined);
+  assert.equal((draft.attributes.brand as any)[0].value,'Generic');assert.ok(draft.attributes.item_package_dimensions);
   const attrs={...draft.attributes,brand:[{value:'Generic',marketplace_id:draft.marketplaceId}],item_package_dimensions:[{length:{value:9,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:draft.marketplaceId}]};
   draft=f.service.saveDraft({...draft,attributes:attrs});draft=f.service.applyBusinessDefaults(draft);assert.deepEqual(draft.attributes,attrs);
   const p=(f.service as unknown as {persistence:AmazonPersistence}).persistence;let begun=0;const begin=p.beginWrite.bind(p);p.beginWrite=(...args)=>{begun++;return begin(...args);};
@@ -229,6 +230,7 @@ test('direct field AI rechecks v2 after its async context callback before provid
 test('missing-only preview cannot hide an unsupported present field beside an absent required field',async t=>{
   const f=fixture(t),getSchema=f.service.getSchema.bind(f.service);f.service.getSchema=async input=>{const schema=await getSchema(input);schema.schema.required=['brand'];return schema;};
   const draft=await f.create(),attributes={...draft.attributes,item_package_dimensions:[{length:{value:5,unit:'cm'},width:{value:5,unit:'cm'},height:{value:5,unit:'cm'},marketplace_id:draft.marketplaceId}]};
+  delete (attributes as JsonObject).brand;
   const schemaIssues=validateAttributes(draft.schema.schema,attributes,draft.schema.metaSchema);
   assert.equal(isMissingOnlyPreview(draft.schema.schema,attributes,draft.schema.metaSchema,schemaIssues),true);
   const saved=f.service.saveDraft({...draft,attributes});await assert.rejects(f.service.previewDraft(saved));
@@ -238,11 +240,22 @@ test('missing-only preview cannot hide an unsupported present field beside an ab
 
 test('adopting supported AI copy preserves unsupported legacy facts and cannot clear their authority gate',async t=>{
   const f=await aiFixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id);
-  r.draft.listingProgram='haul';r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
+  r.draft.listingProgram='haul';r.draft.attributes.brand=[{value:'Unconfigured brand',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
   const suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
   const adopted=await f.listing.adopt({...f.reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});
   assert.equal(adopted.state,'BLOCKED');assert.deepEqual(adopted.attributes.brand,r.draft.attributes.brand);
   assert.ok(adopted.localIssues.some(issue=>issue.code==='FACT_AUTHORITY_REQUIRED'&&issue.attributeNames.includes('brand')));
   assert.equal(adopted.fieldAdoptions?.length,1);assert.equal(f.requests.length,2);
   await assert.rejects(f.amazon.previewDraft(adopted));assert.equal(f.requests.length,2);
+});
+
+
+test('SQLite approved business defaults validate and preview without extra factual confirmation',async t=>{
+  const f=fixture(t); let draft=await f.create();
+  const before=structuredClone(f.product);
+  draft=await f.service.validateDraft(draft);
+  assert.ok(!draft.localIssues.some(i=>i.code==='FACT_AUTHORITY_REQUIRED'),JSON.stringify(draft.localIssues));
+  draft=await f.service.previewDraft(draft);assert.equal(draft.state,'AMAZON_VALIDATED');
+  assert.deepEqual(f.product,before);assert.deepEqual(f.requests,[]);
+  assert.equal(draft.submittedAt,null);
 });

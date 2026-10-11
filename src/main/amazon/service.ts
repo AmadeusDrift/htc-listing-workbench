@@ -452,7 +452,10 @@ export class AmazonService {
     const product=projectSalesProduct(source,draft.salesPlan,draft.variantId);
     const risk=declarationSafetyIssues(source,selectedDeclarationScope(source,draft.variantId,draft.salesPlan?.recipe.components),draft.attributes);
     const matchingPackage=draft.schema.parentageLevel!=='PARENT'&&(!draft.salesPlan||draft.salesPlan.recipe.components.length===1&&draft.salesPlan.recipe.components[0].quantity===draft.salesPlan.recipe.components[0].sourcePackPieces);
-    const authority=currentFactAuthority(product,draft.schema,draft,draft.attributes,matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db,product.id,draft.variantId,draft.mode):{});
+    const target=this.getTarget(draft.targetId),variant=product.variants.find(value=>value.id===draft.variantId)!;
+    const currentRules=this.businessDefaults(product,variant,target,draft.schema,{},'haul',undefined,draft.salesPlan).report;
+    const ruleValues=Object.fromEntries(Object.entries(currentRules?.fields??{}).map(([field,entry])=>[field,entry.value]));
+    const authority=currentFactAuthority(product,draft.schema,draft,draft.attributes,matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db,product.id,draft.variantId,draft.mode):{},ruleValues);
     const riskFields=new Set(risk.flatMap(issue=>issue.attributeNames));
     return [...risk,...authority.issues.filter(issue=>!issue.attributeNames.some(field=>riskFields.has(field)))];
   }
@@ -604,7 +607,7 @@ export class AmazonService {
       const target = this.active(record.draft.targetId), product = this.currentProduct(record);
       const variant = product.variants.find(variant => variant.id === record.draft.variantId)!;
       const resolved = this.businessDefaults(product, variant, target, record.draft.schema, record.draft.attributes, 'haul', record.draft.businessRules,record.draft.salesPlan);
-      if (JSON.stringify(resolved.attributes) !== JSON.stringify(record.draft.attributes)) {
+      if (semanticJson(resolved.attributes) !== semanticJson(record.draft.attributes)) {
         record.draft.attributes = resolved.attributes; record.draft.revision++; record.draft.state = 'DRAFT';
         record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
         record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null; record.previewResponse = null;

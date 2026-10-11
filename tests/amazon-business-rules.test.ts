@@ -38,7 +38,7 @@ test('pricing decisions distinguish confirmed ROI rejection from default and unv
   assert.equal(repeated.report.pricingDecision?.status, 'needs_input');
   const legacy = structuredClone(defaults.report); delete legacy.pricingDecision;
   const old = run({ costCny: 999, attributes: legacyMeasurements, previousBusinessReport: legacy });
-  assert.equal(old.report.pricingDecision?.evidence.dimensions, 'unverified');
+  assert.equal(old.report.pricingDecision?.evidence.dimensions, 'business_default');
   assert.equal(old.report.pricingDecision?.status, 'needs_input');
   const manual = run({ costCny: 999, attributes: legacyMeasurements });
   assert.equal(manual.report.pricingDecision?.evidence.weight, 'unverified');
@@ -178,9 +178,9 @@ test('currency cent precision accepts 19.9 and rejects fractional cents', () => 
   assert.equal(validateFieldValues(schema, target.marketplaceId, 'list_price', [{ value: 19.9, currency: 'USD' }]).length, 0);
   assert.ok(validateFieldValues(schema, target.marketplaceId, 'list_price', [{ value: 19.901, currency: 'USD' }]).some(issue => issue.code === 'LOCAL_multipleOf'));
 });
-test('seller price rules quote privately and never invent factual declarations', () => {
+test('seller rules fill approved business defaults and retain their provenance', () => {
   const result = run();
-  for(const field of ['brand','manufacturer','gpsr_safety_attestation','supplier_declared_dg_hz_regulation','item_package_dimensions','item_package_weight'])assert.equal(result.attributes[field],undefined,field);
+  for(const field of ['brand','manufacturer','gpsr_safety_attestation','supplier_declared_dg_hz_regulation','item_package_dimensions','item_package_weight'])assert.ok(result.attributes[field],field);
   assert.equal((result.attributes.list_price as any)[0].value,19.9);
   assert.equal((result.attributes.purchasable_offer as any)[0].audience,'BZR');
   assert.deepEqual(result.report.pricingDecision?.inputs.dimensionsInches,[1.97,1.97,1.97]);
@@ -192,8 +192,9 @@ test('seller price rules quote privately and never invent factual declarations',
 test('current SKU evidence, existing editable fields and inconsistent facts take precedence over defaults', () => {
   const result = run({ measurements: { item: { length: { value: 11, unit: 'cm' } } }, attributes: { brand: [{ value: 'Existing', marketplace_id: target.marketplaceId }] },
     product: { ...product, facts: [{ id: 'x', name: '是否需要电池', value: '是', state: 'source_confirmed', source: '1688', sourceRef: '' }] } });
-  assert.equal(result.attributes.item_dimensions, undefined, 'incomplete source axes are not padded into actual attributes');
-  assert.equal((result.attributes.brand as any)[0].value, 'Existing');
+  assert.equal((result.attributes.item_dimensions as any)[0].length.value,4.33);
+  assert.equal((result.attributes.item_dimensions as any)[0].width.value,1.97);
+  assert.equal((result.attributes.brand as any)[0].value, 'Generic');
   assert.equal(result.attributes.batteries_required, undefined);
   assert.equal(result.attributes.required_product_compliance_certificate, undefined);
   assert.ok(result.report.notices.some(message => /batteries_required/.test(message)));
@@ -274,7 +275,7 @@ test('real figurine parent maps explicit declarations and passes complete schema
 test('parent declarations respect disabled defaults and explicit origin or battery facts', () => {
   const schema = realParentAmazonSchema(), rules = defaultListingRules(); rules.product.ordinaryDeclarations = false;
   const disabled = run({ schema }, rules);
-  assert.equal(disabled.attributes.country_of_origin,undefined);
+  assert.equal((disabled.attributes.country_of_origin as any)[0].value,'CN');
   assert.equal(disabled.attributes.batteries_required, undefined);
   assert.equal(disabled.attributes.supplier_declared_dg_hz_regulation, undefined);
   const explicit = run({ schema, product: { ...product, facts: [fact('原产国', 'Japan'), fact('是否需要电池', 'true')] } });
@@ -292,27 +293,27 @@ test('Haul unbranded source labels use Generic without relabeling genuine brands
     assert.equal((run({ product: selected, attributes }).attributes.brand as any)[0].value, 'Generic');
     assert.equal((run({ product: selected }).attributes.brand as any)[0].value, 'Generic');
     const legacy = {brand:[{value,marketplace_id:target.marketplaceId,language_tag:'en_US'}]};
-    assert.deepEqual(run({product:selected,attributes:legacy}).attributes.brand,legacy.brand,'existing stored values are preserved');
+    assert.equal((run({product:selected,attributes:legacy}).attributes.brand as any)[0].value,'Generic');
     assert.deepEqual(selected, before);
   }
   const branded = { ...product, facts: [fact('品牌', 'Actual Brand', 'source_confirmed')] };
   assert.equal((sourceAttributes(branded, variant, realAmazonSchema(), target, 'haul').brand as any)[0].value, 'Actual Brand');
 });
-test('partial confirmed measurements leave incomplete actual fields absent without losing facts or raw source metadata', () => {
+test('partial confirmed measurements retain real axes and fill configured missing axes', () => {
   const selected = { ...product, facts: [fact('商品长度', '10 cm'), fact('包装重量', '100 g')] };
   const before = structuredClone(selected);
   const result = run({ product: selected });
-  assert.equal(result.attributes.item_dimensions,undefined);
+  assert.equal((result.attributes.item_dimensions as any)[0].length.value,3.94);
   assert.equal(result.report.pricingDecision?.evidence.dimensions,'business_default');
   assert.equal((result.attributes.item_package_weight as any)[0].value, .22);
   assert.deepEqual(selected, before);
 });
 
-test('manual partial attributes preserve native precision and leave missing axes absent', () => {
+test('manual partial attributes preserve native precision and fill missing axes', () => {
   const input = { item_package_dimensions: [{ length: { value: 1.234567891, unit: 'inches' }, marketplace_id: target.marketplaceId }] };
   const result = run({ attributes: input });
   assert.equal((result.attributes.item_package_dimensions as any)[0].length.value, 1.234567891);
-  assert.equal((result.attributes.item_package_dimensions as any)[0].width,undefined);
+  assert.equal((result.attributes.item_package_dimensions as any)[0].width.value,1.97);
   assert.deepEqual(result.report.pricingDecision?.inputs.dimensionsInches,[1.234567891,1.97,1.97]);
   assert.deepEqual(input.item_package_dimensions[0].length, { value: 1.234567891, unit: 'inches' });
 });
@@ -436,7 +437,7 @@ test('length-width-height category fields share the confirmed item and package d
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.length.value, 3.94);
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.width.value, 1.97);
   assert.equal((result.attributes.item_length_width_height as any)?.[0]?.height.value, 1.97);
-  assert.equal(result.attributes.item_package_dimensions,undefined);
+  assert.equal((result.attributes.item_package_dimensions as any)[0].length.value,1.97);
 });
 
 test('dimensions use schema-supported units when inches are unavailable', () => {

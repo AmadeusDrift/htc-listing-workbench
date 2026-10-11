@@ -22,7 +22,7 @@ export function selectedDeclarationScope(product: ProductDetail, variantId: stri
 const noBattery=/^(?:否|无|不需要|不含|false|no|none|not required)$/iu;
 /** Retain the existing bounded vocabulary and separate electrical/chemical concerns. */
 export function declarationRisks(product: ProductDetail, scope: DeclarationScope, facts: readonly Fact[]=product.facts) {
-  const factText=facts.filter(fact=>['source_confirmed','human_confirmed','conflicting'].includes(fact.state)).map(fact=>`${fact.name}:${fact.value}`).join('\n');
+  const factText=facts.filter(fact=>['source_confirmed','human_confirmed','conflicting'].includes(fact.state) && !(fact.state!=='conflicting' && sourceFieldName(fact.name,'haul')==='batteries_required' && noBattery.test(fact.value.trim()))).map(fact=>`${fact.name}:${fact.value}`).join('\n');
   const text=[product.title,product.description,factText,...scope.variants.flatMap(variant=>[variant.sourceSpec,variant.originalSpec,variant.normalizedSpec]),...scope.componentSpecifications].join('\n');
   const physicalRisk=/电动|充电|电池|清洗剂|清洁剂|消毒|农药|驱虫|气雾|喷雾|复合木|刨花板|密度板|\bbattery\b|\baerosol\b|\bpesticide\b/iu.test(text);
   const batteryRisk=/电动|充电|电池|\bbatter(?:y|ies)\b|\brechargeable\b|\belectric\b/iu.test(text);

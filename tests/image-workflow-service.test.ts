@@ -1,3 +1,4 @@
+import { pricingAttributeInputs } from '../src/main/amazon/pricing-inputs.ts';
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { SourceConsistencyError } from '../src/main/source-image-consistency/proof.ts';
 import { sceneSet } from './fixtures/image-set.ts';
@@ -148,7 +149,7 @@ test('a paid image plan remains stored when pricing changes during its response 
   const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};p.putRecord(r);
+    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
     const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot)rules.save(rules.get());return result;};
     const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/定价/);
     assert.ok(result.workflow.slots?.[0].attempts[0].planResultId);assert.equal(result.workflow.slots?.[0].attempts[0].state,'READY');assert.ok(!f.calls.includes('generate'));
@@ -160,7 +161,7 @@ test('stale v2 pricing permits local UNKNOWN reconciliation but never starts the
   const f=await fixture(t,{lostResponse:true}),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};p.putRecord(r);
+    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
     const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'UNKNOWN');
     const count=f.calls.length;rules.save(rules.get());const result=await f.run();
     assert.equal(result.workflow.id,first.workflow.id);assert.equal(result.workflow.slots![0].attempts[0].state,'GENERATED');

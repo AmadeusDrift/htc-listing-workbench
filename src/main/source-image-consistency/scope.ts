@@ -10,6 +10,7 @@ import { validateSourceImageProvenance,assertSourceImageProvenance } from '../so
 import { readManagedImageSync } from '../ai/source.ts';
 import { selectImageReferences } from '../image-workflow/records.ts';
 import { projectSourceClaims } from './comparison.ts';
+import { SourceConsistencyError } from './errors.ts';
 
 export function validateConsistencyContext(raw:unknown):SourceConsistencyContext {
   const o=keys(raw,['version','productId','productRevision','variantId','identity','referenceAssets','fields','claims','issues']);
@@ -72,7 +73,7 @@ export function resolveConsistencyContext(db:DatabaseSync,store:Pick<WorkspaceSt
     let anchorId:string|null=null,imageId:string|null=null;
     if(source){
       const anchor=anchors.get(asset.id);
-      if(anchor){anchorId=anchor.id;imageId=anchor.imageId;}else if(!confirmed(asset.id,variant.id))throw new AiError('SOURCE_CHANGED');
+      if(anchor){anchorId=anchor.id;imageId=anchor.imageId;}else if(!confirmed(asset.id,variant.id))throw new SourceConsistencyError('NEEDS_INPUT','SOURCE_CONSISTENCY_BINDING_REQUIRED','该 SKU 的原图尚无已确认的对应关系，请在商品图片中核对并确认原图对应规格，再继续来源一致性校验');
     }
     const epoch=db.prepare("SELECT id FROM source_consistency_bindings WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.variantId')=? AND json_extract(record_json,'$.assetId')=? ORDER BY rowid DESC LIMIT 1").get(product.id,variant.id,asset.id);
     const binding=db.prepare('SELECT * FROM variant_assets WHERE asset_id=? AND variant_id=?').get(asset.id,variant.id);

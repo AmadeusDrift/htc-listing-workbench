@@ -10,10 +10,8 @@ import { keys,uuid,integer,sha256,boundedText,validateAiCall,validateStoredAiRes
 import { resolveConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
 import { assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt } from './history.ts';
 
-export class SourceConsistencyError extends UserFacingError {
-  readonly kind:'NEEDS_INPUT'|'SYSTEM_REPAIR'|'UNKNOWN';readonly code:string;
-  constructor(kind:'NEEDS_INPUT'|'SYSTEM_REPAIR'|'UNKNOWN',code:string,message:string){super(message);this.kind=kind;this.code=code;}
-}
+import { SourceConsistencyError } from './errors.ts';
+export { SourceConsistencyError } from './errors.ts';
 const NON_VISUAL_AUTHORITY=new Set(['RANDOM_OR_AMBIGUOUS_FULFILLMENT','RAW_NORMALIZED_CONFLICT','NEGATED_CLAIM']);
 export function sourceConsistencyUnknown(db:DatabaseSync,productId:string,variantIds:string[]):boolean {
   for(const row of db.prepare("SELECT record_json FROM source_consistency_attempts WHERE json_extract(record_json,'$.context.productId')=?").all(productId)){

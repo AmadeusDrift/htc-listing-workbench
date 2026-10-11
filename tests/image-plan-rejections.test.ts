@@ -55,7 +55,7 @@ for(const sku of [35,43,51]) {
     assert.deepEqual(plan.productUnderstanding,before.productUnderstanding);
     assert.equal(plan.setPlan!.slots.length,7);assert.deepEqual(raw,before);
     for(const riskEnabled of [true,false])assert.throws(()=>imageGenerationPrompt(plan,context,riskEnabled));
-    if(sku===51)assert.ok(plan.setPlan!.slots.some((slot,index)=>slot.role==='scene'&&before.setPlan!.slots[index].role==='selling_point'));
+    if(sku===51)assert.deepEqual(plan.setPlan!.slots.map(slot=>slot.role),before.setPlan!.slots.map(slot=>slot.role));
 
     // Exact source context and workflow record first. The old copy-review
     // receipts are outside this diagnostic export, so the history fixture then
@@ -69,8 +69,8 @@ for(const sku of [35,43,51]) {
     const call=validateAiCall({...diagnostic,id:randomUUID(),status:'SUCCEEDED',errorCode:null,requestId:'offline-fixture'});
     const result=validateAiResult({id:resultId,callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,
       variantId:historyContext.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:imageCopySourceIds(historyContext),model:call.model,
-      createdAt:call.finishedAt,reviewState:'unreviewed',sourceSha256:listingFingerprint(historyContext),imageContext:historyContext,imageRequestBytes:1000,output:plan});
-    const run=validateImageWorkflowRun({...workflow,imageContext:historyContext,contextSha256:listingFingerprint(historyContext),setPlan:plan.setPlan,setPlanResultId:result.id});
+      createdAt:call.finishedAt,reviewState:'unreviewed',sourceSha256:listingFingerprint(historyContext),imageContext:historyContext,listingEvidenceContractVersion:'listing-evidence/v5',imageRequestBytes:1000,output:plan});
+    const run=validateImageWorkflowRun({...workflow,listingEvidenceContractVersion:'listing-evidence/v5',imageContext:historyContext,contextSha256:listingFingerprint(historyContext),setPlan:plan.setPlan,setPlanResultId:result.id});
     assert.ok(run.slots!.every(slot=>slot.attempts.length===0));
     const db=new DatabaseSync(':memory:');
     try {

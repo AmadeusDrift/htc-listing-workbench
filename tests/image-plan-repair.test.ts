@@ -21,21 +21,20 @@ function sample(caption='Multicolor rainbow gradient finish') {
   return {c,p,invoke,raw:()=>captured,calls:()=>calls,body:()=>body};
 }
 
-test('initial seven-image planning removes only an unsupported gradient modifier from a supported multicolor caption',async()=>{
+test('current seven-image planning preserves ordinary AI interpretation instead of removing modifiers through a finite whitelist',async()=>{
   const f=sample(),before=structuredClone(f.p),result=await f.invoke(),p=result.output;
   assert.equal(p.setPlan!.slots.length,7);assert.equal(p.setPlan!.slots[3].role,'selling_point');
-  assert.equal(p.setPlan!.slots[3].expectedText[0].text,'Multicolor rainbow finish');
-  assert.doesNotMatch(p.setPlan!.slots[3].prompt,/gradient/i);
+  assert.equal(p.setPlan!.slots[3].expectedText[0].text,'Multicolor rainbow gradient finish');
+  assert.match(p.setPlan!.slots[3].prompt,/gradient/i);
   assert.deepEqual(p.setPlan!.slots[4],before.setPlan.slots[4]);
   assert.deepEqual(p.setPlan!.slots[0],before.setPlan.slots[0]);
   assert.deepEqual(f.raw(),before);assert.equal(f.calls(),1);assert.doesNotThrow(()=>assertImagePlan(p,f.c));
 });
 
-test('an unsupported red-eye selling point becomes a text-free reference scene without retaining the bad caption',async()=>{
+test('current planning preserves an AI-visible detail when the source has no explicit contradiction',async()=>{
   const f=sample('Red Eyes'),result=await f.invoke(),slot=result.output.setPlan!.slots[3];
-  assert.equal(slot.role,'scene');assert.equal(slot.textMode,'none');assert.deepEqual(slot.expectedText,[]);
-  assert.doesNotMatch([slot.focus,slot.scene,slot.prompt].join(' '),/red eyes|overlay:/i);
-  assert.match(slot.prompt,/selected SKU/i);assert.match(slot.prompt,/no visible text/i);
+  assert.equal(slot.role,'selling_point');assert.equal(slot.textMode,'planned');assert.deepEqual(slot.expectedText,[{text:'Red Eyes',evidenceIds:['shape']}]);
+  assert.match(slot.prompt,/Red Eyes/);
   assert.equal(result.output.setPlan!.slots.length,7);assert.doesNotThrow(()=>assertImagePlan(result.output,f.c));
 });
 
@@ -51,7 +50,7 @@ test('caption recovery cannot hide unknown references, foreign SKU facts, wrong 
 
 test('a frozen child slot cannot silently replace its approved captions through initial-plan recovery',async()=>{
   const f=sample();f.c.slot={index:4,total:7,provisional:true};f.c.setPlan=structuredClone(f.p.setPlan);f.c.purpose='detail';
-  f.p.textMode='planned';f.p.expectedText=f.p.setPlan.slots[3].expectedText;delete f.p.setPlan;
+  f.p.textMode='planned';f.p.expectedText=[{text:'Different caption',evidenceIds:[f.c.listing.evidence[0].id]}];delete f.p.setPlan;
   await assert.rejects(f.invoke());
 });
 

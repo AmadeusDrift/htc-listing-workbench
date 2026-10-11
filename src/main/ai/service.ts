@@ -1,5 +1,5 @@
 import { resultHasOwner } from './result-owner.ts';
-import { evidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
+import { evidenceVersion,imageEvidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
 import { assertPresentationResultOwner } from './presentation-history.ts';
 import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
@@ -10,7 +10,7 @@ import { readConsistencyView,readSourceObservationEvidence,saveConsistencyDecisi
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
-import { assertCurrentCopyEvidence } from '../listing-ai/current-evidence.ts';
+import { assertCurrentCopyEvidence,assertCurrentImageCopyEvidence } from '../listing-ai/current-evidence.ts';
 import { assertCurrentListingReview } from './image-validation.ts';
 import type { CompletionRequest } from '../listing-ai/completion-journal.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -452,15 +452,15 @@ export class AiService {
     }
     if(allowed.length>1&&!context.sourceVariantIds||context.sourceVariantIds&&listingFingerprint([...context.sourceVariantIds].sort())!==listingFingerprint([...new Set(allowed)]))throw new AiError('SOURCE_CHANGED');
     if(context.policyVersion===PRODUCT_IMAGE_POLICY_VERSION && listingFingerprint(context.ipSource)!==listingFingerprint(imageRiskSourceSnapshot(source,context.listing.variantId)))throw new AiError('SOURCE_CHANGED');
+    assertCurrentImageCopyEvidence(context.currentListingCopy,context.listing);
     if (context.copyReviewBypass) {
       validateProductImageContext(context);
       if (readCopyReviewSettings(this.db).enabled) throw new AiError('SOURCE_CHANGED');
-      assertCurrentCopyEvidence(context.currentListingCopy,context.listing);
     } else {
       const review = context.listingReviewResultId === null ? undefined : this.getResult(context.listingReviewResultId);
       if (!review || review.output.kind !== 'listing-current-review' || review.output.verdict !== 'PASS' || review.providerId !== 'deepseek-review' || !review.listingContext || review.sourceSha256 !== listingFingerprint(context.listing) || listingFingerprint(review.listingContext) !== listingFingerprint(context.listing) || listingFingerprint(review.output.currentListingCopy) !== listingFingerprint(context.currentListingCopy)) throw new AiError('SOURCE_CHANGED');
       this.successfulResult(review);
-      assertCurrentListingReview({...review.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing);
+      assertCurrentListingReview({...review.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing,{storedVersion:'listing-evidence/v5'});
       const latest = this.listResults(product.id).filter(result => result.output.kind === 'listing-current-review' && result.sourceSha256 === review.sourceSha256 && result.output.copySha256 === listingFingerprint(context.currentListingCopy)).at(-1);
       if (latest?.id !== review.id) throw new AiError('SOURCE_CHANGED');
     }
@@ -701,7 +701,7 @@ export class AiService {
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
+        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
           if(prepared.listingContext)this.assertListingSource(prepared.listingContext);

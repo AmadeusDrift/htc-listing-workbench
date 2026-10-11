@@ -8,7 +8,12 @@ export function explicitCategoryConflicts(field:string,value:string,context:Pick
   const role=field==='target_audience'?'age_range_description':field;
   const typed=['age_range_description','item_firmness_description','power_source_type'].includes(role),candidate=typed?parseCategorySource(role,value):undefined;
   if(candidate?.unparsed)return [];
-  const claims=candidate?[...candidate.values.map(value=>({role,value,polarity:'positive',start:0,end:value.length})),...candidate.excluded.map(value=>({role,value,polarity:'negative',start:0,end:value.length}))]:proseClaims(value);
+  const ordinaryClaims=proseClaims(value);
+  // Contrast clauses have their own polarity; an earlier negation cannot
+  // erase an explicit positive claim after 'but' or 'and suitable'.
+  const clauses=[...value.matchAll(/(?:^|[,;]|\bbut\b|\band\s+(?=suitable\b))\s*([^,;]+?)(?=$|[,;]|\bbut\b|\band\s+(?=suitable\b))/gi)];
+  const prose=ordinaryClaims.some(claim=>claim.polarity==='unparsed')&&clauses.length>1?clauses.flatMap(match=>proseClaims(match[1]).map(claim=>({...claim,start:claim.start+match.index!+match[0].indexOf(match[1]),end:claim.end+match.index!+match[0].indexOf(match[1])}))):ordinaryClaims;
+  const claims=candidate?[...candidate.values.map(value=>({role,value,polarity:'positive',start:0,end:value.length})),...candidate.excluded.map(value=>({role,value,polarity:'negative',start:0,end:value.length}))]:prose;
   const compatible=(role:string,a:string,b:string)=>a===b||role==='power_source_type'&&a!=='Manual'&&b!=='Manual'&&(a==='Electric'||b==='Electric')||role==='item_firmness_description'&&[a,b].every(v=>['Soft','Extra Soft'].includes(v));
   return claims.flatMap(claim=>{
     if(claim.polarity==='unparsed')return [];

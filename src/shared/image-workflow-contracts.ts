@@ -26,6 +26,8 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  /** Local authorization receipt; never changes image contexts or paid attempts. */
+  policyReevaluation?:{version:'source-union-resume/v1';inputSha256:string;at:string;previousRemaining:string[];repairStarted?:boolean};
   rejection?: {version:'rejection-presentation/v1';code:import('./rejection-presentation.ts').OutputRejection['code']|'SOURCE_OBSERVATION_INSUFFICIENT';callId:string;resultId:string|null;contextSha256:string;stage:'content'|'planning';slot:number};
   /** Main-only evidence semantics for stored image captions; absent preserves pre-contract history. */
   listingEvidenceContractVersion?:import('./listing-ai-contracts.ts').ListingEvidenceContractVersion;

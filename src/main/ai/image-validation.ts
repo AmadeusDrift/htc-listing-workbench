@@ -299,7 +299,7 @@ export function validateListingCurrentReview(raw: unknown): ListingCurrentReview
   return { ...review, kind: 'listing-current-review', currentListingCopy, copySha256: String(value.copySha256) };
 }
 export function assertCurrentListingReview(review: ListingFieldsReviewOutput, copy: CurrentListingCopy[], context: ListingAiContext,options:{storedVersion?:string|null}={}): void {
-  if(isFullSchema(context)&&(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4')){
+  if(options.storedVersion==='listing-evidence/v5'||isFullSchema(context)&&(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4')){
     const expected=copy.flatMap(item=>item.values.map((_,index)=>`${item.field}:${index}`));
     if(review.checks.length!==expected.length||new Set(review.checks.map(c=>`${c.field}:${c.index}`)).size!==expected.length||review.checks.some(c=>!expected.includes(`${c.field}:${c.index}`)))fail();
     for(const check of review.checks)for(const id of [...check.evidenceIds,...check.claims.flatMap(c=>c.evidenceIds)])if(!context.evidence.some(e=>e.id===id))fail();
@@ -331,7 +331,7 @@ function assertTextEvidence(text: string, evidenceIds: string[], context: Produc
   if(!context.setPolicy&&!evidenceIds.length)fail();
   const evidence=context.setPolicy?imageEvidence(context):context.listing.evidence;
   if(context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
-  if(isFullSchema(context.listing)&&(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4')){
+  if(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4'||options.storedVersion==='listing-evidence/v5'){
     if(!context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
     if(evidenceIds.some(id=>!evidence.some(item=>item.id===id))||explicitCategoryConflicts('product_description',text,{evidence}).length)fail();
     return;
@@ -343,6 +343,7 @@ function assertTextEvidence(text: string, evidenceIds: string[], context: Produc
   else assertListingEvidence(output,scope);
 }
 export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageContext,options:ImageEvidenceOptions={}): void {
+  if(context.listing.variantId&&context.listing.evidence.some(e=>e.source==='selected_sku'&&!e.id.startsWith(`${context.listing.variantId}:`)))fail();
   if (context.policyVersion !== 'product-image/v1' && (!plan.productUnderstanding || listingFingerprint(plan.productUnderstanding.referenceAssetIds) !== listingFingerprint(context.referenceAssets.map(asset=>asset.assetId)))) fail();
   if(context.policyVersion===PRODUCT_IMAGE_POLICY_VERSION && !plan.ipRisk)fail();
   if(plan.ipRisk?.findings.some(item=>item.referenceAssetIds.some(id=>!context.referenceAssets.some(asset=>asset.assetId===id))))fail();

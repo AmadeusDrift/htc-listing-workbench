@@ -208,6 +208,7 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   if (o.sourceSha256 !== undefined && id !== 'deepseek' && !listingKind && !imageKind && output.kind !== 'category-decision') invalid();
   if (output.kind === 'text-review' && (sourceResultIds.length !== 1 || sourceResultIds[0] !== output.suggestionId)) invalid();
   if(o.listingEvidenceContractVersion!==undefined&&(!(listingKind||imageKind)||!(LISTING_EVIDENCE_CONTRACT_VERSIONS as readonly unknown[]).includes(o.listingEvidenceContractVersion)))invalid();
+  if(listingKind&&o.listingEvidenceContractVersion==='listing-evidence/v5')invalid();
   const evidenceOptions=options.stored?{storedVersion:o.listingEvidenceContractVersion as string??null}:{};
   const listingContext = listingKind ? validateListingContext(o.listingContext) : undefined;
   if(listingContext&&((listingContext.contract==='listing-full-schema/v1')!==(o.listingEvidenceContractVersion==='listing-evidence/v4')))invalid();

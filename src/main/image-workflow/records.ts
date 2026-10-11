@@ -1,3 +1,5 @@
+import { isFullSchema } from '../listing-ai/full-schema.ts';
+import { imageActualInputsMatch } from './context-compatibility.ts';
 import { validateWorkflowRejection, assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
 import { validateAiCall } from '../ai/validation.ts';
 import { assertProductConsistency } from '../source-image-consistency/proof.ts';
@@ -20,7 +22,7 @@ import { readCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-a
 import { imageApprovalDraftSnapshot, validateApprovalReuse } from './approval-reuse.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
-import { isFullSchema } from '../listing-ai/full-schema.ts';
+
 
 export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = false, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
   if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
@@ -70,7 +72,7 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
 
 export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -119,6 +121,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
     run.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,grantedAttempts:1,grantedAt:date(grant.grantedAt),fields:grant.fields as typeof CATEGORY_FIELD_REPAIR_FIELDS[number][]};
   }
   if(o.contentPreparation!==undefined){const preparation=keys(o.contentPreparation,['state','draftRevision','remaining'],['repairPolicyVersion','copyReviewEnabled','sourceColorEvidenceSha256','draftSha256','operationId']);if(preparation.repairPolicyVersion!==undefined&&preparation.repairPolicyVersion!=='field-evidence/v2'||preparation.copyReviewEnabled!==undefined&&typeof preparation.copyReviewEnabled!=='boolean')invalid();if(!['STARTED','DONE'].includes(String(preparation.state))||!Array.isArray(preparation.remaining)||preparation.remaining.length>100)invalid();run.contentPreparation={...(preparation.operationId===undefined?{}:{operationId:uuid(preparation.operationId)}),state:preparation.state as 'STARTED'|'DONE',draftRevision:integer(preparation.draftRevision,1,Number.MAX_SAFE_INTEGER),remaining:(preparation.remaining as unknown[]).map(value=>boundedText(value,2000)),...(preparation.repairPolicyVersion?{repairPolicyVersion:'field-evidence/v2' as const}:{}),...(preparation.copyReviewEnabled===undefined?{}:{copyReviewEnabled:preparation.copyReviewEnabled as boolean}),...(preparation.sourceColorEvidenceSha256===undefined?{}:{sourceColorEvidenceSha256:sha256(preparation.sourceColorEvidenceSha256)}),...(preparation.draftSha256===undefined?{}:{draftSha256:sha256(preparation.draftSha256)})};}
+  if(o.policyReevaluation!==undefined){const receipt=keys(o.policyReevaluation,['version','inputSha256','at','previousRemaining'],['repairStarted']);if(receipt.version!=='source-union-resume/v1'||!Array.isArray(receipt.previousRemaining)||receipt.previousRemaining.length>100||receipt.repairStarted!==undefined&&receipt.repairStarted!==true)invalid();run.policyReevaluation={version:'source-union-resume/v1',inputSha256:sha256(receipt.inputSha256),at:date(receipt.at),previousRemaining:(receipt.previousRemaining as unknown[]).map(value=>boundedText(value,2000)),...(receipt.repairStarted?{repairStarted:true}:{})};}
   if(o.imageRecipeSha256!==undefined)run.imageRecipeSha256=sha256(o.imageRecipeSha256);
   if(o.riskInterceptionEnabled!==undefined)run.riskInterceptionEnabled=o.riskInterceptionEnabled as boolean;
   if(o.copyReviewEnabled!==undefined)run.copyReviewEnabled=o.copyReviewEnabled as boolean;
@@ -156,17 +159,29 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
   if (run.status !== 'COMPLETED' || run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || run.draftSha256 !== imageWorkflowDraftStamp(draft)) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
-  const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0,!isFullSchema(run.imageContext?.listing));
+  const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.
   const getResult=(id:string)=>{
     const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
     const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
   };
+  if(run.imageContext&&!isFullSchema(run.imageContext.listing)&&!imageActualInputsMatch(run.imageContext,draft,product,current,run.imageRecipeSha256))throw new UserFacingError('来源规格、图片、店铺或站点已变化，原图片与付费请求已保留');
+  const legacy=buildListingContext(draft,product,current.targetGeneration,true);
+  for(const evidence of legacy.evidence)if(!current.evidence.some(item=>item.id===evidence.id))current.evidence.push(evidence);
+  for(const evidence of run.imageContext?.listing.evidence??[]){
+    if(current.evidence.some(item=>item.id===evidence.id)||!evidence.imageObservation)continue;
+    const observation=evidence.imageObservation,result=getResult(observation.resultId),scope=result?.sourceColorContext;
+    const variant=scope&&product.variants.find(v=>v.id===scope.variantId);
+    if(!scope||!variant||scope.productId!==product.id||scope.productRevision!==product.revision||scope.sourceSpec!==(variant.normalizedSpec.trim()||variant.originalSpec.trim())||result?.output.kind!=='source-color'||result.output.verdict!=='DETERMINED'||listingFingerprint(scope)!==listingFingerprint(observation.context)||listingFingerprint(result.output.colors)!==listingFingerprint(observation.colors))continue;
+    if(!scope.referenceAssets.every(ref=>db.prepare('SELECT 1 FROM assets a JOIN variant_assets v ON a.id=v.asset_id WHERE a.id=? AND a.product_id=? AND a.sha256=? AND v.variant_id=? AND v.confirmed=1').get(ref.assetId,product.id,ref.sha256,variant.id)))continue;
+    const call=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId);if(!call||validateAiCall(JSON.parse(String(call.record_json))).status!=='SUCCEEDED')continue;
+    current.evidence.push(evidence);
+  }
   const issues=currentDraftEvidenceIssues(draft,current,getResult,{adoptionFields:CONTRACT_ADOPTION_FIELDS,adoptionContext:'stored'});
   if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
   assertCurrentImageCategoryExclusions(current,{base:run.imageContext,setPlan:run.setPlan,plans:currentWorkflowPlanIds(run).flatMap(id=>{const result=getResult(id);return result?[result]:[];})});
-  if(run.imageContext){if(run.setPlan)assertImageSetPlan(run.setPlan,run.imageContext);validateProductImageContext(run.imageContext);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,current);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,run.imageContext.listing);}
+  if(run.imageContext){if(run.setPlan)assertImageSetPlan(run.setPlan,run.imageContext);validateProductImageContext(run.imageContext);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,current);}
   const selected=run.slots?run.slots.map(slot=>({id:slot.approvedAssetId!,sha256:slot.approvedSha256!})):[{id:run.approvedAssetId!,sha256:run.approvedSha256!}];
   for(const item of selected){const asset = db.prepare('SELECT product_id,sha256 FROM assets WHERE id=?').get(item.id);
     if (!asset || asset.product_id !== product.id || asset.sha256 !== item.sha256 || !db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(item.id, draft.variantId)) throw new UserFacingError('自动图片成果或 SKU 关联已变化');}

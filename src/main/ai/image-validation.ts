@@ -392,7 +392,7 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
   if(context.slot||context.setPolicy){
     const evidence=imageEvidence(evidenceContext);
     assertImagePromptMeasurements(plan.prompt,{evidence});
-    assertImageMeasurements([plan.productUnderstanding?.summary??'',...(plan.productUnderstanding?.uncertainties??[]),...plan.expectedText.map(line=>line.text)].join('\n'),{evidence});
+    assertImageMeasurements([imageObservationText(plan.productUnderstanding?.summary??''),...(plan.productUnderstanding?.uncertainties??[]).map(imageObservationText),...plan.expectedText.map(line=>line.text)].join('\n'),{evidence});
   }
   for (const line of plan.expectedText) assertTextEvidence(line.text, line.evidenceIds, evidenceContext,options);
 }
@@ -409,8 +409,21 @@ export function imageGenerationPrompt(plan: ImagePlanOutput,context?:ProductImag
     '\nSet style: '+context.setPlan!.style+'\nSingle focus: '+slot.focus+'\nScene: '+slot.scene+
     (plan.textMode==='none'?'\nNo visible text anywhere in this image: no captions, labels, signs, measurement arrows or lettering. Preserve actual product identity; do not disguise protected markings.':'\nRender only these short US English captions, clearly readable, with no extra text:\n'+plan.expectedText.map(line=>line.text).join('\n'));
 }
+/** Only complete, explicit packaging-exclusion observations qualify. A finite grammar
+ * keeps adjacent positive claims and arbitrary prose inside the numeric list strict.
+ * Use the same projection for validation and generation: excluded numbers must not
+ * reach the image model as possible specifications. Stored responses stay intact.
+ * Never apply this projection to creative prompts, captions, or set-plan fields. */
+function imageObservationText(text:string):string {
+  const dimension=String.raw`\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)*\s*(?:cm|mm|厘米|毫米)`;
+  const dimensions=dimension+String.raw`(?:\s*(?:、|与)\s*`+dimension+String.raw`)*`;
+  const counts=String.raw`(?:图上\s*\d+\s*个/盒、\s*\d+\s*个/箱、净重与毛重、)?`;
+  const exclusion=String.raw`(?:箱规数值[（(]\s*`+dimensions+String.raw`\s*[）)]属于外箱包装，不可当作产品尺寸使用|`+counts+String.raw`箱规\s*`+dimensions+String.raw`\s*均为包装及整箱规格，不是单件属性，本槽不使用)`;
+  const sentence=new RegExp(String.raw`(^|[。；;\n])\s*`+exclusion+String.raw`\s*(?=[。；;\n]|$)`,'g');
+  return text.replace(sentence,'$1 Excluded packaging measurements must not be used as product dimensions or rendered in the image');
+}
 function imagePromptText(plan:ImagePlanOutput):string{
-  return `Selected SKU visual observations (not verified specifications):\n${plan.productUnderstanding?.summary??''}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}${plan.cameraFocalLength?`\n\nPhotography only — camera focal length: ${cameraFocalLength(plan.cameraFocalLength)}. This describes the taking camera, never product dimensions or visible text.`:""}`;
+  return `Selected SKU visual observations (not verified specifications):\n${imageObservationText(plan.productUnderstanding?.summary??'')}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.map(imageObservationText).join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}${plan.cameraFocalLength?`\n\nPhotography only — camera focal length: ${cameraFocalLength(plan.cameraFocalLength)}. This describes the taking camera, never product dimensions or visible text.`:""}`;
 }
 const normalizeText = (value: string): string => value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 export function assertImageTextReview(review: ImageTextReviewOutput, context: ProductImageContext, plan: AiResult, ocr: AiResult, candidate: CandidateImageIdentity,options:ImageEvidenceOptions={}): void {

@@ -39,7 +39,7 @@ function failureMetadata(raw: unknown, provider: 'ocr' | 'segmentation' | 'text'
   if (containsSecret(result, credentials)) result.requestId = null;
   context.onMetadata?.(result);
 }
-function outputError<T>(operation: () => T): T { try { return operation(); } catch (error) { if (error instanceof AiError && ['AUTH_FAILED', 'SERVICE_PERMISSION_REQUIRED', 'IMAGE_INVALID', 'QUOTA_EXCEEDED', 'RATE_LIMITED', 'PROVIDER_ERROR'].includes(error.code)) throw error; throw new AiError('OUTPUT_INVALID'); } }
+function outputError<T>(operation: () => T): T { try { return operation(); } catch (error) { if (error instanceof AiError && ['OUTPUT_INVALID', 'AUTH_FAILED', 'SERVICE_PERMISSION_REQUIRED', 'IMAGE_INVALID', 'QUOTA_EXCEEDED', 'RATE_LIMITED', 'PROVIDER_ERROR'].includes(error.code)) throw error; throw new AiError('OUTPUT_INVALID'); } }
 function noSecrets<T>(value: T, credentials: AiCredentials): T { if (containsSecret(value, credentials)) throw new AiError('OUTPUT_INVALID'); return value; }
 
 export async function recognizeWithAliyun(bytes: Buffer, size: { width: number; height: number }, credentials: AliyunCredentials, signal: AbortSignal, context: AdapterContext): Promise<AdapterResult<OcrOutput>> {
@@ -93,15 +93,22 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: context.thinking ? 'enabled' : 'disabled' }, ...(context.thinking?{reasoning_effort:'high'}:{temperature:0}), stream: false, max_tokens: context.thinking ? Math.max(maxTokens,32768) : maxTokens, response_format: { type: 'json_object' } });
   if (Buffer.byteLength(body) > MAX_VISION_REQUEST_BYTES) throw new AiError('IMAGE_INVALID');
   const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, context, data => failureMetadata(data, 'text', credentials, context));
+  const sourceOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='source-image-consistency';
+  const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error;};
   return outputError(() => {
-    const body = object(raw), usage = object(body.usage);
+    const body = object(raw);
+    if(sourceOperation&&Array.isArray(body.choices)&&body.choices.length===1){const value=body.choices[0]?.message?.content;if(typeof value==='string'&&!containsSecret(value,credentials)){try{context.onUntrustedOutput?.(value,'provider-response-validation');}catch{}}}
+    const usage = object(body.usage);
     const reported = { promptTokens: integer(usage.prompt_tokens, 0, 1000000000), completionTokens: integer(usage.completion_tokens, 0, 1000000000), processedImages: 0 };
     if (usage.total_tokens !== undefined && integer(usage.total_tokens, 0, 2000000000) !== reported.promptTokens + reported.completionTokens) throw new AiError('OUTPUT_INVALID');
     const meta = metadata(body, reported, credentials, context);
     if (!Array.isArray(body.choices) || body.choices.length !== 1) throw new AiError('OUTPUT_INVALID');
     const choice = object(body.choices[0]), message = object(choice.message);
-    if (choice.finish_reason !== 'stop' || message.refusal || (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0))) throw new AiError('OUTPUT_INVALID');
-    const reply = noSecrets({ ...meta, content: JSON.parse(boundedText(message.content, 200000)) as unknown }, credentials);
+    if (choice.finish_reason !== 'stop' || message.refusal || (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0))) {if(sourceOperation)invalidSource(choice.finish_reason!=='stop'?'RESPONSE_NOT_COMPLETE':'RESPONSE_NOT_CONTENT');throw new AiError('OUTPUT_INVALID');}
+    let content:unknown;
+    if(sourceOperation){if(typeof message.content!=='string')invalidSource('RESPONSE_CONTENT_MISSING');try{content=JSON.parse(message.content as string);}catch{invalidSource('RESPONSE_JSON_INVALID');}}
+    else content=JSON.parse(boundedText(message.content,200000));
+    const reply = noSecrets({ ...meta, content }, credentials);
     // Diagnostics observe a copy after the secret gate, before operation-specific validation.
     // A broken observer cannot change the provider result or its usage accounting.
     try { context.onUntrustedOutput?.(structuredClone(reply.content)); } catch { /* Best effort only. */ }

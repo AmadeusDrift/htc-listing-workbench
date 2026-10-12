@@ -176,3 +176,56 @@ test('v1 successful uncertain history remains intact while current use merges it
   assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.equal(f.ai.sourceObservationEvidence(f.context()).images[0].colors[0],'Blue');
   assert.equal(String(f.db.prepare('SELECT record_json FROM source_consistency_assessments').get()!.record_json),prior);assert.equal(f.count(),1);
 });
+
+test('prepare retries only missing source response, preserves immutable paid history and product, survives backup/restart',async t=>{
+  const f=await fixture(t),before=f.store.getProduct(f.p.id);
+  f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,unlinkSync,existsSync}=await import('node:fs');
+  for(const name of (existsSync(join(f.directory,'ai-diagnostics'))?readdirSync(join(f.directory,'ai-diagnostics')):[]))unlinkSync(join(f.directory,'ai-diagnostics',name));
+  const old=f.ai.listCalls()[0],oldAttempt=String(f.db.prepare('SELECT record_json FROM source_consistency_attempts').get()!.record_json);
+  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))}));
+  const input={productId:f.p.id,productRevision:before.revision,variantId:f.p.variants[0].id};
+  assert.equal((await f.ai.prepareSourceConsistency(input)).status,'MATCH');assert.equal(f.count(),2);
+  assert.deepEqual(f.ai.listCalls().find(c=>c.id===old.id),old);assert.equal(String(f.db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(f.context()))!.record_json),oldAttempt);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);assert.deepEqual(f.store.getProduct(f.p.id),before);
+  assertConsistencyHistory(f.db,f.directory);const backup=join(f.directory,'retry.htcbackup');await createWorkspaceBackup(f.directory,backup,'synthetic-retry-backup');const snapshot=await prepareWorkspaceRestore(f.directory,backup,'synthetic-retry-backup');
+  await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
+  const restoredStore=new WorkspaceStore(f.directory),restoredDb=openDatabase(f.directory),restoredHosting=new HostingService(f.directory,restoredStore,mockStorage),restarted=new AiService(f.directory,restoredStore,restoredHosting,mockStorage,f.dependencies);
+  try{assert.equal((await restarted.prepareSourceConsistency(input)).status,'MATCH');assert.equal(f.count(),2);assert.equal(restoredDb.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);assert.deepEqual(restarted.listCalls().find(c=>c.id===old.id),old);}finally{await restarted.close();await restoredHosting.close();restoredDb.close();restoredStore.close();}
+});
+
+test('missing responses consume at most three durable source attempts across repeated preparation',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));const {readdirSync,unlinkSync,existsSync}=await import('node:fs');
+  for(let i=0;i<6;i++){
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));
+    for(const name of (existsSync(join(f.directory,'ai-diagnostics'))?readdirSync(join(f.directory,'ai-diagnostics')):[]))unlinkSync(join(f.directory,'ai-diagnostics',name));
+  }
+  assert.equal(f.count(),3);assert.equal(f.ai.getUsageSummary('deepseek').attempts,3);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,3);assertConsistencyHistory(f.db,f.directory);
+});
+
+
+test('source invalid JSON retains full useful response and fixed reason without another paid preparation',async t=>{
+  const f=await fixture(t),raw='{"assets":['+' '.repeat(210000);
+  f.respond(()=>new Response(JSON.stringify({id:'source-invalid-json',usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150},choices:[{finish_reason:'stop',message:{content:raw}}]})));
+  await assert.rejects(f.observe());const {readdirSync,readFileSync}=await import('node:fs');
+  const files=readdirSync(join(f.directory,'ai-diagnostics')),saved=JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',files[0]),'utf8'));
+  assert.equal(saved.output,raw);assert.equal(saved.rejectionReason,'RESPONSE_JSON_INVALID');
+  await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+});
+
+test('retention never evicts a saved source response while pruning disposable diagnostics',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,readFileSync,writeFileSync,truncateSync,existsSync}=await import('node:fs');
+  const folder=join(f.directory,'ai-diagnostics'),source=readdirSync(folder)[0];
+  const disposable=join(folder,'20990101000000000-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json');writeFileSync(disposable,'');truncateSync(disposable,129*1024*1024);
+  recordInvalidAiOutput(f.directory,{call:{...f.ai.listCalls()[0],id:randomUUID()},operation:'image-plan',createdAt:'2099-01-02T00:00:00.000Z',rejectionStage:'operation-output-validation',output:{bad:true}});
+  assert.ok(existsSync(join(folder,source)));assert.deepEqual(JSON.parse(readFileSync(join(folder,source),'utf8')).output,{bad:true});assert.equal(existsSync(disposable),false);
+});
+
+test('concurrent missing-response preparation sends only one replacement and retains both attempts',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,unlinkSync}=await import('node:fs');for(const n of readdirSync(join(f.directory,'ai-diagnostics')))unlinkSync(join(f.directory,'ai-diagnostics',n));
+  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:[],claims:[]}))}));
+  const other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies),input={productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id};
+  try{const results=await Promise.allSettled([f.ai.prepareSourceConsistency(input),other.prepareSourceConsistency(input)]);assert.ok(results.some(r=>r.status==='fulfilled'));assert.equal(f.count(),2);assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);}finally{await other.close();}
+});

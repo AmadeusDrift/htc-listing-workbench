@@ -27,7 +27,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
   const [sourceProducts, setSourceProducts] = useState<ProductDetail[]>([]);
   const [sourceErrors, setSourceErrors] = useState<Record<string, string>>({});
   const [loadingSources, setLoadingSources] = useState(false);
-  const sourceKey = task ? JSON.stringify([task.id, ...new Map(task.items.map(item => [item.productId, item.productRevision])).entries()]) : '';
+  const previewRevision = task && ['RUNNING', 'QUEUED'].includes(task.status) ? 'active' : task?.revision;
   const groups = useMemo(() => buildAutomaticProductGroups(task?.items ?? [], sourceProducts, products), [task, sourceProducts, products]);
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -47,7 +47,6 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         const id = selectedId || values[0]?.id;
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); }
-        if(detail&&api.previewAutomaticListingAdaptation){try{const checked=await api.previewAutomaticListingAdaptation(detail.id);if(active&&request===version.current&&!actionPending.current){setAdaptation(checked);setAdaptationError('');setSourceProducts(checked.sources);}}catch(cause){if(active&&request===version.current){setAdaptation(null);setAdaptationError(errorText(cause));}}}
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
       finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, 2000); } }
     };
@@ -56,16 +55,29 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [api, selectedId, refresh, startedTask?.id]);
 
+  // Full evidence validation is expensive: do it once per actual task revision,
+  // never for unchanged status polls, and never duplicate it just to read sources.
   useEffect(() => {
     let active = true;
-    const ids = [...new Set(task?.items.map(item => item.productId) ?? [])];
-    setSourceProducts([]); setSourceErrors({}); setLoadingSources(Boolean(ids.length));
-    if(task&&api.previewAutomaticListingAdaptation)void api.previewAutomaticListingAdaptation(task.id).then(checked=>{
-      if(!active)return;setSourceProducts(checked.sources);setSourceErrors({});setLoadingSources(false);
-    }).catch(cause=>{if(active){setSourceErrors(Object.fromEntries(ids.map(id=>[id,errorText(cause)])));setLoadingSources(false);}});
-    else setLoadingSources(false);
+    const request = version.current;
+    setSourceProducts([]);
+    setAdaptation(null); setAdaptationError(''); setSourceErrors({});
+    if (!task || !api.previewAutomaticListingAdaptation) {
+      setLoadingSources(false);
+      return () => { active = false; };
+    }
+    const ids = [...new Set(task.items.map(item => item.productId))];
+    setLoadingSources(true);
+    void api.previewAutomaticListingAdaptation(task.id).then(checked => {
+      if (!active || request !== version.current || actionPending.current) return;
+      setAdaptation(checked); setSourceProducts(checked.sources);
+    }).catch(cause => {
+      if (!active || request !== version.current) return;
+      const message = errorText(cause);
+      setAdaptationError(message); setSourceErrors(Object.fromEntries(ids.map(id => [id, message])));
+    }).finally(() => { if (active) setLoadingSources(false); });
     return () => { active = false; };
-  }, [api, sourceKey, refresh]);
+  }, [api, task?.id, previewRevision, refresh]);
 
   async function applyAdaptation(){
     if(!task||!adaptation||busy||actionPending.current)return;
@@ -100,17 +112,17 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
       <p className="small-copy automatic-task-counts" role="status"><OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="success" label="流程完成" value={outcomes.completed} suffix={` / ${task.items.length} 个销售 SKU`} /> · <OutcomeCount tone="info" label="准备标签" value={outcomes.labels} /> · <OutcomeCount tone="info" label="处理中" value={outcomes.running} /> · <OutcomeCount tone="info" label="等待服务" value={outcomes.waiting} /> · <OutcomeCount tone="neutral" label="待执行" value={outcomes.pending} /></p>
       <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="neutral" label="历史未分类" value={outcomes.unclassified} />；原始原因保留在各 SKU 中。</p>
       {error && <p className="workflow-notice" role="alert">任务操作未完成：{error}</p>}
+      <div className="workflow-actions">
+        {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
+        {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}
+      </div>
+      {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
       {adaptation&&<div className="workflow-notice" aria-label="旧任务适配检查"><strong>当前规则与资料检查</strong>
         {adaptation.blockers.map(message=><p key={message}>{message}</p>)}
         {adaptation.changes.length?<ul>{adaptation.changes.map((change,index)=><li key={change.key+':'+index}>{change.sku??'新增规格'}：{change.message}{change.fields.length?'；字段：'+change.fields.join('、'):''}{change.steps.length?'；涉及：'+change.steps.join('、'):''}</li>)}</ul>:<p>未发现需要适配的差异。</p>}
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
       </div>}
-      <div className="workflow-actions">
-        {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
-        {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}
-      </div>
-      {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
       <AutomaticProductGroups key={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={onManual} onShipping={onShipping} />
     </div>}

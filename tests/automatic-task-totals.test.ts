@@ -5,9 +5,10 @@ import type { AutomaticListingItem } from '../src/shared/automatic-listing-contr
 const row=(patch:Partial<AutomaticListingItem>)=>({status:'PENDING',stage:'DRAFT',error:null,...patch} as AutomaticListingItem);
 test('every current sales SKU belongs to exactly one summary bucket across all states',()=>{
  const rows=[row({status:'DONE',stage:'COMPLETE'}),row({status:'WAITING',stage:'READBACK'}),row({status:'RUNNING',stage:'LABELS'}),row({status:'RUNNING'}),row({status:'WAITING'}),row({}),...(['RULE_FILTERED','NEEDS_INPUT','SYSTEM_REPAIR','UNKNOWN','UNCLASSIFIED'] as const).map(kind=>row({status:kind==='RULE_FILTERED'?'SCREENED':'FAILED',outcome:{kind} as any}))];
+ rows.push(row({status:'SCREENED',outcome:{kind:'RULE_FILTERED',code:'SKU_SELECTION_FILTERED'} as any}),row({status:'SCREENED',outcome:{kind:'RULE_FILTERED',code:'ROI_MAX_PRICE',pricingReport:{}} as any}));
  const before=structuredClone(rows),counts=summarizeAutomaticItems(rows);
  assert.equal(Object.values(counts).reduce((sum,n)=>sum+n,0),rows.length);
- assert.deepEqual(Object.values(counts),Array(11).fill(1));assert.deepEqual(rows,before);
+ assert.deepEqual(Object.values(counts),Array(13).fill(1));assert.deepEqual(rows,before);
 });
 test('waiting and failure reasons identify the actual step without leaking raw errors',()=>{
  for(const [patch,text] of [

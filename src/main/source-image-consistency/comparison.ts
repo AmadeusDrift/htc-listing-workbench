@@ -110,12 +110,16 @@ function validateObservationOutput(raw:unknown):SourceConsistencyOutput {
 
 /** Known JSON-mode shell only. Never invent assets, values, visibility, or bindings. */
 export function normalizeSourceObservations(raw:unknown,context:Pick<SourceConsistencyContext,'claims'|'referenceAssets'>):SourceConsistencyOutput {
+  let diagnosticReason='SOURCE_ENVELOPE_INVALID';
   try {
   const o=keys(raw,['assets'],['kind','type','version']);
   if(o.kind!==undefined&&o.kind!=='source-image-consistency'||o.type!==undefined&&o.type!=='json_object'||o.version!==undefined&&o.version!==SOURCE_OBSERVATION_VERSION)throw new AiError('OUTPUT_INVALID');
   if(!Array.isArray(o.assets))throw new AiError('OUTPUT_INVALID');
+  diagnosticReason='SOURCE_ASSET_SCHEMA_INVALID';
   const assets=o.assets.map(raw=>{const a=keys(raw,['assetId','quality','visibility','lighting','presentation'],['colors','appearance','claims','observations']);return {...a,colors:a.colors??[],appearance:a.appearance??[],claims:a.claims??[]};});
+  diagnosticReason='SOURCE_OBSERVATION_VALUE_INVALID';
   const output=validateConsistencyOutput({kind:'source-image-consistency',version:SOURCE_OBSERVATION_VERSION,assets});
+  diagnosticReason='SOURCE_ASSET_REFERENCE_INVALID';
   assertConsistencyOutput(output,context);return output;
-  }catch{throw new AiError('OUTPUT_INVALID');}
+  }catch{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=diagnosticReason;throw error;}
 }

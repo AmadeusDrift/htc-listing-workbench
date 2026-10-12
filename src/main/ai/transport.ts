@@ -7,7 +7,7 @@ export interface AdapterContext {
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;
   onMetadata?: (metadata: ProviderMetadata) => void;
   /** Secret-checked JSON only; still unapproved and never eligible for adoption. */
-  onUntrustedOutput?: (output: unknown) => void;
+  onUntrustedOutput?: (output: unknown, stage?: import('./output-diagnostics.ts').AiOutputRejectionStage) => void;
   /** Synchronous reservation at the last boundary before one paid POST. */
   beforeSend?: (body: string | Buffer) => void;
 }

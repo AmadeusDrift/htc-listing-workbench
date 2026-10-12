@@ -160,8 +160,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];
 export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask {
-  const value = record(raw, '自动上架任务', taskKeys);
-  if (Object.keys(value).length !== taskKeys.length || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
+  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation']);
+  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
     || !['demo','live'].includes(String(value.mode)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 5000) fail();
   const items = (value.items as unknown[]).map(item);
   const planned=items.filter(row=>row.stage!=='PLAN');
@@ -173,6 +173,14 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
     targetStamp: hash(value.targetStamp), profileId: text(value.profileId, '图床', 30, true), profileStamp: hash(value.profileStamp), rulesStamp: hash(value.rulesStamp),
     ruleRevision: counter(value.ruleRevision), productType: text(value.productType, '商品类型', 100, true), locale: text(value.locale, '语言', 30, true), items,
     labelFormat: validateItemLabelFormat(value.labelFormat), createdAt: date(value.createdAt), updatedAt: date(value.updatedAt), error: optional(value.error, 2000) };
-  for(const row of items)if(row.outcome&&fingerprint(row.outcome.scope)!==fingerprint(outcomeScope(result,row)))fail();
+  if(value.adaptation!==undefined){
+    const a=record(value.adaptation,'适配检查点',['version','token','at','blockedKeys','previousRules']);
+    if(a.version!==1||!Array.isArray(a.blockedKeys)||(a.blockedKeys as unknown[]).some(key=>typeof key!=='string'||!items.some(r=>r.key===key))||!Array.isArray(a.previousRules)||a.previousRules.length>1000)fail();
+    result.adaptation={version:1,token:hash(a.token),at:date(a.at),blockedKeys:a.blockedKeys as string[],previousRules:(a.previousRules as unknown[]).map(raw=>{const r=record(raw,'历史规则',['stamp','revision']);return {stamp:hash(r.stamp),revision:counter(r.revision)};})};
+  }
+  for(const row of items)if(row.outcome){const expected=outcomeScope(result,row),actual=row.outcome.scope;
+    if(result.adaptation?.previousRules.some(r=>r.stamp===actual.rulesStamp&&r.revision===actual.ruleRevision)){expected.rulesStamp=actual.rulesStamp;expected.ruleRevision=actual.ruleRevision;}
+    if(fingerprint(actual)!==fingerprint(expected))fail();
+  }
   return result;
 }

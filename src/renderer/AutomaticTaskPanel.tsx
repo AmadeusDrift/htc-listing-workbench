@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PauseCircle, Play, RefreshCw, XCircle } from 'lucide-react';
-import type { AutomaticListingStatus, AutomaticListingTask } from '../shared/automatic-listing-contracts';
+import type { AutomaticAdaptationPreview, AutomaticListingStatus, AutomaticListingTask } from '../shared/automatic-listing-contracts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
 import type { SettingsStatusTone } from './SettingsStatusBadge';
 import { errorText } from './utils';
@@ -18,6 +18,8 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
   const [selectedId, setSelectedId] = useState('');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
+  const [adaptation,setAdaptation]=useState<AutomaticAdaptationPreview|null>(null);
+  const [adaptationError,setAdaptationError]=useState('');
   const [error, setError] = useState('');
   const [readError, setReadError] = useState('');
   const [pending, setPending] = useState('');
@@ -45,6 +47,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         const id = selectedId || values[0]?.id;
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); }
+        if(detail&&api.previewAutomaticListingAdaptation){try{const checked=await api.previewAutomaticListingAdaptation(detail.id);if(active&&request===version.current&&!actionPending.current){setAdaptation(checked);setAdaptationError('');setSourceProducts(checked.sources);}}catch(cause){if(active&&request===version.current){setAdaptation(null);setAdaptationError(errorText(cause));}}}
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
       finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, 2000); } }
     };
@@ -57,18 +60,20 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     let active = true;
     const ids = [...new Set(task?.items.map(item => item.productId) ?? [])];
     setSourceProducts([]); setSourceErrors({}); setLoadingSources(Boolean(ids.length));
-    void Promise.all(ids.map(async id => {
-      try { return { id, product: await api.getProduct(id), error: '' }; }
-      catch (cause) { return { id, product: null, error: errorText(cause) }; }
-    })).then(values => {
-      if (!active) return;
-      setSourceProducts(values.flatMap(value => value.product ? [value.product] : []));
-      setSourceErrors(Object.fromEntries(values.filter(value => value.error).map(value => [value.id, value.error])));
-      setLoadingSources(false);
-    });
+    if(task&&api.previewAutomaticListingAdaptation)void api.previewAutomaticListingAdaptation(task.id).then(checked=>{
+      if(!active)return;setSourceProducts(checked.sources);setSourceErrors({});setLoadingSources(false);
+    }).catch(cause=>{if(active){setSourceErrors(Object.fromEntries(ids.map(id=>[id,errorText(cause)])));setLoadingSources(false);}});
+    else setLoadingSources(false);
     return () => { active = false; };
   }, [api, sourceKey, refresh]);
 
+  async function applyAdaptation(){
+    if(!task||!adaptation||busy||actionPending.current)return;
+    actionPending.current=true;version.current++;setPending('adaptation');setError('');
+    try{const updated=await api.applyAutomaticListingAdaptation({taskId:task.id,token:adaptation.token});if(mounted.current){setTask(updated);setAdaptation(null);setTasks(values=>values.map(row=>row.id===updated.id?updated:row));}}
+    catch(cause){if(mounted.current)setError(errorText(cause));}
+    finally{actionPending.current=false;version.current++;if(mounted.current){setPending('');setRefresh(v=>v+1);}}
+  }
   async function act(action: 'pause' | 'resume' | 'cancel') {
     if (!task || busy || actionPending.current) return;
     actionPending.current = true; version.current++; setPending(action); setError('');
@@ -95,6 +100,12 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
       <p className="small-copy automatic-task-counts" role="status"><OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="success" label="流程完成" value={outcomes.completed} suffix={` / ${task.items.length} 个销售 SKU`} /> · <OutcomeCount tone="info" label="准备标签" value={outcomes.labels} /> · <OutcomeCount tone="info" label="处理中" value={outcomes.running} /> · <OutcomeCount tone="info" label="等待服务" value={outcomes.waiting} /> · <OutcomeCount tone="neutral" label="待执行" value={outcomes.pending} /></p>
       <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="neutral" label="历史未分类" value={outcomes.unclassified} />；原始原因保留在各 SKU 中。</p>
       {error && <p className="workflow-notice" role="alert">任务操作未完成：{error}</p>}
+      {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
+      {adaptation&&<div className="workflow-notice" aria-label="旧任务适配检查"><strong>当前规则与资料检查</strong>
+        {adaptation.blockers.map(message=><p key={message}>{message}</p>)}
+        {adaptation.changes.length?<ul>{adaptation.changes.map((change,index)=><li key={change.key+':'+index}>{change.sku??'新增规格'}：{change.message}{change.fields.length?'；字段：'+change.fields.join('、'):''}{change.steps.length?'；涉及：'+change.steps.join('、'):''}</li>)}</ul>:<p>未发现需要适配的差异。</p>}
+        <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
+      </div>}
       <div className="workflow-actions">
         {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}

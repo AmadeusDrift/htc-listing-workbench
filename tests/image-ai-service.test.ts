@@ -1377,3 +1377,18 @@ test('workflow history and backup accept strictly owned recovered set plans with
  }finally{db.close();}
  const backup=join(f.directory,'recovered-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'synthetic recovered image history passphrase');await prepareWorkspaceRestore(f.directory,backup,'synthetic recovered image history passphrase');assert.deepEqual(f.ai.getCall(call.id),call);
 });
+test('W2 finite-schema approved seven images survive proven cost-only adaptation without skipping current identity checks',async t=>{
+ const {saveImageAdaptation,inspectImageAdaptation,currentImageAdaptation}=await import('../src/main/image-workflow/adaptation.ts');
+ const f=await legacyFixture(t),{workflow,posts}=productionWorkflow(f);
+ (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');assert.equal(posts(),7);
+ const db=openDatabase(f.directory);try{
+  const before=f.amazon.getDraft(f.draft.id),oldSource=f.store.getProductSnapshot(f.product.id),frozen=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json);
+  const input=saveInput(oldSource);input.variants[0].purchasePrice='2.5';const source=f.store.saveProduct(input);await confirmSourceConsistencyFixture(f.directory,f.store,source.id);
+  const current=f.store.getProductSnapshot(source.id),preview=f.amazon.previewTaskAdaptation(before.id,current);assert.equal(inspectImageAdaptation(first.workflow,before,preview,current,db).compatible,true);
+  const sends=f.requests.length;db.exec('BEGIN IMMEDIATE');const after=f.amazon.applyTaskAdaptation(before.id,current,undefined,db);saveImageAdaptation(db,first.workflow,before,after,current);db.exec('COMMIT');
+  assert.equal(currentImageAdaptation(db,first.workflow,after,current),true,'direct returned workflow proof');assert.deepEqual(workflow.getProgress(before.id),first.workflow,'stored parsed workflow');assert.equal(currentImageAdaptation(db,workflow.getProgress(before.id)!,after,current),true,'stored workflow proof');
+  assert.equal(approvedWorkflowAssets(db,after,current)?.length,7);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json),frozen);assert.equal(f.requests.length,sends);assert.equal(posts(),7);
+  const bad={...after,schema:{...after.schema,version:'different-semantic-version'}};assert.throws(()=>approvedWorkflowAssets(db,bad,current));
+ }finally{db.close();}
+});

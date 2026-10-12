@@ -62,6 +62,7 @@ export interface AutomaticListingItem {
   familyTransition?: { phase:'BIND'|'RECHECK'|'READY'; plan:import('./sales-plan-contracts.ts').SalesListingPlan; sourceWorkflowId:string; draftRevision:number; draftStamp:string };
 }
 export interface AutomaticListingTask {
+  adaptation?:{version:1;token:string;at:string;blockedKeys:string[];previousRules:{stamp:string;revision:number}[]};
   id: string; revision: number; status: AutomaticListingStatus;
   targetId: string; targetName: string; sellerId: string; marketplaceId: string; mode: 'demo' | 'live';
   targetStamp: string; profileId: string; profileStamp: string; rulesStamp: string; ruleRevision: number;
@@ -70,6 +71,8 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
+  previewAutomaticListingAdaptation(id:string):Promise<AutomaticAdaptationPreview>;
+  applyAutomaticListingAdaptation(input:{taskId:string;token:string}):Promise<AutomaticListingTask>;
   getAutomaticListingQueue(input:{productIds:string[];targetId:string}):Promise<AutomaticListingQueue>;
   startAutomaticListing(input: StartAutomaticListingInput): Promise<AutomaticListingTask | null>;
   listAutomaticListingTasks(): Promise<AutomaticListingTask[]>;
@@ -78,3 +81,6 @@ export interface AutomaticListingApi {
   pauseAutomaticListingTask(id: string): Promise<AutomaticListingTask>;
   cancelAutomaticListingTask(id: string): Promise<AutomaticListingTask>;
 }
+
+export interface AutomaticAdaptationChange { key:string; productId:string; sku:string|null; kind:'SOURCE'|'RULES'|'SELECTED'|'NOT_SELECTED'|'NEW'|'DRAFT'|'PRESERVED'|'BLOCKED'; steps:string[]; fields:string[]; message:string }
+export interface AutomaticAdaptationPreview { taskId:string; taskRevision:number; token:string; canApply:boolean; blockers:string[]; changes:AutomaticAdaptationChange[]; sources:import('./contracts.ts').ProductDetail[] }

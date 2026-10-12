@@ -1,3 +1,4 @@
+import { sameSchemaValidation } from './schema-compatibility.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
@@ -450,15 +451,15 @@ export class AmazonService {
     if (currency.notice) result.report.notices.push(currency.notice);
     return result;
   }
-  private declarationIssues(draft: AmazonDraft): ListingIssue[] {
+  private declarationIssues(draft: AmazonDraft, sourceSnapshot?:ProductDetail): ListingIssue[] {
     if(draft.listingProgram!=='haul')return [];
-    const source=this.getProduct(draft.productId);
+    const source=sourceSnapshot??this.getProduct(draft.productId);
     // Validate identities against raw source SKUs, then read their original text.
     const product=projectSalesProduct(source,draft.salesPlan,draft.variantId);
     const risk=declarationSafetyIssues(source,selectedDeclarationScope(source,draft.variantId,draft.salesPlan?.recipe.components),draft.attributes);
     const matchingPackage=draft.schema.parentageLevel!=='PARENT'&&(!draft.salesPlan||draft.salesPlan.recipe.components.length===1&&draft.salesPlan.recipe.components[0].quantity===draft.salesPlan.recipe.components[0].sourcePackPieces);
     const target=this.getTarget(draft.targetId),variant=product.variants.find(value=>value.id===draft.variantId)!;
-    const currentRules=this.businessDefaults(product,variant,target,draft.schema,{},'haul',undefined,draft.salesPlan).report;
+    const currentRules=this.businessDefaults(product,variant,target,draft.schema,{},'haul',undefined,draft.salesPlan,source).report;
     const ruleValues=Object.fromEntries(Object.entries(currentRules?.fields??{}).map(([field,entry])=>[field,entry.value]));
     const authority=currentFactAuthority(product,draft.schema,draft,draft.attributes,matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db,product.id,draft.variantId,draft.mode):{},ruleValues);
     const riskFields=new Set(risk.flatMap(issue=>issue.attributeNames));
@@ -631,6 +632,36 @@ export class AmazonService {
         && !(draft.businessRules?.pricingBasis?.kind==='auto_bundle'&&['number_of_items','unit_count'].includes(field)))delete attributes[field];
     const resolved=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,'haul',draft.businessRules,plan,source);
     return {...draft,productRevision:source.revision,...(plan?{salesPlan:plan}:{}),attributes:resolved.attributes,businessRules:resolved.report};
+  }
+  /** Local explicit adaptation. Frozen responses and adopted fields stay intact. */
+  previewTaskAdaptation(draftId:string,source:ProductDetail,recipe?:SalesRecipe):AmazonDraft {
+    const record=this.persistence.record(draftId);this.mutable(record);
+    if(this.busy.has(draftId))throw new UserFacingError('草稿请求进行中，请等待完成');
+    const draft=record.draft;
+    if(source.id!==draft.productId)throw new UserFacingError('来源身份不一致');
+    if(recipe&&draft.salesPlan)draft.salesPlan={...draft.salesPlan,recipe:clone(recipe)};
+    const product=projectSalesProduct(source,draft.salesPlan,draft.variantId),variant=product.variants.find(v=>v.id===draft.variantId&&v.sku===draft.sku);
+    if(!variant)throw new UserFacingError('原销售规格身份无法对应；保留历史待核对');
+    const cached=this.persistence.schema(draft.schema.key);
+    if(cached&&Date.parse(cached.fetchedAt)>Date.parse(draft.schema.fetchedAt)&&cached.targetId===draft.targetId&&cached.productType===draft.schema.productType&&cached.parentageLevel===draft.schema.parentageLevel&&cached.locale===draft.schema.locale&&(cached.checksum!==draft.schema.checksum||cached.version!==draft.schema.version||!sameSchemaValidation(cached,draft.schema)))draft.schema=cached;
+    let attributes=clone(draft.attributes);
+    // Only unchanged rule-owned values can be refreshed. Manual and AI edits survive.
+    for(const [field,entry] of Object.entries(draft.businessRules?.fields??{}))if(semanticJson(attributes[field]??null)===semanticJson(entry.value))delete attributes[field];
+    const resolved=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,draft.listingProgram,draft.businessRules,draft.salesPlan,source);
+    draft.productRevision=source.revision;draft.attributes=resolved.attributes;if(resolved.report)draft.businessRules=resolved.report;
+    draft.localIssues=[...listingProgramIssues(draft.listingProgram,draft.schema,draft.attributes),...validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema),...imageIssues(draft.attributes),...copyPolicyIssues(draft),...this.declarationIssues(draft,source)];
+    return clone(draft);
+  }
+  applyTaskAdaptation(draftId:string,source:ProductDetail,recipe:SalesRecipe|undefined,db:DatabaseSync):AmazonDraft {
+    if(!db.isTransaction)throw new Error('Task adaptation requires owner transaction');
+    const record=this.persistence.record(draftId),before=clone(record.draft),draft=this.previewTaskAdaptation(draftId,source,recipe);
+    if(JSON.stringify(before)===JSON.stringify(draft))return before;
+    draft.revision++;draft.state=draft.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';draft.previewedAt=null;
+    record.draft=draft;record.preview=null;record.request=this.request(record);
+    this.event(record,'local_validation','用户适配当前来源与规则；保留原属性、图片和平台响应，本地重新校验');
+    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({before,afterRevision:draft.revision}),this.at());
+    db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
+    return clone(draft);
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
   applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false, checkpoint?: (draft:AmazonDraft, db:DatabaseSync)=>void): AmazonDraft {

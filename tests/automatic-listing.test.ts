@@ -1506,3 +1506,81 @@ for(const shape of ['94-A','94-B'])test(`legacy ${shape} missing workflow is del
  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
  assert.deepEqual(admissionOptions,{legacyImageAttempts:0});assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,0);
 });
+
+test('W2 read-only adaptation detects current selection and source without writes or dispatch; apply is stale-safe and idempotent', async t => {
+  const f=fixture(t), task=await f.create();
+  f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+  f.dependencies.store.getProduct=()=>{throw new Error('mutating read forbidden');};
+  f.product.revision++; f.product.title='Current box';
+  const before=f.service.get(task.id);
+  const preview=f.service.previewAdaptation(task.id);
+  assert.ok(preview.changes.some(change=>change.kind==='SOURCE'));
+  assert.deepEqual(f.service.get(task.id),before);
+  assert.deepEqual(f.calls,{sources:0,images:0,submissions:0,batches:0,labels:0});
+  f.product.revision++;
+  assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);
+  const fresh=f.service.previewAdaptation(task.id), applied=f.service.applyAdaptation({taskId:task.id,token:fresh.token});
+  assert.equal(applied.status,'PAUSED');assert.equal(applied.items[0].productRevision,f.product.revision);
+  assert.deepEqual(f.service.applyAdaptation({taskId:task.id,token:fresh.token}),applied);
+  assert.equal(applied.items[0].imageAttempts,before.items[0].imageAttempts);
+  const db=openDatabase(f.directory);
+  try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='automatic-listing.adapted'").get()!.n,1);}finally{db.close();}
+});
+
+test('W2 task save failure rolls back task and audit then restart accepts the same preview', async t=>{
+  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+  f.product.revision++;const preview=f.service.previewAdaptation(task.id),before=f.service.get(task.id),original=(f.service as any).save;
+  (f.service as any).save=function(...args:any[]){original.apply(this,args);throw Error('save failed');};
+  assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/save failed/);
+  assert.deepEqual(f.service.get(task.id),before);
+  (f.service as any).save=original;await f.service.close();
+  const restarted=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>restarted.close());
+  assert.deepEqual(restarted.get(task.id),before);
+  const applied=restarted.applyAdaptation({taskId:task.id,token:preview.token});assert.equal(applied.status,'PAUSED');
+  const db=openDatabase(f.directory);try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='automatic-listing.adapted'").get()!.n,1);}finally{db.close();}
+});
+
+test('W2 submitted rows remain byte-identical when task rules change, in-flight apply is rejected without cancellation',async t=>{
+  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+  const saved=(f.service as any).tasks.get(task.id),row=saved.items[0];
+  row.draftId=randomUUID();row.stage='READBACK';row.status='WAITING';row.imageStarted=true;row.imageAttempts=3;
+  f.drafts.set(row.draftId,{id:row.draftId,submittedAt:new Date().toISOString(),state:'SUBMITTED',revision:7} as AmazonDraft);
+  (f.service as any).save(saved);const before=structuredClone(row);f.rules.revision++;f.rules.product.stockSets++;
+  let p=f.service.previewAdaptation(task.id);const result=f.service.applyAdaptation({taskId:task.id,token:p.token});assert.deepEqual(result.items[0],before);
+  const current=(f.service as any).tasks.get(task.id);current.status='RUNNING';p=f.service.previewAdaptation(task.id);assert.equal(p.canApply,false);
+  assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:p.token}),/进行/);assert.deepEqual(f.calls,{sources:0,images:0,submissions:0,batches:0,labels:0});
+});
+
+test('W2 IPC preview/apply never invokes task start confirmation or paid work',async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);f.product.revision++;
+ const handlers=new Map<string,(...args:any[])=>any>();installAutomaticListingIpc(f.service,(name,_count,fn)=>handlers.set(name,fn),{confirm:async()=>{throw Error('unexpected start');},audit:()=>{}});
+ const preview=handlers.get('red:automatic-listing:adaptation-preview')!(task.id),applied=handlers.get('red:automatic-listing:adaptation-apply')!({taskId:task.id,token:preview.token});
+ assert.equal(applied.status,'PAUSED');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+
+test('W2 complete source selection adds missing rows with atomic naming and no duplicate identity after retry',async t=>{
+ const {SkuNamingService}=await import('../src/main/sku-naming/service.ts');const {planSalesListings}=await import('../src/main/sales-plans/planning.ts');
+ const f=fixture(t);f.product.facts.push({id:randomUUID(),name:'采购币种',value:'CNY',source:'manual',sourceRef:'fixture',state:'human_confirmed'});
+ f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+ const naming=new SkuNamingService(f.directory);f.cleanups.push(async()=>naming.close());
+ f.dependencies.planSales=()=>planSalesListings(f.product,null,f.target,f.rules,naming);
+ f.dependencies.planSalesForAdaptation=(source,_target,db)=>planSalesListings(source,null,f.target,f.rules,new SkuNamingService(f.directory,db));
+ const task=await f.create();const old=task.items[0];
+ f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO',originalSpec:'green',normalizedSpec:'green',sourceSpec:'green'});f.product.revision++;
+ const p=f.service.previewAdaptation(task.id);assert.ok(p.changes.some(c=>c.kind==='NEW'));
+ const beforeGroups=(f.service as any).db.prepare('SELECT * FROM sku_naming_groups').all(),save=(f.service as any).save;
+ (f.service as any).save=()=>{throw Error('task save failure');};assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:p.token}),/task save failure/);
+ assert.deepEqual((f.service as any).db.prepare('SELECT * FROM sku_naming_groups').all(),beforeGroups);
+ (f.service as any).save=save;const next=f.service.applyAdaptation({taskId:task.id,token:p.token});assert.equal(next.items.length,2);assert.equal(next.items[0].sku,old.sku);
+ assert.equal(new Set(next.items.map(r=>r.sku)).size,2);assert.deepEqual(f.service.applyAdaptation({taskId:task.id,token:p.token}),next);
+ assert.equal(f.calls.sources+f.calls.images+f.calls.submissions,0);
+});
+
+for(const changed of ['task','rules','draft','request'] as const)test(`W2 rejects preview when ${changed} changes before apply`,async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);const saved=(f.service as any).tasks.get(task.id),row=saved.items[0];
+ row.draftId=randomUUID();row.stage='IMAGES';f.drafts.set(row.draftId,{id:row.draftId,productId:f.product.id,productRevision:f.product.revision,state:'DRAFT',revision:1,submittedAt:null,attributes:{},localIssues:[],schema:{}} as unknown as AmazonDraft);(f.service as any).save(saved);
+ const preview=f.service.previewAdaptation(task.id);
+ if(changed==='task')saved.revision++;if(changed==='rules')f.rules.revision++;if(changed==='draft')f.drafts.get(row.draftId)!.revision++;
+ if(changed==='request')(f.service as any).db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(randomUUID(),JSON.stringify({id:randomUUID(),productId:f.product.id,status:'FAILED',finishedAt:new Date().toISOString()}));
+ assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);assert.equal(f.calls.images+f.calls.sources+f.calls.submissions,0);
+});

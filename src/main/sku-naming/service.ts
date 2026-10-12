@@ -10,7 +10,8 @@ import type { SkuNamingGroup, SkuNamingPreview, SkuNamingSettings } from '../../
 export class SkuNamingService {
   private db: DatabaseSync;
   private closed = false;
-  constructor(directory: string) { this.db = openDatabase(directory); }
+  private borrowed = false;
+  constructor(directory: string, transactionDb?: DatabaseSync) { this.db = transactionDb ?? openDatabase(directory); this.borrowed = !!transactionDb; }
   getSettings(): SkuNamingSettings {
     const row = this.db.prepare('SELECT value_json FROM amazon_settings WHERE key=?').get(SKU_NAMING_SETTINGS_KEY);
     return row ? parseSkuNamingSettings(JSON.parse(String(row.value_json))) : defaultSkuNamingSettings();
@@ -60,7 +61,7 @@ export class SkuNamingService {
     const expected = key === undefined ? group?.baseSku : group?.children.find(child => child.key === key)?.sku;
     if (!expected || expected !== assertSafeSku(input.sku)) throw new UserFacingError('上架 SKU 与已分配的商品组身份不一致');
   }
-  close(): void { if (!this.closed) { this.db.close(); this.closed = true; } }
+  close(): void { if (!this.closed) { if (!this.borrowed) this.db.close(); this.closed = true; } }
   private appendChildren(group: SkuNamingGroup, keys: string[]): SkuNamingGroup {
     const known = new Set(group.children.map(child => child.key)), added = keys.filter(key => !known.has(key));
     if (group.children.length + added.length > SKU_MAX_CHILDREN) throw new UserFacingError('SKU 子体数量超出限制');
@@ -80,6 +81,7 @@ export class SkuNamingService {
     this.db.prepare('INSERT INTO sku_naming_identities VALUES(?,?,?,?,?)').run(group.storeScope, sku, group.id, childKey, index);
   }
   private transaction<T>(action: () => T): T {
+    if (this.borrowed) { if (!this.db.isTransaction) throw new Error('Naming requires an active owner transaction'); return action(); }
     this.db.exec('BEGIN IMMEDIATE');
     try { const result = action(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }

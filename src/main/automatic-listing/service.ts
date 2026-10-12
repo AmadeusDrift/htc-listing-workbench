@@ -129,11 +129,11 @@ export class AutomaticListingService {
   }
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
-  private save(task: AutomaticListingTask): void {
+  private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
     assertAutomaticRejectionHistory(this.db,task);
-    this.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
+    db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
@@ -365,21 +365,35 @@ export class AutomaticListingService {
     for(const row of task.items)this.migrateRepairPolicy(task,row);
     for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
       if(row.outcome?.kind==='UNKNOWN'&&this.unknownCode(row,task))continue;
-      if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)){
+      if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
         const old=this.deps.amazon.getDraft(row.draftId);
-        if(old.listingProgram==='haul'&&!submitted(old)&&old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input')){
-          const refreshed=this.deps.amazon.applyBusinessDefaults({id:old.id,revision:old.revision},undefined,true);
-          // Advance only the checkpoint proven to own this exact pre-refresh draft.
-          // Remove the resolved pricing diagnostic, retaining every independent field error.
-          if(row.repair&&row.repair.phase!=='FIELDS_STARTED'&&row.repair.draftRevision===old.revision&&row.repair.draftStamp===imageWorkflowDraftStamp(old)){
-            const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==pricingBlockingReason(old)));
+        const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
+        if(!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
+          let refreshed=old;
+          if(!row.pricingRefresh){
+            try{
+              refreshed=this.deps.amazon.applyBusinessDefaults({id:old.id,revision:old.revision},undefined,true,(draft,db)=>{
+                row.pricingRefresh={draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+                this.save(task,db);
+              });
+            }catch(error){
+              // Either both writes committed or both rolled back. Reload the durable task
+              // even when a caller interrupts immediately after the transaction returns.
+              const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
+              if(saved)Object.assign(task,validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+              throw error;
+            }
+          }
+          const proof=row.pricingRefresh??{draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+          if(refreshed.revision!==proof.draftRevision||imageWorkflowDraftStamp(refreshed)!==proof.draftStamp)throw new UserFacingError('本地定价恢复后草稿已变化，保留原检查点待核对');
+          if(row.repair&&row.repair.draftRevision===proof.previousDraftRevision&&row.repair.draftStamp===proof.previousDraftStamp){
+            const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
             if(row.repair.phase==='FIELDS_PENDING'&&!remaining.length&&!row.repairAttempts){
-              // No paid repair was ever started. Retain the cancelled execution in history
-              // and let normal execution create a current-revision replacement.
               this.deps.execution.cancel(row.executionTaskIds.at(-1)!);row.repair=null;
             }else row.repair={...row.repair,remaining,draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),
               phase:row.repair.phase==='FIELDS_PENDING'&&!remaining.length?'READY':row.repair.phase};
           }
+          delete row.pricingRefresh;
           const pricing=pricingOutcome(refreshed,this.deps.rules());
           if(pricing){
             row.outcome={version:1,...pricing,message:(refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};

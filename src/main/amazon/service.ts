@@ -1,3 +1,4 @@
+import type { DatabaseSync } from 'node:sqlite';
 import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
@@ -603,7 +604,7 @@ export class AmazonService {
     if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode):{}), record.draft.businessRules, record.draft.attributes);
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
-  applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false): AmazonDraft {
+  applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false, checkpoint?: (draft:AmazonDraft, db:DatabaseSync)=>void): AmazonDraft {
     const record = this.checked(input); this.enter(record.draft.id);
     try { return this.persistence.transaction(() => {
       this.mutable(record); this.currentProduct(record);
@@ -635,6 +636,7 @@ export class AmazonService {
       }
       this.updateSourceMapping(record); this.persistence.putRecord(record);
       if(completionId){const journal=new CompletionJournal(this.persistence.db),operation=journal.get(completionId);operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal.save(operation);}
+      checkpoint?.(clone(record.draft),this.persistence.db);
       return clone(record.draft);
     }); } finally { this.busy.delete(record.draft.id); }
   }

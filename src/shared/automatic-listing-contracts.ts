@@ -34,6 +34,8 @@ export interface AutomaticListingQueue {
   products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
 }
 export interface AutomaticListingItem {
+  /** Written in the same SQLite transaction as the local pricing draft update. */
+  pricingRefresh?: { draftRevision:number; draftStamp:string; previousDraftRevision:number; previousDraftStamp:string; previousReason:string|null };
   rejection?:{workflowId:string;detail:NonNullable<import('./image-workflow-contracts.ts').ImageWorkflowRun['rejection']>};
   key: string; productId: string; productRevision: number; sourceStamp: string; productTitle: string;
   variantId: string; sku: string; stockSets: number; sourcesPrepared: boolean;

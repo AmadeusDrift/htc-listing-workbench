@@ -30,7 +30,7 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','outcome']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','outcome','pricingRefresh']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
@@ -43,6 +43,12 @@ function item(raw: unknown): AutomaticListingItem {
     draftId: value.draftId === null ? null : identifier(value.draftId), executionTaskIds: (value.executionTaskIds as unknown[]).map(identifier),
     imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts, 21), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
+  if(value.pricingRefresh!==undefined){
+    const refresh=record(value.pricingRefresh,'本地定价检查点',['draftRevision','draftStamp','previousDraftRevision','previousDraftStamp','previousReason']);
+    if(Object.keys(refresh).length!==5||!result.draftId)fail();
+    result.pricingRefresh={draftRevision:counter(refresh.draftRevision),draftStamp:hash(refresh.draftStamp),previousDraftRevision:counter(refresh.previousDraftRevision),previousDraftStamp:hash(refresh.previousDraftStamp),previousReason:optional(refresh.previousReason,2000)};
+    if(!result.pricingRefresh.previousDraftRevision||result.pricingRefresh.draftRevision<result.pricingRefresh.previousDraftRevision)fail();
+  }
   if(value.rejection!==undefined){const r=record(value.rejection,'拒绝原因',['workflowId','detail']);if(Object.keys(r).length!==2||!result.draftId)fail();result.rejection={workflowId:identifier(r.workflowId),detail:validateWorkflowRejection(r.detail)};}
   if(value.repairPolicyVersion!==undefined){if(value.repairPolicyVersion!==FIELD_REPAIR_POLICY_VERSION)fail();result.repairPolicyVersion=FIELD_REPAIR_POLICY_VERSION;}
   if(value.repairPolicyMigration!==undefined){

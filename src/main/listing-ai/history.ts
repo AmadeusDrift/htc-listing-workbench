@@ -62,7 +62,7 @@ export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonD
     attempted();
   } else if (d.status === 'business_blocked') {
     if (!businessFailure || d.code !== d.quoteError || report.quote !== null || e.cost !== 'confirmed_cny'
-      || e.dimensions !== 'confirmed_source' || e.weight !== 'confirmed_source' || e.packageScope !== 'source_sale_unit'
+      || !['confirmed_source',...(d.version===2?['business_default']:[])].includes(e.dimensions) || !['confirmed_source',...(d.version===2?['business_default']:[])].includes(e.weight) || e.packageScope !== 'source_sale_unit'
       || e.saleUnit !== 'confirmed' || marketplaceId !== 'ATVPDKIKX0DER') invalid();
     attempted();
   } else if (d.status === 'system_error') {

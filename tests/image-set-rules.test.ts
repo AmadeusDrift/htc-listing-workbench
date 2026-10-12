@@ -183,3 +183,44 @@ test('singleton wrapped expected text evidence normalizes without relaxing evide
   for(const ids of [[['material','other']],[['material'],'other'],[[['material']]],[['material'],['material']]]){raw.setPlan.slots[1].expectedText[0].evidenceIds=ids;assert.throws(()=>validateImagePlan(raw));}
   raw.setPlan.slots[1].expectedText[0].evidenceIds=[['unknown']];assert.throws(()=>assertImagePlan(validateImagePlan(raw),context()));
 });
+
+const excludedPackagingNotes=[
+  '箱规数值（8 x 6.5 x 32.3 cm、41 x 26 x 34 cm）属于外箱包装，不可当作产品尺寸使用。',
+  '图上 10 个/盒、200 个/箱、净重与毛重、箱规 8*6.5*32.3cm 与 41*26*34cm 均为包装及整箱规格，不是单件属性，本槽不使用。',
+];
+test('explicit excluded packaging metadata accepts retained replies without passing excluded numbers to generation',()=>{
+  for(const note of excludedPackagingNotes)for(const field of ['summary','uncertainties']){
+    const c=context(),p=plan();c.setPlan=p.setPlan;c.slot={index:1,total:7,provisional:true};delete p.setPlan;
+    if(field==='summary')p.productUnderstanding.summary='A round coaster。'+note;
+    else p.productUnderstanding.uncertainties=[note,'Material cannot be inferred from appearance.'];
+    const before=structuredClone(p);
+    assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),c));
+    const handoff=imageGenerationPrompt(p,c);
+    assert.doesNotMatch(handoff,/32\.3|41\s*[x*×]/);
+    assert.match(handoff,/packaging measurements.*must not/i);
+    if(field==='uncertainties')assert.match(handoff,/Material cannot be inferred/);
+    assert.deepEqual(p,before,'Retain the original diagnostic text, never rewrite stored replies');
+  }
+});
+test('excluded packaging metadata cannot exempt positive claims, mixed clauses, prompts or captions',()=>{
+  for(const claim of [
+    'Product length 99 cm.',
+    '箱规 99 cm，属于外箱包装，但产品也是 99 cm。',
+    '箱规数值（99 cm）属于外箱包装，不可当作产品尺寸使用，但仍显示 99 cm。',
+    '产品 99 cm，箱规数值（8 cm）属于外箱包装，不可当作产品尺寸使用。',
+    '箱规数值（8 cm，产品长 99 cm）属于外箱包装，不可当作产品尺寸使用。',
+    excludedPackagingNotes[0]+'产品长 99 cm。',
+    '产品长 99 cm。'+excludedPackagingNotes[1],
+  ]){
+    const p=plan();p.productUnderstanding.uncertainties=[claim];
+    assert.throws(()=>assertImagePlan(validateImagePlan(p),context()),claim);
+  }
+  for(const mutate of [
+    (p:any)=>{p.prompt=excludedPackagingNotes[0];},
+    (p:any)=>{p.setPlan.slots[2].prompt=excludedPackagingNotes[0];},
+    (p:any)=>{p.setPlan.slots[2].scene=excludedPackagingNotes[0];},
+    (p:any)=>{p.setPlan.style=excludedPackagingNotes[0];},
+    (p:any)=>{p.setPlan.slots[2].focus=excludedPackagingNotes[0];},
+    (p:any)=>{p.setPlan.slots[1].expectedText=[{text:'Excluded packaging 99 cm',evidenceIds:['material']}];},
+  ]){const p=plan();p.productUnderstanding.uncertainties=[excludedPackagingNotes[0]];mutate(p);assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));}
+});

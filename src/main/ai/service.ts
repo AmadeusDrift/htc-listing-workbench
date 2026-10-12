@@ -5,7 +5,7 @@ import { assertPresentationResultOwner } from './presentation-history.ts';
 import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
 import { validateConsistencyContext,resolveConsistencyContext,consistencyScopeKey } from '../source-image-consistency/scope.ts';
-import { reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,validateConsistencyAttempt,assertConsistencyHistory } from '../source-image-consistency/history.ts';
+import { reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
 import { readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
@@ -60,7 +60,7 @@ import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.t
 import { referenceMeasurementEvidence } from '../image-workflow/image-facts.ts';
 import { currentSourceImageMeasurements } from '../image-workflow/source-measurements.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
-import { recordInvalidAiOutput,readInvalidAiOutputs } from './output-diagnostics.ts';
+import { recordInvalidAiOutput,readInvalidAiOutputs,hasRetainedInvalidAiOutput } from './output-diagnostics.ts';
 import type { AiOutputRejectionStage } from './output-diagnostics.ts';
 import { readCopyReviewSettings } from '../listing-ai/review-settings.ts';
 import { SOURCE_COLOR_POLICY_VERSION } from '../../shared/source-color-contracts.ts';
@@ -527,9 +527,8 @@ export class AiService {
   async observeSourceConsistency(raw:SourceConsistencyContext,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,assertBeforeSend?:()=>void):Promise<AiResult|{id:string;callId:string;recovered:true;output:import('../../shared/source-image-consistency-contracts.ts').SourceConsistencyOutput;sourceConsistencyRequestBytes?:number}> {
     this.ensureOpen();const context=validateConsistencyContext(raw);
     throwIfAborted(signal??new AbortController().signal);await assertContextFresh();this.assertConsistencyFresh(context);
-    const attemptRow=this.db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(context));
-    if(attemptRow){
-      const attempt=validateConsistencyAttempt(JSON.parse(String(attemptRow.record_json)));
+    const attempt=latestConsistencyAttempt(this.db,context);
+    if(attempt){
       const saved=this.db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").get(attempt.callId);
       if(!saved){
         const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
@@ -544,12 +543,13 @@ export class AiService {
             }catch{this.db.exec('ROLLBACK');}
           }
         }
-        throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');
-      }
+        if(call?.errorCode!=='OUTPUT_INVALID'||hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');
+      }else{
       const result=validateStoredAiResult(JSON.parse(String(saved.record_json)));
       if(result.output.kind!=='source-image-consistency'||!result.sourceConsistencyContext||consistencyScopeKey(result.sourceConsistencyContext)!==consistencyScopeKey(context))throw new AiError('INVALID_CONFIG');
       this.successfulResult(result);this.db.exec('BEGIN IMMEDIATE');try{recordConsistencyAssessment(this.db,result);assertConsistencyHistory(this.db,this.directory);this.db.exec('COMMIT');}catch(error){this.db.exec('ROLLBACK');throw error;}
       await assertContextFresh();this.assertConsistencyFresh(context);throwIfAborted(signal??new AbortController().signal);return result;
+      }
     }
     const profile={...this.assertProfile('deepseek'),model:'deepseek-flash'};
     return this.start(profile,context,{operation:'source-image-consistency',context},async activeSignal=>{
@@ -692,7 +692,7 @@ export class AiService {
             call = this.usage.reserve({ id, ...(isDeepSeek(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
-          onUntrustedOutput: value => { if (call && !finished && !activeSignal.aborted) untrustedOutput = { value }; },
+          onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },
         }), activeSignal);
         if (!call) throw new AiError('PROVIDER_ERROR');
         metadata = { requestId: reply.requestId, usage: reply.usage, usageKnown: reply.usageKnown };
@@ -717,7 +717,7 @@ export class AiService {
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
           if (safe.code === 'OUTPUT_INVALID' && untrustedOutput) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;
-            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage,rejectionReason:safe.reason,output:untrustedOutput.value});
+            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage,rejectionReason:safe.diagnosticReason??safe.reason,output:untrustedOutput.value});
           }
         }
         throw safe;

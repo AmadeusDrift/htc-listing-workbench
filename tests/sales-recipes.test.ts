@@ -110,3 +110,35 @@ test('color aliases cannot create a fictitious mixed-color recipe or unique colo
     assert.equal(recipes.length,2,aliases.join('/'));assert.equal(recipes[0].color,recipes[1].color);
   }
 });
+
+import { previewSalesRecipes } from '../src/main/sales-plans/planning.ts';
+
+test('automatic selection excludes service options before quantity parsing and caps complete ordinary products at four',()=>{
+ const p=product(['春夏秋冬-可备注颜色','更低价格请咨询客服~','红色','蓝色','黑色','白色','绿色']);
+ const before=structuredClone(p), rules=defaultListingRules();rules.pricing.bundleEnabled=false;
+ const selected=previewSalesRecipes(p,null,rules);
+ assert.equal(selected.length,4);
+ assert.ok(selected.every(r=>!r.specification.includes('客服')&&!r.specification.includes('春夏秋冬')));
+ assert.deepEqual(p,before);
+});
+test('automatic selection preserves genuine configurations with remarks and never pads with service rows',()=>{
+ const p=product(['红色整机（可备注颜色）','更低价格请咨询客服~']);
+ assert.equal(previewSalesRecipes(p,null,defaultListingRules()).length,1);
+ assert.match(previewSalesRecipes(p,null,defaultListingRules())[0].specification,/红色整机/);
+});
+test('automatic selection ranks complete products before explicit accessory-only options and diversifies equal candidates',()=>{
+ const p=product(['替换芯','红色','红色','蓝色','白色','黑色']);
+ const rules=defaultListingRules();rules.pricing.bundleEnabled=false;
+ const selected=previewSalesRecipes(p,null,rules);
+ assert.equal(selected.length,4);assert.ok(selected.every(r=>!r.specification.includes('替换芯')));
+ assert.equal(new Set(selected.map(r=>r.color)).size,4);
+});
+
+test('automatic ranking uses supplier image mapping before downloads without rejecting unlinked real colors',()=>{
+ const p=product(['红色','蓝色','黑色','白色','绿色']);const rules=defaultListingRules();rules.pricing.bundleEnabled=false;
+ const receipt={snapshot:{sources:[],attributes:[],description:'',dimensions:[],skus:[],images:[{id:'image-five'}]},mapping:{skus:[]},skuMappings:[{localVariantId:p.variants[4].id,imageIds:['image-five']}]} as any;
+ const candidates=buildSalesRecipes(p,null,rules),chosen=selectSalesRecipes(p,candidates,rules,receipt);
+ assert.equal(chosen.length,4);assert.ok(chosen.some(r=>r.components[0].variantId===p.variants[4].id));
+ assert.equal(selectSalesRecipes(p,candidates.slice(0,1),rules,receipt).length,1);
+});
+import { selectSalesRecipes } from '../src/main/sales-plans/selection.ts';

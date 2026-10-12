@@ -679,7 +679,7 @@ test('frozen legacy source error is refined from receipt mappings without downlo
   const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO'});f.rules.product.variantLimit=2;
   f.dependencies.images.prepareSources=async()=>{f.calls.sources++;return {product:structuredClone(f.product),missing:[{variantId:f.product.variants[1].id,message:'缺少可确定属于该 SKU 的可用来源图片'}]};};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  f.dependencies.sourceReceipt=()=>({snapshot:{skus:f.product.variants,images:[{id:'source',url:'https://example.test/source.png'}]},skuMappings:[{localVariantId:f.product.variants[1].id,imageIds:[]}]} as any);
+  f.dependencies.sourceReceipt=()=>({snapshot:{sources:[],dimensions:[],attributes:[],description:'',skus:f.product.variants.map(v=>({key:v.id})),images:[{id:'source',url:'https://example.test/source.png'}]},mapping:{skus:[],currency:'unknown'},skuMappings:[{localVariantId:f.product.variants[1].id,imageIds:[]}]} as any);
   const revision=f.product.revision;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const rows=f.service.get(task.id).items;
   assert.match(rows[1].error!,/商品有来源图片.*映射为空/);assert.match(rows[1].error!,/来源版本已冻结/);
@@ -706,16 +706,19 @@ test('a new source binding cannot rebase a sibling whose paid images are unfinis
   assert.throws(()=>f.service.prepareStart(task.id),/变化|冻结/);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,0);
 });
 
-test('a saved legacy task with twenty blocked source rows resumes the seventeen mapped SKUs only', async t => {
+test('a saved legacy task with twenty blocked source rows screens excess rows and resumes selected mapped SKUs', async t => {
   const f=fixture(t); f.rules.product.variantLimit=20;
   f.product.variants=Array.from({length:20},(_,index)=>({...f.product.variants[0],id:randomUUID(),sku:`SKU-${index+1}`}));
-  const missingIds=f.product.variants.slice(6,9).map(variant=>variant.id);
+  const selected=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+  const selectedIds=new Set(selected.products[0].rows.map(r=>r.recipeKey));
+  const missingIds=[...selectedIds].slice(0,1);
   f.dependencies.images.prepareSources=async()=>{
     f.calls.sources++;
     return {product:structuredClone(f.product),missing:missingIds.map(variantId=>({variantId,message:'No source mapping for this SKU'}))};
   };
   const task=await f.create(); await f.service.close();
   task.status='PAUSED';
+  task.items=f.product.variants.map(variant=>({...structuredClone(task.items[0]),key:f.product.id+':'+variant.id,variantId:variant.id,sku:variant.sku}));
   for(const [index,row] of task.items.entries()){
     row.status='FAILED'; row.error=index===0||missingIds.includes(row.variantId)?'No source mapping for this SKU':'Waiting for sibling sources';
   }
@@ -725,10 +728,9 @@ test('a saved legacy task with twenty blocked source rows resumes the seventeen 
   try {
     restored.startAuthorized(restored.prepareStart(task.id)); await restored.waitForIdle();
     const rows=restored.get(task.id).items;
-    assert.equal(rows.length,20); assert.equal(rows.filter(row=>row.status==='DONE').length,17);
+    assert.equal(rows.length,20); assert.equal(rows.filter(row=>row.status==='DONE').length,3);assert.equal(rows.filter(row=>row.status==='SCREENED').length,16);
     assert.deepEqual(rows.filter(row=>row.status==='FAILED').map(row=>row.variantId),missingIds);
-    assert.equal(rows[0].status,'DONE'); assert.equal(rows[0].error,null);
-    assert.equal(f.calls.sources,1); assert.equal(f.calls.images,17); assert.equal(f.calls.submissions,17);
+    assert.equal(f.calls.sources,1); assert.equal(f.calls.images,3); assert.equal(f.calls.submissions,3);
   } finally { await restored.close(); }
 });
 
@@ -1162,11 +1164,11 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
   assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(after.items[1].status,outcome==='unknown'?'FAILED':'DONE');
 });
 
-test('release mixed synthetic sample separates rule, missing facts, wrong source and UNKNOWN while preserving healthy paid work',async t=>{
+test('release four-SKU synthetic sample separates rule, missing facts and UNKNOWN while preserving healthy paid work',async t=>{
   // Real automatic coordinator, AiService, source observations, fact validator and
   // SQLite. Amazon/image generation/execution are the existing explicit substitutes.
   const f=fixture(t,'live');f.setReady();f.rules.product.variantLimit=5;f.rules.pricing.bundleEnabled=false;
-  f.product.variants=['Red','Blue','Green','Yellow','White'].map((color,index)=>({...f.product.variants[0],id:randomUUID(),sku:`RELEASE-${index}`,originalSpec:color,normalizedSpec:color,sourceSpec:color}));
+  f.product.variants=['Red','Green','Yellow','White'].map((color,index)=>({...f.product.variants[0],id:randomUUID(),sku:`RELEASE-${index}`,originalSpec:color,normalizedSpec:color,sourceSpec:color}));
   const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
   const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{
     sends++;const payload=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text),color=payload.claims.find((c:any)=>c.kind==='color')?.value||payload.claims[0].value;
@@ -1183,12 +1185,12 @@ test('release mixed synthetic sample separates rule, missing facts, wrong source
   const prepare=f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts=async raw=>{
     const result=await prepare(raw),draft=result.items[0].draft!;
-    if(draft.variantId===f.product.variants[3].id){
+    if(draft.variantId===f.product.variants[2].id){
       draft.attributes={batteries_required:[{value:false}]};
       draft.localIssues=currentFactAuthority(f.product,realAmazonSchema(),f.target,draft.attributes).issues;
       assert.ok(draft.localIssues.some(issue=>issue.code==='FACT_AUTHORITY_REQUIRED'));
     }
-    if(draft.variantId===f.product.variants[4].id){
+    if(draft.variantId===f.product.variants[3].id){
       draft.attributes={item_package_dimensions:[{length:{value:1,unit:'inches'},width:{value:1,unit:'inches'},height:{value:1,unit:'inches'}}],item_package_weight:[{value:1,unit:'pounds'}],number_of_items:[{value:1}]};
       draft.businessRules={revision:f.rules.revision,fields:{},notices:[],quote:null,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:100,quantity:1,saleUnitCostCny:100},pricingDecision:{version:1,status:'business_blocked',code:'ROI_MAX_PRICE',quoteError:'ROI_MAX_PRICE',inputs:{costCny:100,dimensionsInches:[1,1,1],weightPounds:1},evidence:{cost:'confirmed_cny',dimensions:'confirmed_source',weight:'confirmed_source',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:[1,1,1],weightPounds:1}}}};
     }
@@ -1198,15 +1200,15 @@ test('release mixed synthetic sample separates rule, missing facts, wrong source
   f.dependencies.images.complete=async input=>{const draft=f.drafts.get((input as {draftId:string}).draftId)!;if(draft.localIssues.length){f.workflow.set(draft.id,{status:'BLOCKED',slots:[],error:'Synthetic known facts are missing'});throw new UserFacingError('Synthetic known facts are missing');}return complete(input);};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const first=f.service.get(task.id),row=(index:number)=>first.items.find(i=>i.variantId===f.product.variants[index].id)!;
-  assert.equal(row(0).status,'DONE',JSON.stringify({sends,rows:first.items.map(r=>({sku:r.sku,error:r.error,outcome:r.outcome?.kind}))}));assert.equal(row(1).status,'DONE');assert.equal(row(2).outcome?.kind,'UNKNOWN');assert.equal(row(3).outcome?.kind,'NEEDS_INPUT');assert.equal(row(3).outcome?.code,'FACT_AUTHORITY_REQUIRED');assert.equal(row(4).outcome?.kind,'RULE_FILTERED');
-  assert.equal(sends,5);assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,2);
+  assert.equal(row(0).status,'DONE',JSON.stringify({sends,rows:first.items.map(r=>({sku:r.sku,error:r.error,outcome:r.outcome?.kind}))}));assert.equal(row(1).outcome?.kind,'UNKNOWN');assert.equal(row(2).outcome?.kind,'NEEDS_INPUT');assert.equal(row(2).outcome?.code,'FACT_AUTHORITY_REQUIRED');assert.equal(row(3).outcome?.kind,'RULE_FILTERED');
+  assert.equal(sends,4);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
   const preserved=JSON.stringify(f.workflow.get(row(0).draftId!)),history=JSON.stringify(ai.listResults(f.product.id));
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try{
     const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});
     assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.filter(r=>r.kind==='UNKNOWN').length,1);
     restored.startAuthorized(restored.prepareStart(task.id));await restored.waitForIdle();
-    assert.equal(sends,5);assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,2);
+    assert.equal(sends,4);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
     assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
   }finally{await restored.close();}
 });
@@ -1322,4 +1324,42 @@ for(const stage of ['READBACK','LABELS'] as const)test(`submitted ${stage} failu
   assert.match(row.outcome!.message,stage==='LABELS'?/PDF 标签文件不完整/:/平台回读确认缺少必填属性/);
   assert.equal(f.calls.submissions,1);assert.equal(f.calls.images,1);
   assert.deepEqual(validateAutomaticListingTask(f.service.get(task.id)),f.service.get(task.id));
+});
+
+test('automatic SKU policy is enforced in legacy preview and task creation',async t=>{
+ const f=fixture(t);f.product.variants=Array.from({length:7},(_,i)=>({...f.product.variants[0],id:randomUUID(),sku:'selection-'+i,originalSpec:i===0?'更低价格请咨询客服~':['红色','蓝色','白色','黑色','绿色','黄色'][i-1],normalizedSpec:''}));
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+ assert.equal(queue.products[0].rows.length,4);
+ const task=await f.create();assert.equal(task.items.length,4);assert.ok(task.items.every(r=>r.variantId!==f.product.variants[0].id));
+});
+test('old unsubmitted informational row is screened without deleting its saved work',async t=>{
+ const f=fixture(t);const info={...f.product.variants[0],id:randomUUID(),sku:'old-info',originalSpec:'春夏秋冬-可备注颜色',normalizedSpec:'',sourceSpec:'春夏秋冬-可备注颜色'};f.product.variants.push(info);
+ const task=await f.create(),saved=(f.service as any).tasks.get(task.id);
+ const row={...structuredClone(saved.items[0]),key:f.product.id+':'+info.id,variantId:info.id,sku:info.sku};saved.items=[row];
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const result=f.service.get(task.id);assert.equal(result.items.length,1);assert.equal(result.items[0].status,'SCREENED',JSON.stringify(result.items[0]));assert.equal(result.items[0].outcome?.code,'SKU_SELECTION_FILTERED');assert.equal(f.calls.sources,0);assert.equal(f.calls.images,0);
+});
+
+
+test('all informational source is visibly rule filtered and creates no task',async t=>{
+ const f=fixture(t);f.product.variants[0].originalSpec='更低价格请咨询客服~';f.product.variants[0].normalizedSpec='';f.product.variants[0].sourceSpec='';
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+ assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].filteredCount,1);assert.match(queue.products[0].rows[0].message,/说明/);
+ await assert.rejects(f.create,/没有可启动/);
+});
+
+
+
+
+
+for(const sent of [false,true])test(`selection reconciliation preserves completed images and submitted identity (submitted=${sent})`,async t=>{
+ const f=fixture(t);const info={...f.product.variants[0],id:randomUUID(),sku:'old-info',originalSpec:'春夏秋冬-可备注颜色',normalizedSpec:'',sourceSpec:'春夏秋冬-可备注颜色'};f.product.variants.push(info);
+ const task=await f.create(),saved=(f.service as any).tasks.get(task.id);
+ const prepared=await f.dependencies.amazon.prepareDrafts({items:[{variantId:info.id}]}),draft=prepared.items[0].draft!;
+ const original=f.drafts.get(draft.id)!;if(sent){original.submittedAt=new Date().toISOString();original.state='SUBMITTED';}
+ const paid={status:'COMPLETED',slots:[{index:1,status:'PASSED',approvedAssetId:randomUUID()}]};f.workflow.set(draft.id,paid);
+ saved.items=[{...structuredClone(saved.items[0]),key:f.product.id+':'+info.id,variantId:info.id,sku:info.sku,draftId:draft.id,imageStarted:true,imageAttempts:1,stage:'IMAGES'}];
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const row=f.service.get(task.id).items[0];assert.equal(row.draftId,draft.id);assert.equal(row.sku,info.sku);assert.deepEqual(f.workflow.get(draft.id),paid);assert.equal(f.calls.images,0);
+ if(sent)assert.notEqual(row.status,'SCREENED');else assert.equal(row.status,'SCREENED');
 });

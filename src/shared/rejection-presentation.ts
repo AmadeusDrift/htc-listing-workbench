@@ -23,6 +23,7 @@ export function validateFieldRejections(raw:unknown,output:ListingFieldsOutput,c
 }
 /** Fixed local copy only. Neither arbitrary model reasons nor historical messages are inputs. */
 const reasons:Record<string,string>={
+ SKU_SELECTION_FILTERED:'SKU 选择规则淘汰：说明性选项或未入选每来源最多 4 个代表规格；原始资料和历史保留。',
  EMPTY_PROMPT:'图片规划缺少可用指令。请查看已保存的规划和调用记录。',
  UNSUPPORTED_MEASUREMENT:'尺寸或重量声明缺少匹配依据。请核对当前 SKU 的真实测量资料。',
  SOURCE_OBSERVATION_INSUFFICIENT:'来源图片不足以确认当前商品。请核对已关联原图和当前规格。',

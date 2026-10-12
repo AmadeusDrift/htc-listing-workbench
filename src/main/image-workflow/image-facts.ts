@@ -47,9 +47,14 @@ export function assertImageMeasurements(text:string,context:Pick<ListingAiContex
 /** Only standalone camera-look directions in generation prompts are not product measurements.
  * Keep source facts, captions and bare lens specifications on the strict measurement path. */
 export function assertImagePromptMeasurements(prompt:string,context:Pick<ListingAiContext,'evidence'>):void {
-  const explicitPhotography=prompt.replace(/(^|[,;.；，。\n])\s*(?:Camera(?:\s+look)?\s*:\s*\d+(?:\.\d+)?\s*mm\s+(?:macro\s+)?lens|\d+(?:\.\d+)?\s*(?:to|-|–)\s*\d+(?:\.\d+)?\s*mm\s+perspective\s+feel)(?=\s*(?:[,;.；，。\n]|$))/gi,'$1 ');
-  const productText=explicitPhotography.replace(/(^|[,;\n])\s*\d+(?:\.\d+)?\s*mm\s+(?:macro\s+)?lens\s+look(?=\s*(?:[,;.\n]|$))/gi,'$1 ');
-  assertImageMeasurements(productText,context);
+  // Parse complete camera-direction clauses, never strip all occurrences of a focal
+  // number. Bare lens/product specifications and adjacent dimensions stay factual.
+  const focal=String.raw`\d+(?:\.\d+)?(?:\s*(?:to|-|–)\s*\d+(?:\.\d+)?)?\s*mm`;
+  const modifier=String.raw`(?:macro(?:-style)?\s+)?`;
+  const look=String.raw`(?:perspective(?:\s+feel)?|look|lens\s+look)`;
+  const direction=String.raw`(?:Camera(?:\s+look)?\s*:\s*`+focal+String.raw`\s+`+modifier+String.raw`(?:lens|`+look+String.raw`)|Camera\s+look\s+of\s+(?:an?\s+)?`+focal+String.raw`\s+`+modifier+String.raw`lens|`+focal+String.raw`\s+`+modifier+look+String.raw`)`;
+  const clause=new RegExp(String.raw`(^|[,;；，。\n]|(?<!\d)\.(?!\d))\s*`+direction+String.raw`(?=\s*(?:[,;.；，。\n]|$))`,'gi');
+  assertImageMeasurements(prompt.replace(clause,'$1 '),context);
 }
 /** Defaults are listing-only. Source measurements keep their original evidence and authority. */
 export function imageListingSnapshot(draft:AmazonDraft,listing:ListingAiContext,copy:CurrentListingCopy[]):{context:ListingAiContext;currentListingCopy:CurrentListingCopy[]} {

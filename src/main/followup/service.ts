@@ -56,7 +56,7 @@ export class FollowupService {
         if (record.id !== row.id || this.records.has(record.draftId)) throw new UserFacingError('延迟回读记录身份不一致');
         this.records.set(record.draftId, record);
         // Migrate legacy 48h schedules and premature attempt-based expiry using the immutable submission clock.
-        if (record.submittedAt && (pending(record) || record.status === 'PROCESSING' || record.reason === 'EXPIRED')) {
+        if (!record.requeryPending && record.submittedAt && (pending(record) || record.status === 'PROCESSING' || record.reason === 'EXPIRED')) {
           const deadline = Date.parse(record.submittedAt) + FOLLOWUP_OFFSETS.at(-1)!;
           if (this.now() >= deadline) this.attention(record, 'EXPIRED', '原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交');
           else if (record.reason === 'EXPIRED' || record.nextDueAt === null || Date.parse(record.nextDueAt) > deadline) {
@@ -75,6 +75,7 @@ export class FollowupService {
     this.db.prepare('INSERT INTO listing_followups(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(record.id, JSON.stringify(record));
   }
   private attention(record: FollowupRecord, reason: FollowupReason, error: string): void {
+    delete record.requeryPending;
     record.status = 'NEEDS_ATTENTION'; record.reason = reason; record.error = error.slice(0, 500); record.nextDueAt = null; this.save(record);
   }
   list(): FollowupRecord[] { this.ensureOpen(); return [...this.records.values()].reverse().map(record => structuredClone(record)); }
@@ -122,6 +123,7 @@ export class FollowupService {
     const record = this.find(draftId); if (this.activeDraftId === record.draftId) throw new UserFacingError('此回读正在处理，请等待完成');
     this.scope(record, true); record.targetGeneration = this.amazon.executionTargetScope(record.targetId).generation;
     record.status = record.attempts ? 'PROCESSING' : 'WAITING'; record.reason = null; record.error = null;
+    record.requeryPending = true;
     record.nextDueAt = timestamp(Math.max(this.now(), Date.parse(record.submittedAt!) + FOLLOWUP_OFFSETS[0]));
     this.save(record); this.arm(); return structuredClone(record);
   }
@@ -157,6 +159,7 @@ export class FollowupService {
     catch (error) { if (!(error instanceof ScopeError)) throw error; this.attention(record, error.reason, error.message); return; }
     const offsets = FOLLOWUP_OFFSETS;
     const started = this.now(), next = offsets.map(offset => Date.parse(record.submittedAt!) + offset).find(time => time > started);
+    delete record.requeryPending;
     record.status = 'PROCESSING'; record.attempts++; record.lastAttemptAt = timestamp(started); record.reason = null; record.error = null;
     record.nextDueAt = next !== undefined ? timestamp(next) : null;
     this.save(record);

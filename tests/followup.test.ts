@@ -309,3 +309,12 @@ test('known creation without buyability never expires merely from elapsed time',
  const f=fixture(t);f.asin('B0ABC12345');f.service.schedule(f.draft.id);f.at(offsets[0]);await f.service.runDue();
  f.at(48*60*minute);await f.reopen();assert.equal(f.service.get(f.draft.id).status,'READY');assert.deepEqual(f.service.get(f.draft.id).statuses,[]);
 });
+
+for(const outcome of ['pending','ready','network'] as const)test(`explicit expired requery survives restart once: ${outcome}`,async t=>{
+ const f=fixture(t);f.service.schedule(f.draft.id);f.at(24*60*minute);await f.service.runDue();
+ assert.equal(f.service.get(f.draft.id).reason,'EXPIRED');const reads=f.reads;
+ f.at(25*60*minute);f.service.reschedule(f.draft.id);await f.reopen();f.outcome(outcome);await f.service.runDue();
+ assert.equal(f.reads,reads+1);assert.equal(f.service.get(f.draft.id).submittedAt,new Date(initial).toISOString());
+ assert.equal(f.service.get(f.draft.id).status,outcome==='ready'?'READY':'NEEDS_ATTENTION');
+ await f.reopen();f.at(26*60*minute);await f.service.runDue();assert.equal(f.reads,reads+1);
+});

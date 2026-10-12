@@ -15,9 +15,9 @@ const integer = (value: unknown, min = 0) => Number.isSafeInteger(value) && Numb
 const date = (value: unknown): value is string => string(value, 30, true) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const nullableDate = (value: unknown) => value === null || date(value);
 const code = (value: unknown) => value === null || typeof value === 'string' && /^[A-Z0-9]{10}$/.test(value);
-function exact(value: unknown, keys: string[]): Record<string, unknown> {
-  const result = record(value, '延迟回读记录', keys);
-  if (Object.keys(result).length !== keys.length) throw new UserFacingError('延迟回读记录不完整');
+function exact(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> {
+  const result = record(value, '延迟回读记录', [...keys, ...optional]);
+  if (keys.some(key => !Object.hasOwn(result, key))) throw new UserFacingError('延迟回读记录不完整');
   return result;
 }
 
@@ -30,7 +30,7 @@ export function followupDraftFingerprint(draft: AmazonDraft): string {
 /** Exact shape validation also prevents credentials or unbounded response bodies entering backups. */
 export function validateFollowupRecord(value: unknown): FollowupRecord {
   const o = exact(value, ['id','draftId','revision','productId','variantId','sku','targetId','targetName','sellerId','marketplaceId','mode','targetGeneration','draftRevision','draftFingerprint',
-    'submittedAt','submissionId','status','reason','attempts','nextDueAt','lastAttemptAt','checkedAt','listingState','statuses','issues','asin','fnsku','error','createdAt','updatedAt']);
+    'submittedAt','submissionId','status','reason','attempts','nextDueAt','lastAttemptAt','checkedAt','listingState','statuses','issues','asin','fnsku','error','createdAt','updatedAt'], ['requeryPending']);
   for (const key of ['id','draftId','productId','variantId','targetId']) identifier(o[key]);
   if (o.id !== o.draftId || !integer(o.revision, 1) || !integer(o.targetGeneration) || !integer(o.draftRevision, 1)
     || !['sku','targetName','sellerId','marketplaceId'].every(key => string(o[key], 500, true)) || o.mode !== 'live'
@@ -48,7 +48,8 @@ export function validateFollowupRecord(value: unknown): FollowupRecord {
       || !['field','fact','qualification','compliance','image','network','rate_limit'].includes(String(issue.category))
       || !['local','amazon','demo'].includes(String(issue.source)) || typeof issue.autoFixable !== 'boolean') throw new UserFacingError('延迟回读问题记录格式不正确');
   }
-  if ((o.status === 'READY' || o.status === 'NEEDS_ATTENTION') && o.nextDueAt !== null
+  if (Object.hasOwn(o, 'requeryPending') && (o.requeryPending !== true || !['WAITING','PROCESSING'].includes(String(o.status)) || o.nextDueAt === null)
+    || (o.status === 'READY' || o.status === 'NEEDS_ATTENTION') && o.nextDueAt !== null
     || o.status === 'WAITING' && (o.nextDueAt === null || o.attempts !== 0)
     || (o.status === 'WAITING' || o.status === 'PROCESSING') && o.submittedAt === null
     || o.status === 'PROCESSING' && Number(o.attempts) < 1

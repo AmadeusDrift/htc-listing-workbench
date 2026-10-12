@@ -229,3 +229,26 @@ test('concurrent missing-response preparation sends only one replacement and ret
   const other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies),input={productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id};
   try{const results=await Promise.allSettled([f.ai.prepareSourceConsistency(input),other.prepareSourceConsistency(input)]);assert.ok(results.some(r=>r.status==='fulfilled'));assert.equal(f.count(),2);assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);}finally{await other.close();}
 });
+
+test('source diagnostic rejects unicode-escaped credential echoes before retaining raw content',async t=>{
+  const {readdirSync,readFileSync}=await import('node:fs');
+  for(const malformed of [false,true]){
+    const f=await fixture(t),escaped='\\u0063onsistency-synthetic-key',raw='{"note":"'+escaped+'"'+(malformed?'':'}');
+    f.respond(()=>new Response(JSON.stringify({id:'synthetic-escaped',usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150},choices:[{finish_reason:'stop',message:{content:raw}}]})));
+    await assert.rejects(f.observe());
+    const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
+    assert.ok(saved.length);for(const record of saved){assert.equal(JSON.stringify(record).includes('onsistency-synthetic-key'),false);}
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+  }
+});
+
+test('source malformed HTTP 200 envelope retains safe text and never becomes a missing-response retry',async t=>{
+  const {readdirSync,readFileSync}=await import('node:fs');
+  for(const raw of ['{"choices":[', '{"note":"\\u0063onsistency-synthetic-key"']){
+    const f=await fixture(t);f.respond(()=>new Response(raw));await assert.rejects(f.observe());
+    const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
+    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,'RESPONSE_ENVELOPE_JSON_INVALID');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
+    if(raw==='{"choices":[')assert.equal(saved[0].output,raw);
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+  }
+});

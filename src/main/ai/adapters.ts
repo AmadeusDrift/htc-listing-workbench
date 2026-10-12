@@ -109,28 +109,35 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: context.thinking ? 'enabled' : 'disabled' }, ...(context.thinking?{reasoning_effort:'high'}:{temperature:0}), stream: false, max_tokens: context.thinking ? Math.max(maxTokens,32768) : maxTokens, response_format: { type: 'json_object' } });
   if (Buffer.byteLength(body) > MAX_VISION_REQUEST_BYTES) throw new AiError('IMAGE_INVALID');
   const sourceOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='source-image-consistency';
+  const imageOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='image-plan';
+  const diagnosticOperation=sourceOperation||imageOperation;
   const captureSource=(text:string)=>{try{context.onUntrustedOutput?.(safeSourceResponseText(text,credentials),'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
-  const transport=sourceOperation?{...context,onInvalidResponseText:captureSource}:context;
+  const transport=diagnosticOperation?{...context,onInvalidResponseText:captureSource}:context;
   const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));
   const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error;};
   return outputError(() => {
+    if(imageOperation)captureSource(JSON.stringify(raw));
+    let phase='RESPONSE_ENVELOPE_INVALID';
+    try{
     const body = object(raw);
-    if(sourceOperation&&Array.isArray(body.choices)&&body.choices.length===1){const value=body.choices[0]?.message?.content;if(typeof value==='string')captureSource(value)}
+    if(diagnosticOperation&&Array.isArray(body.choices)&&body.choices.length===1){const value=body.choices[0]?.message?.content;if(typeof value==='string')captureSource(value)}
     const usage = object(body.usage);
     const reported = { promptTokens: integer(usage.prompt_tokens, 0, 1000000000), completionTokens: integer(usage.completion_tokens, 0, 1000000000), processedImages: 0 };
     if (usage.total_tokens !== undefined && integer(usage.total_tokens, 0, 2000000000) !== reported.promptTokens + reported.completionTokens) throw new AiError('OUTPUT_INVALID');
     const meta = metadata(body, reported, credentials, context);
     if (!Array.isArray(body.choices) || body.choices.length !== 1) throw new AiError('OUTPUT_INVALID');
     const choice = object(body.choices[0]), message = object(choice.message);
-    if (choice.finish_reason !== 'stop' || message.refusal || (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0))) {if(sourceOperation)invalidSource(choice.finish_reason!=='stop'?'RESPONSE_NOT_COMPLETE':'RESPONSE_NOT_CONTENT');throw new AiError('OUTPUT_INVALID');}
+    if (choice.finish_reason !== 'stop' || message.refusal || (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0))) {if(diagnosticOperation)invalidSource(choice.finish_reason!=='stop'?'RESPONSE_NOT_COMPLETE':'RESPONSE_NOT_CONTENT');throw new AiError('OUTPUT_INVALID');}
     let content:unknown;
-    if(sourceOperation){if(typeof message.content!=='string')invalidSource('RESPONSE_CONTENT_MISSING');try{content=JSON.parse(message.content as string);}catch{invalidSource('RESPONSE_JSON_INVALID');}}
+    if(diagnosticOperation){if(typeof message.content!=='string')invalidSource('RESPONSE_CONTENT_MISSING');try{content=JSON.parse(imageOperation?boundedText(message.content,200000):message.content as string);}catch{invalidSource('RESPONSE_JSON_INVALID');}}
     else content=JSON.parse(boundedText(message.content,200000));
+    phase='RESPONSE_SECRET_ECHO';
     const reply = noSecrets({ ...meta, content }, credentials);
     // Diagnostics observe a copy after the secret gate, before operation-specific validation.
     // A broken observer cannot change the provider result or its usage accounting.
     try { context.onUntrustedOutput?.(structuredClone(reply.content)); } catch { /* Best effort only. */ }
     return reply;
+    }catch(error){if(imageOperation){const safe=error instanceof AiError&&error.code==='OUTPUT_INVALID'?error:new AiError('OUTPUT_INVALID');safe.diagnosticReason??=phase;throw safe;}throw error;}
   });
 }
 export async function suggestWithDeepSeek(payload: TextPayload, model: DeepSeekModel, credentials: DeepSeekCredentials, signal: AbortSignal, context: AdapterContext): Promise<AdapterResult<ContentSuggestionOutput>> {

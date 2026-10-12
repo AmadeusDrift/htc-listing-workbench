@@ -1,3 +1,4 @@
+import { resultHasOwner } from '../ai/result-owner.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
@@ -14,7 +15,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
   const invalid=():never=>{throw new UserFacingError('自动图片流程的生成、OCR 或复核记录关联不完整');};
   const successful=(id:string):AiResult=>{
     const result=results.get(id),call=result&&calls.get(result.callId);
-    if(!result||!call||call.status!=='SUCCEEDED'||call.productId!==result.productId||call.productRevision!==result.productRevision||call.providerId!==result.providerId||call.model!==result.model||call.finishedAt!==result.createdAt)return invalid();
+    if(!result||!call||!resultHasOwner(result,call))return invalid();
     return result;
   };
   const assertCopySource=(context:ProductImageContext,copyReviewEnabled:boolean|undefined,version?:string):void=>{

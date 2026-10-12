@@ -1246,7 +1246,7 @@ for(const code of ['EMPTY_PROMPT','UNSUPPORTED_MEASUREMENT','SOURCE_OBSERVATION_
  const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
  assert.equal(result.workflow.rejection?.code,code);assert.equal(result.workflow.rejection?.slot,code==='EMPTY_PROMPT'?1:0);assert.equal(result.workflow.rejection?.stage,'planning');assert.equal(posts(),0);assert.equal(result.workflow.slots?.reduce((n,slot)=>n+slot.attempts.length,0),code==='EMPTY_PROMPT'?1:0);
  const detail=result.workflow.rejection!,call=f.ai.getCall(detail.callId)!;assert.equal(call.presentationContext?.draftId,f.draft.id);assert.doesNotMatch(result.workflow.error??'',/secret|https/);
- if(code==='SOURCE_OBSERVATION_INSUFFICIENT'){assert.equal(call.status,'SUCCEEDED');assert.equal(detail.resultId,result.workflow.setPlanResultId);}else{assert.equal(call.rejection?.code,code);assert.equal(detail.resultId,null);}
+ if(code==='SOURCE_OBSERVATION_INSUFFICIENT'){assert.equal(call.status,'SUCCEEDED');assert.ok(detail.resultId);assert.equal(result.workflow.setPlanResultId,undefined);}else{assert.equal(call.rejection?.code,code);assert.equal(detail.resultId,null);}
  const before=f.requests.length;await workflow.close();
  const db=openDatabase(f.directory);try{const {workflowRuns}=await import('../src/main/image-workflow/records.ts');assert.deepEqual(workflowRuns(db,f.draft.id)[0].rejection,detail);}finally{db.close();}
  assert.equal(f.requests.length,before);assert.equal(posts(),0);
@@ -1321,4 +1321,59 @@ test('real image owner retains three unknown generation attempts through encrypt
  const file=join(f.directory,'unknown-three.htcbackup');await createWorkspaceBackup(f.directory,file,'synthetic unknown image retry');
  const prepared=await prepareWorkspaceRestore(f.directory,file,'synthetic unknown image retry'),db=openDatabase(prepared.stagingDirectory);
  try{const saved=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json));assert.equal(saved.slots[0].attempts.length,3);assert.deepEqual(saved.slots[0].attempts.map((a:any)=>a.requestId),run.slots![0].attempts.map(a=>a.requestId));}finally{db.close();}
+});
+
+test('empty seven-slot source refusal keeps an attributable result and no executable blueprint',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);
+ (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',setPlan:{...sceneSet(),slots:sceneSet().slots.map(s=>({...s,prompt:'',scene:''}))},prompt:'',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),sufficient:false,uncertainties:['The selected product is not visible.']}}):undefined);
+ const before=f.requests.length,result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+ assert.equal(result.aiCalls,f.requests.length-before);assert.equal(result.workflow.rejection?.code,'SOURCE_OBSERVATION_INSUFFICIENT');assert.equal(posts(),0);assert.equal(result.workflow.setPlan,undefined);
+ const saved=f.ai.getResult(result.workflow.rejection!.resultId!)!;assert.equal(saved.output.kind,'image-plan');assert.equal((saved.output as any).setPlan.slots[0].prompt,'');assert.equal(f.ai.getCall(saved.callId)!.status,'SUCCEEDED');await workflow.close();
+});
+
+test('locally recovered image plan keeps failed paid history and reuses exact saved response without another POST',async t=>{
+ const f=await fixture(t),original=await f.ai.imagePlan(f.context,()=>{}),raw:any=structuredClone(original.output);
+ for(const key of ['referenceAssetIds','uncertainties','sufficient']){raw[key]=raw.productUnderstanding[key];delete raw.productUnderstanding[key];}
+ const call={...f.ai.getCall(original.callId)!,status:'FAILED' as const,errorCode:'OUTPUT_INVALID' as const,responseReceived:true as const};
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(original.id);}finally{db.close();}
+ const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');recordInvalidAiOutput(f.directory,{call,operation:'image-plan',createdAt:call.finishedAt!,rejectionStage:'operation-output-validation',output:raw});
+ const before=f.requests.length,result=await f.ai.imagePlan(f.context,()=>{});
+ assert.equal(f.requests.length,before);assert.equal(result.callId,call.id);assert.deepEqual(f.ai.getCall(call.id),call);assert.deepEqual(result.output,original.output);assert.deepEqual(result.imagePlanRecovery?.rawOutput,raw);assert.equal(result.imageRequestBytes,undefined);
+ assert.deepEqual(f.ai.getResult(result.id),result);assert.equal((await f.ai.imagePlan(f.context,()=>{})).id,result.id);assert.equal(f.requests.length,before);
+ assert.equal(await f.ai.recoverImagePlan(call.id,{...f.context,referenceAssets:[{...f.context.referenceAssets[0],assetId:randomUUID()}]},()=>{}),undefined);
+ const {resultHasOwner}=await import('../src/main/ai/result-owner.ts');assert.equal(resultHasOwner(result,{...call,presentationContext:{...call.presentationContext!,slot:1}}),false);assert.equal(resultHasOwner(result,{...call,presentationContext:{...call.presentationContext!,variantId:randomUUID()}}),false);
+ const diagnosticNames=(await import('node:fs')).readdirSync(join(f.directory,'ai-diagnostics'));const retained=JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',diagnosticNames[0]),'utf8'));assert.deepEqual(retained.output,raw);
+ const corrupted=structuredClone(result);(corrupted.output as any).prompt='Changed after local recovery';assert.throws(()=>validateAiResult(corrupted));
+});
+
+test('image plan schema failure retains exact safe JSON with a fixed diagnostic reason',async t=>{
+ const f=await fixture(t);f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{}));const {readdirSync}=await import('node:fs');
+ const files=readdirSync(join(f.directory,'ai-diagnostics')).map(name=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',name),'utf8')));
+ assert.equal(files.at(-1).rejectionReason,'IMAGE_PLAN_VALIDATION_INVALID');assert.deepEqual(files.at(-1).output,{kind:'image-plan',unexpected:true});
+});
+test('successful source refusal reuses the exact observation locally without executable instructions',async t=>{
+ const f=await fixture(t);f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),sufficient:false,uncertainties:['Source product not visible.']}}):undefined);
+ let sent=0;const first=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,undefined,()=>sent++),before=f.requests.length,again=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,undefined,()=>sent++);assert.equal(again.id,first.id);assert.equal(f.requests.length,before);assert.equal(sent,1);
+});
+
+test('repair response recovery requires the exact saved repair request and adds no paid call',async t=>{
+ const f=await fixture(t),prior=await f.ai.imagePlan(f.context,()=>{}),repair={previousPlanId:prior.id,issues:['Keep the selected shape.']};
+ const original=await f.ai.imagePlan(f.context,()=>{},repair),raw:any=structuredClone(original.output),call={...f.ai.getCall(original.callId)!,status:'FAILED' as const,errorCode:'OUTPUT_INVALID' as const,responseReceived:true as const};
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(original.id);}finally{db.close();}
+ const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');recordInvalidAiOutput(f.directory,{call,operation:'image-plan',createdAt:call.finishedAt!,rejectionStage:'operation-output-validation',output:raw});
+ let sent=0;const before=f.requests.length,recovered=await f.ai.imagePlan(f.context,()=>{},repair,undefined,undefined,()=>sent++);
+ assert.equal(f.requests.length,before);assert.equal(sent,0);assert.equal(recovered.callId,call.id);assert.deepEqual(recovered.sourceResultIds,original.sourceResultIds);
+ await f.ai.imagePlan(f.context,()=>{},{...repair,issues:['Use another scene.']},undefined,undefined,()=>sent++);assert.equal(sent,1);assert.equal(f.requests.length,before+1);
+});
+test('workflow history and backup accept strictly owned recovered set plans without rewriting paid history',async t=>{
+ const f=await fixture(t),{workflow}=productionWorkflow(f,0);(workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ const completed=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}),run=completed.workflow;assert.ok(run.setPlanResultId);
+ const original=f.ai.getResult(run.setPlanResultId!)!,raw=structuredClone(original.output),call={...f.ai.getCall(original.callId)!,status:'FAILED' as const,errorCode:'OUTPUT_INVALID' as const,responseReceived:true as const};
+ const recovered=validateAiResult({...original,imagePlanRecovery:{parserVersion:'image-plan-recovery/v1',contextSha256:original.sourceSha256,rawSha256:listingFingerprint(raw),rawOutput:raw,recoveredAt:original.createdAt}});
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(recovered),recovered.id);
+ const results=new Map(f.ai.listResults(f.product.id).map(result=>[result.id,result])),calls=new Map(f.ai.listCalls().map(call=>[call.id,call]));assert.doesNotThrow(()=>assertImageWorkflowHistory(db,results,calls));
+ }finally{db.close();}
+ const backup=join(f.directory,'recovered-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'synthetic recovered image history passphrase');await prepareWorkspaceRestore(f.directory,backup,'synthetic recovered image history passphrase');assert.deepEqual(f.ai.getCall(call.id),call);
 });

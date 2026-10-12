@@ -123,10 +123,36 @@ function cameraFocalLength(raw:unknown):string {
   if(!/^\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*mm$/i.test(value)||value.match(/\d+(?:\.\d+)?/g)!.some(n=>Number(n)<=0))fail();
   return value;
 }
+/** Recover only misplaced known members; do not reconcile competing observations. */
+export function normalizeImagePlanStructure(raw:unknown):unknown {
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))return raw;
+  const value={...raw} as Record<string,unknown>, nested=value.productUnderstanding;
+  if(nested&&typeof nested==='object'&&!Array.isArray(nested)){
+    const understanding={...nested} as Record<string,unknown>;
+    for(const key of ['summary','referenceAssetIds','uncertainties','sufficient'])if(Object.hasOwn(value,key)){
+      if(Object.hasOwn(understanding,key)&&listingFingerprint(understanding[key])!==listingFingerprint(value[key]))fail();
+      understanding[key]=value[key];delete value[key];
+    }
+    value.productUnderstanding=understanding;
+  }
+  return value;
+}
+function planText(value:Record<string,unknown>){
+  if(!['none','planned'].includes(String(value.textMode)))fail();
+  const expectedText=list(value.expectedText,20,raw=>{
+    const line=keys(raw,['text','evidenceIds']);
+    const wrapped=line.evidenceIds;
+    // Exactly [[id]] is unambiguous; mixed, duplicate and deeper arrays stay invalid.
+    const normalized=Array.isArray(wrapped)&&wrapped.length===1&&Array.isArray(wrapped[0])&&wrapped[0].length===1&&typeof wrapped[0][0]==='string'?[wrapped[0][0]]:wrapped;
+    return {text:englishText(boundedText(line.text,300)),evidenceIds:ids(normalized)};
+  });
+  if((value.textMode==='none')!==(expectedText.length===0)||new Set(expectedText.map(line=>line.text)).size!==expectedText.length)fail();
+  return {textMode:value.textMode as 'none'|'planned',expectedText};
+}
 export function validateImagePlan(raw: unknown): ImagePlanOutput {
-  const value = keys(raw, ['kind','prompt','textMode','expectedText'], ['productUnderstanding','ipRisk','setPlan','cameraFocalLength']);
+  const value = keys(normalizeImagePlanStructure(raw), ['kind','prompt','textMode','expectedText'], ['productUnderstanding','ipRisk','setPlan','cameraFocalLength']);
   if (value.kind !== 'image-plan' || !['none','planned'].includes(String(value.textMode))) fail();
-  const expectedText = list(value.expectedText, 20, raw => { const line = keys(raw, ['text','evidenceIds']); return { text: englishText(boundedText(line.text, 300)), evidenceIds:ids(line.evidenceIds) }; });
+  const {expectedText} = planText(value);
   if ((value.textMode === 'none') !== (expectedText.length === 0) || new Set(expectedText.map(line => line.text)).size !== expectedText.length) fail();
   let productUnderstanding: ImagePlanOutput['productUnderstanding'];
   if (value.productUnderstanding !== undefined) {
@@ -152,39 +178,39 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
   }
   // A source refusal is a valid, cacheable observation, but never a generation
   // instruction. Slot prompts, source identities and all claims remain checked.
-  return { kind: 'image-plan', ...(value.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(value.cameraFocalLength)}), prompt: planPrompt(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan)}) };
+  return { kind: 'image-plan', ...(value.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(value.cameraFocalLength)}), prompt: planPrompt(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan,productUnderstanding?.sufficient===false)}) };
 }
-export function validateImageSetPlan(raw:unknown):ImageSetPlan{
+export function validateImageSetPlan(raw:unknown,refusal=false):ImageSetPlan{
   const value=keys(raw,['style','dimensionEvidenceIds','dimensionReason','slots']);
   const slots=list(value.slots,7,raw=>{
     const item=keys(raw,['index','role','focus','evidenceIds','scene','prompt','textMode','expectedText'],['cameraFocalLength']);
     if(!['main_scene','selling_point','dimensions','scene'].includes(String(item.role)))fail();
-    const text=validateImagePlan({kind:'image-plan',prompt:item.prompt,textMode:item.textMode,expectedText:item.expectedText});
+    const text={...planText(item),prompt:planPrompt(item.prompt,2000,refusal)};
     if(text.expectedText.length>3||text.expectedText.some(line=>line.text.length>100))fail();
-    return {...(item.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(item.cameraFocalLength)}),index:integer(item.index,1,7),role:item.role as ImageSetSlot['role'],focus:boundedText(item.focus,200),evidenceIds:ids(item.evidenceIds),scene:boundedText(item.scene,500),prompt:boundedText(text.prompt,2000),textMode:text.textMode,expectedText:text.expectedText};
+    return {...(item.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(item.cameraFocalLength)}),index:integer(item.index,1,7),role:item.role as ImageSetSlot['role'],focus:boundedText(item.focus,200),evidenceIds:ids(item.evidenceIds),scene:boundedText(item.scene,500,refusal),prompt:boundedText(text.prompt,2000,refusal),textMode:text.textMode,expectedText:text.expectedText};
   });
   if(slots.length!==7||slots.some((slot,index)=>slot.index!==index+1))fail();
   return {style:boundedText(value.style,1000),dimensionEvidenceIds:ids(value.dimensionEvidenceIds),dimensionReason:boundedText(value.dimensionReason,1000),slots};
 }
-export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext,options:ImageEvidenceOptions={}):void{
+export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext,options:ImageEvidenceOptions={},refusal=false):void{
   const sourceSizes=sourceDimensionEvidence(context),available=[...sourceSizes.map(item=>item.id),...(context.referenceMeasurements??[]).map(item=>item.id)];
-  if(plan.dimensionEvidenceIds.some(id=>!available.includes(id))||sourceSizes.length&&!plan.dimensionEvidenceIds.length)fail();
+  if(plan.dimensionEvidenceIds.some(id=>!available.includes(id))||!refusal&&sourceSizes.length&&!plan.dimensionEvidenceIds.length)fail();
   const dimensions=plan.slots.filter(slot=>slot.role==='dimensions');
-  if(dimensions.length!==(plan.dimensionEvidenceIds.length?1:0))fail();
+  if(!refusal&&dimensions.length!==(plan.dimensionEvidenceIds.length?1:0))fail();
   const effective={...context,setPlan:plan},evidence=imageEvidence(effective);
   const focuses=new Set<string>(),scenes=new Set<string>();
   for(const [index,slot] of plan.slots.entries()){
     if(index===0?slot.role!=='main_scene'||slot.textMode!=='none':slot.role==='main_scene')fail();
     if(slot.evidenceIds.some(id=>!evidence.some(item=>item.id===id)))fail();
-    if(slot.role==='selling_point'){
+    if(!refusal&&slot.role==='selling_point'){
       const focus=normalizeText(slot.focus);
       if(slot.textMode!=='planned'||!slot.evidenceIds.length||focuses.has(focus))fail();
       focuses.add(focus);
     }
-    if(slot.role==='scene'||slot.role==='main_scene'){
+    if(!refusal&&(slot.role==='scene'||slot.role==='main_scene')){
       const scene=normalizeText(slot.scene);if(scenes.has(scene))fail();scenes.add(scene);
     }
-    if(slot.role==='dimensions'&&(slot.textMode!=='planned'||!slot.evidenceIds.some(id=>plan.dimensionEvidenceIds.includes(id))||!slot.expectedText.some(line=>imageMeasurements(line.text).some(value=>value.kind==='length'))))fail();
+    if(!refusal&&slot.role==='dimensions'&&(slot.textMode!=='planned'||!slot.evidenceIds.some(id=>plan.dimensionEvidenceIds.includes(id))||!slot.expectedText.some(line=>imageMeasurements(line.text).some(value=>value.kind==='length'))))fail();
     for(const line of slot.expectedText){
       if(['selling_point','dimensions'].includes(slot.role)&&!line.evidenceIds.length)fail();
       if(line.evidenceIds.some(id=>!slot.evidenceIds.includes(id)))fail();
@@ -199,7 +225,7 @@ export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext
 /** Repair only new, unfrozen caption plans. Source identity and measurements are
  * never repaired by dropping evidence, and historical results remain unchanged. */
 export function repairImagePlanCaptions(plan:ImagePlanOutput,context:ProductImageContext):ImagePlanOutput{
-  if(!context.setPolicy||context.slot||!plan.setPlan)return plan;
+  if(plan.productUnderstanding?.sufficient===false||!context.setPolicy||context.slot||!plan.setPlan)return plan;
   const repaired=structuredClone(plan),set=repaired.setPlan!,effective={...context,setPlan:set},evidence=imageEvidence(effective);
   // Known standalone camera directions describe photography, not measured
   // product properties. Use qualitative wording before the strict size check.
@@ -355,7 +381,7 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
   if(plan.ipRisk?.findings.some(item=>item.referenceAssetIds.some(id=>!context.referenceAssets.some(asset=>asset.assetId===id))))fail();
   if (context.purpose === 'main' && plan.textMode !== 'none') fail();
   if(context.setPolicy){
-    if(!context.slot){if(!plan.setPlan)fail();assertImageSetPlan(plan.setPlan,context,options);}
+    if(!context.slot){if(!plan.setPlan)fail();assertImageSetPlan(plan.setPlan,context,options,plan.productUnderstanding?.sufficient===false);}
     else{
       if(plan.setPlan||!context.setPlan)fail();
       const slot=context.setPlan.slots[context.slot.index-1];
@@ -417,4 +443,11 @@ export function assertImageTextReview(review: ImageTextReviewOutput, context: Pr
     if (plan.output.textMode === 'planned' && (!expected.length || review.noTextVerified || review.expectedTextChecks.some(check => !check.present))) fail();
   }
   if(context.slot&&review.verdict!=='PASS'&&!review.checks.some(check=>check.verdict==='CONTRADICTED'&&check.evidenceIds.length))fail();
+}
+
+/** Same local validation pipeline for a new reply and an immutable retained reply. */
+export function parseImagePlanResponse(raw:unknown,context:ProductImageContext):ImagePlanOutput {
+  const envelope=raw&&typeof raw==='object'&&!Array.isArray(raw)&&'type' in raw&&raw.type==='json_object'?Object.fromEntries(Object.entries(raw).filter(([key])=>key!=='type')):raw;
+  const plan=repairImagePlanCaptions(validateImagePlan(fillSetPlanPrompt(normalizeImagePlanStructure(envelope),context)),context);
+  assertImagePlan(plan,context);return plan;
 }

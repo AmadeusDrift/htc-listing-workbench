@@ -39,7 +39,7 @@ export interface AiCall {
   responseReceived?: true;
   thinking?: boolean;
   rejection?: import('./rejection-presentation.ts').OutputRejection;
-  presentationContext?: {workflowId?:string;kind:'image'|'listing';draftId:string;variantId:string;sourceSha256:string;slot:number};
+  presentationContext?: {imagePlanRequestSha256?:string;workflowId?:string;kind:'image'|'listing';draftId:string;variantId:string;sourceSha256:string;slot:number};
   id: string; providerId: AiProviderId; productId: string; productRevision: number;
   status: 'RUNNING' | 'SUCCEEDED' | 'FAILED'; errorCode: AiErrorCode | null;
   requestId: string | null; model: string; generation: number;
@@ -80,6 +80,7 @@ export interface TextReviewOutput {
 }
 export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
+  imagePlanRecovery?: { repair?:{previousPlanId:string;issues:string[]}; parserVersion:'image-plan-recovery/v1'; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   localRecovery?: { parserVersion:'full-schema-recovery/v1'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   fieldRejections?: import('./rejection-presentation.ts').FieldRejections;
   id: string; callId: string; providerId: AiProviderId; productId: string; productRevision: number;

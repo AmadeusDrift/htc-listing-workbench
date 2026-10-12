@@ -353,20 +353,20 @@ export class ListingAiService {
     return { draft, aiCalls:3, review, remaining:review.review.output.kind === 'listing-current-review' ? review.review.output.issues.map(issue => `${issue.field}：${issue.message}`) : ['文案审核结果无效'], blocked:review.review.output.kind !== 'listing-current-review' || review.review.output.verdict === 'BLOCKED' };
   }
 
-  private completionScope(draft:AmazonDraft,legacy=false):string {
+  private completionScope(draft:AmazonDraft,legacy=false,legacyOperation?:CompletionOperation):string {
     const context=buildListingContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation,legacy);
     const {fields: _fields,evidence: _evidence,draftRevision: _revision,repairRequest: _repair,categoryInferencePolicyVersion: _categoryPolicy,contract:_contract,fullSchema:_schema,currentAttributes:_attributes,businessValues:_business,sourceProduct:_source,...identity}=context;
     const product=this.store.getProduct(draft.productId);
-    return listingFingerprint({identity,categoryInferencePolicyVersion:CATEGORY_INFERENCE_POLICY_VERSION,source:{id:product.id,revision:product.revision,facts:product.facts,variants:product.variants,assets:legacy?product.assets:this.sourceAssets(draft,product)},sellerId:draft.sellerId,salesPlan:draft.salesPlan??null,...(legacy?{}:{contract:'listing-full-schema/v1'})});
+    return listingFingerprint({identity,categoryInferencePolicyVersion:CATEGORY_INFERENCE_POLICY_VERSION,source:{id:product.id,revision:product.revision,facts:product.facts,variants:product.variants,assets:legacy?(legacyOperation?this.ai.completionJournal.legacySourceAssets(product,legacyOperation):product.assets):this.sourceAssets(draft,product)},sellerId:draft.sellerId,salesPlan:draft.salesPlan??null,...(legacy?{}:{contract:'listing-full-schema/v1'})});
   }
   /** Main-only stable operation reference shared by automatic owners. */
   beginCompletion(raw:unknown,operationId?:string):CompletionOperation {
     const reference=input(raw,'suggest'),{draft,context}=this.current(reference);
     const operations=this.ai.completionJournal.list(draft.id),prior=operationId?operations.find(op=>op.id===operationId):operations.find(op=>!['DONE','RETIRED'].includes(op.state));
-    const legacy=!!prior&&prior.scopeHash!==this.completionScope(draft)&&prior.scopeHash===this.completionScope(draft,true);
+    const legacy=!!prior&&prior.scopeHash!==this.completionScope(draft)&&prior.scopeHash===this.completionScope(draft,true,prior);
     const preserveDone=prior?.state==='DONE'&&legacy&&draft.listingProgram==='haul'&&operationId!==undefined;
     if(prior?.state==='DONE'&&legacy&&isFullSchema(context)&&!preserveDone)operationId=undefined;
-    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId,draft,()=>this.completionScope(draft,true));
+    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone),legacy?prior:undefined),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId,draft,()=>this.completionScope(draft,true));
   }
   beginLegacyThemeRepair(draftId:string,row:AutomaticListingItem,workflow:ImageWorkflowRun):CompletionOperation|undefined {
     const draft=this.amazon.getDraft(draftId),reference={draftId,draftRevision:draft.revision};
@@ -379,7 +379,7 @@ export class ListingAiService {
   completionOperations(draftId:string):CompletionOperation[]{return this.ai.completionJournal.list(draftId);}
   private completionDraft(operation:CompletionOperation):AmazonDraft {
     const draft=this.amazon.getDraft(operation.draftId);
-    if(this.completionScope(draft)!==operation.scopeHash&&this.completionScope(draft,true)!==operation.scopeHash||this.copyReviewEnabled()!==operation.copyReviewEnabled)throw new UserFacingError('字段操作来源、店铺或审核策略已变化，未自动重发');
+    if(this.completionScope(draft)!==operation.scopeHash&&this.completionScope(draft,true,operation)!==operation.scopeHash||this.copyReviewEnabled()!==operation.copyReviewEnabled)throw new UserFacingError('字段操作来源、店铺或审核策略已变化，未自动重发');
     if(draft.revision===operation.draftRevision&&completionDraftStamp(draft)===operation.draftStamp)return draft;
     const round=operation.rounds.at(-1),adoption=round?.adoptionId&&draft.fieldAdoptions?.find(a=>a.id===round.adoptionId);
     if(adoption&&adoption.fromRevision===operation.draftRevision&&adoption.toRevision===draft.revision&&adoption.contextSha256===round!.contextHash&&adoption.suggestionResultId===round!.candidate.resultId&&adoption.reviewResultId===(round!.review?.resultId??null)&&adoption.changes.every(change=>listingFingerprint(draft.attributes[change.field])===listingFingerprint(change.after))){

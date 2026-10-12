@@ -1,3 +1,5 @@
+import { legacyCompletionAssets } from './legacy-generated-scope.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
 import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair } from './legacy-theme-repair.ts';
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
@@ -93,6 +95,7 @@ export class CompletionJournal {
     return this.db.prepare('SELECT id,record_json FROM listing_completion_operations WHERE '+fields.map(name=>`json_extract(record_json,'$.safetyIdentity.${name}')=?`).join(' AND ')).all(...fields.map(name=>input[name])).map(row=>{const op=validateCompletionOperation(JSON.parse(String(row.record_json)));if(op.id!==row.id)invalid();return op;});
   }
   save(op:CompletionOperation):CompletionOperation{op.updatedAt=[op.updatedAt,new Date().toISOString()].sort()[1];return save(this.db,op);}
+  legacySourceAssets(product:ProductDetail,operation:CompletionOperation):ProductDetail['assets'] { return legacyCompletionAssets(this.db,product,operation.createdAt); }
   begin(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,id?:string,legacyDraft?:AmazonDraft,legacyScopeHash?:()=>string):CompletionOperation {
     this.db.exec('BEGIN IMMEDIATE');
     try {

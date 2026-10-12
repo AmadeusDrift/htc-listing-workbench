@@ -114,3 +114,14 @@ test('the set-planning instructions state what the outer prompt must contain',as
   const f=sample();await f.invoke();const system=f.body();
   assert.match(system,/top-level prompt MUST be non-empty/);assert.match(system,/slot 1/i);
 });
+
+test('planner requests separate camera metadata and passes the frozen slot focal length as input',async()=>{
+  const f=sample();f.p.cameraFocalLength='50 to 85 mm';f.p.setPlan.slots[0].cameraFocalLength='35 mm';
+  const result=await f.invoke();assert.equal(result.output.cameraFocalLength,'50 to 85 mm');
+  assert.equal(result.output.setPlan!.slots[0].cameraFocalLength,'35 mm');
+  assert.match(f.body(),/Choose and fill cameraFocalLength/);
+  f.c.setPlan=result.output.setPlan;f.c.slot={index:1,total:7,provisional:true};delete f.p.setPlan;
+  await f.invoke();const messages=JSON.parse(f.body()).messages;
+  assert.match(JSON.stringify(messages),/cameraFocalLength/);
+  const body=JSON.stringify(messages);assert.match(body,/35 mm/);
+});

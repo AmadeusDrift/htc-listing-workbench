@@ -1,3 +1,4 @@
+import { plainColorName } from './plain-colors.ts';
 import type { ListingEvidence } from '../../shared/listing-ai-contracts.ts';
 
 type ColorName = { name: string; aliases: string[]; includes?: string[] };
@@ -116,7 +117,7 @@ export function supportsColorClaims(value:string,evidence:ListingEvidence[],colo
   if(colorField&&/^[A-Za-z -]+$/.test(value)&&evidence.length>0&&evidence.every(e=>e.meaning==='color'
     &&['source_confirmed','human_confirmed'].includes(e.source)&&e.name!=='Selected SKU color'
     &&e.value.trim().toLowerCase()===value.trim().toLowerCase()))return true;
-  const claim=readColors(value,false,colorField),sources=evidence.map(e=>colorEvidence(e,scope)).filter((c):c is Colors=>!!c);
+  const claim=readColors(colorField?plainColorName(value).replace(/([a-z])([A-Z])/g,'$1 $2'):value,false,colorField),sources=evidence.map(e=>colorEvidence(e,scope)).filter((c):c is Colors=>!!c);
   if(colorField){
     if(!sources.length){
       // Preserve exact copies of explicitly confirmed color names outside the
@@ -125,7 +126,7 @@ export function supportsColorClaims(value:string,evidence:ListingEvidence[],colo
     }
     if(!claim||claim.remainder)return false;
     // The color field names the whole variant, not one color in a multicolor item.
-    if(claim.names.length&&!sources.some(s=>s.names.length===claim.names.length&&claim.names.every(n=>s.names.some(other=>other.name===n.name))))return false;
+    if(claim.names.length&&!sources.some(s=>s.names.length===claim.names.length&&claim.names.every(n=>s.names.some(other=>other.name===n.name||plainColorName(other.name)===plainColorName(n.name)))))return false;
   }
   if(!claim)return true;
   if(claim.random&&!sources.some(s=>s.random))return false;

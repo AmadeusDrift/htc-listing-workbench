@@ -41,6 +41,8 @@ export interface FollowupRecord {
   reason: FollowupReason | null;
   attempts: number;
   nextDueAt: string | null;
+  /** Explicit query authorized but not yet checkpointed; consumed before sending. */
+  requeryPending?: true;
   lastAttemptAt: string | null;
   checkedAt: string | null;
   listingState: ListingState;

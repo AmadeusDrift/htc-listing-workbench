@@ -119,7 +119,9 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
   const result:AutomaticListingOutcome={version:1,kind:value.kind as AutomaticListingOutcome['kind'],code:text(value.code,'结果代码',100,true),message:text(value.message,'结果原因',2000,true),classifiedAt:date(value.classifiedAt),
     scope:{mode:scope.mode as 'demo'|'live',sellerId:text(scope.sellerId,'卖家',100,true),marketplaceId:text(scope.marketplaceId,'站点',100,true),productId:identifier(scope.productId),recipeKey:text(scope.recipeKey,'配方',200,true),recipeStamp:hash(scope.recipeStamp),sourceStamp:hash(scope.sourceStamp),rulesStamp:hash(scope.rulesStamp),ruleRevision:counter(scope.ruleRevision)},
     draftId:value.draftId===null?null:identifier(value.draftId),draftRevision:value.draftRevision===null?null:counter(value.draftRevision)};
-  if(result.draftId!==row.draftId||!result.draftId&&result.draftRevision!==null||result.kind==='RULE_FILTERED'&&!result.draftRevision)fail();
+  const selection=result.kind==='RULE_FILTERED'&&result.code==='SKU_SELECTION_FILTERED';
+  if(selection&&(value.pricingReport!==undefined||value.image!==undefined))fail();
+  if(result.draftId!==row.draftId||!result.draftId&&result.draftRevision!==null||result.kind==='RULE_FILTERED'&&!selection&&!result.draftRevision)fail();
   if(value.pricingReport!==undefined){
     const p=record(value.pricingReport,'定价证据',['revision','fields','notices','quote','bundleQuantity','pricingBasis','pricingDecision']);
     if(p.revision!==scope.ruleRevision||p.quote!==null||JSON.stringify(p.fields)!=='{}'||JSON.stringify(p.notices)!=='[]'||!Number.isSafeInteger(p.bundleQuantity)||Number(p.bundleQuantity)<1||!p.pricingDecision||!result.draftId)fail();
@@ -136,16 +138,18 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     result.image={kind:image.kind as 'IP_PLAN_BLOCKED'|'IP_IMAGE_BLOCKED',workflowId:identifier(image.workflowId),resultId:identifier(image.resultId),callId:identifier(image.callId),planResultId:identifier(image.planResultId),candidateId:image.candidateId===null?null:identifier(image.candidateId),contextSha256:hash(image.contextSha256),draftRevision:counter(image.draftRevision),references,policyVersion:text(image.policyVersion,'图片规则版本',100,true),message:text(image.message,'图片规则原因',2000,true)};
     if((result.image.kind==='IP_IMAGE_BLOCKED')!==Boolean(result.image.candidateId))fail();
   }
-  if(result.kind==='RULE_FILTERED'&&(!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
+  if(result.kind==='RULE_FILTERED'&&(!selection&&!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
   if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
     if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
   }else if(Object.hasOwn(SOURCE_CONSISTENCY_OUTCOMES,result.code)){
     if(result.kind!==SOURCE_CONSISTENCY_OUTCOMES[result.code as keyof typeof SOURCE_CONSISTENCY_OUTCOMES]||result.pricingReport||result.image)fail();
+  }else if(result.code==='READBACK_BRAND_REQUIRES_MANUAL'){
+    if(result.kind!=='NEEDS_INPUT'||row.stage!=='READBACK'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if(['LABELS_FAILED','READBACK_FAILED'].includes(result.code)){
     if(result.kind!=='SYSTEM_REPAIR'||row.stage!==(result.code==='LABELS_FAILED'?'LABELS':'READBACK')||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
-  }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(result.code)){
+  }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT,'AMAZON_BRAND_MANUAL'].includes(result.code)){
     if(result.kind!=='NEEDS_INPUT'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
-  }else if(!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();
+  }else if(!selection&&!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();
   return result;
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];

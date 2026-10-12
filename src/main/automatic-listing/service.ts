@@ -1,4 +1,5 @@
-import { needsBusinessAuthorityRefresh } from '../image-workflow/policy-reevaluation.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
+import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
@@ -44,6 +45,7 @@ import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pr
 import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow, AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, recipeKey } from './outcomes.ts';
 import { previewSalesRecipes } from '../sales-plans/planning.ts';
+import { informationalVariant, selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
   store: Pick<WorkspaceStore, 'getProduct'>;
@@ -192,7 +194,8 @@ export class AutomaticListingService {
       // Confirmed submissions are already beyond source preparation, pricing and
       // image admission. Their readback/label failure must retain its actual cause.
       if(draft&&submitted(draft)&&!['UNKNOWN','SUBMITTING'].includes(draft.state)&&this.matching(task,row,draft)&&['READBACK','LABELS'].includes(row.stage)){
-        row.outcome={version:1,kind:'SYSTEM_REPAIR',code:row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
+        const brandError = row.stage === 'READBACK' && draft.listingProgram === 'haul' && Array.isArray(draft.attributes.brand) && draft.attributes.brand.some(value => value && typeof value === 'object' && 'value' in value && value.value === 'Generic') && draft.listingIssues.some(issue => issue.source === 'amazon' && issue.severity === 'ERROR' && ['5665','5882'].includes(issue.code));
+        row.outcome={version:1,kind:brandError?'NEEDS_INPUT':'SYSTEM_REPAIR',code:brandError?'READBACK_BRAND_REQUIRES_MANUAL':row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
         return;
       }
       const unknown=this.unknownCode(row,task);
@@ -201,6 +204,7 @@ export class AutomaticListingService {
         const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
         const factIssue=draft.listingProgram==='haul'?draft.localIssues.find(issue=>[FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(issue.code)&&issue.severity==='ERROR'&&['fact','compliance'].includes(issue.category)&&issue.source==='local'&&!issue.autoFixable):undefined;
         classification=pricingOutcome(draft,this.deps.rules())??(declarationConflict?{kind:'NEEDS_INPUT',code:DECLARATION_SOURCE_CONFLICT}:factIssue?{kind:'NEEDS_INPUT',code:factIssue.code}:classification);
+        if(classification.kind!=='RULE_FILTERED'&&manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]).length)classification={kind:'NEEDS_INPUT',code:'AMAZON_BRAND_MANUAL'};
         if(classification.kind!=='RULE_FILTERED'&&this.deps.images.getRuleFilterEvidence){
           const image=await this.deps.images.getRuleFilterEvidence(draft.id);
           if(image)classification={kind:'RULE_FILTERED',code:image.kind,image};
@@ -220,6 +224,12 @@ export class AutomaticListingService {
     row.outcome={version:1,...classification,message:(classification.image?.message??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
     if(classification.kind==='RULE_FILTERED')row.status='SCREENED';
   }
+  private selectedVariants(product: ProductDetail) {
+    const rules=this.deps.rules();
+    const selected=previewSalesRecipes(product,this.deps.sourceReceipt?.(product.id)??null,{...rules,pricing:{...rules.pricing,bundleEnabled:false}});
+    const ids=new Set(selected.flatMap(r=>r.components.map(c=>c.variantId)));
+    return product.variants.filter(v=>ids.has(v.id));
+  }
   async queue(raw:unknown):Promise<AutomaticListingQueue> {
     this.ensureOpen();const input=record(raw,'待上架范围',['productIds','targetId']);
     if(!Array.isArray(input.productIds)||input.productIds.length>1000)throw new UserFacingError('最多读取 1000 个来源商品');
@@ -237,8 +247,8 @@ export class AutomaticListingService {
     const snapshots=ids.map(id=>this.deps.store.getProduct(id)),products:AutomaticListingQueue['products']=[];
     for(const product of snapshots){
       let recipes:{key:string;specification:string;stamp:string;legacyVariantId:string|null}[],planningError:string|null=null;
-      try{recipes=this.deps.planSales?(this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules)).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
-        :product.variants.slice(0,rules.product.variantLimit).map(v=>({key:v.id,specification:v.normalizedSpec||v.originalSpec,stamp:fingerprint({variantId:v.id}),legacyVariantId:v.id}));}
+      try{recipes=this.deps.planSales?selectSalesRecipes(product,this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules),rules,receipts.get(product.id)??null).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
+        :this.selectedVariants(product).map(v=>({key:v.id,specification:v.normalizedSpec||v.originalSpec,stamp:fingerprint({variantId:v.id}),legacyVariantId:v.id}));}
       catch(error){planningError=errorMessage(error);recipes=[];}
       const rows:AutomaticQueueRow[]=[];
       for(const recipe of recipes){
@@ -271,6 +281,7 @@ export class AutomaticListingService {
         }catch{view.kind='SYSTEM_REPAIR';delete view.continuationRequired;view.noticeCode='EVIDENCE_READ_FAILED';view.message='暂无法核对已保存证据，记录保留待修复';view.eligible=false;}
         rows.push(view);
       }
+      if(!planningError&&!recipes.length)for(const variant of product.variants.filter(informationalVariant))rows.push({key:product.id+':'+variant.id,productId:product.id,recipeKey:variant.id,specification:variant.originalSpec,sku:null,kind:'RULE_FILTERED',eligible:false,reasonCode:'SKU_SELECTION_FILTERED',message:'说明性/服务性选项不参与自动上架，原始资料保留',reconsideration:null,taskId:null});
       products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
     }
     if(fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(revisions())!==taskRevisions||fingerprint(evidenceState())!==evidenceStamp||snapshots.some(p=>fingerprint(this.deps.store.getProduct(p.id))!==fingerprint(p)||fingerprint(this.deps.sourceReceipt?.(p.id)??null)!==fingerprint(receipts.get(p.id))))throw new UserFacingError('读取期间范围已变化，请刷新');
@@ -287,7 +298,7 @@ export class AutomaticListingService {
     if (!target.target.configured || target.target.paused) throw new UserFacingError('请选择已配置且启用的目标店铺');
     if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用图片托管');
     const queue=await this.queue({productIds:ids,targetId}),eligible=new Set(queue.products.flatMap(p=>p.rows.filter(r=>r.eligible).map(r=>r.key)));
-    if(!eligible.size)throw new UserFacingError(queue.products.find(p=>p.inputIssue)?.inputIssue??'所选商品没有可启动的销售 SKU；请查看规则淘汰或待核对原因，已在自动任务中的销售 SKU 请继续原任务');
+    if(!eligible.size)throw new UserFacingError(queue.products.find(p=>p.inputIssue)?.inputIssue??'所选商品没有可启动的销售 SKU（说明性选项不入选，每来源最多 4 个代表规格）；请查看规则淘汰或待核对原因，已在自动任务中的销售 SKU 请继续原任务');
     if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile))throw new UserFacingError('创建期间范围已变化，请刷新');
     this.deps.preflight?.();
     const regroupedSkus=new Set<string>();
@@ -301,7 +312,7 @@ export class AutomaticListingService {
         return [{key:product.id+':'+variant.id,productId:product.id,productRevision:product.revision,sourceStamp:sourceStamp(product),productTitle:product.title,
           variantId:variant.id,sku:variant.sku,stockSets:rules.product.stockSets,sourcesPrepared:false,status:'FAILED',stage:'PLAN',draftId:null,executionTaskIds:[],imageStarted:false,imageAttempts:0,repairAttempts:0,repair:null,batchId:null,error:errorMessage(error)} as AutomaticListingItem];
       }
-      const selected=plans?plans.map(salesPlan=>({variant:product.variants.find(v=>v.id===salesPlan.recipe.components[0].variantId)!,salesPlan})):product.variants.slice(0,rules.product.variantLimit).map(variant=>({variant,salesPlan:undefined}));
+      const selected=plans?plans.map(salesPlan=>({variant:product.variants.find(v=>v.id===salesPlan.recipe.components[0].variantId)!,salesPlan})):this.selectedVariants(product).map(variant=>({variant,salesPlan:undefined}));
       return selected.filter(({variant,salesPlan})=>eligible.has(product.id+':'+(salesPlan?.recipe.key??variant.id))).map(({variant,salesPlan}) => {
         const existing=salesPlan?this.deps.existingSale?.(product.id,salesPlan,targetId):undefined;
         const frozen=existing&&submitted(existing)?existing:undefined;
@@ -370,7 +381,22 @@ export class AutomaticListingService {
       // Retain the precise source failure if a ready sibling has frozen this product's revision.
       if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
     }
+    this.reconcileSelection(task);
     task.status = 'QUEUED'; task.error = null; this.grants.add(task.id); this.save(task); this.deps.labels.resumeJob?.(task.id); this.pump(); return structuredClone(task);
+  }
+  private reconcileSelection(task: AutomaticListingTask): void {
+    for(const productId of new Set(task.items.map(row=>row.productId))){
+      const product=this.deps.store.getProduct(productId),rows=task.items.filter(row=>row.productId===productId),rules=this.deps.rules();
+      const recipes=rows.some(row=>row.salesPlan)?selectSalesRecipes(product,this.deps.previewSales?.(productId)??previewSalesRecipes(product,this.deps.sourceReceipt?.(productId)??null,rules),rules,this.deps.sourceReceipt?.(productId)??null):null;
+      const keys=new Set(recipes?recipes.map(r=>r.key):this.selectedVariants(product).map(v=>v.id));
+      for(const row of rows){
+        if(row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)||this.unknownCode(row,task))continue;
+        const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):this.deps.amazon.listDrafts(productId).find(d=>this.matching(task,row,d));
+        if(draft&&submitted(draft)||keys.has(row.salesPlan?.recipe.key??row.variantId))continue;
+        row.status='SCREENED';row.error='SKU 选择规则淘汰：说明性选项或未入选本来源最多 4 个代表规格；来源、草稿、已完成图片及历史保留';
+        row.outcome={version:1,kind:'RULE_FILTERED',code:'SKU_SELECTION_FILTERED',message:row.error,classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:row.draftId?draft?.revision??null:null};
+      }
+    }
   }
   private migrateRepairPolicy(task: AutomaticListingTask,row: AutomaticListingItem): void {
     if(row.repairPolicyVersion)return;
@@ -699,6 +725,8 @@ export class AutomaticListingService {
       row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
     }
     while (repair.phase === 'FIELDS_PENDING') {
+      const brandIssues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);
+      if(brandIssues.length)throw incompleteFields(brandIssues);
       if(localRefresh&&row.repairAttempts>=repairLimit(row))throw incompleteFields(repair.remaining??[]);
       assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);
@@ -798,11 +826,18 @@ export class AutomaticListingService {
           try {
             if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
             if (!row.batchId) {
-              if (!candidates.get(row.draftId)?.eligible) {
-                const followup = this.deps.followup.get(row.draftId);
-                if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
-                row.status = 'WAITING'; continue;
+              const followup = task.mode === 'live' ? this.deps.followup.get(row.draftId) : { status: 'READY', error: null };
+              if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
+              const candidate = candidates.get(row.draftId);
+              if (followup.status !== 'READY' || !candidate?.eligible) {
+                if (followup.status === 'READY' && candidate?.requiresAttention) throw new UserFacingError(candidate.reason);
+                row.status = 'WAITING';
+                row.error = followup.status === 'READY'
+                  ? `平台已建档；${candidate?.reason || '等待备货条件确认'}；可售状态单独以平台结果为准`
+                  : followup.error || '等待 Amazon 处理原提交并确认建档（原提交后 24 小时内回读）';
+                delete row.outcome; continue;
               }
+              row.error = null; delete row.outcome;
               const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
               const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
               if (!batch) throw new UserFacingError('回读已就绪，但备货批次未建立');

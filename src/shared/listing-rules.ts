@@ -156,16 +156,37 @@ export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuo
     const roi = (rules.fx * (price * (1 - rules.reservePercent / 100) - commission - deliveryFee) - upfrontCny) / upfrontCny;
     return { price, roi, deliveryFee, commission };
   };
+  // Diagnostic only: solve the same piecewise fees beyond the cap, never accept that price.
+  const requiredPrice = (): number => {
+    const tier = rules.deliveryTiers.find(tier => tier.upperOz === null || oz <= tier.upperOz + 1e-10)!;
+    const threshold = Math.floor(rules.lowPriceThreshold * 100 + 1e-8);
+    const first = (fee:number, lower:number, upper:number):number|null => {
+      const net = upfrontCny * (1 + rules.targetRoi + 1e-10) / rules.fx + fee;
+      let cents = Math.max(lower, Math.floor(100 * Math.max((net + rules.commissionMinimum) / (1-rules.reservePercent/100), net / (1-(rules.reservePercent+rules.commissionPercent)/100))) + 1);
+      while(cents<=upper&&evaluate(cents/100).roi<=rules.targetRoi+1e-10)cents++;
+      return cents<=upper?cents:null;
+    };
+    const small=oz<=rules.deliveryTiers[0].upperOz!+1e-10;
+    const low=small?first(rules.lowPriceFee,1,threshold):null;
+    const high=first(tier[rules.apparel?'apparel':'ordinary'],small?threshold+1:1,Infinity)!;
+    const minimumCents=Math.min(low??Infinity,high);
+    const floor=Math.ceil(minimumCents+rules.margin*100-1e-8);
+    const discount=rules.promoEnabled?rules.promoDiscount:0;
+    const candidates=[floor,high,low??high,Math.ceil(high+discount*100-1e-8),Math.ceil((low??high)+discount*100-1e-8),threshold+1,Math.ceil(threshold+1+discount*100-1e-8)]
+      .map(cents=>Math.max(floor,cents)).sort((a,b)=>a-b);
+    return candidates.find(cents=>evaluate(cents/100).roi>rules.targetRoi+1e-10&&(!rules.promoEnabled||round2(cents/100-discount)>0&&evaluate(round2(cents/100-discount)).roi>rules.targetRoi+1e-10))!/100;
+  };
+  const explanation=()=>`采购成本 ¥${round2(costCny)}，前期成本 ¥${round2(upfrontCny)}；所需售价 $${requiredPrice().toFixed(2)}，超过售价上限 $${rules.maxPrice.toFixed(2)}`;
   const cap = Math.floor(rules.maxPrice * 100 + 1e-8); let minimum: number | null = null;
   for (let cents = 1; cents <= cap; cents++) if (evaluate(cents / 100).roi > rules.targetRoi + 1e-10) { minimum = cents / 100; break; }
-  if (minimum === null) throw new ListingQuoteError('ROI_MAX_PRICE', '售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置');
+  if (minimum === null) throw new ListingQuoteError('ROI_MAX_PRICE', `${explanation()}；售价上限内无法满足目标 ROI > ${rules.targetRoi}`);
   for (let cents = Math.ceil((minimum + rules.margin) * 100 - 1e-8); cents <= cap; cents++) {
     const normal = evaluate(cents / 100), promotionPrice = rules.promoEnabled ? round2(normal.price - rules.promoDiscount) : null;
     const promotion = promotionPrice === null ? null : evaluate(promotionPrice);
     if (normal.roi <= rules.targetRoi + 1e-10 || (promotion && (promotion.price <= 0 || promotion.roi <= rules.targetRoi + 1e-10))) continue;
     return { ...normal, minimum, upfrontCny, dimensionalWeightGrams, billableWeightGrams, promotionPrice, promotionRoi: promotion?.roi ?? null };
   }
-  throw new ListingQuoteError('ROI_PROMOTION_OR_MARGIN', '加价或促销后的报价无法同时满足 ROI 和售价上限');
+  throw new ListingQuoteError('ROI_PROMOTION_OR_MARGIN', `${explanation()}；加价或促销后的报价无法同时满足 ROI 和售价上限`);
 }
 export function bundleQuantity(costCny: number, skuCount: number, rules: PricingRules): number {
   if (!rules.bundleEnabled || skuCount !== 1 || !Number.isFinite(costCny) || costCny <= 0 || costCny / rules.fx >= rules.bundleThresholdUsd) return 1;

@@ -1,3 +1,4 @@
+import { pricingBlockingReason } from '../src/main/image-workflow/deferred-fields.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { chat,mockStorage } from './fixtures/listing-ai.ts';
@@ -845,7 +846,7 @@ for(const {field,spec,eligible} of [
   {field:'target_audience',spec:'red',eligible:true},{field:'fabric_type',spec:'red',eligible:true},
 ]) test(`legacy exhausted ${field} ${spec} repair receives only its eligible one-time capability migration`,async t=>{
   const f=fixture(t);let fields=0;
-  f.product.variants[0].sourceSpec=spec;f.product.variants[0].originalSpec=spec;f.product.variants[0].normalizedSpec=spec;
+  f.product.variants[0].sourceSpec=spec;f.product.variants[0].normalizedSpec=spec;f.product.variants[0].originalSpec=spec;f.product.variants[0].sourceSpec=spec;f.product.variants[0].normalizedSpec=spec;f.product.variants[0].normalizedSpec=spec;
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'Missing fields'}];return structuredClone(child);};
   f.dependencies.repairFields=async id=>{fields++;const draft=f.drafts.get(id)!;draft.revision++;
     draft.localIssues=[{code:'LOCAL_required',message:`${field}: missing`,severity:'ERROR',attributeNames:[field],category:'field',source:'local',autoFixable:false}];return structuredClone(draft);};
@@ -1322,4 +1323,48 @@ for(const stage of ['READBACK','LABELS'] as const)test(`submitted ${stage} failu
   assert.match(row.outcome!.message,stage==='LABELS'?/PDF 标签文件不完整/:/平台回读确认缺少必填属性/);
   assert.equal(f.calls.submissions,1);assert.equal(f.calls.images,1);
   assert.deepEqual(validateAutomaticListingTask(f.service.get(task.id)),f.service.get(task.id));
+});
+
+for(const [cost,expected,spec] of [[2.4,'PENDING','red'],[2.4,'PENDING','repair'],[2.4,'PENDING','repair-other'],[100,'SCREENED','red'],[null,'FAILED','red'],[100,'FAILED','5 pc / 10 pc']] as const)
+test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} without paid calls`,async t=>{
+  const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;f.product.variants[0].originalSpec=spec;f.product.variants[0].sourceSpec=spec;f.product.variants[0].normalizedSpec=spec;
+  await f.dependencies.prepareSourceConsistency!({productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]},new AbortController().signal,()=>{});
+  const task=await f.create(),saved=(f.service as any).tasks.get(task.id),row=saved.items[0];
+  const prepared=await f.dependencies.amazon.prepareDrafts({items:[{variantId:row.variantId}]}),draft=prepared.items[0].draft!;
+  draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};
+  draft.previewIssues=spec==='repair'?[]:[{code:'PLATFORM_KEEP',severity:'ERROR',message:'Keep platform error',attributeNames:[]} as any];
+  f.drafts.set(draft.id,draft);
+  row.draftId=draft.id;row.stage='IMAGES';row.status='FAILED';row.error='售价上限内无法满足目标 ROI';row.sourcesPrepared=true;
+  if(spec.startsWith('repair')){
+    const child=f.dependencies.execution.create({draftIds:[draft.id],profileId:'alpha'});f.executions.get(child.id)!.status='NEEDS_ATTENTION';row.executionTaskIds=[child.id];
+    row.repair={phase:'FIELDS_PENDING',sourceWorkflowId:randomUUID(),remaining:[pricingBlockingReason(draft)!],draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};
+  }
+  saved.status='NEEDS_ATTENTION';(f.service as any).save(saved);
+  const images={id:randomUUID(),status:'COMPLETED',stage:'complete',approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64),slots:Array.from({length:7},(_,i)=>({index:i+1,status:'PASSED',approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64)}))};f.workflow.set(draft.id,images);
+  let refreshes=0;
+  f.dependencies.amazon.applyBusinessDefaults=(reference,_operation,revalidate)=>{
+    refreshes++;assert.equal(revalidate,true);
+    const current=f.drafts.get(reference.id)!;
+    const result=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:current.attributes,measurements:{},costCny:cost,previousBusinessReport:current.businessRules,now:new Date()},f.rules);
+    current.attributes=result.attributes;current.businessRules=result.report;current.revision++;return structuredClone(current);
+  };
+  f.service.startAuthorized(f.service.prepareStart(task.id));f.service.pause(task.id);await f.service.waitForIdle();
+  const actual=f.service.get(task.id).items[0];assert.equal(refreshes,1);assert.equal(actual.status,expected);
+  if(expected==='SCREENED'){assert.equal(actual.outcome?.kind,'RULE_FILTERED');assert.match(actual.outcome!.message,/100.*所需售价.*上限/s);}
+  if(expected==='FAILED')assert.equal(actual.outcome?.kind,'NEEDS_INPUT');
+  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.deepEqual(f.workflow.get(draft.id),images);assert.deepEqual(f.drafts.get(draft.id)!.previewIssues,draft.previewIssues);
+  await f.service.close();const restarted=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>restarted.close());
+  assert.deepEqual(restarted.get(task.id).items[0],actual);
+  if(expected==='PENDING'){
+    f.setReady();restarted.startAuthorized(restarted.prepareStart(task.id));await restarted.waitForIdle();
+    assert.equal(restarted.get(task.id).items[0].status,spec==='repair-other'?'FAILED':'DONE',restarted.get(task.id).items[0].error??'');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,spec==='repair-other'?0:1,'only the fake downstream execution continues');
+    if(spec==='repair-other')assert.match(restarted.get(task.id).items[0].error!,/PLATFORM_KEEP/);
+    assert.deepEqual(f.workflow.get(draft.id),images);
+  }
+  if(expected!=='PENDING'){
+    restarted.startAuthorized(restarted.prepareStart(task.id));restarted.pause(task.id);await restarted.waitForIdle();
+    assert.equal(restarted.get(task.id).items[0].status,expected);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+  }
+  const queue=await restarted.queue({productIds:[f.product.id],targetId:f.target.id});
+  if(expected==='SCREENED'){assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');assert.match(queue.products[0].rows[0].message,/100.*所需售价/s);}
 });

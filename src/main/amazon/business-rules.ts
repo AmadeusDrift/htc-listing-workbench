@@ -294,7 +294,7 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
             if (error.code === 'QUOTE_INVALID_INPUT') { decision.status = 'needs_input'; decision.code = error.code; }
             else if (quantityUnconfirmed) { decision.status = 'needs_input'; decision.code = 'SOURCE_QUANTITY_UNCONFIRMED'; }
             else if (decision.evidence.packageScope !== 'source_sale_unit') { decision.status = 'needs_input'; decision.code = 'PACKAGE_SCOPE_UNCONFIRMED'; }
-            else if (decision.evidence.dimensions !== 'confirmed_source' || decision.evidence.weight !== 'confirmed_source') { decision.status = 'needs_input'; decision.code = 'PACKAGE_INPUT_UNCONFIRMED'; }
+            else if (!['confirmed_source','business_default'].includes(decision.evidence.dimensions) || !['confirmed_source','business_default'].includes(decision.evidence.weight)) { decision.status = 'needs_input'; decision.code = 'PACKAGE_INPUT_UNCONFIRMED'; }
             else { decision.status = 'business_blocked'; decision.code = error.code; }
           } else { decision.status = 'system_error'; decision.code = 'PRICING_SYSTEM_ERROR'; }
         }

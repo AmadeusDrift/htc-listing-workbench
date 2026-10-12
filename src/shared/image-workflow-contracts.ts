@@ -27,6 +27,8 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  /** Derivation under the same task; original context and paid attempt prefixes remain owned by the source run. */
+  sourceReuse?:{derivationRunId:string;sourceRunId:string;sourceRunHash:string;sourceProductRevision:number;sourceContext:ProductImageContext;slotAttempts:number[];slotContexts:(string|null)[]};
   /** Local authorization receipt; never changes image contexts or paid attempts. */
   policyReevaluation?:{version:'source-union-resume/v1';inputSha256:string;at:string;previousRemaining:string[];repairStarted?:boolean};
   rejection?: {version:'rejection-presentation/v1';code:import('./rejection-presentation.ts').OutputRejection['code']|'SOURCE_OBSERVATION_INSUFFICIENT';callId:string;resultId:string|null;contextSha256:string;stage:'content'|'planning';slot:number};

@@ -1,3 +1,5 @@
+import { currentRiskRecheck } from './risk-adaptation.ts';
+import { readImageRiskSettings } from '../image-workflow/risk-settings.ts';
 import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
 import { nonDeferredImageIssues,pricingBlockingReason,withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
 import { inspectImageAdaptation,saveImageAdaptation } from '../image-workflow/adaptation.ts';
@@ -38,6 +40,7 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
     if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读');continue;}
     if(recipeErrors.has(p.id)){add(row,'BLOCKED',recipeErrors.get(p.id)!,['销售选样']);continue;}
     const selected=deps.planSales?recipes.get(p.id)!.some(r=>matchesRecipe(row,r)):p.variants.some(v=>v.id===row.variantId);
+    if(!selected&&row.outcome?.kind==='RULE_FILTERED'&&row.outcome.pricingReport){add(row,'PRESERVED','原利润淘汰继续排除；本次也未选中，保留独立定价证据供后续重新入选时核对');continue;}
     if(!selected){if(row.outcome?.code!=='SKU_SELECTION_FILTERED')add(row,'NOT_SELECTED','按当前完整来源选样，本次未选中；保留历史、成果和次数');continue;}
     const priorRun=draft?deps.images.getProgress(draft.id):null;
     if(row.repair?.phase==='FIELDS_STARTED'||priorRun?.contentPreparation?.state==='STARTED'){
@@ -45,6 +48,7 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
       else add(row,'PRESERVED','先按原检查点恢复字段请求结果；不改变原请求上下文或次数');
       continue;
     }
+    if(row.outcome?.image&&currentRiskRecheck(db,row,draft,priorRun,p)){add(row,'RISK_RECHECK','原生成图评分按当前阈值不再拦截；继续时核验已有候选和原审核，不重复生图',['已有候选复核']);continue;}
     if(row.outcome?.image){add(row,'PRESERVED','原图片风险结论与检测证据保留，按图片规则单独复核');continue;}
     if(row.outcome?.code==='SKU_SELECTION_FILTERED')add(row,'SELECTED','当前选样已入选，恢复原身份；由用户继续缺失步骤',[row.stage]);
     if(sourceStamp(p)!==row.sourceStamp||p.revision!==row.productRevision)add(row,'SOURCE','来源版本已变化，保留原资料与成果；逐项本地重新校验',['字段依据','定价','图片依赖']);
@@ -61,7 +65,7 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
     }else if(draft&&(p.revision!==draft.productRevision||task.rulesStamp!==fingerprint(rules)))add(row,'BLOCKED','本地草稿适配接口不可用，保留原记录待修复');
   }
   for(const p of sources)for(const recipe of recipes.get(p.id)??[])if(!task.items.some(r=>r.productId===p.id&&matchesRecipe(r,recipe)))changes.push({key:p.id+':'+recipe.key,productId:p.id,sku:null,kind:'NEW',steps:['来源','分类','草稿'],fields:[],message:'当前完整来源选样新增销售规格：'+recipe.specification});
-  const token=fingerprint(stable({version:1,task,rules,sources,receipts,drafts:[...drafts],runs,executions,target,profile,changes,projections:[...projections]}));
+  const token=fingerprint(stable({version:1,task,rules,riskSettings:db?readImageRiskSettings(db):null,sources,receipts,drafts:[...drafts],runs,executions,target,profile,changes,projections:[...projections]}));
   const preview:AutomaticAdaptationPreview={taskId:task.id,taskRevision:task.revision,token,canApply:!blockers.length,blockers,changes,sources};
   return {preview,rules,sources,recipes,drafts,projections};
 }
@@ -76,6 +80,7 @@ export function applyAdaptationRows(task:AutomaticListingTask,deps:AutomaticList
     if(!changes.length||changes.every(c=>c.kind==='PRESERVED'))continue;
     if(changes.some(c=>c.kind==='BLOCKED')){if(row.status!=='SCREENED')row.status='FAILED';row.error??=changes.find(c=>c.kind==='BLOCKED')!.message;row.outcome??={version:1,kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE',message:row.error,classifiedAt:now,scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};continue;}
     const recipe=recipes.get(p.id)?.find(r=>matchesRecipe(row,r));
+    if(changes.some(c=>c.kind==='RISK_RECHECK')){if(!currentRiskRecheck(db,row,draft,draft?deps.images.getProgress(draft.id):null,p))throw new UserFacingError('当前风险解释或候选身份已变化');row.status='PENDING';delete row.outcome;continue;}
     if(row.outcome?.image&&!changes.some(c=>c.kind==='NOT_SELECTED'))continue;
     if(changes.some(c=>c.kind==='NOT_SELECTED')||row.outcome?.code==='SKU_SELECTION_FILTERED'&&!recipe&&deps.planSales){
       if(['EXECUTION','PARENT'].includes(row.stage))row.stage='IMAGES';

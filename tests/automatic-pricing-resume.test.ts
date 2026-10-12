@@ -144,3 +144,19 @@ for(const change of ['unrelated','cost-still-blocked','cost-qualified'] as const
  assert.equal(applied.status,'PAUSED');assert.equal(next.imageAttempts,before.items[0].imageAttempts);assert.equal(next.repairAttempts,2);assert.deepEqual(next.executionTaskIds,before.items[0].executionTaskIds);assert.equal(JSON.stringify(f.ai.completionJournal.list(f.draft.id)),journal);assert.equal(f.requests.length,0);
  assert.equal(next.status,change==='cost-qualified'?'PENDING':'SCREENED',JSON.stringify(next.outcome));assert.equal(next.outcome?.kind,change==='cost-qualified'?undefined:'RULE_FILTERED');rules.close();
 });
+
+test('W2 selection changes never overwrite a persistent profit exclusion or make unrelated re-selection eligible',async t=>{
+ const f=await legacyOwner(t),owner=f.ownerService(),rules=new ListingRuleStore(f.directory);try{
+  (owner as any).deps.images.getProgress=()=>null;(owner as any).deps.rules=()=>rules.get();
+  let source=f.store.getProductSnapshot(f.product.id),input=saveInput(source);input.variants[0].purchasePrice='100';input.variants.push({...input.variants[0],id:randomUUID(),sku:'SECOND-FIXTURE-SKU',originalSpec:'Red',normalizedSpec:'Red',purchasePrice:'2.4'});source=f.store.saveProduct(input);
+  const originalAsset=source.assets[0];source=f.store.updateAsset({productId:source.id,revision:source.revision,assetId:originalAsset.id,role:originalAsset.role,variantIds:source.variants.map(v=>v.id)});
+  const record=f.p.record(f.draft.id);record.draft.productRevision=source.revision;f.p.putRecord(record);const draft=f.amazon.applyBusinessDefaults({id:record.draft.id,revision:record.draft.revision},undefined,true);assert.equal(draft.businessRules?.pricingDecision?.status,'business_blocked');
+  const task=(owner as any).tasks.get(f.taskId),row=task.items[0];Object.assign(row,{productRevision:source.revision,sourceStamp:sourceStamp(source),status:'SCREENED'});row.outcome={version:1,...pricingOutcome(draft,rules.get())!,message:'Original profit exclusion',classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
+  const second=source.variants[1];task.items.push({...structuredClone(row),key:source.id+':'+second.id,variantId:second.id,sku:second.sku,status:'PENDING',stage:'SOURCES',draftId:null,outcome:undefined,imageStarted:false,imageAttempts:0,repairAttempts:0,repair:null,executionTaskIds:[],error:null});(owner as any).save(task);
+  (owner as any).deps.planSales=()=>{throw Error('readonly preview must not allocate');};const config=rules.get();config.product.variantLimit=1;rules.save(config);
+  const originalReport=structuredClone(row.outcome.pricingReport),p=owner.previewAdaptation(task.id);assert.ok(p.changes.some(c=>c.key===row.key&&c.kind==='PRESERVED'&&c.message.includes('利润')));
+  const applied=owner.applyAdaptation({taskId:task.id,token:p.token});assert.deepEqual(applied.items[0].outcome?.pricingReport,originalReport);assert.equal(applied.items[0].status,'SCREENED');assert.notEqual(applied.items[0].outcome?.code,'SKU_SELECTION_FILTERED');
+  const reselect=rules.get();reselect.product.variantLimit=2;rules.save(reselect);const current=owner.previewAdaptation(task.id),again=owner.applyAdaptation({taskId:task.id,token:current.token});assert.equal(again.items[0].status,'SCREENED');assert.ok(again.items[0].outcome?.pricingReport);
+  const queue=await owner.queue({productIds:[source.id],targetId:f.draft.targetId});assert.equal(queue.products[0].rows.find(r=>r.sku===row.sku)?.eligible,false);assert.equal(f.requests.length,0);
+ }finally{rules.close();}
+});

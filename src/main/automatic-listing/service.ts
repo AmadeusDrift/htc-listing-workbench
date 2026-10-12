@@ -1,3 +1,4 @@
+import { canResumeRiskAdaptation } from './risk-adaptation.ts';
 import { adaptationState, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
@@ -694,7 +695,7 @@ export class AutomaticListingService {
       const prior = this.deps.images.getProgress(draft.id);
       row.stage = 'IMAGES'; this.save(task);
       if (!this.imageReady(prior)) {
-        const changedRiskPolicy=!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
+        const changedRiskPolicy=canResumeRiskAdaptation(this.db,task,row,draft,prior,this.deps.store.getProduct(row.productId))||!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
         if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy && !(unknown==='IMAGE_RESULT_UNKNOWN')) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
         // complete rejects local preflight synchronously and defers admitted work.
         // Save the conservative unknown marker before awaiting that work, not before

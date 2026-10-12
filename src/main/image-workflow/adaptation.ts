@@ -1,3 +1,4 @@
+import { readImageRiskSettings } from './risk-settings.ts';
 import { semanticJson } from '../amazon/preparation.ts';
 import { imageRiskSourceSnapshot } from '../ai/image-validation.ts';
 import { imageActualInputsMatch } from './context-compatibility.ts';
@@ -14,7 +15,7 @@ import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
 import { compatibleApprovalRecipe, imageApprovalDraftSnapshot } from './approval-reuse.ts';
 
 const fingerprint=(value:unknown)=>rawFingerprint(semanticJson(JSON.parse(JSON.stringify(value))));
-const workflowHash=(run:ImageWorkflowRun)=>fingerprint(run);
+export const workflowHash=(run:ImageWorkflowRun)=>fingerprint(run);
 const approvalHash=(draft:AmazonDraft)=>rawFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
 function approvedBaseline(db:DatabaseSync|undefined,run:ImageWorkflowRun,before:AmazonDraft):AmazonDraft|undefined{
   if(approvalHash(before)===run.draftSha256)return before;
@@ -35,7 +36,8 @@ export function inspectImageAdaptation(run:ImageWorkflowRun|null|undefined,befor
   const approved=approvedBaseline(db,run,before);
   if(!approved)return {compatible:false,message:'当前草稿未绑定原图片审核快照，保留原图并重新核对改动内容'};
   const old=run.imageContext?.listing.sourceProduct;
-  if(!run.imageContext||!hasSevenApprovedImages(run))return {compatible:false,message:'来源版本变化；已付费图片和次数保留，旧请求上下文不足以安全接续，需核对具体图片依赖'};
+  if(!hasSevenApprovedImages(run)){const blocked=(db?partialRiskModeBlocker(run,readImageRiskSettings(db).enabled):null)??partialSourceBlocker(run);if(blocked)return {compatible:false,message:blocked};}
+  if(!run.imageContext)return {compatible:false,message:'来源版本变化；已付费图片和次数保留，旧请求上下文不足以安全接续，需核对具体图片依赖'};
   const frozenRecipe=old?.salesRecipe?.recipe??approved.salesPlan?.recipe??null;
   const visibleRecipe=(recipe:SalesRecipe|null)=>recipe?{...recipe,totalCostCny:null,components:recipe.components.map(c=>({...c,quotedCostCny:null}))}:null;
   if(!compatibleApprovalRecipe(run,frozenRecipe)||fingerprint(visibleRecipe(frozenRecipe))!==fingerprint(visibleRecipe(after.salesPlan?.recipe??null))||!sameSchemaValidation(before.schema,after.schema))return {compatible:false,message:'销售组合或类目字段约束变化；原图保留，需重新核对对应图片'};
@@ -47,7 +49,7 @@ export function inspectImageAdaptation(run:ImageWorkflowRun|null|undefined,befor
   const visible=(draft:AmazonDraft)=>Object.fromEntries(Object.entries(draft.attributes).filter(([field])=>!business.has(field)));
   if(fingerprint(visible(approved))!==fingerprint(visible(before))||fingerprint(visible(before))!==fingerprint(visible(after)))return {compatible:false,message:'可见属性或文案变化；保留原图，需对应内容复核'};
   if(!run.referenceAssets.every(ref=>source.assets.some(a=>a.id===ref.id&&a.variantIds.some(id=>ids.has(id)))))return {compatible:false,message:'原参考图或规格关联已变化；保留原图待核对'};
-  return {compatible:true,message:'仅成本/库存或无关来源版本变化；所选规格、文案及图片事实一致，沿用已通过七图'};
+  return {compatible:true,message:'仅成本/库存或无关来源版本变化；所选规格、文案及图片事实一致，保留已通过图位，接续未完成步骤'};
 }
 export function saveImageAdaptation(db:DatabaseSync,run:ImageWorkflowRun|null|undefined,before:AmazonDraft,after:AmazonDraft,source:ProductDetail):void{
   if(!run||before.productRevision===after.productRevision)return;
@@ -69,4 +71,34 @@ export function adaptedImageInputsMatch(db:DatabaseSync,run:ImageWorkflowRun,dra
   if(!run.imageContext||!currentImageAdaptation(db,run,draft,source))return false;
   const original=approvedBaseline(db,run,draft);if(!original)return false;
   return imageActualInputsMatch(run.imageContext,{...draft,salesPlan:original.salesPlan,productRevision:run.productRevision},{...source,revision:run.productRevision},{...current,productRevision:run.productRevision},run.imageRecipeSha256);
+}
+
+export function partialSourceBlocker(run:ImageWorkflowRun):string|null{
+  if(run.status==='RUNNING')return '旧图片请求仍在进行，等待原结果保存后再适配';
+  if(!run.slots||!run.imageContext||!run.setPlan||!run.setPlanResultId)return '部分图片尚缺完整原规划上下文；保留记录待核对';
+  if(run.sourceReuse||run.approvalReuse||run.recheckedFromRunId)return '此来源已存在图片派生关系，保留全部图位及次数待核对';
+  if(run.copyReviewEnabled!==false||!run.imageContext.copyReviewBypass)return '旧文案审核上下文需要单独复核，保留已通过图片';
+  if(run.imageContext.referenceMeasurements?.length)return '原图 OCR 尺寸依据仍绑定旧来源版本，保留图片和原始依据待核对';
+  if(run.contentPreparation?.state==='STARTED'||run.contentPreparation?.remaining.length)return '先完成原字段检查点，保留图片及请求次数';
+  if(run.slots.some(slot=>slot.status!=='PASSED'&&slot.attempts.some(attempt=>attempt.state!=='RETRYABLE_FAILURE'||attempt.candidateId!==null)))return '旧图位尚有待恢复的请求或候选，须按原身份恢复；未清除请求或重置次数';
+  return null;
+}
+export function assertPartialSourceReuse(run:ImageWorkflowRun,source:ImageWorkflowRun|undefined,db?:DatabaseSync):void{
+  const proof=run.sourceReuse;if(!proof)return;
+  const invalid=()=>{throw new Error('部分图片派生记录与原始上下文或尝试次数不一致');};
+  if(run.id!==proof.derivationRunId&&run.approvalReuse?.sourceRunId!==proof.derivationRunId)invalid();
+  if(!source||source.id!==proof.sourceRunId||source.id===run.id||workflowHash(source)!==proof.sourceRunHash||partialSourceBlocker(source)||source.draftId!==run.draftId||source.productId!==run.productId||source.variantId!==run.variantId||source.sku!==run.sku||source.productRevision!==proof.sourceProductRevision||run.productRevision<=source.productRevision||run.maxAttempts!==source.maxAttempts||run.legacyImageAttempts!==source.legacyImageAttempts||run.copyRepairAttempts!==source.copyRepairAttempts||run.copyReviewEnabled!==source.copyReviewEnabled||run.riskInterceptionEnabled!==source.riskInterceptionEnabled||source.createdAt>run.createdAt||fingerprint(source.referenceAssets)!==fingerprint(run.referenceAssets)||fingerprint(source.imageContext)!==fingerprint(proof.sourceContext)||source.setPlanResultId!==run.setPlanResultId||fingerprint(source.setPlan)!==fingerprint(run.setPlan))invalid();
+  if(db){
+    const saved=db.prepare("SELECT detail_json FROM audit_events WHERE action='image.workflow.partial-source-derived' AND json_extract(detail_json,'$.workflowId')=? ORDER BY rowid DESC LIMIT 1").get(proof.derivationRunId);
+    const receipt=saved?JSON.parse(String(saved.detail_json)):undefined;
+    if(!receipt||receipt.sourceRunId!==source!.id||receipt.sourceRunHash!==proof.sourceRunHash||receipt.productRevision!==run.productRevision||receipt.contextSha256!==run.contextSha256)invalid();
+  }
+  for(const [index,slot] of run.slots!.entries()){
+    const old=source!.slots![index],count=proof.slotAttempts[index];
+    if(count!==old.attempts.length||proof.slotContexts[index]!==old.contextSha256||fingerprint(slot.attempts.slice(0,count))!==fingerprint(old.attempts)||old.status==='PASSED'&&fingerprint(slot)!==fingerprint(old))invalid();
+  }
+}
+
+export function partialRiskModeBlocker(run:ImageWorkflowRun,currentEnabled:boolean):string|null{
+  return currentEnabled!==(run.riskInterceptionEnabled!==false)?'风险开关与原部分图片流程不同；此来源接续暂不支持同时切换风险模式，原记录与次数保持不变':null;
 }

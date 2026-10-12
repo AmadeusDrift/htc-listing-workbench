@@ -1323,3 +1323,26 @@ for(const stage of ['READBACK','LABELS'] as const)test(`submitted ${stage} failu
   assert.equal(f.calls.submissions,1);assert.equal(f.calls.images,1);
   assert.deepEqual(validateAutomaticListingTask(f.service.get(task.id)),f.service.get(task.id));
 });
+
+for (const state of ['PROCESSING','NEEDS_ATTENTION','READY'] as const) test(`readback ${state} drives handling independently of procurement`, async t => {
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ if(state!=='READY')f.setReady();
+ f.dependencies.followup.get=()=>({status:state,error:state==='NEEDS_ATTENTION'?'Generic brand requires manual handling':null} as any);
+ await f.service.refreshWaiting();const row=f.service.get(task.id).items[0];
+ assert.equal(row.stage,'READBACK');assert.equal(row.status,state==='NEEDS_ATTENTION'?'FAILED':'WAITING');assert.ok(row.error);
+ assert.equal(f.calls.batches,0);assert.equal(f.calls.submissions,1);
+});
+
+for(const code of ['5665','5882'])test(`explicit readback brand ${code} requires manual input without changing Generic`,async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const draft=f.drafts.get(f.service.get(task.id).items[0].draftId!)!;
+ draft.attributes.brand=[{value:'Generic'}];draft.listingIssues=[{code,message:'平台要求批准',severity:'ERROR',attributeNames:['brand'],category:'qualification',source:'amazon',autoFixable:false}];
+ f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',reason:'LISTING_ERRORS',issues:draft.listingIssues,error:'Brand approval required'} as any);
+ await f.service.refreshWaiting();assert.equal(f.service.get(task.id).items[0].outcome?.kind,'NEEDS_INPUT');
+ assert.deepEqual(draft.attributes.brand,[{value:'Generic'}]);assert.equal(f.calls.submissions,1);
+});
+
+test('demo readback does not require a live followup record',async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.followup.get=()=>{throw new UserFacingError('No live followup');};
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED');
+});

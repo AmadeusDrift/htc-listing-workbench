@@ -1,3 +1,4 @@
+import {missingWorkflowBudget} from './legacy-missing.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { isProductReference } from '../image-upstream-trace.ts';
@@ -274,7 +275,7 @@ export class ImageWorkflowService {
   }
   // Admission contract: synchronous checks send nothing. Accepted work is deferred
   // so the automatic coordinator can persist its intent before any async work runs.
-  complete(raw: unknown, options: {maxImageAttempts?:1|2|3} = {}): Promise<CompleteAutomaticProductResult> {
+  complete(raw: unknown, options: {maxImageAttempts?:1|2|3;legacyImageAttempts?:number} = {}): Promise<CompleteAutomaticProductResult> {
     this.ensureOpen(); const input = keys(raw, ['draftId','draftRevision']), draftId = uuid(input.draftId), revision = integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
     if (this.active.has(draftId)) {
       const active=this.active.get(draftId)!;
@@ -287,6 +288,7 @@ export class ImageWorkflowService {
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     const prior = this.getProgress(draftId);
+    if(!prior&&options.legacyImageAttempts!==undefined)options={...options,maxImageAttempts:missingWorkflowBudget(this.db,this.directory,draft,options.legacyImageAttempts)};
     if(prior?.referenceAssets.length){
       const product=this.store.getProduct(draft.productId),allowUnbound=allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants=draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId];
       for(const ref of prior.referenceAssets){const asset=product.assets.find(a=>a.id===ref.id);
@@ -324,6 +326,7 @@ export class ImageWorkflowService {
     const reusable=prior?.slots&&prior.status!=='COMPLETED'&&prior.productId===draft.productId&&prior.productRevision===draft.productRevision&&prior.variantId===draft.variantId&&prior.sku===draft.sku&&(!prior.draftSha256||prior.draftSha256===imageWorkflowDraftStamp(draft));
     const run: ImageWorkflowRun = reusable?structuredClone(prior!):{ listingEvidenceContractVersion:imageEvidenceVersion(this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation)),id:randomUUID(),draftId,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,
       status:'RUNNING',stage:'content',attempt:0,maxAttempts:integer(options.maxImageAttempts??3,1,3),contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],ipReviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,imagePolicyVersion:PRODUCT_IMAGE_POLICY_VERSION,slotPolicy:IMAGE_SET_POLICY,slots:newSlots(),categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION };
+    if(!prior&&options.legacyImageAttempts!==undefined)run.legacyImageAttempts=options.legacyImageAttempts;
     if(!this.getRiskSettings().enabled)run.riskInterceptionEnabled=false;
     if(!this.getCopyReviewSettings().enabled)run.copyReviewEnabled=false;
     else if(!run.imageContext?.copyReviewBypass)delete run.copyReviewEnabled;
@@ -494,7 +497,11 @@ export class ImageWorkflowService {
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
-      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&!run.contentPreparation.operationId)throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
+      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&!run.contentPreparation.operationId){
+        const operation=this.listing.beginCompletion?.({draftId:run.draftId,draftRevision:initial.revision});
+        if(!operation)throw new UserFacingError('旧字段准备恢复服务不可用，结果尚未确认，原进度已保留');
+        run.contentPreparation.operationId=operation.id;this.save(run);
+      }
       let sourceColorEvidenceSha256:string|undefined;
       if(this.listing.prepareSourceColors){
         const prepared=await this.listing.prepareSourceColors({draftId:run.draftId,draftRevision:initial.revision},signal);

@@ -497,11 +497,11 @@ test('pause during images revokes later publishing, and explicit resume reuses c
   assert.equal(f.calls.images, 1); assert.equal(f.calls.submissions, 1);
 });
 
-test('unknown paid response remains exceptional across resume instead of repeating generation', async t => {
+test('missing legacy workflow returns to its recovery owner and remains exceptional when recovery fails', async t => {
   const f = fixture(t), task =await f.create(); f.failImages();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
-  assert.equal(f.calls.images, 1); assert.equal(f.calls.submissions, 0);
+  assert.equal(f.calls.images, 2); assert.equal(f.calls.submissions, 0);
   assert.equal(f.service.get(task.id).status, 'NEEDS_ATTENTION');
 });
 
@@ -1498,4 +1498,11 @@ test('changed recipe quantity cannot bypass a historical profit rejection by cha
  f.product.variants[0].originalSpec='red 2 pc';f.product.variants[0].normalizedSpec='red 2 pc';
  let previews=0;f.dependencies.amazon.previewPricing=(id,_source,recipe)=>{previews++;return reprice(f.drafts.get(id)!,recipe!);};
  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,0);assert.equal(previews,1);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+for(const shape of ['94-A','94-B'])test(`legacy ${shape} missing workflow is delegated with its original budget and cannot submit`,async t=>{
+ const f=fixture(t);let admissionOptions:any;f.dependencies.images.complete=async(_input,options)=>{f.calls.images++;admissionOptions=options;throw Error('mock stop before any provider work');};
+ const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ assert.equal(f.service.get(task.id).items[0].imageStarted,true);assert.equal(f.workflow.size,0);
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ assert.deepEqual(admissionOptions,{legacyImageAttempts:0});assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,0);
 });

@@ -31,6 +31,8 @@ export interface ImageWorkflowRun {
   rejection?: {version:'rejection-presentation/v1';code:import('./rejection-presentation.ts').OutputRejection['code']|'SOURCE_OBSERVATION_INSUFFICIENT';callId:string;resultId:string|null;contextSha256:string;stage:'content'|'planning';slot:number};
   /** Main-only evidence semantics for stored image captions; absent preserves pre-contract history. */
   listingEvidenceContractVersion?:import('./listing-ai-contracts.ts').ListingEvidenceContractVersion;
+  /** Original automatic-row budget when its workflow checkpoint was absent. */
+  legacyImageAttempts?:number;
   id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
   status: 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
   stage: ImageWorkflowStage; attempt: number; maxAttempts: number;

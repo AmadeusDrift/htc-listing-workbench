@@ -47,7 +47,8 @@ export function assertImageMeasurements(text:string,context:Pick<ListingAiContex
 /** Only standalone camera-look directions in generation prompts are not product measurements.
  * Keep source facts, captions and bare lens specifications on the strict measurement path. */
 export function assertImagePromptMeasurements(prompt:string,context:Pick<ListingAiContext,'evidence'>):void {
-  const productText=prompt.replace(/(^|[,;\n])\s*\d+(?:\.\d+)?\s*mm\s+(?:macro\s+)?lens\s+look(?=\s*(?:[,;.\n]|$))/gi,'$1 ');
+  const explicitPhotography=prompt.replace(/(^|[,;.；，。\n])\s*(?:Camera(?:\s+look)?\s*:\s*\d+(?:\.\d+)?\s*mm\s+(?:macro\s+)?lens|\d+(?:\.\d+)?\s*(?:to|-|–)\s*\d+(?:\.\d+)?\s*mm\s+perspective\s+feel)(?=\s*(?:[,;.；，。\n]|$))/gi,'$1 ');
+  const productText=explicitPhotography.replace(/(^|[,;\n])\s*\d+(?:\.\d+)?\s*mm\s+(?:macro\s+)?lens\s+look(?=\s*(?:[,;.\n]|$))/gi,'$1 ');
   assertImageMeasurements(productText,context);
 }
 /** Defaults are listing-only. Source measurements keep their original evidence and authority. */

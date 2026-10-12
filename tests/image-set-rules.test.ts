@@ -136,3 +136,30 @@ test('new OCR rules cannot pass visible text on the main or a missing required s
   review.checks=[{source:'summary',index:0,text:ocr.output.text,verdict:'UNSUPPORTED',evidenceIds:['material'],reason:'Waterproof has no source support.'}];
   assert.throws(()=>assertImageTextReview(review,c,planResult,ocr,candidate));
 });
+
+test('camera focal length is separate optional planning metadata and reaches generation as photography only',()=>{
+  const raw=plan();raw.cameraFocalLength='50 mm';raw.setPlan.slots[0].cameraFocalLength='35 mm';
+  const parsed=validateImagePlan(raw);assert.equal(parsed.cameraFocalLength,'50 mm');
+  assert.equal(parsed.setPlan!.slots[0].cameraFocalLength,'35 mm');assert.doesNotThrow(()=>assertImagePlan(parsed,context()));
+  const c=context();c.setPlan=parsed.setPlan;c.slot={index:1,total:7,provisional:true};
+  delete parsed.setPlan;
+  assert.match(imageGenerationPrompt(parsed,c),/Photography only.*50 mm/);
+  delete parsed.cameraFocalLength;
+  assert.match(imageGenerationPrompt(parsed,c),/Photography only.*35 mm/);
+  assert.deepEqual(validateImagePlan(plan()),plan());
+  for(const bad of ['Product length 50 mm','50 mm; product width 99 cm','0 mm','50 cm','50 x 85 mm']){
+    assert.throws(()=>validateImagePlan({...raw,cameraFocalLength:bad}),bad);
+  }
+});
+
+test('legacy explicit camera clauses pass saved plan validation without mutating product data',()=>{
+  for(const camera of ['Camera: 50mm lens','Camera look: 35mm lens','50 to 85mm perspective feel']){
+    const raw=plan();raw.prompt=`Product on a table. ${camera}. No text.`;raw.setPlan.slots[0].prompt=raw.prompt;
+    const parsed=validateImagePlan(raw),before=structuredClone(parsed);
+    assert.doesNotThrow(()=>assertImagePlan(parsed,context()),camera);assert.deepEqual(parsed,before);
+    for(const claim of ['Product length 99 mm.','Camera: 50mm lens cap included.','Camera look: 35mm lens printed on product.']){
+      const bad=structuredClone(raw);bad.prompt+=' '+claim;
+      assert.throws(()=>assertImagePlan(validateImagePlan(bad),context()),claim);
+    }
+  }
+});

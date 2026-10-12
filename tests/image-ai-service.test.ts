@@ -766,7 +766,7 @@ test('set planning states the existing dimension reason, unit and numeric eviden
   assert.match(system, /dimensionReason<=1000/);
   assert.match(system, /cm, mm, in, or inches/);
   assert.match(system, /double-quote inch symbols/);
-  assert.match(system, /camera lenses, background props, or excluded unknown dimensions.*qualitatively/);
+  assert.match(system, /background props and excluded unknown dimensions.*qualitatively/);
 });
 
 test('legacy current-copy review reports omitted wording without granting image planning approval', async t => {

@@ -907,20 +907,27 @@ export class AutomaticListingService {
     }
     return this.deps.execution.create({ draftIds: [draft.id], profileId: task.profileId, concurrency: 1 });
   }
-  private summarize(task: AutomaticListingTask): void {
+  private summarize(task: AutomaticListingTask, observedBefore?: string): void {
     if (['PAUSED','CANCELLED'].includes(task.status)) return;
     task.status = task.items.every(row => ['DONE','SCREENED'].includes(row.status)) ? 'COMPLETED'
       : task.items.some(row => row.status === 'WAITING') ? 'WAITING' : 'NEEDS_ATTENTION';
-    task.error = task.items.find(row => row.status === 'FAILED')?.error ?? null; this.save(task);
+    task.error = task.items.find(row => row.status === 'FAILED')?.error ?? null;
+    if (observedBefore === undefined || JSON.stringify(task) !== observedBefore) this.save(task);
   }
   refreshWaiting(): Promise<void> {
     if (this.closed || this.closing || this.schedulingSuspended) return Promise.resolve();
     if (this.observing) return this.observing;
     this.observing = Promise.resolve().then(async () => {
-      const candidates = new Map(this.deps.procurement.candidates().map(value => [value.draftId, value]));
+      // Global scan failures must stay outside per-SKU error classification.
+      // Only observable submitted work can need this expensive view.
+      const needsCandidates = [...this.tasks.values()].some(task => !this.confirming.has(task.id)
+        && ['WAITING', 'NEEDS_ATTENTION'].includes(task.status)
+        && task.items.some(row => row.draftId && !row.batchId && row.status !== 'DONE' && ['READBACK', 'LABELS'].includes(row.stage)));
+      const candidates = new Map((needsCandidates ? this.deps.procurement.candidates() : []).map(value => [value.draftId, value]));
       for (const task of this.tasks.values()) {
         const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
         if (!canObserve()) continue;
+        const observedBefore = JSON.stringify(task);
         let resumeParents=false,interrupted=false;
         for (const row of task.items) {
           const beforeYield = task.revision;
@@ -971,7 +978,7 @@ export class AutomaticListingService {
         }
         if(interrupted||!canObserve())continue;
         if(resumeParents&&this.grants.has(task.id)){task.status='QUEUED';this.save(task);queueMicrotask(()=>this.pump());}
-        else this.summarize(task);
+        else this.summarize(task, observedBefore);
       }
     }).finally(() => { this.observing = null; });
     return this.observing;

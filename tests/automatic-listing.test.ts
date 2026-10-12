@@ -1603,3 +1603,23 @@ for(const phase of ['create','start'] as const)test(`local failure after seven a
   }finally{db.close();}
   assert.deepEqual(f.workflow.get(row.draftId!),workflow);
 });
+
+
+test('idle observer avoids procurement scans and unchanged task revision churn',async t=>{
+ const f=fixture(t);let scans=0;f.dependencies.procurement.candidates=()=>{scans++;return [];};
+ await f.service.refreshWaiting();assert.equal(scans,0,'no task means no expensive scan');
+ const created=await f.create();f.service.pause(created.id);const paused=f.service.get(created.id);
+ await f.service.refreshWaiting();assert.equal(scans,0,'paused task must not scan');assert.deepEqual(f.service.get(created.id),paused);
+ const saved=(f.service as any).tasks.get(created.id);saved.status='NEEDS_ATTENTION';saved.items[0].status='FAILED';saved.items[0].error='source failure';
+ await f.service.refreshWaiting();const settled=f.service.get(created.id);
+ await f.service.refreshWaiting();assert.deepEqual(f.service.get(created.id),settled,'unchanged observation must not rewrite revision or updatedAt');assert.equal(scans,0,'source failures have no readback candidates');
+ saved.items[0].error='new source failure';await f.service.refreshWaiting();assert.ok(f.service.get(created.id).revision>settled.revision);assert.equal(f.service.get(created.id).error,'new source failure');
+});
+
+
+test('global procurement scan failure aborts observation once without reclassifying any SKU',async t=>{
+ const f=fixture(t,'live');f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SECOND'});const task=await f.create(),saved=(f.service as any).tasks.get(task.id);saved.status='WAITING';
+ for(const row of saved.items){row.draftId=randomUUID();row.stage='READBACK';row.status='WAITING';}
+ let scans=0;f.dependencies.procurement.candidates=()=>{scans++;throw Error('global candidate failure');};const before=f.service.get(task.id);
+ await assert.rejects(()=>f.service.refreshWaiting(),/global candidate failure/);assert.equal(scans,1);assert.deepEqual(f.service.get(task.id),before);
+});

@@ -156,7 +156,7 @@ export function assertListingHistory(draft: AmazonDraft, results: Map<string,AiR
       assertStoredListingReview(review.output,suggestion.output,c,suggestion.listingEvidenceContractVersion);
     }
     const schema=adoptionSchema(draft,c,a,database);
-    if (!schema || c.draftId !== draft.id || c.draftRevision !== a.fromRevision || c.productId !== draft.productId || c.productRevision !== draft.productRevision || c.variantId !== draft.variantId || c.sku !== draft.sku || c.targetId !== draft.targetId || c.listingProgram !== (draft.listingProgram ?? 'standard') || a.contextSha256 !== listingFingerprint(c) || suggestion.sourceSha256 !== a.contextSha256) return invalid();
+    if (!schema || c.draftId !== draft.id || c.draftRevision !== a.fromRevision || c.productId !== draft.productId || c.variantId !== draft.variantId || c.sku !== draft.sku || c.targetId !== draft.targetId || c.listingProgram !== (draft.listingProgram ?? 'standard') || a.contextSha256 !== listingFingerprint(c) || suggestion.sourceSha256 !== a.contextSha256) return invalid();
     for (const result of review ? [suggestion,review] : [suggestion]) {const call=calls.get(result.callId);if(!call||!resultHasOwner(result,call)||call.productId!==result.productId||call.productRevision!==result.productRevision||call.providerId!==result.providerId||call.model!==result.model)invalid();}
     assertStoredListingEvidence(suggestion.output,c,suggestion.listingEvidenceContractVersion);
     const expectedId=listingFingerprint({draftId:draft.id,revision:a.fromRevision,suggestion:suggestion.id,review:review?.id??null,fields:[...a.fields].sort(),...(hasDisposition?{reviewDisposition:a.reviewDisposition}:{})});if(a.id!==expectedId)invalid();

@@ -2,7 +2,7 @@ import { sameSchemaValidation } from './schema-compatibility.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
 import type { ListingObservation } from '../../shared/followup-contracts.ts';
 import type { AmazonCallEvent, AmazonDataPolicy, AmazonDraft, AmazonSchema, AmazonTarget, CleanupResult, DraftReference, JsonObject, JsonValue, ListingEvent, ListingIssue, ListingProgram, PreparedAmazonDraftItem, PrepareAmazonDraftsResult, ProductTypeOption } from '../../shared/amazon-contracts.ts';
@@ -654,12 +654,13 @@ export class AmazonService {
   }
   applyTaskAdaptation(draftId:string,source:ProductDetail,recipe:SalesRecipe|undefined,db:DatabaseSync):AmazonDraft {
     if(!db.isTransaction)throw new Error('Task adaptation requires owner transaction');
-    const record=this.persistence.record(draftId),before=clone(record.draft),draft=this.previewTaskAdaptation(draftId,source,recipe);
+    const record=this.persistence.record(draftId),beforeRecord=clone(record),before=clone(record.draft),draft=this.previewTaskAdaptation(draftId,source,recipe);
     if(JSON.stringify(before)===JSON.stringify(draft))return before;
     draft.revision++;draft.state=draft.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';draft.previewedAt=null;
     record.draft=draft;record.preview=null;record.request=this.request(record);
     this.event(record,'local_validation','用户适配当前来源与规则；保留原属性、图片和平台响应，本地重新校验');
-    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({before,afterRevision:draft.revision}),this.at());
+    const afterRecord=clone(record);
+    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
     db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
     return clone(draft);
   }

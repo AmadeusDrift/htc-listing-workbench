@@ -13,19 +13,24 @@ import { sourceStamp } from './records.ts';
 import { previewSalesRecipes } from '../sales-plans/planning.ts';
 import { outcomeScope, pricingOutcome, qualifiedPricing } from './outcomes.ts';
 import type { SalesRecipe } from '../../shared/sales-plan-contracts.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 
 export const adaptationSubmitted=(draft:AmazonDraft|undefined)=>!!draft&&(!!draft.submittedAt||['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state));
 const stable=(value:unknown):unknown=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,stable(v)])):value;
 const matchesRecipe=(row:AutomaticListingItem,recipe:SalesRecipe)=>row.salesPlan?row.salesPlan.recipe.key===recipe.key:recipe.components.length===1&&recipe.components[0].variantId===row.variantId&&recipe.components[0].quantity===recipe.components[0].sourcePackPieces;
-export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingDependencies,busy:boolean,db?:DatabaseSync){
+export function* adaptationSteps(task:AutomaticListingTask,deps:AutomaticListingDependencies,busy:boolean,db?:DatabaseSync){
   if(!deps.store.getProductSnapshot)throw new UserFacingError('此版本缺少只读来源接口，请更新后检查');
-  const rules=deps.rules(),sources=[...new Set(task.items.map(r=>r.productId))].map(id=>deps.store.getProductSnapshot!(id));
+  const rules=deps.rules(),sources:ProductDetail[]=[];
+  for(const id of new Set(task.items.map(r=>r.productId))){yield;sources.push(deps.store.getProductSnapshot!(id));}
   const receipts=sources.map(p=>deps.sourceReceipt?.(p.id)??null);
   const recipeErrors=new Map<string,string>();
   const recipes=new Map(sources.map((p,index)=>{try{return [p.id,deps.planSales?previewSalesRecipes(p,receipts[index],rules):[]] as const;}catch(error){recipeErrors.set(p.id,error instanceof Error?error.message:'销售选样资料不足');return [p.id,[] as ReturnType<typeof previewSalesRecipes>] as const;}}));
-  const drafts=new Map(task.items.filter(r=>r.draftId).map(r=>[r.draftId!,deps.amazon.getDraft(r.draftId!)]));
-  const runs=[...drafts.keys()].map(id=>deps.images.getProgress(id));
+  const drafts=new Map<string,AmazonDraft>();
+  for(const id of new Set(task.items.flatMap(r=>r.draftId?[r.draftId]:[]))){yield;drafts.set(id,deps.amazon.getDraft(id));}
+  const runByDraft=new Map<string,ReturnType<AutomaticListingDependencies['images']['getProgress']>>();
+  for(const id of drafts.keys()){yield;runByDraft.set(id,deps.images.getProgress(id));}
+  const runs=[...runByDraft.values()];
   const executions=deps.execution.list();
   const target=deps.amazon.executionTargetScope(task.targetId),profile=deps.hosting.getProfile(task.profileId);
   const blockers:string[]=[];
@@ -36,13 +41,14 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
   const add=(row:AutomaticListingItem,kind:AutomaticAdaptationChange['kind'],message:string,steps:string[]=[],fields:string[]=[])=>changes.push({key:row.key,productId:row.productId,sku:row.sku,kind,message,steps,fields});
   const projections=new Map<string,AmazonDraft>();
   for(const row of task.items){
+    yield;
     const draft=row.draftId?drafts.get(row.draftId):undefined,p=sources.find(p=>p.id===row.productId)!;
     if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读');continue;}
     if(recipeErrors.has(p.id)){add(row,'BLOCKED',recipeErrors.get(p.id)!,['销售选样']);continue;}
     const selected=deps.planSales?recipes.get(p.id)!.some(r=>matchesRecipe(row,r)):p.variants.some(v=>v.id===row.variantId);
     if(!selected&&row.outcome?.kind==='RULE_FILTERED'&&row.outcome.pricingReport){add(row,'PRESERVED','原利润淘汰继续排除；本次也未选中，保留独立定价证据供后续重新入选时核对');continue;}
     if(!selected){if(row.outcome?.code!=='SKU_SELECTION_FILTERED')add(row,'NOT_SELECTED','按当前完整来源选样，本次未选中；保留历史、成果和次数');continue;}
-    const priorRun=draft?deps.images.getProgress(draft.id):null;
+    const priorRun=draft?runByDraft.get(draft.id):null;
     if(row.repair?.phase==='FIELDS_STARTED'||priorRun?.contentPreparation?.state==='STARTED'){
       if(p.revision!==row.productRevision||sourceStamp(p)!==row.sourceStamp)add(row,'BLOCKED','来源已变化，先恢复原字段请求归属和结果；保留原上下文与次数',['字段请求恢复']);
       else add(row,'PRESERVED','先按原检查点恢复字段请求结果；不改变原请求上下文或次数');
@@ -56,7 +62,7 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
     if(draft&&deps.amazon.previewTaskAdaptation){
       try{
         const projected=deps.amazon.previewTaskAdaptation(draft.id,p,recipes.get(p.id)?.find(r=>matchesRecipe(row,r)));
-        const image=inspectImageAdaptation(deps.images.getProgress(draft.id),draft,projected,p,db);
+        const image=inspectImageAdaptation(runByDraft.get(draft.id),draft,projected,p,db);
         if(!image.compatible&&pricingOutcome(projected,rules)?.kind!=='RULE_FILTERED'){add(row,'BLOCKED',image.message,['图片依赖']);continue;}
         projections.set(row.key,projected);
         const fields=[...new Set([...Object.keys(draft.attributes),...Object.keys(projected.attributes)])].filter(f=>fingerprint(draft.attributes[f]??null)!==fingerprint(projected.attributes[f]??null));
@@ -68,6 +74,11 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
   const token=fingerprint(stable({version:1,task,rules,riskSettings:db?readImageRiskSettings(db):null,sources,receipts,drafts:[...drafts],runs,executions,target,profile,changes,projections:[...projections]}));
   const preview:AutomaticAdaptationPreview={taskId:task.id,taskRevision:task.revision,token,canApply:!blockers.length,blockers,changes,sources};
   return {preview,rules,sources,recipes,drafts,projections};
+}
+/** Transactional callers drain the same validation without yielding. */
+export function adaptationState(...args:Parameters<typeof adaptationSteps>){
+  const steps=adaptationSteps(...args);let result=steps.next();
+  while(!result.done)result=steps.next();return result.value;
 }
 export function applyAdaptationRows(task:AutomaticListingTask,deps:AutomaticListingDependencies,state:ReturnType<typeof adaptationState>,db:DatabaseSync):void {
   const {rules,sources,recipes,drafts,preview}=state;

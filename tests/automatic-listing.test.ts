@@ -1554,7 +1554,7 @@ test('W2 submitted rows remain byte-identical when task rules change, in-flight 
 test('W2 IPC preview/apply never invokes task start confirmation or paid work',async t=>{
  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);f.product.revision++;
  const handlers=new Map<string,(...args:any[])=>any>();installAutomaticListingIpc(f.service,(name,_count,fn)=>handlers.set(name,fn),{confirm:async()=>{throw Error('unexpected start');},audit:()=>{}});
- const preview=handlers.get('red:automatic-listing:adaptation-preview')!(task.id),applied=handlers.get('red:automatic-listing:adaptation-apply')!({taskId:task.id,token:preview.token});
+ const preview=await handlers.get('red:automatic-listing:adaptation-preview')!(task.id),applied=handlers.get('red:automatic-listing:adaptation-apply')!({taskId:task.id,token:preview.token});
  assert.equal(applied.status,'PAUSED');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
 });
 
@@ -1622,4 +1622,15 @@ test('global procurement scan failure aborts observation once without reclassify
  for(const row of saved.items){row.draftId=randomUUID();row.stage='READBACK';row.status='WAITING';}
  let scans=0;f.dependencies.procurement.candidates=()=>{scans++;throw Error('global candidate failure');};const before=f.service.get(task.id);
  await assert.rejects(()=>f.service.refreshWaiting(),/global candidate failure/);assert.equal(scans,1);assert.deepEqual(f.service.get(task.id),before);
+});
+
+
+test('UI adaptation yields to pending input and keeps the exact synchronous proof',async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+ const baseline=f.service.previewAdaptation(task.id);let inputHandled=false;setImmediate(()=>{inputHandled=true;});
+ const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(inputHandled,true);assert.deepEqual(preview,baseline);assert.equal(f.calls.submissions,0);assert.equal(f.calls.images,0);
+});
+test('UI adaptation keeps source display but blocks apply if task changes during a yield',async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+ setImmediate(()=>f.service.pause(task.id));const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(preview.canApply,false);assert.match(preview.blockers.join('；'),/任务.*变化/);assert.equal(preview.sources.length,1);assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.images,0);
 });

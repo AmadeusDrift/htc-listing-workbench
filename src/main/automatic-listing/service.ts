@@ -1,5 +1,5 @@
 import { canResumeRiskAdaptation } from './risk-adaptation.ts';
-import { adaptationState, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
+import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -144,14 +144,33 @@ export class AutomaticListingService {
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
-  private adaptationState(task:AutomaticListingTask){
+  private *adaptationStateSteps(task:AutomaticListingTask){
     const products=[...new Set(task.items.map(row=>row.productId))],drafts=task.items.flatMap(row=>row.draftId?[row.draftId]:[]);
     const calls=this.db.prepare("SELECT id,json_extract(record_json,'$.status') status,json_extract(record_json,'$.finishedAt') finishedAt,json_extract(record_json,'$.responseReceived') responseReceived FROM ai_calls WHERE json_extract(record_json,'$.productId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(products));
     const operations=this.db.prepare("SELECT id,json_extract(record_json,'$.revision') revision,json_extract(record_json,'$.state') state,json_extract(record_json,'$.updatedAt') updatedAt FROM listing_completion_operations WHERE json_extract(record_json,'$.draftId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(drafts));
-    const state=adaptationState(task,this.deps,this.busy||calls.some(call=>call.status==='RUNNING'),this.db);
+    const state=yield* adaptationSteps(task,this.deps,this.busy||calls.some(call=>call.status==='RUNNING'),this.db);
     const naming={settings:this.db.prepare("SELECT value_json FROM amazon_settings WHERE key='sku_naming_v1'").get()??null,groups:this.db.prepare('SELECT record_json FROM sku_naming_groups ORDER BY id').all()};
     state.preview.token=fingerprint({base:state.preview.token,naming,calls:calls.map(call=>[call.id,call.status,call.finishedAt,call.responseReceived]),operations});
     return state;
+  }
+  private adaptationState(task:AutomaticListingTask){
+    const steps=this.adaptationStateSteps(task);let result=steps.next();
+    while(!result.done)result=steps.next();return result.value;
+  }
+  async previewAdaptationForUi(id:string){
+    const task=this.get(id),steps=this.adaptationStateSteps(task);
+    for(;;){
+      await yieldToEventLoop();
+      const current=this.task(id); // Also rejects shutdown before another DB read.
+      const result=steps.next();
+      if(result.done){
+        const preview=result.value.preview;
+        // An active task can advance while its readonly source view is loading.
+        // Preserve that view, but never present an obsolete proof as applicable.
+        if(current.revision!==task.revision){preview.canApply=false;preview.blockers.push('检查期间任务已变化，请刷新任务后再适配');}
+        return preview;
+      }
+    }
   }
   previewAdaptation(id:string){return this.adaptationState(this.get(id)).preview;}
   applyAdaptation(raw:unknown):AutomaticListingTask {

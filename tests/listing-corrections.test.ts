@@ -18,7 +18,7 @@ async function setup(t:test.TestContext){
  r.draft.attributes={package_level:[{value:'unit',marketplace_id:r.draft.marketplaceId}],package_contains_sku:[{sku:r.draft.sku,marketplace_id:r.draft.marketplaceId,quantity:1}]};r.request={productType:r.draft.schema.productType,attributes:r.draft.attributes};p.putRecord(r);
  const target={...p.target(r.draft.targetId),mode:'live' as const,paused:false};p.putTarget(target);
  let remote:JsonObject={sku:r.draft.sku,summaries:[{marketplaceId:r.draft.marketplaceId,productType:r.draft.schema.productType}],attributes:structuredClone(r.draft.attributes),issues:[]};let sends=0;let unknown=false;let rejected=false;let previewError=false;
- const service=new ListingCorrections(p,{active:()=>target,schema:async()=>r.draft.schema,api:async(_target,op,_path,_query,body,guard)=>{guard?.();if(op==='getListingsItem')return {data:structuredClone(remote),status:200,requestId:'read'};if(op==='previewPatchListingsItem')return {data:{sku:r.draft.sku,status:previewError?'INVALID':'VALID',issues:previewError?[{severity:'ERROR',code:'preview-error'}]:[]},status:200,requestId:'preview'};sends++;if(unknown)throw new Error('lost');assert.equal((body as any)?.patches?.[0]?.op,'delete');return {data:(rejected?{sku:r.draft.sku,status:'INVALID',issues:[{severity:'ERROR',code:'test'}]}:{sku:r.draft.sku,status:'ACCEPTED',submissionId:'correction',issues:[]}) as JsonObject,status:200,requestId:'patch'};}});
+ const service=new ListingCorrections(p,{active:()=>target,schema:async()=>r.draft.schema,api:async(_target,op,_path,_query,body,guard)=>{guard?.();if(op==='getListingsItem')return {data:structuredClone(remote),status:200,requestId:'read'};if(op==='previewPatchListingsItem')return {data:{sku:r.draft.sku,status:previewError?'INVALID':'VALID',issues:previewError?[{severity:'ERROR',code:'preview-error',message:'Preview rejected'}]:[]},status:200,requestId:'preview'};sends++;if(unknown)throw new Error('lost');assert.equal((body as any)?.patches?.[0]?.op,'delete');return {data:(rejected?{sku:r.draft.sku,status:'INVALID',issues:[{severity:'ERROR',code:'test',message:'Submission rejected'}]}:{sku:r.draft.sku,status:'ACCEPTED',submissionId:'correction',issues:[]}) as JsonObject,status:200,requestId:'patch'};}});
  return {f,p,r,service,target,get sends(){return sends;},previewError(){previewError=true;},reject(){rejected=true;},remote:(value:JsonObject)=>{remote=value;},remove(){delete (remote.attributes as JsonObject).package_contains_sku;remote.issues=[{code:'8031',message:'remaining issue'}];},unknown(){unknown=true;},change(){(remote.attributes as JsonObject).other='changed';}};
 }
 test('original-SKU narrow prepare preview send readback preserves original record and sends once',async t=>{
@@ -95,4 +95,44 @@ test('restart converts SENDING to UNKNOWN without modifying original submitted r
 test('preview ERROR never authorizes sending and a changed current PTD invalidates READY',async t=>{
  const f=await setup(t);f.previewError();const rejected=await f.service.preview(ref(await f.service.prepare({id:f.r.draft.id,revision:f.r.draft.revision})));assert.equal(rejected.state,'REJECTED');await assert.rejects(f.service.send(ref(rejected),true));assert.equal(f.sends,0);
  const g=await setup(t),ready=await g.service.preview(ref(await g.service.prepare({id:g.r.draft.id,revision:g.r.draft.revision})));g.r.draft.schema.version='changed';await assert.rejects(g.service.send(ref(ready),true));assert.equal(g.service.get(ready.id).state,'STALE');assert.equal(g.sends,0);
+});
+test('preview in-flight changes cannot authorize READY',async t=>{
+ for(const change of ['generation','baseline','schema','original'] as const)await t.test(change,async t=>{
+  const f=await setup(t),prepared=await f.service.prepare({id:f.r.draft.id,revision:f.r.draft.revision}),hooks=(f.service as any).hooks,api=hooks.api;
+  hooks.api=async(...args:any[])=>{const result=await api(...args);if(args[1]==='previewPatchListingsItem'){
+   if(change==='generation')f.p.putTarget(f.target,true);if(change==='baseline')f.change();if(change==='schema')f.r.draft.schema.version='changed';if(change==='original'){f.r.draft.revision++;f.p.putRecord(f.r);}
+  }return result;};
+  await assert.rejects(f.service.preview(ref(prepared)));assert.equal(f.service.get(prepared.id).state,'STALE');assert.equal(f.sends,0);
+ });
+});
+test('unreadable relationship entries preserve observations and ACCEPTED or UNKNOWN locks',async t=>{
+ for(const state of ['ACCEPTED','UNKNOWN'] as const)await t.test(state,async t=>{
+  const f=await setup(t),ready=await f.service.preview(ref(await f.service.prepare({id:f.r.draft.id,revision:f.r.draft.revision})));if(state==='UNKNOWN')f.unknown();let c=await f.service.send(ref(ready),true);
+  for(const edges of [[null],[{}],[{marketplace_id:f.r.draft.marketplaceId}],[{sku:'OTHER'}],{sku:'OTHER'}] as any[]){
+   const remote={sku:f.r.draft.sku,summaries:[],attributes:{package_contains_sku:edges},issues:[]};f.remote(remote);c=await f.service.readback(ref(c));
+   assert.equal(c.state,state);assert.deepEqual(c.readback,remote);assert.match(c.message,/无法核实/);assert.equal(f.p.lock(c.listingHash)?.ownerId,c.id);assert.equal(f.p.lock(c.listingHash)?.state,state);
+  }
+  f.remote({sku:f.r.draft.sku,summaries:[],attributes:{package_contains_sku:[]},issues:[]});c=await f.service.readback(ref(c));assert.equal(c.state,state==='UNKNOWN'?'UNKNOWN':'VERIFIED');assert.equal(!!f.p.lock(c.listingHash),state==='UNKNOWN');assert.equal(f.sends,1);
+ });
+});
+test('restored old ACCEPTED lock clears only for the identical verified or rejected terminal owner',async t=>{
+ for(const state of ['VERIFIED','REJECTED'] as const)for(const conflict of ['none','owner','identity','request'] as const)await t.test(state+' '+conflict,async t=>{
+  const f=await setup(t),ready=await f.service.preview(ref(await f.service.prepare({id:f.r.draft.id,revision:f.r.draft.revision}))),snapshot=openDatabase(join(f.f.directory,'snapshot-lock'));
+  try{
+   if(state==='REJECTED')f.reject();let terminal=await f.service.send(ref(ready),true);if(state==='VERIFIED'){f.remove();terminal=await f.service.readback(ref(terminal));}
+   const old={...terminal,state:'ACCEPTED',revision:terminal.revision-1};if(conflict==='identity')old.sku='OTHER';if(conflict==='request')old.patchHash='other-hash';
+   snapshot.prepare('INSERT INTO listing_corrections VALUES(?,?,?,?)').run(old.id,old.draftId,old.listingHash,JSON.stringify(old));
+   snapshot.prepare("INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at,owner_kind,owner_id) VALUES(?,?,'ACCEPTED',?,'correction',?)").run(old.listingHash,old.draftId,old.createdAt,conflict==='owner'?'other-correction':old.id);
+   retainCorrectionHistory(f.p.db,snapshot);const lock=snapshot.prepare('SELECT * FROM amazon_write_locks WHERE listing_hash=?').get(old.listingHash),merged=JSON.parse(String(snapshot.prepare('SELECT record_json FROM listing_corrections WHERE id=?').get(old.id)!.record_json));
+   if(conflict==='none'){assert.equal(lock,undefined);assert.equal(merged.state,state);}else{assert.ok(lock);assert.equal(lock.state,'UNKNOWN');assert.equal(merged.state,'UNKNOWN');if(conflict==='owner')assert.equal(lock.owner_id,'other-correction');}
+   assert.equal(snapshot.prepare('SELECT count(*) AS n FROM listing_correction_attempts').get()!.n,1);
+  }finally{snapshot.close();}
+ });
+});
+test('malformed issue objects cannot authorize preview or mark a formal response accepted',async t=>{
+ for(const operation of ['previewPatchListingsItem','patchListingsItem'] as const)await t.test(operation,async t=>{
+  const f=await setup(t),hooks=(f.service as any).hooks,base=hooks.api,prepared=await f.service.prepare({id:f.r.draft.id,revision:f.r.draft.revision});
+  hooks.api=async(...args:any[])=>{const result=await base(...args);if(args[1]===operation)result.data.issues=[null];return result;};
+  const preview=await f.service.preview(ref(prepared));if(operation==='previewPatchListingsItem'){assert.equal(preview.state,'REJECTED');assert.equal(f.sends,0);}else{const sent=await f.service.send(ref(preview),true);assert.equal(sent.state,'UNKNOWN');assert.equal(f.p.lock(sent.listingHash)?.state,'UNKNOWN');assert.equal(f.sends,1);}
+ });
 });

@@ -4,6 +4,7 @@ import {UserFacingError} from '../../shared/errors.ts';
 import {correctionHash} from './corrections.ts';
 
 export const CORRECTION_TABLES={listing_corrections:['id','draft_id','listing_hash','record_json'],listing_correction_attempts:['id','correction_id','record_json']};
+const identity=(c:ListingCorrection)=>correctionHash([c.id,c.draftId,c.draftRevision,c.draftStamp,c.listingHash,c.targetId,c.sellerId,c.marketplaceId,c.sku,c.productType,c.locale,c.generation,c.targetStamp]);
 const has=(db:DatabaseSync,table:string)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
 export function assertCorrectionHistory(db:DatabaseSync){
  for(const row of db.prepare('SELECT * FROM listing_corrections').all()){
@@ -24,7 +25,18 @@ export function retainCorrectionHistory(current:DatabaseSync,snapshot:DatabaseSy
   const prior=old?JSON.parse(String(old.record_json)) as ListingCorrection:null;
   const sent=current.prepare('SELECT * FROM listing_correction_attempts WHERE correction_id=?').get(c.id);
   if(!sent&&prior)continue;
-  if(sent&&prior&&prior.patchHash!==c.patchHash){c.state='UNKNOWN';c.message='恢复中发现修正请求历史冲突；禁止重发';c.revision++;}
+  const lock=snapshot.prepare('SELECT * FROM amazon_write_locks WHERE listing_hash=?').get(c.listingHash);
+  const currentLock=current.prepare('SELECT 1 FROM amazon_write_locks WHERE listing_hash=?').get(c.listingHash);
+  const attempt=sent?JSON.parse(String(sent.record_json)) as ListingCorrectionAttempt:null;
+  const sameRequest=prior?prior.patchHash===c.patchHash&&correctionHash(prior.request)===c.patchHash:!lock;
+  const sameIdentity=!prior||identity(prior)===identity(c);
+  const sameOwner=!lock||lock.owner_kind==='correction'&&lock.owner_id===c.id&&lock.draft_id===c.draftId;
+  const trustedTerminal=!!attempt&&['VERIFIED','REJECTED'].includes(c.state)&&attempt.state===c.state&&attempt.correctionId===c.id&&attempt.patchHash===c.patchHash&&correctionHash(attempt.request)===c.patchHash
+    &&attempt.identity.draftId===c.draftId&&attempt.identity.targetId===c.targetId&&attempt.identity.sku===c.sku&&attempt.identity.sellerId===c.sellerId&&attempt.identity.marketplaceId===c.marketplaceId&&attempt.identity.productType===c.productType;
+  if(sent&&(!sameRequest||!sameIdentity||!sameOwner||trustedTerminal&&!!currentLock)) {c.state='UNKNOWN';c.message='恢复中发现修正身份、请求或写锁归属冲突；禁止重发';c.revision++;}
+  // Only a proven completed attempt can retire its own older snapshot lock.
+  if(trustedTerminal&&c.state!=='UNKNOWN'&&sameRequest&&sameIdentity&&sameOwner&&!currentLock&&lock)
+    snapshot.prepare("DELETE FROM amazon_write_locks WHERE listing_hash=? AND draft_id=? AND owner_kind='correction' AND owner_id=?").run(c.listingHash,c.draftId,c.id);
   if(c.state==='SENDING'){c.state='UNKNOWN';c.revision++;c.message='恢复时修正发送未完成；禁止重发';}
   if(['PREPARED','READY'].includes(c.state)){c.state='STALE';c.readyAt=null;c.revision++;c.message='恢复后修正基线及授权失效';}
   snapshot.prepare('INSERT INTO listing_corrections(id,draft_id,listing_hash,record_json) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(c.id,c.draftId,c.listingHash,JSON.stringify(c));

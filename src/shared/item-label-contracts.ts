@@ -9,6 +9,7 @@ export interface ItemLabelRecord {
   targetId: string; sellerId: string; marketplaceId: string; sku: string; mode: 'live' | 'demo'; targetGeneration: number;
   quantity: number | null; format: ItemLabelFormat; fingerprint: string; version: number; current: boolean;
   status: ItemLabelStatus; paused: boolean; attempts: number; nextDueAt: string | null; createdAt: string; updatedAt: string;
+  requestedAt?: string;
   requestId: string | null; errorCode: string | null; message: string; files: ItemLabelFile[];
 }
 export interface ItemLabelApi {
@@ -16,6 +17,7 @@ export interface ItemLabelApi {
   saveItemLabelFormat(input: ItemLabelFormat): Promise<ItemLabelFormat>;
   listItemLabels(input?: { batchId?: string; jobId?: string }): Promise<ItemLabelRecord[]>;
   getItemLabel(id: string): Promise<ItemLabelRecord>;
+  prepareItemLabels(batchId: string): Promise<ItemLabelRecord[]>;
   retryItemLabel(id: string): Promise<ItemLabelRecord>;
   openItemLabel(input: { id: string; fileIndex: number }): Promise<void>;
   exportItemLabels(batchId: string): Promise<{ cancelled: boolean }>;

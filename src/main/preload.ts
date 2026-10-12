@@ -25,6 +25,7 @@ const api: RedApi = {
   saveItemLabelFormat: input => invoke('red:item-labels:save-format', input),
   listItemLabels: input => invoke('red:item-labels:list', input),
   getItemLabel: id => invoke('red:item-labels:get', id),
+  prepareItemLabels: id => invoke('red:item-labels:prepare', id),
   retryItemLabel: id => invoke('red:item-labels:retry', id),
   openItemLabel: input => invoke('red:item-labels:open', input),
   exportItemLabels: id => invoke('red:item-labels:export', id),

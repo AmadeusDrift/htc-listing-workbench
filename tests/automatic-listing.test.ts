@@ -458,7 +458,7 @@ test('accepted submission waits for platform readiness and does not submit again
   assert.equal(f.service.get(task.id).status, 'WAITING'); assert.equal(f.calls.batches, 0);
   f.setReady(); await f.service.refreshWaiting(); await f.service.refreshWaiting();
   assert.equal(f.service.get(task.id).status, 'COMPLETED');
-  assert.equal(f.calls.submissions, 1); assert.equal(f.calls.batches, 1);
+  assert.equal(f.calls.submissions, 1); assert.equal(f.calls.batches, 1); assert.equal(f.calls.labels,0);
 });
 
 for(const action of ['pause','cancel'] as const)for(const resumeParents of [false,true])test(`readback ${action} during outcome proof stops sibling work${resumeParents?' and pending parent resume':''}`,async t=>{
@@ -472,7 +472,7 @@ for(const action of ['pause','cancel'] as const)for(const resumeParents of [fals
   let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>entered=resolve),held=new Promise<null>(resolve=>release=()=>resolve(null));
   const classify=(f.service as any).classifyFailure.bind(f.service);
   (f.service as any).classifyFailure=async(...args:any[])=>{await classify(...args);entered();await held;};
-  f.dependencies.labels.syncBatch=()=>{f.calls.labels++;throw new UserFacingError('Local label fixture failure');};
+  f.dependencies.procurement.ensureAutomaticBatch=()=>{throw new UserFacingError('Local procurement fixture failure');};
   f.setReady();const pending=f.service.refreshWaiting();await started;
   f.service[action](task.id);const stopped=f.service.get(task.id),calls=structuredClone(f.calls);release();await pending;await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
   const saved=f.service.get(task.id);assert.equal(saved.status,action==='pause'?'PAUSED':'CANCELLED');
@@ -1312,17 +1312,16 @@ test('synchronous image source preflight rejection is not an unknown paid reques
   } finally { await restored.close(); }
 });
 
-for(const stage of ['READBACK','LABELS'] as const)test(`submitted ${stage} failure retains its own cause without requiring legacy source proof`,async t=>{
+for(const stage of ['READBACK'] as const)test(`submitted ${stage} failure retains its own cause without requiring legacy source proof`,async t=>{
   const f=fixture(t,'live'),task=await f.create();
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const db=openDatabase(f.directory);try{db.exec('DELETE FROM source_consistency_decisions');}finally{db.close();}
-  if(stage==='LABELS'){f.setReady();f.dependencies.labels.syncBatch=()=>{throw new UserFacingError('PDF 标签文件不完整');};}
-  else f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'平台回读确认缺少必填属性'} as any);
+  f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'平台回读确认缺少必填属性'} as any);
   await f.service.refreshWaiting();
   const row=f.service.get(task.id).items[0];
-  assert.equal(row.outcome?.code,stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED');
+  assert.equal(row.outcome?.code,'READBACK_FAILED');
   assert.equal(row.outcome?.kind,'SYSTEM_REPAIR');
-  assert.match(row.outcome!.message,stage==='LABELS'?/PDF 标签文件不完整/:/平台回读确认缺少必填属性/);
+  assert.match(row.outcome!.message,/平台回读确认缺少必填属性/);
   assert.equal(f.calls.submissions,1);assert.equal(f.calls.images,1);
   assert.deepEqual(validateAutomaticListingTask(f.service.get(task.id)),f.service.get(task.id));
 });
@@ -1738,4 +1737,15 @@ test('a permanent error in the delayed Schema GET exhausts the receipt without p
   f.dependencies.amazon.getSchema=async()=>{calls++;throw new UserFacingError('Amazon Schema checksum 校验失败');};
   t.mock.timers.tick(30_001);await f.service.refreshWaiting();t.mock.timers.tick(180_001);await f.service.refreshWaiting();
   assert.equal(calls,1);assert.equal(f.service.get(f.id).items[0].schemaRetry?.state,'EXHAUSTED');assert.match(f.service.get(f.id).items[0].error!,/checksum/);assert.deepEqual(f.calls,counts);
+});
+for(const status of ['WAITING','PAUSED','CANCELLED'] as const)test(`legacy LABELS ${status} retains evidence and requires readback eligibility`,async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const stored=(f.service as any).tasks.get(task.id);stored.status=status;stored.items[0].stage='LABELS';stored.items[0].error='历史标签权限错误';stored.items[0].status='FAILED';
+ const labels={pause:0,resume:0,cancel:0};f.dependencies.labels.pauseJob=()=>labels.pause++;f.dependencies.labels.resumeJob=()=>labels.resume++;f.dependencies.labels.cancelJob=()=>labels.cancel++;
+ await f.service.refreshWaiting();let row=f.service.get(task.id).items[0];assert.notEqual(row.status,'DONE');
+ if(status==='WAITING'){
+  const db=openDatabase(f.directory);const evidence=db.prepare("SELECT detail_json FROM audit_events WHERE action='automatic-listing.labels-detached'").all();db.close();assert.equal(evidence.length,1);assert.match(String(evidence[0].detail_json),/历史标签权限错误/);
+  f.setReady();await f.service.refreshWaiting();row=f.service.get(task.id).items[0];assert.equal(row.status,'DONE');assert.equal(row.stage,'COMPLETE');assert.equal(f.calls.labels,0);
+ }else{assert.equal(f.service.get(task.id).status,status);assert.equal(row.error,'历史标签权限错误');}
+ assert.deepEqual(labels,{pause:0,resume:0,cancel:0});
 });

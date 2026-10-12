@@ -316,7 +316,7 @@ export class AutomaticListingService {
         try{
           const unsafe=histories.find(h=>this.unknownCode(h.item,h.task));
           if(unsafe){view.kind='UNKNOWN';view.eligible=false;view.taskId=unsafe.task.id;view.message=unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务';}
-          else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读或标签';}
+          else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读';}
           else if(latest){
             const {task,item}=latest,outcome=item.outcome;
             if(outcome?.kind==='RULE_FILTERED'&&outcome.pricingReport){
@@ -505,7 +505,7 @@ export class AutomaticListingService {
       this.tasks.set(task.id,restored);this.grants.delete(task.id);
       throw error;
     }
-    this.grants.add(task.id);this.deps.labels.resumeJob?.(task.id);this.pump();return structuredClone(task);
+    this.grants.add(task.id);this.pump();return structuredClone(task);
   }
   private reconcileSelection(task: AutomaticListingTask): void {
     for(const productId of new Set(task.items.map(row=>row.productId))){
@@ -1019,7 +1019,7 @@ export class AutomaticListingService {
       // Only observable submitted work can need this expensive view.
       const needsCandidates = [...this.tasks.values()].some(task => !this.confirming.has(task.id)
         && ['WAITING', 'NEEDS_ATTENTION'].includes(task.status)
-        && task.items.some(row => row.draftId && !row.batchId && row.status !== 'DONE' && ['READBACK', 'LABELS'].includes(row.stage)));
+        && task.items.some(row => row.draftId && row.status !== 'DONE' && ['READBACK', 'LABELS'].includes(row.stage)));
       const candidates = new Map((needsCandidates ? this.deps.procurement.candidates() : []).map(value => [value.draftId, value]));
       for (const task of this.tasks.values()) {
         const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
@@ -1038,10 +1038,12 @@ export class AutomaticListingService {
             else if(parent.status==='READY'&&this.grants.has(task.id)){row.status='PENDING';resumeParents=true;}
             continue;
           }
-          if (!row.draftId || row.status === 'DONE' || !['READBACK','LABELS'].includes(row.stage)) continue;
+          if (!row.draftId || ['DONE','SCREENED'].includes(row.status) || !['READBACK','LABELS'].includes(row.stage)) continue;
           try {
+            if(row.stage==='LABELS'&&(row.error||row.outcome))this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'automatic-listing.labels-detached','保留旧标签错误；标签改为按需独立处理',JSON.stringify({taskId:task.id,draftId:row.draftId,error:row.error,outcome:row.outcome??null}),new Date().toISOString());
             if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
-            if (!row.batchId) {
+            if(row.stage==='LABELS')row.stage='READBACK';
+            {
               const followup = task.mode === 'live' ? this.deps.followup.get(row.draftId) : { status: 'READY', error: null };
               if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
               const candidate = candidates.get(row.draftId);
@@ -1057,15 +1059,9 @@ export class AutomaticListingService {
               const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
               const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
               if (!batch) throw new UserFacingError('回读已就绪，但备货批次未建立');
-              row.batchId = batch.id; row.stage = 'LABELS'; this.save(task);
+              row.batchId = batch.id;
             }
-            this.deps.labels.syncBatch(row.batchId, { jobId: task.id, format: task.labelFormat });
-            const labels = this.deps.labels.list({ batchId: row.batchId, jobId: task.id });
-            // Label records carry the exact draft identity and superseded versions remain excluded.
-            const relevant = labels.filter(label => label.draftId === row.draftId && label.current && !['STALE','CANCELLED'].includes(label.status));
-            if (relevant.length && relevant.every(label => label.status === 'READY')) { row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; }
-            else if (relevant.some(label => label.status === 'FAILED')) throw new UserFacingError(relevant.find(label => label.status === 'FAILED')?.message || '商品标签获取失败');
-            else { row.status = 'WAITING'; row.error = null; }
+            row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; delete row.outcome;
           } catch (error) {
             recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
             row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
@@ -1090,7 +1086,6 @@ export class AutomaticListingService {
     task.status = 'CANCELLED'; this.grants.delete(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
   }
   private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
-    if (cancel) this.deps.labels.cancelJob?.(task.id); else this.deps.labels.pauseJob?.(task.id);
     if (this.activeId === task.id) this.controller?.abort();
     for (const row of task.items) {
       if (row.stage === 'SOURCES' && row.status === 'RUNNING') this.deps.images.cancelSources(row.productId);

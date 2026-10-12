@@ -141,7 +141,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
   installExecutionIpc(window, hosting, execution, store, handle);
   if (automatic) installAutomaticListingIpc(automatic, handle, {
     confirm: async task => {
-      const detail = `${task.targetName} · ${task.sellerId} · ${task.marketplaceId}\n商品类型：${task.productType} · 图床：${task.profileId}\n备货：每个 SKU ${task.items[0].stockSets} 个销售单位\n\n${task.items.slice(0,50).map(row => row.sku).join('\n')}${task.items.length > 50 ? '\n……其余 SKU 见任务清单' : ''}\n\n将自动完成资料、图片、侵权与 OCR 复核、上传、校验${task.mode === 'live' ? '及正式发布' : '及本地演示'}。通过后继续回读、备货和商品标签；异常商品会停止并显示原因。`;
+      const detail = `${task.targetName} · ${task.sellerId} · ${task.marketplaceId}\n商品类型：${task.productType} · 图床：${task.profileId}\n备货：每个 SKU ${task.items[0].stockSets} 个销售单位\n\n${task.items.slice(0,50).map(row => row.sku).join('\n')}${task.items.length > 50 ? '\n……其余 SKU 见任务清单' : ''}\n\n将自动完成资料、图片、侵权与 OCR 复核、上传、校验${task.mode === 'live' ? '及正式发布' : '及本地演示'}。通过后继续回读并建立备货批次；商品标签在需要时单独准备；异常商品会停止并显示原因。`;
       const answer = await dialog.showMessageBox(window, { type: 'question', title: '启动完整自动上架流程', message: `启动 ${task.items.length} 个 SKU 的自动流程？`, detail,
         buttons: ['取消', task.mode === 'live' ? '启动并自动发布' : '启动本地演示'], defaultId: 0, cancelId: 0, noLink: true });
       return answer.response === 1;

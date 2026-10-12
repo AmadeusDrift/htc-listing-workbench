@@ -13,3 +13,9 @@ export function currentPolicyRemaining(draft:AmazonDraft,context:ListingAiContex
   const issues=[...schema,...draft.localIssues.filter(issue=>!stale.has(issue.code)&&!issue.code.startsWith('LOCAL_')),...draft.previewIssues,...draft.listingIssues];
   return [...new Set([...issues.filter(issue=>issue.severity==='ERROR'&&!isDeferredImageIssue(draft,issue)).map(issue=>`${issue.attributeNames.join('、')||issue.code}：${issue.message}`),...currentDraftEvidenceIssues(draft,context,getResult)])].slice(0,100).map(value=>value.slice(0,2000));
 }
+
+/** Only identifies a local refresh opportunity; it never declares an error fixed. */
+export function needsBusinessAuthorityRefresh(draft:AmazonDraft,remaining:readonly string[]=[]):boolean {
+  return draft.listingProgram==='haul'&&(draft.localIssues.some(i=>i.source==='local'&&['FACT_AUTHORITY_REQUIRED','HAUL_FORBIDDEN_ATTRIBUTE'].includes(i.code))
+    ||remaining.some(s=>/规则默认和直接保存的数值不构成事实确认|缺少匹配当前销售规格的已确认事实|Haul 草稿不能包含 (?:fulfillment_availability|externally_assigned_product_identifier|merchant_suggested_asin)/.test(s)));
+}

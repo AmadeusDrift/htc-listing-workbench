@@ -32,7 +32,7 @@ import { getReceipt } from '../miaoshou/persistence.ts';
 import { readListingRules } from '../listing-rules.ts';
 import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
-import { currentFactAuthority } from './fact-authority.ts';
+import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
 import { assertStoredPricingForPaid } from './pricing-guard.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
@@ -603,14 +603,20 @@ export class AmazonService {
     if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode):{}), record.draft.businessRules, record.draft.attributes);
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
-  applyBusinessDefaults(input: DraftReference, completionId?:string): AmazonDraft {
+  applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false): AmazonDraft {
     const record = this.checked(input); this.enter(record.draft.id);
     try { return this.persistence.transaction(() => {
       this.mutable(record); this.currentProduct(record);
       if (record.draft.listingProgram !== 'haul') return clone(record.draft);
+      const platformIssues={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
       const target = this.active(record.draft.targetId), product = this.currentProduct(record);
       const variant = product.variants.find(variant => variant.id === record.draft.variantId)!;
       const resolved = this.businessDefaults(product, variant, target, record.draft.schema, record.draft.attributes, 'haul', record.draft.businessRules,record.draft.salesPlan);
+      if(revalidateLocal&&resolved.report){
+        const expected=this.businessDefaults(product,variant,target,record.draft.schema,{},'haul',undefined,record.draft.salesPlan).report;
+        for(const [field,entry] of Object.entries(expected?.fields??{}))if(FACT_PROTECTED_FIELDS.has(field)&&resolved.attributes[field]!==undefined
+          &&semanticJson(entry.value)===semanticJson(resolved.attributes[field]))resolved.report.fields[field]={...entry,value:clone(resolved.attributes[field])};
+      }
       if (semanticJson(resolved.attributes) !== semanticJson(record.draft.attributes)) {
         record.draft.attributes = resolved.attributes; record.draft.revision++; record.draft.state = 'DRAFT';
         record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
@@ -621,6 +627,11 @@ export class AmazonService {
       if (resolved.report) {
         const retained = Object.fromEntries(Object.entries(record.draft.businessRules?.fields ?? {}).filter(([field,entry]) => JSON.stringify(record.draft.attributes[field]) === JSON.stringify(entry.value)));
         record.draft.businessRules = { ...resolved.report, fields: { ...retained, ...resolved.report.fields } };
+      }
+      if(revalidateLocal){
+        this.validate(record);
+        // Local migration is not a new platform acceptance; retain its independent errors.
+        record.draft.previewIssues=platformIssues.preview;record.draft.listingIssues=platformIssues.listing;
       }
       this.updateSourceMapping(record); this.persistence.putRecord(record);
       if(completionId){const journal=new CompletionJournal(this.persistence.db),operation=journal.get(completionId);operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal.save(operation);}

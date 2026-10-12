@@ -1,3 +1,4 @@
+import { needsBusinessAuthorityRefresh } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
@@ -662,6 +663,14 @@ export class AutomaticListingService {
   }
   private async finishRepair(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
     let repair = row.repair!;
+    const before=this.deps.amazon.getDraft(row.draftId!);
+    const localRefresh=!!repair.operationId&&(repair.businessAuthorityRefresh==='business-authority/v1'||needsBusinessAuthorityRefresh(before,repair.remaining))
+      &&new CompletionJournal(this.db).get(repair.operationId).state==='DONE';
+    if(localRefresh&&repair.phase==='FIELDS_PENDING'){
+      if(!this.matching(task,row,before)||submitted(before)||before.revision!==repair.draftRevision||imageWorkflowDraftStamp(before)!==repair.draftStamp
+        ||row.executionTaskIds.some(id=>this.deps.execution.get(id).items.some(i=>i.submitStarted||i.draftId!==before.id)))throw new UserFacingError('旧事实恢复范围或提交记录已变化，未修改草稿');
+      row.repair=repair={...repair,phase:'FIELDS_STARTED',businessAuthorityRefresh:'business-authority/v1'};this.save(task);
+    }
     if(repair.phase==='FIELDS_STARTED'&&repair.operationId&&this.deps.repairFields){
       this.checkpoint(task,row);
       const current=this.deps.amazon.getDraft(row.draftId!);
@@ -669,7 +678,7 @@ export class AutomaticListingService {
       const op=new CompletionJournal(this.db).get(repair.operationId);
       if(op.draftId!==row.draftId)throw new UserFacingError('字段操作身份不一致，未自动重发');
       const result=await this.deps.repairFields(row.draftId!,this.controller!.signal,repair.operationId),draft='draft' in result?result.draft:result;
-      const remaining=fieldRepairRemaining(draft,'draft' in result?result.remaining:[]);
+      const remaining=localRefresh?[...new Set([...('draft' in result?result.remaining:[]),...fieldRepairRemaining(draft)])]:fieldRepairRemaining(draft,'draft' in result?result.remaining:[]);
       row.repair=repair={...repair,phase:remaining.length?'FIELDS_PENDING':'RECHECK_PENDING',remaining,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);this.checkpoint(task,row);
     }
     if (repair.phase === 'FIELDS_STARTED') {
@@ -690,6 +699,7 @@ export class AutomaticListingService {
       row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
     }
     while (repair.phase === 'FIELDS_PENDING') {
+      if(localRefresh&&row.repairAttempts>=repairLimit(row))throw incompleteFields(repair.remaining??[]);
       assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);
       if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));

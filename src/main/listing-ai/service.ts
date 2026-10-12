@@ -1,5 +1,5 @@
 import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
-import { currentPolicyRemaining } from '../image-workflow/policy-reevaluation.ts';
+import { currentPolicyRemaining, needsBusinessAuthorityRefresh } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
@@ -320,8 +320,9 @@ export class ListingAiService {
     const reference=input(raw,'suggest'),{draft,context}=this.current(reference);
     const operations=this.ai.completionJournal.list(draft.id),prior=operationId?operations.find(op=>op.id===operationId):operations.find(op=>!['DONE','RETIRED'].includes(op.state));
     const legacy=!!prior&&prior.scopeHash!==this.completionScope(draft)&&prior.scopeHash===this.completionScope(draft,true);
-    if(prior?.state==='DONE'&&legacy&&isFullSchema(context))operationId=undefined;
-    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&prior?.state!=='DONE'),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId);
+    const preserveDone=prior?.state==='DONE'&&legacy&&draft.listingProgram==='haul'&&operationId!==undefined;
+    if(prior?.state==='DONE'&&legacy&&isFullSchema(context)&&!preserveDone)operationId=undefined;
+    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId);
   }
   getCompletion(id:string):CompletionOperation{return this.ai.completionJournal.get(id);}
   completionUnknown(id:string):boolean{return this.ai.completionJournal.unknown(id);}
@@ -355,7 +356,20 @@ export class ListingAiService {
     };
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
-    refresh();if(operation.state==='DONE'){const context=this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);return{draft,aiCalls,previewAttempts,remaining:isFullSchema(context)?currentPolicyRemaining(draft,context,id=>this.ai.getResult(id)):currentRemaining(operation.remaining),rejections:rejections()};}
+    refresh();if(operation.state==='DONE'){
+      const platformIssues=[...draft.previewIssues,...draft.listingIssues];
+      if(needsBusinessAuthorityRefresh(draft,operation.remaining)){
+        const previousRemaining=[...operation.remaining];
+        draft=this.amazon.applyBusinessDefaults({id:draft.id,revision:draft.revision},operation.id,true);
+        operation=journal.get(operation.id);
+        const context=this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
+        operation.remaining=currentPolicyRemaining({...draft,previewIssues:platformIssues},context,id=>this.ai.getResult(id));checkpoint();
+        this.store.recordWorkspaceEvent('listing.business-authority.refreshed','旧事实依据阻断已按当前业务规则本地重评；原响应和调用预算保留',{draftId:draft.id,operationId:operation.id,previousRemaining,remaining:operation.remaining});
+        return{draft,aiCalls:0,previewAttempts:0,remaining:operation.remaining,rejections:rejections()};
+      }
+      const context=this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
+      return{draft,aiCalls,previewAttempts,remaining:isFullSchema(context)?currentPolicyRemaining(draft,context,id=>this.ai.getResult(id)):currentRemaining(operation.remaining),rejections:rejections()};
+    }
     if(!operation.rounds.length){
       this.amazon.assertPricingForPaid(draft.id);
       aiCalls+=(await this.prepareSourceColors({draftId:draft.id,draftRevision:draft.revision},signal)).aiCalls;

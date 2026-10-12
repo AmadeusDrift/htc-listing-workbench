@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { AmazonSchema, AmazonTarget, JsonObject, JsonValue, SourceFieldMapping } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
 import { bundleQuantity, ListingQuoteError, promotionSchedule, quoteListing } from '../../shared/listing-rules.ts';
@@ -315,6 +316,6 @@ export function ruleSourceMapping(mapping: SourceFieldMapping[], report: Busines
     // Current component authority wins over every historical rule label, including receipts without fact IDs.
     if (entry.status === 'conflicting' || entry.status === 'mapped' && entry.sourceFactIds.length) return entry;
     const rule = report.fields[entry.field];
-    return rule && JSON.stringify(rule.value) === JSON.stringify(attributes[entry.field]) ? { ...entry, status: 'mapped', sourceFactIds: [], reason: `业务规则 v${report.revision}：${rule.reason}` } : entry;
+    return rule && isDeepStrictEqual(rule.value, attributes[entry.field]) ? { ...entry, status: 'mapped', sourceFactIds: [], reason: `业务规则 v${report.revision}：${rule.reason}` } : entry;
   });
 }

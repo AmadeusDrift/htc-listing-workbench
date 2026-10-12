@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { AmazonSchema, AmazonTarget, JsonObject, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { isObject } from './context.ts';
@@ -34,7 +35,7 @@ export function currentFactAuthority(product: ProductDetail, schema: AmazonSchem
   const record = (field:string, result:FieldAuthority) => {
     // ruleValues must be freshly derived by the caller from current store/SKU configuration.
     // Never accept a saved report alone as authority, and never mask explicit conflicts.
-    if (!result.conflicting && Object.hasOwn(ruleValues, field) && JSON.stringify(ruleValues[field]) === JSON.stringify(attributes[field])) result.supported = true;
+    if (!result.conflicting && Object.hasOwn(ruleValues, field) && isDeepStrictEqual(ruleValues[field], attributes[field])) result.supported = true;
     result.sourceFactIds = [...new Set(result.sourceFactIds)]; fields.set(field,result);
     if(result.supported)return;
     issues.push({code:result.conflicting?FACT_SOURCE_CONFLICT:FACT_AUTHORITY_REQUIRED,severity:'ERROR',category:/gpsr|batter|regulation|certificate/.test(field)?'compliance':'fact',

@@ -1115,3 +1115,24 @@ test('historical references preserve existing manual source authority for an eli
  assert.doesNotThrow(()=>f.store.assertSourceConsistency(product.id,[product.variants[0].id]));
  }finally{db.close();}
 });
+
+test('completed seven-image execution preserves approval after plain color migration without regeneration',async t=>{
+ const f=await fixture(t),market=f.draft.marketplaceId;
+ f.amazon.saveDraft({id:f.draft.id,revision:f.draft.revision,attributes:{...f.draft.attributes,brand:[{value:'Verified Brand',marketplace_id:market}],color:[{value:'Cherry Blossom Pink',marketplace_id:market}],purchasable_offer:[{marketplace_id:market,currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:12.5}]}]}]}});
+ const completed=await f.run();assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');const calls=[...f.calls];
+ const {plainColorApprovalMatches}=await import('../src/main/image-workflow/approval-reuse.ts');
+ const current=f.amazon.getDraft(f.draft.id),renamed={...current,attributes:{...current.attributes,color:[{value:'Pink',marketplace_id:market}]}};
+ assert.equal(plainColorApprovalMatches(completed.workflow,renamed,f.store.getProduct(f.product.id)),true);
+ for(const [field,value] of [['material','Steel'],['number_of_items',12]] as const)assert.equal(plainColorApprovalMatches(completed.workflow,{...renamed,attributes:{...renamed.attributes,[field]:[{value}]}},f.store.getProduct(f.product.id)),false);
+ const changedSource=structuredClone(f.store.getProduct(f.product.id));changedSource.variants[0].originalSpec='Blue';assert.equal(plainColorApprovalMatches(completed.workflow,renamed,changedSource),false);
+ assert.equal(plainColorApprovalMatches(completed.workflow,{...renamed,mode:'live'},f.store.getProduct(f.product.id)),false);
+ const {ExecutionService}=await import('../src/main/execution/service.ts'),uploads=new Map<string,any>();let uploadCalls=0;
+ const hosting={getProfile:()=>({id:'alpha',name:'Alpha',host:'ftp.example.test',port:21,secure:true,remoteRoot:'/',publicBaseUrl:'https://images.example.test/',enabled:true,configured:true,generation:1}),upload:async({assetId}:{assetId:string})=>{uploadCalls++;const value={id:randomUUID(),assetId,profileId:'alpha',generation:1,sha256:f.store.getAssetRecord(assetId)!.sha256,publicUrl:`https://images.example.test/${assetId}.png`,status:'AVAILABLE'};uploads.set(value.id,value);return value;},verify:async(id:string)=>uploads.get(id)};
+ const execution=new ExecutionService(f.root,f.store,f.amazon,hosting),db=openDatabase(f.root);
+ try{
+  const raw=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(completed.workflow.id)!.record_json),task=execution.create({draftIds:[f.draft.id],profileId:'alpha'});
+  execution.startAuthorized(execution.prepareStart(task.id));await execution.waitForIdle();const done=execution.get(task.id);
+  assert.equal(done.status,'COMPLETED',done.error??'');assert.equal(uploadCalls,7);assert.deepEqual(f.calls,calls);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(completed.workflow.id)!.record_json),raw);
+  assert.deepEqual(done.items[0].assets.map(a=>a.id),completed.workflow.slots!.map(s=>s.approvedAssetId));
+ }finally{db.close();await execution.close();}
+});

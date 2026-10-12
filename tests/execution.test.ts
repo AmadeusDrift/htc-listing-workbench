@@ -1,3 +1,4 @@
+import { saveInput } from './fixtures/listing-ai.ts';
 import { addSourceOriginalFixture,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,13 +14,13 @@ import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.t
 
 const implementation = await import('../src/main/execution/service.ts').catch(() => null);
 const safeStorage = { isEncryptionAvailable: () => false, encryptString: () => Buffer.alloc(0), decryptString: () => '' };
-async function fixture(t: test.TestContext, options: { holdUpload?: boolean; failVerify?: boolean; requireMain?: boolean; gallery?: boolean } = {}) {
+async function fixture(t: test.TestContext, options: { holdUpload?: boolean; failVerify?: boolean; requireMain?: boolean; gallery?: boolean; sourceSpec?:string } = {}) {
   assert.ok(implementation?.ExecutionService, 'durable execution service must exist');
   const parent = resolve('.test-data'); mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(join(parent, 'execution-'));
   const store = new WorkspaceStore(directory);
   const amazon = new AmazonService(directory, id => store.getProduct(id), safeStorage, { fetch: async () => { throw Error('Unexpected network'); } });
-  let product = store.createProduct(); const variantId = product.variants[0].id;
+  let product = store.createProduct(); if(options.sourceSpec)product=store.saveProduct({...saveInput(product),variants:saveInput(product).variants.map(v=>({...v,originalSpec:options.sourceSpec!,normalizedSpec:options.sourceSpec!}))}); const variantId = product.variants[0].id;
   product=addSourceOriginalFixture(directory,store,product.id,[variantId]);
   const assetId=product.assets[0].id;
   if(options.gallery)product=addSourceOriginalFixture(directory,store,product.id,[variantId],'gallery',1);
@@ -291,4 +292,61 @@ test('Haul field omission reaches preview after hosting and does not fail before
   const task=f.create();f.start(task.id);await f.service.waitForIdle();const result=f.service.get(task.id);
   assert.equal(f.uploadCalls,1);assert.equal(result.items[0].steps.find(s=>s.name==='validate')!.status,'DONE');assert.equal(result.items[0].steps.find(s=>s.name==='preview')!.status,'FAILED');assert.equal(result.items[0].submitStarted,false);
   assert.ok(f.amazon.getDraft(f.draft.id).previewIssues.some(i=>i.source==='demo'));
+});
+
+async function oldExecutionColor(t:test.TestContext,color='Cherry Blossom Pink'){
+ const f=await fixture(t,{sourceSpec:'樱花粉'}),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
+ r.draft.attributes.color=[{value:color,marketplace_id:r.draft.marketplaceId}];r.previewResponse={raw:'historical platform reply'};p.putRecord(r);
+ return {...f,p,fixture:f};
+}
+for(const color of ['Cherry Blossom Pink','Sakura'])test(`old execution ${color} migrates under owned scope and completes after upload`,async t=>{
+ const {fixture:f}=await oldExecutionColor(t,color),task=f.create();
+ f.start(task.id);await f.service.waitForIdle();const done=f.service.get(task.id);
+ assert.equal(done.status,'COMPLETED',done.error??'');assert.equal((f.amazon.getDraft(f.draft.id).attributes.color as any)[0].value,'Pink');assert.equal(f.uploadCalls,1);assert.equal(done.items[0].intendedAttributesHash,null);
+});
+
+test('owned color write interrupted before execution checkpoint resumes without duplicate upload',async t=>{
+ const {fixture:f,p}=await oldExecutionColor(t),task=f.create(),validate=f.amazon.validateDraft.bind(f.amazon);let once=true;
+ f.amazon.validateDraft=async input=>{const result=await validate(input);if(once){once=false;throw Error('color write checkpoint interruption');}return result;};
+ f.start(task.id);await f.service.waitForIdle();assert.equal(f.uploadCalls,0);assert.equal((f.amazon.getDraft(f.draft.id).attributes.color as any)[0].value,'Pink');assert.ok(f.service.get(task.id).items[0].intendedAttributesHash);assert.deepEqual(p.record(f.draft.id).previewResponse,{raw:'historical platform reply'});
+ await f.reopen();f.start(task.id);await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED');assert.equal(f.uploadCalls,1);
+});
+
+test('external draft edits are not adopted as owned color migration',async t=>{
+ const {fixture:f}=await oldExecutionColor(t),task=f.create(),draft=f.amazon.getDraft(f.draft.id);
+ f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,color:[{value:'Red',marketplace_id:draft.marketplaceId}]}});
+ assert.throws(()=>f.start(task.id),/已变化/);assert.equal(f.uploadCalls,0);assert.equal((f.amazon.getDraft(draft.id).attributes.color as any)[0].value,'Red');
+});
+
+test('unknown execution submission never migrates old color or uploads again',async t=>{
+ const {fixture:f,p}=await oldExecutionColor(t),task=f.create(),record=p.record(f.draft.id);
+ record.unresolvedWrite=true;record.draft.state='UNKNOWN';p.putRecord(record);
+ f.start(task.id);await f.service.waitForIdle();assert.equal((f.amazon.getDraft(f.draft.id).attributes.color as any)[0].value,'Cherry Blossom Pink');assert.equal(f.uploadCalls,0);assert.equal(f.amazon.listCalls().filter(c=>c.operation==='putListingsItem').length,0);
+});
+
+test('old color execution resumes past completed upload and image steps without uploading again',async t=>{
+ const {fixture:f}=await oldExecutionColor(t),hosted=await f.hosting.upload({assetId:f.product.assets[0].id}),draft=f.amazon.getDraft(f.draft.id);
+ f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,main_product_image_locator:[{media_location:hosted.publicUrl,marketplace_id:draft.marketplaceId}]}});
+ const task=f.create(),stored=(f.service as any).tasks.get(task.id),item=stored.items[0];
+ item.uploads=[{assetId:hosted.assetId,uploadId:hosted.id,sha256:hosted.sha256,publicUrl:hosted.publicUrl}];
+ for(const step of item.steps)if(['upload','images'].includes(step.name)){step.status='DONE';step.attempts=1;}
+ (f.service as any).save(stored);await f.reopen();f.start(task.id);await f.service.waitForIdle();
+ const done=f.service.get(task.id);assert.equal(done.status,'COMPLETED',done.error??'');assert.equal(f.uploadCalls,1);assert.equal((f.amazon.getDraft(draft.id).attributes.color as any)[0].value,'Pink');assert.equal(done.items[0].steps.find(s=>s.name==='upload')!.attempts,1);
+});
+
+test('color execution migration preserves platform brand error and raw receipt for manual handling',async t=>{
+ const {fixture:f,p}=await oldExecutionColor(t),record=p.record(f.draft.id),issue={code:'5882',source:'amazon',severity:'ERROR',attributeNames:['color'],category:'field',autoFixable:false,message:'Brand conflict'};
+ record.draft.listingProgram='haul';record.draft.attributes.brand=[{value:'Generic',marketplace_id:record.draft.marketplaceId}];record.draft.previewIssues=[issue];record.previewResponse={issues:[issue],raw:'original payload'};p.putRecord(record);
+ const task=f.create();f.start(task.id);await f.service.waitForIdle();const stopped=f.service.get(task.id);
+ assert.equal(stopped.status,'NEEDS_ATTENTION');assert.match(stopped.error??'',/5882.*人工/);assert.equal(f.uploadCalls,0);assert.deepEqual(p.record(f.draft.id).previewResponse,{issues:[issue],raw:'original payload'});assert.deepEqual(f.amazon.getDraft(f.draft.id).previewIssues,[issue]);assert.equal((f.amazon.getDraft(f.draft.id).attributes.color as any)[0].value,'Pink');
+ await f.reopen();f.start(task.id);await f.service.waitForIdle();assert.match(f.service.get(task.id).error??'',/人工/);assert.equal(f.uploadCalls,0);
+});
+
+test('combined Haul and color cleanup has one owned revision and keeps later execution in scope',async t=>{
+ const {fixture:f,p}=await oldExecutionColor(t),r=p.record(f.draft.id);
+ r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';r.draft.attributes.merchant_suggested_asin=[];
+ r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+ const task=f.create(),validate=f.amazon.validateDraft.bind(f.amazon);let first=true;
+ f.amazon.validateDraft=async input=>{const result=await validate(input);if(first){first=false;assert.equal(result.revision,r.draft.revision+1);assert.equal(result.attributes.merchant_suggested_asin,undefined);assert.equal((result.attributes.color as any)[0].value,'Pink');}return result;};
+ f.start(task.id);await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED',f.service.get(task.id).error??'');assert.equal(f.uploadCalls,1);
 });

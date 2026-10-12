@@ -1,3 +1,4 @@
+import { isSchemaTransientError } from './schema-retry.ts';
 import { sameSchemaValidation } from './schema-compatibility.ts';
 import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
 import { validateAutomaticListingTask } from '../automatic-listing/records.ts';
@@ -252,6 +253,7 @@ export class AmazonService {
     if (options.forceRefresh !== undefined && typeof options.forceRefresh !== 'boolean') throw new UserFacingError('Schema 刷新参数无效');
     const key = schemaKey(target, selected); const cached = this.persistence.schema(key);
     if (!options.forceRefresh && cached && Date.parse(cached.expiresAt) > this.now()) return { ...cached, fromCache: true };
+    try {
     let snapshot: AmazonSchema;
     if (target.mode === 'demo') {
       if (selected.productType !== DEMO_TYPE) throw new UserFacingError('本地演示仅支持 HTC_DEMO_STORAGE_BAG，不代表正式 Amazon 商品类型');
@@ -275,6 +277,7 @@ export class AmazonService {
         propertyGroups, fetchedAt: this.at(), expiresAt: new Date(this.now() + 86_400_000).toISOString(), fromCache: false };
     }
     this.persistence.putSchema(snapshot); return clone(snapshot);
+    } catch(error) { if(isSchemaTransientError(error)) error.selection={...selected}; throw error; }
   }
   listDrafts(productId: string): AmazonDraft[] { this.ensureOpen(); return this.persistence.records(textField(productId, '商品 ID', 100)).map(record => this.vault.redact(record.draft)); }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }

@@ -1,3 +1,4 @@
+import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import {validateListingContext} from '../listing-ai/validation.ts';
 import {replayReferenceCandidates,sameRecoverySource} from '../listing-ai/candidate-recovery.ts';
 import { parseImagePlanRecovery } from './image-validation.ts';
@@ -654,7 +655,7 @@ export class AiService {
       throwIfAborted(signal??new AbortController().signal);
       try{return await this.imagePlanOnce(rawContext,assertContextFresh,rawRepair,signal,workflowId,onRequestSent);}
       catch(error){
-        if(!(error instanceof AiError)||error.code!=='OUTPUT_INVALID'||!error.callId||!workflowId||['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(error.diagnosticReason??''))throw error;
+        if(isSchemaTransientError(error)||!(error instanceof AiError)||error.code!=='OUTPUT_INVALID'||!error.callId||!workflowId||['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(error.diagnosticReason??''))throw error;
         const recovered=await this.recoverImagePlan(error.callId,rawContext,assertContextFresh,signal,rawRepair);
         if(recovered)return recovered;
         if(attempt>=2||this.imagePlanningAttempts(rawContext,workflowId)>=3)throw new ImagePlanningLimitError(error.callId);
@@ -750,6 +751,10 @@ export class AiService {
       try {
         throwIfAborted(activeSignal);
         const prepared = await abortable(prepare(activeSignal), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
+        const draftId=(prepared.imageContext?.listing??prepared.listingContext)?.draftId;
+        if(draftId&&this.db.prepare("SELECT 1 FROM ai_calls c WHERE json_extract(c.record_json,'$.schemaResponseRetained')=1 AND json_extract(c.record_json,'$.providerId')=? AND json_extract(c.record_json,'$.presentationContext.draftId')=? AND NOT EXISTS(SELECT 1 FROM ai_results r WHERE json_extract(r.record_json,'$.callId')=c.id) LIMIT 1").get(profile.id,draftId)){
+          const blocked=new AiError('OUTPUT_INVALID');blocked.message='已收到 AI 响应，Schema 检查曾中断；原响应和费用保留，当前步骤无法安全本地恢复，未重发付费请求';throw blocked;
+        }
         const credentials = this.vault.read(profile.id, profile.generation);
         const reply = await abortable(prepared.invoke(credentials, { ...this.context, thinking:profile.thinking,
           beforeSend: body => {
@@ -770,6 +775,7 @@ export class AiService {
         if (!call) throw new AiError('PROVIDER_ERROR');
         metadata = { requestId: reply.requestId, usage: reply.usage, usageKnown: reply.usageKnown };
         rejectionStage = 'source-freshness';
+        untrustedOutput ??= {value:reply.output};
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
@@ -782,11 +788,13 @@ export class AiService {
           this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(result.sourceConsistencyContext)recordConsistencyAssessment(this.db,result); if(completion)this.completionJournal.recordResult(completion,result); this.db.exec('COMMIT'); return result;
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       } catch (error) {
+        const schemaReceived=isSchemaTransientError(error)&&rejectionStage==='source-freshness'&&!!call;
         const safe = safeError(error, activeSignal);
+        if(schemaReceived){safe.diagnosticReason='SCHEMA_TRANSIENT';rejectionStage='schema-freshness-transient';}
         if (call) {
           safe.callId=call.id;
           const finishedAt = this.finishedAt(call.startedAt); this.db.exec('BEGIN IMMEDIATE');
-          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(safe.code==='OUTPUT_INVALID'&&['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(safe.diagnosticReason??'')&&source&&typeof source==='object'&&'operation' in source&&source.operation==='image-plan'?{imagePlanRetryBlock:safe.diagnosticReason as AiCall['imagePlanRetryBlock']}:{}), ...(safe.code==='OUTPUT_INVALID'&&untrustedOutput?{responseReceived:true as const}:{}), ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
+          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(schemaReceived?{schemaResponseRetained:true as const}:{}), ...(safe.code==='OUTPUT_INVALID'&&['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(safe.diagnosticReason??'')&&source&&typeof source==='object'&&'operation' in source&&source.operation==='image-plan'?{imagePlanRetryBlock:safe.diagnosticReason as AiCall['imagePlanRetryBlock']}:{}), ...(safe.code==='OUTPUT_INVALID'&&untrustedOutput?{responseReceived:true as const}:{}), ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
           if (safe.code === 'OUTPUT_INVALID' && (untrustedOutput||safe.responseDiagnostic)) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;

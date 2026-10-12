@@ -1,3 +1,4 @@
+import { isSchemaTransientError, type SchemaTransientError } from '../amazon/schema-retry.ts';
 import { canResumeRiskAdaptation } from './risk-adaptation.ts';
 import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -53,7 +54,7 @@ import { selectSalesRecipes } from '../sales-plans/selection.ts';
 export interface AutomaticListingDependencies {
   store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'>>;
   rules(): ListingRules;
-  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
   hosting: Pick<HostingService, 'getProfile'>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     getRiskSettings?: () => {enabled:boolean};
@@ -127,9 +128,9 @@ export class AutomaticListingService {
         assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
-        if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT')) {
+        if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT'||row.schemaRetry&&['WAITING','IN_FLIGHT'].includes(row.schemaRetry.state))) {
           task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
-          for (const row of task.items) if (row.status === 'RUNNING') row.status = 'PENDING';
+          for (const row of task.items) { if(row.schemaRetry?.state==='IN_FLIGHT')row.schemaRetry.state='WAITING'; if (row.status === 'RUNNING') row.status = 'PENDING'; }
           this.save(task);
         }
       }
@@ -447,7 +448,7 @@ export class AutomaticListingService {
       // siblings retain their exact draft/product revision and never repeat paid work.
       for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
       for(const row of task.items)this.migrateRepairPolicy(task,row);
-      for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN'&&!task.adaptation?.blockedKeys.includes(row.key)) {
+      for (const row of task.items) if ((!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status === 'FAILED'&&row.stage!=='PLAN'&&!task.adaptation?.blockedKeys.includes(row.key)) {
         if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
         if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
           const old=this.deps.amazon.getDraft(row.draftId);
@@ -552,11 +553,12 @@ export class AutomaticListingService {
             // Yield between SKUs, then recheck pause/cancel before touching the next one.
             await yieldToEventLoop();
             if (!this.running(task)) break;
-            if (task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
+            if (task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)||row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state)) continue;
             try { await this.prepareItem(task, row); }
             catch (error) {
               recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
+              if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
               const classified=structuredClone(row);await this.classifyFailure(task,classified);
               if(!this.running(task))break;
@@ -565,10 +567,52 @@ export class AutomaticListingService {
             }
           }
           if (this.running(task)) this.summarize(task);
-        } finally { if(!task.items.some(row=>row.stage==='PARENT'&&row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
+        } finally { if(!task.items.some(row=>row.status==='WAITING'&&(row.stage==='PARENT'||row.schemaRetry&&['WAITING','IN_FLIGHT'].includes(row.schemaRetry.state))))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
       }
       await this.refreshWaiting();
     }).finally(() => { this.worker = null; if([...this.tasks.values()].some(task=>task.status==='QUEUED'&&this.grants.has(task.id)))this.pump(); });
+  }
+  private schemaScope(task:AutomaticListingTask,row:AutomaticListingItem,selected:NonNullable<AutomaticListingItem['schemaRetry']>['selection']):string {
+    return fingerprint({taskId:task.id,key:row.key,productRevision:row.productRevision,sourceStamp:row.sourceStamp,targetStamp:task.targetStamp,rulesStamp:task.rulesStamp,profileStamp:task.profileStamp,selection:[selected.targetId,selected.productType,selected.requirements,selected.parentageLevel,selected.locale]});
+  }
+  private deferSchema(task:AutomaticListingTask,row:AutomaticListingItem,error:SchemaTransientError):boolean {
+    const selected=error.selection;
+    if(!selected||selected.targetId!==task.targetId||!this.deps.amazon.getSchema)return false;
+    const scope=this.schemaScope(task,row,selected),now=Date.now();
+    if(row.schemaRetry&&row.schemaRetry.scope!==scope)return false;
+    row.schemaRetry??={version:1,scope,selection:{...selected},originalStage:row.stage,firstFailureAt:new Date(now).toISOString(),dueAt:new Date(now+30_000).toISOString(),deadlineAt:new Date(now+600_000).toISOString(),usedDelayedRounds:0,state:'WAITING',reason:'SCHEMA_TRANSIENT'};
+    const retry=row.schemaRetry;
+    if(retry.state==='SUCCEEDED'){retry.originalStage=row.stage;retry.dueAt=new Date(Math.min(Date.parse(retry.deadlineAt),now+([30_000,90_000,180_000][retry.usedDelayedRounds]??0))).toISOString();}
+    if(retry.usedDelayedRounds>=3||now>=Date.parse(retry.deadlineAt)){retry.state='EXHAUSTED';row.status='FAILED';row.error='Schema 有限重试已用尽或超过 10 分钟，原进度和次数保留';}
+    else {retry.state='WAITING';row.status='WAITING';row.error='等待 Schema GET 有限重试，已有图片和请求进度保留';}
+    this.save(task);return true;
+  }
+  private async retrySchema(task:AutomaticListingTask,row:AutomaticListingItem):Promise<boolean>{
+    const retry=row.schemaRetry!;
+    const eligible=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&this.grants.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
+    if(!eligible()||retry.state!=='WAITING')return false;
+    if(Date.now()>=Date.parse(retry.deadlineAt)||retry.usedDelayedRounds>=3){retry.state='EXHAUSTED';row.status='FAILED';row.error='Schema 有限重试已用尽或超过 10 分钟，原进度和次数保留';this.save(task);return false;}
+    if(Date.now()<Date.parse(retry.dueAt))return false;
+    try {
+      this.assertScope(task,row);
+      if(retry.scope!==this.schemaScope(task,row,retry.selection))throw new UserFacingError('Schema 重试范围已变化，原进度保留');
+      retry.usedDelayedRounds++;retry.state='IN_FLIGHT';retry.dueAt=new Date(Math.min(Date.parse(retry.deadlineAt),Date.now()+([30_000,90_000,180_000][retry.usedDelayedRounds]??0))).toISOString();this.save(task);
+      const revision=task.revision;
+      try {await this.deps.amazon.getSchema!(retry.selection);}
+      catch(error){
+        if(!eligible()||task.revision!==revision){retry.state='WAITING';this.save(task);return false;}
+        this.assertScope(task,row);
+        if(!isSchemaTransientError(error))throw error;
+        retry.state='WAITING';retry.dueAt=new Date(Math.min(Date.parse(retry.deadlineAt),Date.now()+([30_000,90_000,180_000][retry.usedDelayedRounds]??0))).toISOString();
+        if(retry.usedDelayedRounds>=3){retry.state='EXHAUSTED';row.status='FAILED';row.error='Schema 有限重试已用尽，原进度和次数保留';}
+        this.save(task);return false;
+      }
+      if(!eligible()||task.revision!==revision){retry.state='WAITING';this.save(task);return false;}
+      this.assertScope(task,row);
+      if(retry.scope!==this.schemaScope(task,row,retry.selection))throw new UserFacingError('Schema 重试范围已变化');
+      if(Date.now()>=Date.parse(retry.deadlineAt))throw new UserFacingError('Schema 重试超过 10 分钟，原进度和次数保留');
+      retry.state='SUCCEEDED';row.stage=retry.originalStage;row.status='PENDING';row.error=null;this.save(task);return true;
+    }catch(error){retry.state='EXHAUSTED';row.status='FAILED';row.error=errorMessage(error);this.save(task);return false;}
   }
   private running(task: AutomaticListingTask): boolean { return !this.closed && !this.closing && task.status === 'RUNNING' && this.grants.has(task.id); }
   private checkpoint(task: AutomaticListingTask, row: AutomaticListingItem): void {
@@ -987,6 +1031,7 @@ export class AutomaticListingService {
           await yieldToEventLoop();
           if (task.revision !== beforeYield) { interrupted = true; break; }
           if(!canObserve())break;
+          if(row.schemaRetry?.state==='WAITING'){if(await this.retrySchema(task,row))resumeParents=true;continue;}
           if(row.stage==='PARENT'&&row.parentDraftId&&row.status==='WAITING'){
             const parent=this.deps.followup.get(row.parentDraftId);
             if(parent.status==='NEEDS_ATTENTION'){row.status='FAILED';row.error=parent.error||'父体建档失败，保留子体图片和进度';}

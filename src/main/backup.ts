@@ -1,3 +1,5 @@
+import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
+import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
 import { assertSourceImageHistory, validateSourceImageProvenance } from './source-image-provenance.ts';
 import { assertCompletionHistory, retainCompletionOperations, validateCompletionOperation } from './listing-ai/completion-journal.ts';
@@ -374,6 +376,8 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
       for (const row of current.prepare('SELECT id,target_id,created_at,event_json FROM amazon_calls').all()) addCall.run(row.id, row.target_id, row.created_at, row.event_json);
     }
     retainAiUsage(current, snapshot);
+    retainSchemaRetryBudgets(current,snapshot);
+    retainSchemaResponseCalls(current,snapshot);
     retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);
     retainImagePlanningAttempts(current, snapshot);

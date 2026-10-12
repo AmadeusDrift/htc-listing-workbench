@@ -1223,3 +1223,22 @@ for(const change of ['display','enum','required','description','meta','version']
   }
   assert.deepEqual(f.amazon.getDraft(f.draft.id).schema,frozen.schema);
 });
+
+test('image workflow propagates typed Schema failure while preserving the original resumable workflow',async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=await fixture(t),original=f.ai.imagePlan;let failing=true;
+  f.ai.imagePlan=async(...args)=>{if(failing)throw Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:f.draft.schema});return original(...args);};
+  await assert.rejects(f.run(),e=>e instanceof SchemaTransientError);
+  const prior=f.service.getProgress(f.draft.id)!;assert.equal(f.calls.includes('generate'),false);assert.equal(canResumeImageWorkflow(prior),true);
+  failing=false;const resumed=await f.run();assert.equal(resumed.workflow.id,prior.id);assert.equal(resumed.workflow.status,'COMPLETED');
+});
+
+test('Schema generation preflight preserves NOT_SENT identity and never marks an unknown POST',async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const {imageRequestNotSent}=await import('../src/main/image-generation/errors.ts');
+  const f=await fixture(t),original=f.generation.generateForWorkflow;let failing=true;
+  f.generation.generateForWorkflow=async(...args)=>{if(failing)throw imageRequestNotSent(Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:f.draft.schema}));return original(...args);};
+  await assert.rejects(f.run(),e=>e instanceof SchemaTransientError);
+  const prior=f.service.getProgress(f.draft.id)!;assert.equal(prior.slots![0].attempts[0].state,'READY');assert.equal(f.calls.includes('generate'),false);
+  failing=false;const resumed=await f.run();assert.equal(resumed.workflow.id,prior.id);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,prior.slots![0].attempts[0].requestId);
+});

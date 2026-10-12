@@ -39,6 +39,8 @@ export interface AiCall {
   imagePlanRetryBlock?:'RESPONSE_NOT_CONTENT'|'RESPONSE_SECRET_ECHO';
   /** Provider content was received; independent of local parsing success. */
   responseReceived?: true;
+  /** Reply was received but Schema freshness could not be checked. Never authorize another paid request. */
+  schemaResponseRetained?: true;
   thinking?: boolean;
   rejection?: import('./rejection-presentation.ts').OutputRejection;
   presentationContext?: {imagePlanRequestSha256?:string;workflowId?:string;kind:'image'|'listing';draftId:string;variantId:string;sourceSha256:string;slot:number};

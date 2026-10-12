@@ -1160,7 +1160,7 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
   const confirm=()=>ai.decideSourceConsistency({...proofInput,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Synthetic independent human checked this exact visual association'});
   if(outcome==='unknown')await assert.rejects(confirm());else await confirm();
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
+  const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,outcome==='unknown'?3:2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
   assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(after.items[1].status,outcome==='unknown'?'FAILED':'DONE');
 });
 
@@ -1208,7 +1208,7 @@ test('release four-SKU synthetic sample separates rule, missing facts and UNKNOW
     const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});
     assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.filter(r=>r.kind==='UNKNOWN').length,1);
     restored.startAuthorized(restored.prepareStart(task.id));await restored.waitForIdle();
-    assert.equal(sends,4);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+    assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
     assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
   }finally{await restored.close();}
 });
@@ -1391,4 +1391,19 @@ for(const spec of ['颜色:红色;备注:可备注颜色','红色整机 / 可备
  const f=fixture(t);Object.assign(f.product.variants[0],{originalSpec:spec,normalizedSpec:'',sourceSpec:spec});
  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,1);
  const task=await f.create();assert.equal(task.items.length,1);assert.equal(task.items[0].variantId,f.product.variants[0].id);
+});
+
+test('authorized resume sends a retained unknown image workflow back to its bounded recovery owner',async t=>{
+ const f=fixture(t),complete=f.dependencies.images.complete;let first=true;
+ f.dependencies.images.complete=async input=>{if(first){first=false;f.calls.images++;const id=(input as any).draftId;f.workflow.set(id,{id:randomUUID(),draftId:id,status:'INTERRUPTED',slots:[{status:'UNKNOWN',attempts:[{state:'UNKNOWN'}]}]});throw Error('synthetic missing provider result');}return complete(input);};
+ const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.service.get(task.id).items[0].outcome?.kind,'UNKNOWN');
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ assert.equal(f.calls.images,2);assert.equal(f.calls.sources,1);assert.equal(f.calls.submissions,1);assert.equal(f.service.get(task.id).status,'COMPLETED');
+});
+test('unknown formal submission takes priority over an unknown image and is never retried as AI',async t=>{
+ const f=fixture(t),complete=f.dependencies.images.complete;
+ f.dependencies.images.complete=async input=>{f.calls.images++;const id=(input as any).draftId;f.workflow.set(id,{id:randomUUID(),draftId:id,status:'INTERRUPTED',slots:[{status:'UNKNOWN',attempts:[{state:'UNKNOWN'}]}]});throw Error('synthetic missing image');};
+ const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();const draftId=f.service.get(task.id).items[0].draftId!;f.drafts.get(draftId)!.state='UNKNOWN';
+ assert.equal((f.service as any).unknownCode(f.service.get(task.id).items[0],f.service.get(task.id)),'SUBMISSION_UNKNOWN');
+ f.dependencies.images.complete=complete;f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,0);
 });

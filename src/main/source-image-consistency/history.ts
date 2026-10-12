@@ -9,6 +9,7 @@ import { readManagedImageSync } from '../ai/source.ts';
 import { validateSourceImageProvenance,assertSourceImageProvenance } from '../source-image-provenance.ts';
 import { assertUnambiguousRecordJson } from '../record-json.ts';
 import { readSourceImageReceipt,sourceImageMappings } from '../source-images.ts';
+import { validateAiUsageRecord } from '../ai/usage.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { validateConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
 import { assertConsistencyOutput,reduceSourceConsistency,normalizeSourceObservations } from './comparison.ts';
@@ -62,7 +63,7 @@ export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsisten
 /** Called only in AiUsageLedger.reserve's transaction, before the transport sends bytes. */
 export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string}):void {
   const attempts=listConsistencyAttempts(db,context),latest=attempts.at(-1),n=(latest?.attemptNumber??(latest?1:0))+1;
-  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;if(!prior||prior.status!=='FAILED'||prior.errorCode!=='OUTPUT_INVALID'||n>MAX_SOURCE_ATTEMPTS)invalid();}
+  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||prior.providerId!=='deepseek'||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(prior.errorCode??'')||n>MAX_SOURCE_ATTEMPTS)invalid();}
   const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyAttemptId(context,n),context,callId:call.id,sentAt:call.startedAt,...(n>1?{attemptNumber:n}:{})});
   db.prepare('INSERT INTO source_consistency_attempts VALUES(?,?)').run(record.id,JSON.stringify(record));
 }

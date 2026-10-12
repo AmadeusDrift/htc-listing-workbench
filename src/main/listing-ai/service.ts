@@ -356,7 +356,12 @@ export class ListingAiService {
     };
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
-    refresh();if(operation.state==='DONE'){
+    refresh();
+    // Recover received outputs above and enforce unknown-result protection first.
+    // A historical ACTIVE round must not bypass the same manual stop as a new round.
+    const existingBrandIssues=manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]);
+    if(operation.state==='ACTIVE'&&existingBrandIssues.length)return finish([...existingBrandIssues,...operation.remaining]);
+    if(operation.state==='DONE'){
       const platformIssues=[...draft.previewIssues,...draft.listingIssues];
       if(needsBusinessAuthorityRefresh(draft,operation.remaining)){
         const previousRemaining=[...operation.remaining];
@@ -415,7 +420,9 @@ export class ListingAiService {
       await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
         const entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;if(entry.sent){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
-        const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
+        const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
+        assertBrandDispatch();
+        const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
         aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
       };
       const suggestion=await request('candidate');

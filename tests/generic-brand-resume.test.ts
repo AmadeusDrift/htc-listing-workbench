@@ -60,3 +60,20 @@ test('ordinary brand schema errors are not classified as brand approval disputes
  assert.deepEqual(manualBrandIssues(draft,[{...brandingIssue('90220'),message:'Missing required marketplace_id'}]),[]);
  assert.deepEqual(manualBrandIssues(draft,[{...brandingIssue(),severity:'WARNING'}]),[]);
 });
+
+for(const pending of ['candidate','review'] as const)test(`resumed ACTIVE ${pending} dispatch stops for Generic brand dispute and retains journal`,async t=>{
+ const {randomUUID}=await import('node:crypto'),{listingFingerprint}=await import('../src/main/listing-ai/validation.ts');
+ const f=await fixture(t,{brand:brandSchema}),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
+ r.draft.listingProgram='haul';r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.previewIssues=[brandingIssue()];delete r.draft.attributes.material;p.putRecord(r);
+ const op=f.listing.beginCompletion(f.reference),context=f.listing.currentContext(f.amazon.getDraft(f.draft.id),f.product,f.amazon.executionTargetScope(f.draft.targetId).generation);
+ context.fields=context.fields.filter(field=>field.name==='material');context.repairRequest={issues:[{field:'material',code:'90220',message:'Missing material'}],currentValues:{material:null}};
+ const round={context,contextHash:listingFingerprint(context),candidate:{id:randomUUID(),sent:false,resultId:null},review:{id:randomUUID(),sent:false,resultId:null},resolved:false,adoptionId:null};op.rounds=[round];f.ai.completionJournal.save(op);
+ if(pending==='review')await f.ai.listingFields(context,async()=>{},undefined,undefined,{operationId:op.id,callId:round.candidate.id,contextHash:round.contextHash});
+ const before=f.ai.completionJournal.get(op.id),calls=f.requests.length,history=f.ai.listCalls();
+ f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[brandingIssue()]});
+ const result=await f.listing.complete(f.reference,undefined,op.id);
+ assert.equal(f.requests.length,calls);assert.equal(result.aiCalls,0);assert.ok(result.remaining.some(s=>s.includes('人工')));
+ const after=f.ai.completionJournal.get(op.id);assert.deepEqual(after.rounds,before.rounds);assert.deepEqual(f.ai.listCalls(),history);
+ assert.equal(after.state,'DONE');assert.equal(after.rounds[0].review?.sent,false);
+ if(pending==='review')assert.ok(f.ai.getResult(after.rounds[0].candidate.resultId!));
+});

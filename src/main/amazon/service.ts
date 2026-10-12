@@ -1,7 +1,10 @@
 import { sameSchemaValidation } from './schema-compatibility.ts';
+import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
+import { validateAutomaticListingTask } from '../automatic-listing/records.ts';
+import { hasGenericBrand } from '../image-workflow/policy-reevaluation.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
+import { CompletionJournal, completionDraftStamp, completionSafetyScope } from '../listing-ai/completion-journal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
 import type { ListingObservation } from '../../shared/followup-contracts.ts';
@@ -667,6 +670,44 @@ export class AmazonService {
     db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
     db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
     return clone(draft);
+  }
+  /** Independent local rule migration. It never expands the theme adoption grant. */
+  migrateFixedBrand(input:DraftReference,completionId:string):AmazonDraft {
+    const record=this.checked(input);this.enter(record.draft.id);
+    try{return this.persistence.transaction(()=>{
+      this.mutable(record);const product=this.currentProduct(record),draft=record.draft;
+      const journal=new CompletionJournal(this.persistence.db),op=journal.get(completionId);
+      if(journal.unknown(op.id))throw new UserFacingError('字段请求结果尚未确认，未迁移品牌');
+      if(!op.scopedRepair||op.state!=='DONE'||draft.listingProgram!=='haul'||hasGenericBrand(draft))return clone(draft);
+      if(op.draftId!==draft.id||op.safetyScopeHash!==completionSafetyScope(draft)||op.draftRevision!==draft.revision||op.draftStamp!==completionDraftStamp(draft)||journal.unknown(op.id))throw new UserFacingError('固定品牌迁移检查点不匹配，保留原记录');
+      if(journal.list(draft.id).some(other=>other.id!==op.id&&!['DONE','RETIRED'].includes(other.state)))throw new UserFacingError('仍有未完成字段请求，未迁移品牌');
+      const db=this.persistence.db;
+      if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.submitStarted')=1").get(draft.id))throw new UserFacingError('已有提交意图，未迁移品牌');
+      const owners=db.prepare("SELECT t.id,t.record_json FROM automatic_listing_tasks t WHERE EXISTS(SELECT 1 FROM json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=?)").all(draft.id).map(saved=>validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+      for(const task of owners)for(const row of task.items.filter(row=>row.draftId===draft.id)){
+        if(task.targetId!==draft.targetId||task.sellerId!==draft.sellerId||task.marketplaceId!==draft.marketplaceId||task.mode!==draft.mode||row.productId!==draft.productId||row.productRevision!==draft.productRevision||row.variantId!==draft.variantId||row.sku!==draft.sku||!row.repair||row.repair.operationId!==op.id||row.repair.draftRevision!==draft.revision||row.repair.draftStamp!==imageWorkflowDraftStamp(draft)||!['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING'].includes(row.repair.phase))throw new UserFacingError('自动任务品牌迁移检查点不匹配，保留原记录');
+      }
+      const before=clone(record),variant=product.variants.find(v=>v.id===draft.variantId)!;
+      const resolved=this.businessDefaults(product,variant,this.active(draft.targetId),draft.schema,draft.attributes,'haul',draft.businessRules,draft.salesPlan);
+      if(!resolved.report?.fields.brand||!resolved.attributes.brand)throw new UserFacingError('固定品牌规则依据缺失');
+      draft.attributes.brand=clone(resolved.attributes.brand);
+      draft.businessRules=draft.businessRules?{...draft.businessRules,fields:{...draft.businessRules.fields,brand:resolved.report.fields.brand}}:{...resolved.report,fields:{brand:resolved.report.fields.brand}};
+      // Only the latest exact preview request can prove that a current 5665 is stale.
+      const exchanges=db.prepare('SELECT exchange_json FROM amazon_exchanges WHERE draft_id=? ORDER BY created_at DESC,rowid DESC').all(draft.id).map(row=>JSON.parse(String(row.exchange_json)) as import('./persistence.ts').ExchangeSnapshot);
+      const latest=exchanges.find(exchange=>exchange.operation==='preview');
+      const oldBrand=isObject(latest?.request.attributes)?latest!.request.attributes.brand:undefined;
+      const stale=latest?.revision===before.draft.revision&&semanticJson(oldBrand??null)===semanticJson(before.draft.attributes.brand??null)&&Array.isArray(oldBrand)&&oldBrand.length>0&&oldBrand.every(entry=>isObject(entry)&&typeof entry.value==='string'&&entry.value!=='Generic');
+      const responseIssues=latest?.response?.issues;
+      if(stale&&Array.isArray(responseIssues))draft.previewIssues=draft.previewIssues.filter(issue=>!(issue.source==='amazon'&&issue.code==='5665'&&responseIssues.some(raw=>isObject(raw)&&raw.code===issue.code&&raw.message===issue.message)));
+      draft.localIssues=draft.localIssues.filter(issue=>!(issue.attributeNames.length===1&&issue.attributeNames[0]==='brand'&&['FACT_AUTHORITY_REQUIRED','FACT_SOURCE_CONFLICT'].includes(issue.code)));
+      draft.revision++;draft.previewedAt=null;record.preview=null;record.request=this.request(record);
+      this.event(record,'save','独立本地固定品牌规则迁移为 Generic；保留主题权限、历史响应及次数');
+      op.draftRevision=draft.revision;op.draftStamp=completionDraftStamp(draft);journal.save(op);
+      for(const task of owners){for(const row of task.items.filter(row=>row.draftId===draft.id)){row.repair!.draftRevision=draft.revision;row.repair!.draftStamp=imageWorkflowDraftStamp(draft);}task.revision++;task.updatedAt=draft.updatedAt;validateAutomaticListingTask(task);db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),task.id);}
+      this.persistence.putRecord(record);
+      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.fixed-brand-migrated','固定 Generic 独立本地迁移',JSON.stringify({version:1,operationId:op.id,before,after:clone(record)}),draft.updatedAt);
+      return clone(draft);
+    });}finally{this.busy.delete(record.draft.id);}
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
   applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false, checkpoint?: (draft:AmazonDraft, db:DatabaseSync)=>void): AmazonDraft {

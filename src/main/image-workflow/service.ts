@@ -493,7 +493,7 @@ export class ImageWorkflowService {
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
-      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||new CompletionJournal(this.db,this.directory).unknown(run.contentPreparation.operationId)))throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
+      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&!run.contentPreparation.operationId)throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
       let sourceColorEvidenceSha256:string|undefined;
       if(this.listing.prepareSourceColors){
         const prepared=await this.listing.prepareSourceColors({draftId:run.draftId,draftRevision:initial.revision},signal);
@@ -656,7 +656,10 @@ export class ImageWorkflowService {
           if(!plan.output.productUnderstanding?.sufficient||riskEnabled&&plan.output.ipRisk?.verdict!=='PASS')throw new UserFacingError('原图片规划尚未通过来源或 IP 初筛');
           if(['GENERATING','UNKNOWN'].includes(attempt.state)){
             const recovered=await this.generation.reconcileWorkflowGeneration(attempt.requestId);
-            if(!recovered){attempt.state='UNKNOWN';slot.status='UNKNOWN';slot.error=attempt.error='生图响应结果未知，已核对本地生成记录仍无法确认；保留次数并停止，不重发付费请求';this.save(run);throw new UserFacingError(slot.error);}
+            if(!recovered){
+              if(slot.attempts.length>=run.maxAttempts){slot.status='FAILED';slot.error=attempt.error='生图结果无法恢复且已用完尝试次数；原请求和费用记录保留';this.save(run);throw new UserFacingError(slot.error);}
+              attempt.state='RETRYABLE_FAILURE';slot.status='PENDING';attempt.error='已核对原生图记录仍无法恢复；按已授权规则重试缺失步骤，原请求和费用记录保留';this.save(run);continue;
+            }
             attempt.candidateId=recovered.id;attempt.state='GENERATED';attempt.error=null;this.save(run);
           }
           let local:Awaited<ReturnType<Generator['readCandidate']>>;

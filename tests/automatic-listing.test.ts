@@ -1634,3 +1634,108 @@ test('UI adaptation keeps source display but blocks apply if task changes during
  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
  setImmediate(()=>f.service.pause(task.id));const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(preview.canApply,false);assert.match(preview.blockers.join('；'),/任务.*变化/);assert.equal(preview.sources.length,1);assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.images,0);
 });
+
+test('Schema retries only its GET while waiting and resumes the original row after success',async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const f=fixture(t);let gets=0,prepares=0,ready=false;
+  const original=f.dependencies.amazon.prepareDrafts;
+  const selected={targetId:f.target.id,productType:'BOX',requirements:'LISTING',parentageLevel:'NONE',locale:'en_US'} as const;
+  f.dependencies.amazon.prepareDrafts=async(...args)=>{prepares++;if(!ready){const e=new SchemaTransientError('BODY_INCOMPLETE');e.selection=selected;throw e;}return original(...args);};
+  (f.dependencies.amazon as any).getSchema=async()=>{gets++;if(gets===1){const e=new SchemaTransientError('BODY_INCOMPLETE');e.selection=selected;throw e;}ready=true;return {};};
+  const created=await f.create();f.service.startAuthorized(f.service.prepareStart(created.id));await f.service.waitForIdle();
+  const waiting=f.service.get(created.id);assert.equal(waiting.status,'WAITING');assert.equal(waiting.items[0].schemaRetry?.usedDelayedRounds,0);
+  const counts=structuredClone(f.calls);await f.service.refreshWaiting();assert.equal(gets,0);
+  t.mock.timers.tick(30_001);await f.service.refreshWaiting();assert.equal(gets,1);assert.equal(prepares,1);assert.deepEqual(f.calls,counts);
+  assert.equal(f.service.get(created.id).items[0].schemaRetry?.usedDelayedRounds,1);
+  t.mock.timers.tick(90_001);await f.service.refreshWaiting();await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
+  assert.equal(gets,2);assert.equal(prepares,2);assert.equal(f.calls.sources,counts.sources);assert.equal(f.calls.submissions,1);
+  assert.equal(f.service.get(created.id).items[0].schemaRetry?.state,'SUCCEEDED');
+});
+
+async function schemaWaitingFixture(t:test.TestContext){
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  const f=fixture(t),selected={targetId:f.target.id,productType:'BOX',requirements:'LISTING',parentageLevel:'NONE',locale:'en_US'} as const;
+  const failure=()=>Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:selected});
+  const healthyPrepare=f.dependencies.amazon.prepareDrafts;
+  f.dependencies.amazon.prepareDrafts=async()=>{throw failure();};let gets=0;
+  f.dependencies.amazon.getSchema=async()=>{gets++;throw failure();};
+  const created=await f.create();f.service.startAuthorized(f.service.prepareStart(created.id));await f.service.waitForIdle();
+  return {...f,id:created.id,get gets(){return gets;},failure,healthyPrepare};
+}
+test('Schema delayed budget expires after three rounds and explicit resume cannot reset it',async t=>{
+  const f=await schemaWaitingFixture(t),counts=structuredClone(f.calls);
+  for(const ms of [30_001,90_001,180_001]){t.mock.timers.tick(ms);await f.service.refreshWaiting();}
+  assert.equal(f.gets,3);assert.equal(f.service.get(f.id).items[0].schemaRetry?.state,'EXHAUSTED');assert.deepEqual(f.calls,counts);
+  f.service.startAuthorized(f.service.prepareStart(f.id));await f.service.waitForIdle();assert.equal(f.gets,3);assert.equal(f.service.get(f.id).items[0].schemaRetry?.usedDelayedRounds,3);
+});
+test('Schema deadline and permanent errors stop without additional row preparation',async t=>{
+  const f=await schemaWaitingFixture(t);t.mock.timers.tick(600_001);await f.service.refreshWaiting();
+  assert.equal(f.gets,0);assert.equal(f.service.get(f.id).items[0].schemaRetry?.state,'EXHAUSTED');
+});
+for(const action of ['pause','cancel','suspend','confirm','revoke'] as const)test(`Schema due GET respects ${action}`,async t=>{
+  const f=await schemaWaitingFixture(t);t.mock.timers.tick(30_001);
+  if(action==='pause')f.service.pause(f.id);else if(action==='cancel')f.service.cancel(f.id);else if(action==='suspend')f.service.suspendScheduling();else if(action==='confirm')(f.service as any).confirming.add(f.id);else (f.service as any).grants.delete(f.id);
+  await f.service.refreshWaiting();assert.equal(f.gets,0);
+});
+for(const action of ['pause','cancel','close','source'] as const)test(`Schema GET reservation survives in-flight ${action} and does not resume paid work`,async t=>{
+  const f=await schemaWaitingFixture(t),counts=structuredClone(f.calls);let release!:()=>void;
+  const started=new Promise<void>(resolve=>{f.dependencies.amazon.getSchema=async()=>{resolve();await new Promise<void>(r=>release=r);return {} as any;};});
+  t.mock.timers.tick(30_001);const observation=f.service.refreshWaiting();await started;
+  assert.equal(f.service.get(f.id).items[0].schemaRetry?.usedDelayedRounds,1);
+  let closing:Promise<void>|undefined,closed=false;
+  if(action==='pause')f.service.pause(f.id);else if(action==='cancel')f.service.cancel(f.id);else if(action==='close'){closing=f.service.close().then(()=>{closed=true;});await new Promise(r=>setImmediate(r));assert.equal(closed,false);}else f.product.revision++;
+  release();await observation;await closing;assert.deepEqual(f.calls,counts);
+  if(action!=='close')assert.notEqual(f.service.get(f.id).status,'QUEUED');
+});
+test('restart revokes Schema grant and explicit resume retains consumed rounds',async t=>{
+  const f=await schemaWaitingFixture(t);t.mock.timers.tick(30_001);await f.service.refreshWaiting();await f.service.close();
+  const reopened=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>reopened.close());
+  assert.equal(reopened.get(f.id).status,'PAUSED');assert.equal(reopened.get(f.id).items[0].schemaRetry?.usedDelayedRounds,1);
+  t.mock.timers.tick(90_001);await reopened.refreshWaiting();assert.equal(f.gets,1);
+  reopened.startAuthorized(reopened.prepareStart(f.id));await reopened.waitForIdle();assert.equal(f.gets,2);assert.equal(reopened.get(f.id).items[0].schemaRetry?.usedDelayedRounds,2);
+});
+test('Schema receipts strictly reject unknown fields, impossible rounds and signed URLs',async t=>{
+  const f=await schemaWaitingFixture(t),saved=f.service.get(f.id);
+  for(const patch of [{usedDelayedRounds:4},{deadlineAt:new Date(Date.now()+700_000).toISOString()},{url:'https://secret.test/signed'}]){
+    const bad=structuredClone(saved);Object.assign(bad.items[0].schemaRetry!,patch);assert.throws(()=>validateAutomaticListingTask(bad));
+  }
+  const old=structuredClone(saved);delete old.items[0].schemaRetry;assert.doesNotThrow(()=>validateAutomaticListingTask(old));
+});
+
+test('older backup retains Schema delayed rounds and deadline without restoring permission',async t=>{
+  const {retainSchemaRetryBudgets}=await import('../src/main/automatic-listing/schema-retry-budget.ts');
+  const f=await schemaWaitingFixture(t),old=f.service.get(f.id);
+  t.mock.timers.tick(30_001);await f.service.refreshWaiting();
+  const snapshotDir=mkdtempSync(join(resolve('.test-data'),'schema-backup-')),snapshot=openDatabase(snapshotDir),current=openDatabase(f.directory);
+  try{
+    snapshot.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(old.id,JSON.stringify(old));
+    retainSchemaRetryBudgets(current,snapshot);
+    const restored=validateAutomaticListingTask(JSON.parse(String(snapshot.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(old.id)!.record_json)));
+    assert.equal(restored.items[0].schemaRetry?.usedDelayedRounds,1);assert.equal(restored.items[0].schemaRetry?.deadlineAt,old.items[0].schemaRetry?.deadlineAt);assert.equal(restored.status,'PAUSED');
+  }finally{snapshot.close();current.close();rmSync(snapshotDir,{recursive:true,force:true});}
+});
+test('Schema grant never leaks to another waiting task',async t=>{
+  const f=await schemaWaitingFixture(t),other=structuredClone(f.service.get(f.id));other.id=randomUUID();other.items[0].schemaRetry!.scope=(f.service as any).schemaScope(other,other.items[0],other.items[0].schemaRetry!.selection);
+  (f.service as any).tasks.set(other.id,other);(f.service as any).save(other);
+  t.mock.timers.tick(30_001);await f.service.refreshWaiting();assert.equal(f.gets,1);assert.equal(f.service.get(other.id).items[0].schemaRetry?.usedDelayedRounds,0);
+});
+
+test('a later image failure after Schema success can explicitly continue without resetting Schema history',async t=>{
+  const f=await schemaWaitingFixture(t),complete=f.dependencies.images.complete;
+  f.dependencies.amazon.prepareDrafts=f.healthyPrepare;
+  f.dependencies.amazon.getSchema=async()=>({} as any);
+  f.dependencies.images.complete=async()=>{throw new UserFacingError('Later local image failure');};
+  t.mock.timers.tick(30_001);await f.service.refreshWaiting();await new Promise(r=>setImmediate(r));await f.service.waitForIdle();
+  const row=f.service.get(f.id).items[0];assert.equal(row.schemaRetry?.state,'SUCCEEDED');assert.equal(row.status,'FAILED');
+  f.dependencies.images.complete=complete;
+  f.service.startAuthorized(f.service.prepareStart(f.id));await f.service.waitForIdle();
+  assert.equal(f.calls.submissions,1);assert.equal(f.service.get(f.id).items[0].schemaRetry?.usedDelayedRounds,1);
+});
+test('a permanent error in the delayed Schema GET exhausts the receipt without preparing the row',async t=>{
+  const f=await schemaWaitingFixture(t),counts=structuredClone(f.calls);let calls=0;
+  f.dependencies.amazon.getSchema=async()=>{calls++;throw new UserFacingError('Amazon Schema checksum 校验失败');};
+  t.mock.timers.tick(30_001);await f.service.refreshWaiting();t.mock.timers.tick(180_001);await f.service.refreshWaiting();
+  assert.equal(calls,1);assert.equal(f.service.get(f.id).items[0].schemaRetry?.state,'EXHAUSTED');assert.match(f.service.get(f.id).items[0].error!,/checksum/);assert.deepEqual(f.calls,counts);
+});

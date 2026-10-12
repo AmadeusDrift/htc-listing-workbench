@@ -34,7 +34,20 @@ export interface AutomaticListingQueue {
   targetId:string; scope:{mode:'demo'|'live';sellerId:string;marketplaceId:string};ruleRevision:number;
   products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;profitFilteredCount?:number;notSelectedCount?:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
 }
+export interface AutomaticSchemaRetry {
+  version: 1;
+  scope: string;
+  selection: import('./amazon-contracts.ts').SchemaSelection;
+  originalStage: AutomaticListingStage;
+  firstFailureAt: string;
+  dueAt: string;
+  deadlineAt: string;
+  usedDelayedRounds: number;
+  state: 'WAITING' | 'IN_FLIGHT' | 'SUCCEEDED' | 'EXHAUSTED';
+  reason: 'SCHEMA_TRANSIENT';
+}
 export interface AutomaticListingItem {
+  schemaRetry?: AutomaticSchemaRetry;
   /** Written in the same SQLite transaction as the local pricing draft update. */
   pricingRefresh?: { draftRevision:number; draftStamp:string; previousDraftRevision:number; previousDraftStamp:string; previousReason:string|null };
   rejection?:{workflowId:string;detail:NonNullable<import('./image-workflow-contracts.ts').ImageWorkflowRun['rejection']>};

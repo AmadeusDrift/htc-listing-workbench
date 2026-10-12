@@ -1,3 +1,4 @@
+import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
 import { assertImageWorkflowHistory } from './history.ts';
 import { currentImageAdaptation,partialSourceBlocker,partialRiskModeBlocker,workflowHash } from './adaptation.ts';
@@ -743,7 +744,7 @@ export class ImageWorkflowService {
               }catch(error){
                 if(error instanceof AiError&&'notSent' in error&&error.notSent===true){
                   attempt.state='READY';attempt.error=`生图请求尚未发送 [NOT_SENT]：${publicError(error)}；本位置和原请求编号已保留，请处理后继续`;
-                  slot.error=attempt.error;slot.status='FAILED';this.save(run);throw new UserFacingError(attempt.error);
+                  slot.error=attempt.error;slot.status='FAILED';this.save(run);if(isSchemaTransientError(error))throw error;throw new UserFacingError(attempt.error);
                 }
                 const known=error instanceof AiError&&'definitive' in error&&error.definitive===true;
                 attempt.state=known?'RETRYABLE_FAILURE':'UNKNOWN';attempt.error=`${known?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}：${publicError(error)}`;slot.error=attempt.error;slot.status=known?'FAILED':'UNKNOWN';this.save(run);
@@ -790,6 +791,7 @@ export class ImageWorkflowService {
       this.captureRejection(run,error);
       run.status=signal.aborted?'CANCELLED':error instanceof AiError&&!['NOT_CONFIGURED','DISABLED','SOURCE_CHANGED','CONFIG_CHANGED'].includes(error.code)?'FAILED':'BLOCKED';
       run.error=signal.aborted?'自动准备已停止，已通过图片和尝试次数保留':run.stage==='ip-check'&&error instanceof AiError?`阿里云图片侵权检测未完成：${publicError(error)}。请核对图片审核增强版开通状态、访问权限和额度；本商品已停止。`:publicError(error);this.save(run);
+      if(isSchemaTransientError(error))throw error;
     }
     try{result.draft=this.amazon.getDraft(run.draftId);}catch{/* Preserve the last valid draft. */}
     return {...result,workflow:structuredClone(run)};
@@ -934,6 +936,7 @@ export class ImageWorkflowService {
       this.captureRejection(run,error);
       run.status=signal.aborted?'CANCELLED':error instanceof AiError && !['NOT_CONFIGURED','DISABLED','SOURCE_CHANGED','CONFIG_CHANGED'].includes(error.code)?'FAILED':'BLOCKED';
       run.error=signal.aborted?'自动准备已停止，未自动重发请求':run.stage==='ip-check' && error instanceof AiError?`阿里云图片侵权检测未完成：${publicError(error)}。请核对图片审核增强版开通状态、访问权限和额度；本商品已停止。`:publicError(error); this.save(run);
+      if(isSchemaTransientError(error))throw error;
       try { result.draft=this.amazon.getDraft(run.draftId); } catch { /* Keep the last known draft. */ }
       return {...result,workflow:structuredClone(run)};
     }

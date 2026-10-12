@@ -399,3 +399,23 @@ test('live pre-submit readback rejects before token refresh or network access', 
   await assert.rejects(f.service.readListing(d), /提交|回读/);
   assert.equal(f.requests.length, count); assert.equal(f.service.getDraft(d.id).state, 'DRAFT');
 });
+
+test('Schema body read exhaustion is typed with validated selection and no signed URL', async t => {
+  const f=fixture(t),target=await f.service.importCredentials(creds);
+  const selected={targetId:target.id,productType:'STORAGE_BAG',requirements:'LISTING',parentageLevel:'NONE',locale:'en_US'};
+  f.hook(url=>url.hostname.endsWith('.s3.amazonaws.com')?new Response(new ReadableStream({start(controller){controller.error(new Error('broken body'));}}),{status:200}):undefined);
+  await assert.rejects(f.service.getSchema(selected),error=>{
+    assert.equal((error as any).name,'SchemaTransientError');
+    assert.deepEqual((error as any).selection,selected);
+    assert.equal(JSON.stringify(error).includes('s3.amazonaws.com'),false);return true;
+  });
+  assert.equal(f.requests.filter(r=>r.url.hostname.endsWith('.s3.amazonaws.com')).length,3);
+});
+
+for(const failure of ['checksum','redirect','unauthorized','json'] as const)test(`permanent Schema ${failure} never becomes a delayed transient`,async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=fixture(t),target=await f.service.importCredentials(creds),selected={targetId:target.id,productType:'STORAGE_BAG',requirements:'LISTING',parentageLevel:'NONE',locale:'en_US'};
+  if(failure==='checksum')f.corruptChecksum();
+  else f.hook(url=>url.hostname.endsWith('.s3.amazonaws.com')?failure==='redirect'?new Response('',{status:302,headers:{location:'https://example.test'}}):failure==='unauthorized'?new Response('',{status:403}):new Response('broken JSON',{status:200}):undefined);
+  await assert.rejects(f.service.getSchema(selected),e=>!(e instanceof SchemaTransientError));
+});

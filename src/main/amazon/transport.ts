@@ -1,3 +1,4 @@
+import { SchemaTransientError } from './schema-retry.ts';
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -210,6 +211,7 @@ export class AmazonTransport {
             if (code === 401 || code === 403) { this.clear(target.id); this.hooks.pause(target.id, 'Amazon 授权或权限失败，店铺已暂停'); authPaused = true; }
           }); }
         catch { if (!write && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
+          if(operation==='getDefinitionsProductType')throw new SchemaTransientError('NETWORK');
           throw new AmazonTransportError(write ? '提交连接中断，结果未知；请回读核对，禁止重放' : 'Amazon 网络请求失败或超时', null, null, write); }
         status = result.status; headers = result.headers;
         const { requestId, rateLimit } = this.hooks.redact(metadata(headers)); if (rateLimit) this.nextAllowed.set(rateKey, this.now() + 1000 / Number(rateLimit));
@@ -225,6 +227,7 @@ export class AmazonTransport {
           // Receiving HTTP 200 does not mean the streamed JSON finished. Only
           // retry read/preview requests; a formal submission remains unknown.
           if (!write && result.bodyUnavailable === 'read' && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
+          if(operation==='getDefinitionsProductType'&&status===200&&result.bodyUnavailable==='read')throw new SchemaTransientError('BODY_INCOMPLETE');
           const reason = result.bodyUnavailable === 'limit' ? 'Amazon 响应正文超过允许大小' : 'Amazon 响应正文读取中断或超时';
           throw new AmazonTransportError(write ? `${reason}，提交结果未知；请回读核对，禁止重放` : reason, status, requestId, write, this.errorBody(result));
         }
@@ -341,14 +344,15 @@ export class AmazonTransport {
     if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || !trusted || isIP(url.hostname)) throw new UserFacingError('Amazon Schema 地址不可信，下载已阻止');
     const start = this.now(); let status: number | null = null; let headers = new Headers(); let attempts = 0; let category: string | null = null;
     try {
-      const addresses = await this.bounded(() => this.resolveAddresses(url.hostname));
+      let addresses:string[];
+      try{addresses=await this.bounded(() => this.resolveAddresses(url.hostname));}catch{throw new SchemaTransientError('NETWORK');}
       const proxySchema = !!this.schemaFetcher && officialProxySchema(url);
       if (!addresses.length || addresses.some(address => !publicAddress(address) && !(proxySchema && fakeIpAddress(address)))) throw new UserFacingError('Amazon Schema 地址解析到非公开网络，下载已阻止');
       let result: HttpResult | undefined;
       for (let attempt = 0; attempt < 3; attempt++) {
         this.hooks.active(target.id); attempts++;
         try { result = await this.http(url.href, { method: 'GET', headers: { accept: 'application/json' }, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }, this.maxSchemaBytes, undefined, this.schemaFetcher ?? this.fetcher); }
-        catch { if (attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; } throw new UserFacingError('Amazon Schema 下载失败或超时'); }
+        catch { if (attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; } throw new SchemaTransientError('NETWORK'); }
         status = result.status; headers = result.headers;
         if ((status >= 500 || status === 429) && attempt < 2) { const delay = this.delay(headers, attempt); if (delay <= 30_000) { await this.sleep(delay); continue; } }
         if (status >= 300 && status < 400) throw new UserFacingError('Amazon Schema 下载包含重定向，已阻止');
@@ -356,7 +360,7 @@ export class AmazonTransport {
         if (result.bodyUnavailable === 'limit') throw new UserFacingError('Amazon Schema 正文超过允许大小，内容未缓存');
         if (result.bodyUnavailable) {
           if (attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
-          throw new UserFacingError('Amazon Schema 正文下载未完成或超时，内容未缓存，请稍后重试');
+          throw new SchemaTransientError('BODY_INCOMPLETE');
         }
         break;
       }

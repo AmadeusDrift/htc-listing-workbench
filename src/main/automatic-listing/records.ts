@@ -1,3 +1,4 @@
+import { selection } from '../amazon/context.ts';
 import { validateWorkflowRejection } from '../image-workflow/rejection.ts';
 import { SOURCE_CONSISTENCY_OUTCOMES } from '../../shared/source-image-consistency-contracts.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
@@ -30,7 +31,7 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
@@ -43,6 +44,16 @@ function item(raw: unknown): AutomaticListingItem {
     draftId: value.draftId === null ? null : identifier(value.draftId), executionTaskIds: (value.executionTaskIds as unknown[]).map(identifier),
     imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts, 21), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
+  if(value.schemaRetry!==undefined){
+    const r=record(value.schemaRetry,'Schema 重试',['version','scope','selection','originalStage','firstFailureAt','dueAt','deadlineAt','usedDelayedRounds','state','reason']);
+    if(Object.keys(r).length!==10||r.version!==1||r.reason!=='SCHEMA_TRANSIENT'||!['WAITING','IN_FLIGHT','SUCCEEDED','EXHAUSTED'].includes(String(r.state))
+      ||!['SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION'].includes(String(r.originalStage)))fail();
+    const selected=record(r.selection,'Schema 选择',['targetId','productType','parentageLevel','requirements','locale']);
+    if(Object.keys(selected).length!==5)fail();
+    result.schemaRetry={version:1,scope:hash(r.scope),selection:selection(selected),originalStage:r.originalStage as AutomaticListingItem['stage'],firstFailureAt:date(r.firstFailureAt),dueAt:date(r.dueAt),deadlineAt:date(r.deadlineAt),usedDelayedRounds:counter(r.usedDelayedRounds,3),state:r.state as NonNullable<AutomaticListingItem['schemaRetry']>['state'],reason:'SCHEMA_TRANSIENT'};
+    const retry=result.schemaRetry,first=Date.parse(retry.firstFailureAt),due=Date.parse(retry.dueAt),deadline=Date.parse(retry.deadlineAt);
+    if(deadline!==first+600_000||due<first||due>deadline||retry.state==='IN_FLIGHT'&&!retry.usedDelayedRounds)fail();
+  }
   if(value.pricingRefresh!==undefined){
     const refresh=record(value.pricingRefresh,'本地定价检查点',['draftRevision','draftStamp','previousDraftRevision','previousDraftStamp','previousReason']);
     if(Object.keys(refresh).length!==5||!result.draftId)fail();
@@ -183,6 +194,7 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
     if(a.version!==1||!Array.isArray(a.blockedKeys)||(a.blockedKeys as unknown[]).some(key=>typeof key!=='string'||!items.some(r=>r.key===key))||!Array.isArray(a.previousRules)||a.previousRules.length>1000)fail();
     result.adaptation={version:1,token:hash(a.token),at:date(a.at),blockedKeys:a.blockedKeys as string[],previousRules:(a.previousRules as unknown[]).map(raw=>{const r=record(raw,'历史规则',['stamp','revision']);return {stamp:hash(r.stamp),revision:counter(r.revision)};})};
   }
+  for(const row of items)if(row.schemaRetry&&row.schemaRetry.selection.targetId!==result.targetId)fail();
   for(const row of items)if(row.outcome){const expected=outcomeScope(result,row),actual=row.outcome.scope;
     if(result.adaptation?.previousRules.some(r=>r.stamp===actual.rulesStamp&&r.revision===actual.ruleRevision)){expected.rulesStamp=actual.rulesStamp;expected.ruleRevision=actual.ruleRevision;}
     if(fingerprint(actual)!==fingerprint(expected))fail();

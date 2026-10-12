@@ -214,3 +214,19 @@ export function retainImagePlanningAttempts(current:DatabaseSync,snapshot:Databa
     snapshot.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(retained.id,JSON.stringify(retained));
   }
 }
+
+/** Keep the known received-response barrier even when restoring a snapshot predating it. */
+export function retainSchemaResponseCalls(current:DatabaseSync,snapshot:DatabaseSync):void {
+  const has=(db:DatabaseSync)=>db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_calls'").get();
+  if(!has(current)||!has(snapshot))return;
+  for(const row of current.prepare("SELECT id,record_json FROM ai_calls WHERE json_extract(record_json,'$.schemaResponseRetained')=1").all()){
+    const call=validateAiCall(JSON.parse(String(row.record_json)));
+    const old=snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
+    if(old){
+      const previous=validateAiCall(JSON.parse(String(old.record_json)));
+      if(previous.productId!==call.productId||previous.providerId!==call.providerId||previous.startedAt!==call.startedAt||previous.model!==call.model)throw new AiError('INVALID_CONFIG');
+      if(previous.status==='SUCCEEDED')throw new AiError('INVALID_CONFIG');
+    }
+    snapshot.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(call.id,JSON.stringify(call));
+  }
+}

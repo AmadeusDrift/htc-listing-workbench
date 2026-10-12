@@ -172,3 +172,29 @@ test('preview failure keeps the same operation and consumes no field call budget
   const after=db.prepare('SELECT id,record_json FROM listing_completion_operations').all();
   assert.deepEqual(after.map(row=>row.id),before.map(row=>row.id));assert.equal(JSON.parse(String(after[0].record_json)).state,'DONE');db.close();
 });
+
+for(const paid of [false,true])test(`Schema transient ${paid?'after':'before'} field response preserves operation and paid counts`,async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=await fixture(t),listing=new ListingAiService(f.store,f.amazon,f.ai,()=>false);
+  f.amazon.previewDraft=async()=>{const draft=f.amazon.getDraft(f.draft.id);return{...draft,state:draft.fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:draft.fieldAdoptions?.length?[]:[issue]};};
+  const original=f.ai.listingFields.bind(f.ai);let failing=true;
+  f.ai.listingFields=(context,fresh,...rest)=>original(context,async()=>{await fresh();if(failing&&(!paid||f.requests.length)){const error=new SchemaTransientError('BODY_INCOMPLETE');error.selection=f.draft.schema;throw error;}},...rest);
+  const operation=listing.beginCompletion(f.reference);
+  await assert.rejects(listing.complete(f.reference,undefined,operation.id),e=>e instanceof SchemaTransientError);
+  assert.equal(f.requests.length,paid?1:0);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);
+  if(paid){assert.equal(f.ai.listCalls()[0].schemaResponseRetained,true);assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,150);}
+  failing=false;const result=await listing.complete(f.reference,undefined,operation.id);
+  assert.equal(f.requests.length,1);assert.equal(result.draft.fieldAdoptions?.length,1);
+});
+
+test('Schema-interrupted review retains response and fees but blocks without a second paid review',async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});
+  const original=f.ai.listingFields.bind(f.ai);let failing=true;
+  f.ai.listingFields=(context,fresh,review,...rest)=>original(context,async()=>{await fresh();if(failing&&review&&f.requests.length===2)throw Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:f.draft.schema});},review,...rest);
+  const operation=f.listing.beginCompletion(f.reference);
+  await assert.rejects(f.listing.complete(f.reference,undefined,operation.id),e=>e instanceof SchemaTransientError);
+  assert.equal(f.requests.length,2);assert.equal(f.ai.listCalls().filter(c=>c.schemaResponseRetained).length,1);
+  failing=false;await assert.rejects(f.listing.complete(f.reference,undefined,operation.id),/已收到响应/);
+  assert.equal(f.requests.length,2);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);
+});

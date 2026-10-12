@@ -6,7 +6,7 @@ const SOURCE_MAX_BYTES=16*1024*1024;
 const MAX_BYTES = 200000, MAX_FILES = 10000, MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const managedName = /^\d{17}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 const canonical = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
-export type AiOutputRejectionStage = 'provider-response-validation' | 'operation-output-validation' | 'source-freshness' | 'result-record-validation';
+export type AiOutputRejectionStage = 'provider-response-validation' | 'operation-output-validation' | 'source-freshness' | 'schema-freshness-transient' | 'result-record-validation';
 
 function safeDirectory(path: string): void {
   const info = lstatSync(path);
@@ -89,7 +89,7 @@ function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{re
         const path=join(folder,entry),info=lstatSync(path);
         if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>(operation==='source-image-consistency'?SOURCE_MAX_BYTES:MAX_BYTES)||canonical(realpathSync(path))!==canonical(path))continue;
         const raw=JSON.parse(readFileSync(path,'utf8'));
-        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&['provider-response-validation','operation-output-validation','source-freshness','result-record-validation'].includes(raw.rejectionStage))values.push(raw);
+        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&['provider-response-validation','operation-output-validation','source-freshness','schema-freshness-transient','result-record-validation'].includes(raw.rejectionStage))values.push(raw);
       }catch{/* A damaged diagnostic does not hide another retained response. */}
     }
   }catch{/* Missing evidence remains an explicit unrecoverable output. */}
@@ -106,7 +106,7 @@ export function hasInvalidAiResponse(directory:string,call:AiCall,operation:stri
   });
 }
 export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
-  return readInvalidAiRecords(directory,call,operation).filter(record=>(record.rejectionStage==='operation-output-validation'&&(operation!=='image-plan'||typeof record.output==='object')||operation==='image-plan'&&record.rejectionStage==='provider-response-validation'&&record.rejectionReason==='RESPONSE_JSON_INVALID'&&typeof record.output==='string')&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
+  return readInvalidAiRecords(directory,call,operation).filter(record=>(call.schemaResponseRetained&&record.rejectionStage==='schema-freshness-transient'&&record.rejectionReason==='SCHEMA_TRANSIENT'||record.rejectionStage==='operation-output-validation'&&(operation!=='image-plan'||typeof record.output==='object')||operation==='image-plan'&&record.rejectionStage==='provider-response-validation'&&record.rejectionReason==='RESPONSE_JSON_INVALID'&&typeof record.output==='string')&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
 }
 
 /** Includes malformed/provider-incomplete text: its presence must never authorize a paid retry. */
@@ -114,6 +114,6 @@ export function hasRetainedInvalidAiOutput(directory:string,call:AiCall,operatio
 
 /** Provider refusal/tool requests and credential echoes are not repairable format failures. */
 export function imagePlanRetryForbidden(directory:string,call:AiCall):boolean {
- if(call.imagePlanRetryBlock)return true;
+ if(call.imagePlanRetryBlock||call.schemaResponseRetained)return true;
  return readInvalidAiRecords(directory,call,'image-plan').some(record=>['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(record.rejectionReason??'')||JSON.stringify(record.output??null).includes('[omitted: credential echo]'));
 }

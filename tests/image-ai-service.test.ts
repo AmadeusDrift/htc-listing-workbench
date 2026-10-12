@@ -1597,3 +1597,41 @@ test('R2 malformed envelope credential echo stays blocked after restore without 
  const store=new WorkspaceStore(prepared.stagingDirectory),hosting=new HostingService(prepared.stagingDirectory,store,mockStorage);let requests=0;const ai=new AiService(prepared.stagingDirectory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('Restored secret echo must not resend');}});
  try{ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});assert.equal(ai.getCall(call.id)!.imagePlanRetryBlock,'RESPONSE_SECRET_ECHO');await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(requests,0);}finally{await ai.close();await hosting.close();store.close();}
 });
+
+for(const paid of [false,true])test(`Schema transient ${paid?'after':'before'} paid image reply retains response and never repeats POST`,async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=await fixture(t),before=f.requests.length,workflowId=randomUUID();let failing=true;
+  const fresh=()=>{if(failing&&(!paid||f.requests.length>before)){const error=new SchemaTransientError('BODY_INCOMPLETE');error.selection=f.draft.schema;throw error;}};
+  await assert.rejects(f.ai.imagePlan(f.context,fresh,undefined,undefined,workflowId),e=>e instanceof SchemaTransientError);
+  assert.equal(f.requests.length,before+(paid?1:0));
+  if(paid){const call=f.ai.listCalls().find(c=>c.presentationContext?.workflowId===workflowId)!;assert.equal(call.responseReceived,true);assert.equal(call.schemaResponseRetained,true);assert.equal(call.usage.promptTokens+call.usage.completionTokens,150);}
+  failing=false;
+  const recovered=await f.ai.imagePlan(f.context,fresh,undefined,undefined,workflowId);
+  assert.equal(recovered.output.kind,'image-plan');assert.equal(f.requests.length,before+1);
+  if(paid)assert.equal(recovered.imagePlanRecovery?.parserVersion,'image-plan-recovery/v2');
+});
+
+for(const missing of [true,false])test(`retained Schema image response ${missing?'with missing diagnostic':'with changed context'} cannot authorize a new POST`,async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const f=await fixture(t),before=f.requests.length,workflowId=randomUUID();let failing=true;
+  const fresh=()=>{if(failing&&f.requests.length>before)throw Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:f.draft.schema});};
+  await assert.rejects(f.ai.imagePlan(f.context,fresh,undefined,undefined,workflowId));failing=false;
+  if(missing)rmSync(join(f.directory,'ai-diagnostics'),{recursive:true,force:true});
+  const context=structuredClone(f.context);if(!missing)context.listing.schemaVersion+='changed';
+  await assert.rejects(f.ai.imagePlan(context,fresh,undefined,undefined,workflowId));assert.equal(f.requests.length,before+1);
+});
+
+test('Schema retained paid response marker survives an older backup call record',async t=>{
+  const {SchemaTransientError}=await import('../src/main/amazon/schema-retry.ts');
+  const {retainSchemaResponseCalls}=await import('../src/main/ai/usage.ts');
+  const f=await fixture(t),before=f.requests.length,workflowId=randomUUID();
+  await assert.rejects(f.ai.imagePlan(f.context,()=>{if(f.requests.length>before)throw Object.assign(new SchemaTransientError('BODY_INCOMPLETE'),{selection:f.draft.schema});},undefined,undefined,workflowId));
+  const current=openDatabase(f.directory),folder=mkdtempSync(resolve('.test-data/schema-paid-backup-')),snapshot=openDatabase(folder);
+  try{
+    const call=f.ai.listCalls().find(c=>c.presentationContext?.workflowId===workflowId)!;
+    const old={...call,status:'RUNNING',errorCode:null,finishedAt:null};delete old.schemaResponseRetained;delete old.responseReceived;
+    snapshot.prepare('INSERT INTO ai_calls VALUES(?,?)').run(call.id,JSON.stringify(old));retainSchemaResponseCalls(current,snapshot);
+    const retained=JSON.parse(String(snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id)!.record_json));
+    assert.equal(retained.schemaResponseRetained,true);assert.equal(retained.responseReceived,true);assert.deepEqual(retained.usage,call.usage);
+  }finally{snapshot.close();current.close();rmSync(folder,{recursive:true,force:true});}
+});

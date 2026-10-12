@@ -1,7 +1,9 @@
+import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import { AiError } from '../ai/errors.ts';
 
 /** Main-only proof: validation failed before any generation POST could be dispatched. */
 export function imageRequestNotSent(error:unknown):AiError&{notSent:true}{
+  if(isSchemaTransientError(error))return Object.assign(error,{notSent:true as const});
   const safe=new AiError(error instanceof AiError?error.code:'PROVIDER_ERROR');
   if(error instanceof AiError)safe.message=error.message;
   return Object.assign(safe,{notSent:true as const});

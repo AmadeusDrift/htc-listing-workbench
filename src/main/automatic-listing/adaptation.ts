@@ -16,7 +16,7 @@ import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 export const adaptationSubmitted=(draft:AmazonDraft|undefined)=>!!draft&&(!!draft.submittedAt||['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state));
 const stable=(value:unknown):unknown=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,stable(v)])):value;
 const matchesRecipe=(row:AutomaticListingItem,recipe:SalesRecipe)=>row.salesPlan?row.salesPlan.recipe.key===recipe.key:recipe.components.length===1&&recipe.components[0].variantId===row.variantId&&recipe.components[0].quantity===recipe.components[0].sourcePackPieces;
-export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingDependencies,busy:boolean){
+export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingDependencies,busy:boolean,db?:DatabaseSync){
   if(!deps.store.getProductSnapshot)throw new UserFacingError('此版本缺少只读来源接口，请更新后检查');
   const rules=deps.rules(),sources=[...new Set(task.items.map(r=>r.productId))].map(id=>deps.store.getProductSnapshot!(id));
   const receipts=sources.map(p=>deps.sourceReceipt?.(p.id)??null);
@@ -52,7 +52,7 @@ export function adaptationState(task:AutomaticListingTask,deps:AutomaticListingD
     if(draft&&deps.amazon.previewTaskAdaptation){
       try{
         const projected=deps.amazon.previewTaskAdaptation(draft.id,p,recipes.get(p.id)?.find(r=>matchesRecipe(row,r)));
-        const image=inspectImageAdaptation(deps.images.getProgress(draft.id),draft,projected,p);
+        const image=inspectImageAdaptation(deps.images.getProgress(draft.id),draft,projected,p,db);
         if(!image.compatible&&pricingOutcome(projected,rules)?.kind!=='RULE_FILTERED'){add(row,'BLOCKED',image.message,['图片依赖']);continue;}
         projections.set(row.key,projected);
         const fields=[...new Set([...Object.keys(draft.attributes),...Object.keys(projected.attributes)])].filter(f=>fingerprint(draft.attributes[f]??null)!==fingerprint(projected.attributes[f]??null));

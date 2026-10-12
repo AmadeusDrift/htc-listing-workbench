@@ -146,7 +146,7 @@ export class AutomaticListingService {
     const products=[...new Set(task.items.map(row=>row.productId))],drafts=task.items.flatMap(row=>row.draftId?[row.draftId]:[]);
     const calls=this.db.prepare("SELECT id,json_extract(record_json,'$.status') status,json_extract(record_json,'$.finishedAt') finishedAt,json_extract(record_json,'$.responseReceived') responseReceived FROM ai_calls WHERE json_extract(record_json,'$.productId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(products));
     const operations=this.db.prepare("SELECT id,json_extract(record_json,'$.revision') revision,json_extract(record_json,'$.state') state,json_extract(record_json,'$.updatedAt') updatedAt FROM listing_completion_operations WHERE json_extract(record_json,'$.draftId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(drafts));
-    const state=adaptationState(task,this.deps,this.busy||calls.some(call=>call.status==='RUNNING'));
+    const state=adaptationState(task,this.deps,this.busy||calls.some(call=>call.status==='RUNNING'),this.db);
     const naming={settings:this.db.prepare("SELECT value_json FROM amazon_settings WHERE key='sku_naming_v1'").get()??null,groups:this.db.prepare('SELECT record_json FROM sku_naming_groups ORDER BY id').all()};
     state.preview.token=fingerprint({base:state.preview.token,naming,calls:calls.map(call=>[call.id,call.status,call.finishedAt,call.responseReceived]),operations});
     return state;

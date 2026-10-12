@@ -1,4 +1,4 @@
-import { currentImageAdaptation } from './adaptation.ts';
+import { currentImageAdaptation, adaptedImageInputsMatch } from './adaptation.ts';
 import { isFullSchema } from '../listing-ai/full-schema.ts';
 import { imageActualInputsMatch } from './context-compatibility.ts';
 import { validateWorkflowRejection, assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
@@ -168,7 +168,7 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
     const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
     const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
   };
-  if(run.imageContext&&!isFullSchema(run.imageContext.listing)&&!imageActualInputsMatch(run.imageContext,draft,product,current,run.imageRecipeSha256))throw new UserFacingError('来源规格、图片、店铺或站点已变化，原图片与付费请求已保留');
+  if(run.imageContext&&!isFullSchema(run.imageContext.listing)&&!imageActualInputsMatch(run.imageContext,draft,product,current,run.imageRecipeSha256)&&!adaptedImageInputsMatch(db,run,draft,product,current))throw new UserFacingError('来源规格、图片、店铺或站点已变化，原图片与付费请求已保留');
   const legacy=buildListingContext(draft,product,current.targetGeneration,true);
   for(const evidence of legacy.evidence)if(!current.evidence.some(item=>item.id===evidence.id))current.evidence.push(evidence);
   for(const evidence of run.imageContext?.listing.evidence??[]){

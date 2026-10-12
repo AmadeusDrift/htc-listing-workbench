@@ -13,7 +13,7 @@ test('every current sales SKU belongs to exactly one summary bucket across all s
 test('waiting and failure reasons identify the actual step without leaking raw errors',()=>{
  for(const [patch,text] of [
   [{status:'WAITING',stage:'READBACK'},'等待 Amazon 回读'],
-  [{status:'WAITING',stage:'LABELS'},'标签尚未完成'],
+  [{status:'WAITING',stage:'LABELS'},'平台建档结果待核对'],
   [{status:'WAITING',stage:'DRAFT'},'等待字段处理'],
   [{status:'FAILED',outcome:{kind:'UNKNOWN',code:'FIELD_RESULT_UNKNOWN'}},'字段请求结果未知'],
   [{status:'FAILED',outcome:{kind:'UNKNOWN',code:'IMAGE_RESULT_UNKNOWN'}},'图片请求结果未知'],

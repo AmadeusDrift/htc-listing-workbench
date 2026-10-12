@@ -6,6 +6,8 @@ import {realAmazonSchema} from './fixtures/amazon/schema-fixture.ts';
 import {saveInput} from './fixtures/listing-ai.ts';
 import {sourceStamp} from '../src/main/automatic-listing/records.ts';
 import {imageWorkflowDraftStamp} from '../src/main/image-workflow/records.ts';
+import {buildSalesRecipes} from '../src/main/sales-plans/recipes.ts';
+import {qualifiedPricing} from '../src/main/automatic-listing/outcomes.ts';
 import {pricingOutcome,outcomeScope} from '../src/main/automatic-listing/outcomes.ts';
 import {ListingRuleStore} from '../src/main/listing-rules.ts';
 import {pricingBlockingReason} from '../src/main/image-workflow/deferred-fields.ts';
@@ -84,17 +86,21 @@ test('profit preview uses current cost and shipping rules locally and never edit
 });
 
 
-for(const change of ['copy','source-title','unrelated-rules','price-still-blocked','price-qualified','ceiling-qualified','shipping-still-blocked','package-default','missing-cost','quantity-conflict','invalid-proof'] as const)
+for(const change of ['copy','source-title','unrelated-rules','price-still-blocked','price-qualified','ceiling-qualified','shipping-still-blocked','package-default','missing-cost','quantity-conflict','manual-quantity','invalid-proof'] as const)
 test(`historical profit queue requires qualified local repricing after ${change}`,async t=>{
  let rules:ListingRuleStore;t.after(()=>rules?.close());const f=await legacyOwner(t);rules=new ListingRuleStore(f.directory);
  const high=saveInput(f.store.getProduct(f.product.id));high.variants[0].purchasePrice='100';const source=f.store.saveProduct(high);
- const record=f.p.record(f.draft.id);record.draft.productRevision=source.revision;f.p.putRecord(record);
+ const record=f.p.record(f.draft.id);record.draft.productRevision=source.revision;
+ if(change==='manual-quantity')record.draft.salesPlan={namingGroupId:randomUUID(),sourceGroupKey:'same-source',collectedAt:source.createdAt,collectionBasis:'first_import',sku:record.draft.sku,baseSku:record.draft.sku,recipe:buildSalesRecipes(source,null,rules.get())[0],parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null};
+ f.p.putRecord(record);
  const draft=f.amazon.applyBusinessDefaults({id:record.draft.id,revision:record.draft.revision});
  assert.equal(draft.businessRules!.pricingDecision!.status,'business_blocked');
  const owner=f.ownerService(),task=(owner as any).tasks.get(f.taskId),row=task.items[0];
  Object.assign(row,{productRevision:source.revision,sourceStamp:sourceStamp(source),status:'SCREENED',repair:null});
+ if(draft.salesPlan){row.salesPlan=draft.salesPlan;row.key=row.productId+':'+draft.salesPlan.recipe.key;}
  row.outcome={version:1,...pricingOutcome(draft,rules.get()),message:'Historical profit rejection',classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};task.status='COMPLETED';(owner as any).save(task);
  (owner as any).deps.rules=()=>rules.get();
+ if(change==='manual-quantity'){(owner as any).deps.planSales=()=>[];(owner as any).deps.previewSales=()=>buildSalesRecipes(f.store.getProduct(source.id),null,rules.get());}
  const before=JSON.stringify(owner.get(f.taskId));
  if(change==='copy'){const r=f.p.record(draft.id);r.draft.revision++;r.draft.attributes.item_name=[{value:'Rewritten copy'}];f.p.putRecord(r);}
  if(change==='source-title'){const input=saveInput(f.store.getProduct(source.id));input.title='New title';f.store.saveProduct(input);}
@@ -104,10 +110,22 @@ test(`historical profit queue requires qualified local repricing after ${change}
  if(change==='shipping-still-blocked'){const r=rules.get();r.pricing.deliveryTiers=r.pricing.deliveryTiers.map(tier=>({...tier,ordinary:tier.ordinary+1}));rules.save(r);}
  if(change==='package-default'){const r=rules.get();r.product.packageWeight=200;rules.save(r);}
  if(change==='quantity-conflict'){const input=saveInput(f.store.getProduct(source.id));input.variants[0].originalSpec='5 pc / 10 pc';input.variants[0].normalizedSpec='5 pc / 10 pc';f.store.saveProduct(input);}
+ if(change==='manual-quantity'){
+   const input=saveInput(f.store.getProduct(source.id));input.variants[0].purchasePrice='2.4';const current=f.store.saveProduct(input);
+   const r=f.p.record(draft.id);r.draft.attributes.number_of_items=[{value:2,marketplace_id:draft.marketplaceId}];f.p.putRecord(r);
+   const preview=f.amazon.previewPricing(draft.id,current);
+   assert.ok(preview.businessRules!.quote,'low cost produces a numerical quote despite the manual contradiction');
+   assert.equal(preview.businessRules!.pricingDecision!.evidence.saleUnit,'unconfirmed');
+   assert.equal(qualifiedPricing(preview,rules.get()),false,'a numerical quote cannot authorize contradictory sale quantity');
+   assert.equal(pricingOutcome(preview,rules.get())?.kind,'NEEDS_INPUT');
+   const contradictory=structuredClone(preview);contradictory.businessRules!.pricingDecision!.evidence.saleUnit='confirmed';
+   assert.equal(qualifiedPricing(contradictory,rules.get()),false,'a claimed confirmation cannot bypass disagreement with the current recipe');
+ }
  if(change==='invalid-proof'){const r=f.p.record(draft.id);r.draft.businessRules.pricingDecision.inputs.costCny=0;f.p.putRecord(r);}
  const queue=await owner.queue({productIds:[source.id],targetId:f.target.id}),qualified=['price-qualified','ceiling-qualified'].includes(change);
  assert.equal(queue.products[0].eligibleCount,qualified?1:0);
- if(!['missing-cost','quantity-conflict','invalid-proof'].includes(change)&&!qualified)assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');
+ if(!['missing-cost','quantity-conflict','manual-quantity','invalid-proof'].includes(change)&&!qualified)assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');
+ if(change==='manual-quantity')assert.equal(queue.products[0].rows[0].kind,'NEEDS_INPUT');
  assert.equal(JSON.stringify(owner.get(f.taskId)),before,'queue must preserve task, attempts and original outcome');assert.equal(f.requests.length,0);assert.equal(f.previews(),0);
  if(!qualified)await assert.rejects(owner.create({productIds:[source.id],targetId:f.target.id,profileId:'alpha'}));
 });

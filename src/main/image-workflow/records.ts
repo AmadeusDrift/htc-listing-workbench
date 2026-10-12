@@ -152,13 +152,18 @@ export function imageWorkflowDraftStamp(draft: AmazonDraft): string {
   return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
 }
 export function workflowRuns(db: DatabaseSync, draftId?: string): ImageWorkflowRun[] {
-  const runs=db.prepare('SELECT id,record_json FROM image_workflow_runs ORDER BY rowid DESC').all().map(row => {
+  // Scope before parsing/validating: a progress read must not revalidate every
+  // other draft's contexts. Same-draft history remains complete for reuse proofs.
+  const rows = draftId
+    ? db.prepare("SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? ORDER BY rowid DESC").all(draftId)
+    : db.prepare('SELECT id,record_json FROM image_workflow_runs ORDER BY rowid DESC').all();
+  const runs=rows.map(row => {
     const run = validateStoredImageWorkflowRun(JSON.parse(String(row.record_json)));
     assertWorkflowRejectionOwner(run,id=>{const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id);return row?validateAiCall(JSON.parse(String(row.record_json))):undefined;},id=>{const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);return row?validateStoredAiResult(JSON.parse(String(row.record_json))):undefined;},id=>readCompletionForRejection(db,id));
     if (run.id !== row.id) throw new UserFacingError('图片流程记录身份不一致'); return run;
   });
   for(const run of runs)if(run.sourceReuse)assertPartialSourceReuse(run,runs.find(source=>source.id===run.sourceReuse!.sourceRunId),db);
-  return runs.filter(run => !draftId || run.draftId === draftId);
+  return runs;
 }
 export function approvedWorkflowAsset(db: DatabaseSync, draft: AmazonDraft, product: ProductDetail): { id: string; sha256: string } | null {
   return approvedWorkflowAssets(db,draft,product)?.[0]??null;

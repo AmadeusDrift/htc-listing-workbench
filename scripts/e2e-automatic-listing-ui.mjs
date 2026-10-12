@@ -127,7 +127,7 @@ try {
  await page.evaluate(()=>window.fixture.queueMode=null);await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(start).toBeEnabled();
  pass('selected target drives recipe counts, partial filters retain healthy recipes, all filtered products leave pending and remain in the reason tab');
  await expect(start).toBeEnabled();
- await expect(page.getByText(/每件商品按来源顺序取前 2 个来源规格/)).toBeVisible();
+ await expect(page.getByText(/每个来源链接按配置、资料和代表性选择，最多 2 个销售 SKU，不含说明性选项/)).toBeVisible();
  await page.evaluate(()=>window.fixture.consent=false);await start.click();
  await expect(start).toBeEnabled();assert.equal(await page.evaluate(()=>window.fixture.tasks.length),0);
  await page.evaluate(()=>window.fixture.consent=true);await start.click();

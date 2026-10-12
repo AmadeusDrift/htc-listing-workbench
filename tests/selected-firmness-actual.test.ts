@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
+import { WorkspaceStore } from '../src/main/store.ts';
+import { AmazonService } from '../src/main/amazon/service.ts';
+import { AiService } from '../src/main/ai/service.ts';
+import { HostingService } from '../src/main/hosting/service.ts';
+import { ListingAiService } from '../src/main/listing-ai/service.ts';
+import { ImageWorkflowService } from '../src/main/image-workflow/service.ts';
+import { assertCurrentImageCategoryExclusions } from '../src/main/listing-ai/current-evidence.ts';
+const snapshot=process.env.FIRMNESS_SOURCE_DB,assets=process.env.FIRMNESS_SOURCE_ASSETS;
+test('actual 87 image entry corrects the original DONE locally and survives commit interruption and restart', {skip:!snapshot||!assets?'Requires explicit isolated source snapshot and asset paths':false},async()=>{
+ fs.mkdirSync('.test-data',{recursive:true});const directory=fs.mkdtempSync(path.resolve('.test-data/firmness-actual-'));
+ fs.copyFileSync(snapshot!,path.join(directory,'red.sqlite'));fs.cpSync(assets!,path.join(directory,'assets'),{recursive:true});
+ let requests=0;const deny=async()=>{requests++;throw Error('NETWORK_FORBIDDEN');};
+ const storage={isEncryptionAvailable:()=>false,encryptString:()=>{throw Error('No secrets');},decryptString:()=>{throw Error('No secrets');}};
+ const store=new WorkspaceStore(directory),amazon=new AmazonService(directory,id=>store.getProduct(id),storage,{schemaFetch:deny,dataFetch:deny}),hosting=new HostingService(directory,store,storage),ai=new AiService(directory,store,hosting,storage,{fetch:deny}),listing=new ListingAiService(store,amazon,ai,()=>false),db=new DatabaseSync(path.join(directory,'red.sqlite'));
+ const make=()=>new ImageWorkflowService(directory,store,amazon,ai,{getConnection:()=>({enabled:false,configured:false}),configurationScope:()=> 'offline'} as any,{listing});let images=make();
+ try{
+  const task=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks LIMIT 1').get()!.record_json)),row=task.items.find((i:any)=>i.sku==='H2-261008-87');
+  const saved=db.prepare('SELECT target_json,credential_generation FROM amazon_targets WHERE id=?').get(task.targetId)!,target=JSON.parse(String(saved.target_json));amazon.getTarget=()=>structuredClone(target);amazon.executionTargetScope=()=>({target:structuredClone(target),generation:Number(saved.credential_generation)});
+  const original=amazon.getDraft(row.draftId),ops=ai.completionJournal.list(original.id),op=ops.at(-1)!,prior=images.getProgress(original.id)!;
+  assert.equal(original.revision,4);assert.equal(row.repair,null);assert.equal(row.repairAttempts,0);assert.equal(op.state,'DONE');assert.equal(prior.contentPreparation?.state,'DONE');
+  const tables=['ai_calls','ai_results','ai_usage_ledger','assets','facts','variants','products','amazon_exchanges','automatic_listing_tasks'];
+  const digest=()=>Object.fromEntries(tables.map(name=>[name,createHash('sha256').update(JSON.stringify(db.prepare('SELECT * FROM '+name+' ORDER BY rowid').all())).digest('hex')]));const before=digest();
+  const migrate=amazon.migrateSelectedFirmness.bind(amazon);let interrupted=false;
+  amazon.migrateSelectedFirmness=(...args)=>{const draft=migrate(...args);if(!interrupted&&draft.revision!==original.revision){interrupted=true;throw Error('after correction commit');}return draft;};
+  const first=await images.complete({draftId:original.id,draftRevision:original.revision});
+  assert.equal(interrupted,true);assert.equal(first.workflow.contentPreparation?.state,'STARTED');assert.equal(amazon.getDraft(original.id).revision,5);
+  await images.close();images=make();
+  const updated=amazon.getDraft(original.id),resumed=await images.complete({draftId:updated.id,draftRevision:updated.revision});
+  assert.equal(resumed.workflow.id,prior.id);assert.equal(resumed.workflow.contentPreparation?.state,'DONE');assert.deepEqual(resumed.workflow.contentPreparation?.remaining,[]);assert.equal(resumed.workflow.contentPreparation?.operationId,op.id);
+  assert.equal((resumed.draft.attributes.special_feature as any)[0].value,'Hard Bristles');assert.deepEqual(resumed.draft.fieldAdoptions,original.fieldAdoptions);
+  const attributes=structuredClone(resumed.draft.attributes);attributes.special_feature=original.attributes.special_feature;assert.deepEqual(attributes,original.attributes);
+  assert.deepEqual(resumed.workflow.slots,prior.slots);assert.equal(resumed.workflow.attempt,prior.attempt);assert.equal(resumed.aiCalls,0);assert.equal(resumed.previewAttempts,0);
+  const again=await listing.complete({draftId:updated.id,draftRevision:updated.revision},undefined,op.id);assert.equal(again.draft.revision,5);assert.deepEqual(again.remaining,[]);
+  assert.equal(ai.completionJournal.list(original.id).length,ops.length);assert.deepEqual(ai.completionJournal.get(op.id).rounds,op.rounds);assert.deepEqual(digest(),before);assert.equal(requests,0);
+  assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='listing.selected-firmness-corrected'").get()!.n,1);
+  const context=listing.currentAuthorizationContext(updated,store.getProduct(updated.productId),Number(saved.credential_generation));
+  assert.throws(()=>assertCurrentImageCategoryExclusions(context,{plans:[{output:{kind:'image-plan',expectedText:[{text:'Soft Bristles',evidenceIds:[`${updated.variantId}:spec`]}]}} as any]}),/冲突/);
+ }finally{await images.close();await ai.close();await hosting.close();amazon.close();store.close();db.close();fs.rmSync(directory,{recursive:true,force:true});}
+});

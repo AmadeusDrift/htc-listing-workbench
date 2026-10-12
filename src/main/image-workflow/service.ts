@@ -64,7 +64,7 @@ function assertImageSchemaCurrent(schema:AmazonSchema,snapshot:ListingAiContext)
   const displayOnly=schema.version===snapshot.schemaVersion&&snapshot.fullSchema&&sameSchemaValidation(schema,snapshot.fullSchema);
   if(!unchanged&&!displayOnly)throw new UserFacingError('Amazon 字段规则已更新，当前图片依据与新 Schema 不兼容，请重新核对字段规则');
 }
-type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'hasRetainedFieldReferences'|'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'|'currentAuthorizationContext'>> & {
+type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'hasSelectedFirmnessCorrection'|'hasRetainedFieldReferences'|'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'|'currentAuthorizationContext'>> & {
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
@@ -517,7 +517,7 @@ export class ImageWorkflowService {
       throwIfAborted(signal);
       this.reevaluatePolicy(run,initial);
       const cached=run.contentPreparation;
-      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId))||this.listing.hasRetainedFieldReferences?.(initial))){
+      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId))||this.listing.hasRetainedFieldReferences?.(initial)||this.listing.hasSelectedFirmnessCorrection?.(initial))){
         const op=new CompletionJournal(this.db).get(cached.operationId);
         if(op.state==='DONE'){
           if(cached.state==='DONE'&&(cached.draftRevision!==initial.revision||cached.draftSha256&&cached.draftSha256!==imageWorkflowDraftStamp(initial)))throw new UserFacingError('旧事实恢复对应的草稿已变化，原记录保留');

@@ -671,6 +671,35 @@ export class AmazonService {
     db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
     return clone(draft);
   }
+  /** Local correction has its own audit; historical AI results/adoptions remain immutable. */
+  migrateSelectedFirmness(input:DraftReference,completionId:string,prove:(draft:AmazonDraft)=>import('../listing-ai/selected-firmness.ts').SelectedFirmnessCorrection|null,revalidate:(draft:AmazonDraft)=>string[]):AmazonDraft {
+    const record=this.checked(input);this.enter(record.draft.id);
+    try{return this.persistence.transaction(()=>{
+      const draft=record.draft,proof=prove(draft);if(!proof)return clone(draft);
+      this.mutable(record);this.currentProduct(record);this.active(draft.targetId);
+      const db=this.persistence.db,journal=new CompletionJournal(db),op=journal.get(completionId);
+      if(op.state!=='DONE'||op.scopedRepair||op.draftId!==draft.id||op.safetyScopeHash!==completionSafetyScope(draft)||op.draftRevision!==draft.revision||op.draftStamp!==completionDraftStamp(draft)||journal.unknown(op.id))throw new UserFacingError('规格硬度纠正检查点不匹配，保留原记录');
+      if(journal.list(draft.id).some(other=>other.id!==op.id&&!['DONE','RETIRED'].includes(other.state)))throw new UserFacingError('仍有未完成字段请求，未纠正规格硬度');
+      if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.submitStarted')=1").get(draft.id))throw new UserFacingError('已有提交意图，未纠正规格硬度');
+      const owners=db.prepare("SELECT t.record_json FROM automatic_listing_tasks t WHERE EXISTS(SELECT 1 FROM json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=?)").all(draft.id).map(saved=>validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+      for(const task of owners)for(const row of task.items.filter(row=>row.draftId===draft.id)){
+        if(task.targetId!==draft.targetId||task.sellerId!==draft.sellerId||task.marketplaceId!==draft.marketplaceId||task.mode!==draft.mode||row.productId!==draft.productId||row.productRevision!==draft.productRevision||row.variantId!==draft.variantId||row.sku!==draft.sku||row.batchId||row.status==='DONE'||(row.repair&&(row.repair.operationId!==op.id||row.repair.draftRevision!==draft.revision||row.repair.draftStamp!==imageWorkflowDraftStamp(draft)||!['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING'].includes(row.repair.phase))))throw new UserFacingError('自动任务规格硬度检查点不匹配，保留原记录');
+      }
+      const before=clone(record);
+      draft.attributes.special_feature=clone(proof.after);draft.revision++;draft.previewedAt=null;record.preview=null;
+      draft.localIssues=[...listingProgramIssues(draft.listingProgram,draft.schema,draft.attributes),...validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema),...imageIssues(draft.attributes),...copyPolicyIssues(draft),...this.declarationIssues(draft)];
+      draft.state=draft.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';record.request=this.request(record);
+      op.remaining=revalidate(draft);op.draftRevision=draft.revision;op.draftStamp=completionDraftStamp(draft);
+      this.event(record,'save','按当前选中规格独立纠正旧软毛特点；保留原始事实、AI响应及预算');journal.save(op);
+      for(const task of owners.filter(task=>task.items.some(row=>row.draftId===draft.id&&row.repair))){for(const row of task.items.filter(row=>row.draftId===draft.id)){
+        if(row.repair){row.repair.draftRevision=draft.revision;row.repair.draftStamp=imageWorkflowDraftStamp(draft);row.repair.remaining=clone(op.remaining);}
+      }task.revision++;task.updatedAt=draft.updatedAt;validateAutomaticListingTask(task);db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),task.id);}
+      this.persistence.putRecord(record);
+      const after=clone(record);db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.selected-firmness-corrected','当前规格硬度本地纠正',JSON.stringify({version:1,operationId:op.id,proof,before,after,beforeSha256:createHash('sha256').update(JSON.stringify(before)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(after)).digest('hex')}),draft.updatedAt);
+      return clone(draft);
+    });}finally{this.busy.delete(record.draft.id);}
+  }
+
   /** Independent local rule migration. It never expands the theme adoption grant. */
   migrateFixedBrand(input:DraftReference,completionId:string):AmazonDraft {
     const record=this.checked(input);this.enter(record.draft.id);

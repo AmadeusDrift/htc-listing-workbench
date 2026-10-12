@@ -837,10 +837,10 @@ export class AutomaticListingService {
       let result:Awaited<ReturnType<NonNullable<AutomaticListingDependencies['repairFields']>>>;
       try{result=await this.deps.repairFields(row.draftId!,this.controller!.signal,repair.operationId);}
       catch(error){
-        // A local fixed-brand migration commits the owner checkpoint together
+        // A local brand or selected-firmness migration commits the owner checkpoint together
         // with the draft. Do not overwrite it with stale in-memory state if a
         // caller is interrupted immediately after that transaction returns.
-        if(op.scopedRepair&&op.state==='DONE'){
+        if(op.state==='DONE'){
           const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
           if(saved){
             const durable=validateAutomaticListingTask(JSON.parse(String(saved.record_json))),items=task.items;

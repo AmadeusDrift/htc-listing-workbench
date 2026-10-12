@@ -1,3 +1,4 @@
+import { selectedFirmnessCorrection } from './selected-firmness.ts';
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
@@ -183,6 +184,11 @@ export class ListingAiService {
     const issues = isFullSchema(context)?[...fullCopyPolicyIssues(result.output),...nativeCandidateIssues(result.output,context)]:[...validatePolicyOutputs(draft.schema, values),...result.output.candidates.flatMap(c => validateFieldValues(draft.schema, draft.marketplaceId, c.field, c.items.map(i => i.value), draft.attributes))];
     if (issues.some(i => i.severity === 'ERROR')) throw new UserFacingError(`候选字段不符合规则：${issues.slice(0, 3).map(i => i.message).join('；')}`);
     return result.output;
+  }
+  hasSelectedFirmnessCorrection(draft:AmazonDraft):boolean {
+    if(!JSON.stringify(draft.attributes.special_feature??null).includes('Soft Bristles'))return false;
+    const context=this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation);
+    return selectedFirmnessCorrection(draft,context,id=>this.ai.getResult(id))!==null;
   }
   hasRetainedFieldReferences(draft:AmazonDraft):boolean {
     return !this.copyReviewEnabled()&&this.ai.listResults(draft.productId).some(r=>!r.fieldCandidateRecovery&&r.listingContext?.draftId===draft.id&&r.output.kind==='amazon-fields'&&r.output.missing.some(m=>m.reason.includes('[FIELD_REFERENCE]')&&draft.attributes[m.field]===undefined));
@@ -407,6 +413,11 @@ export class ListingAiService {
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
     refresh();
+    if(operation.state==='DONE'&&!operation.scopedRepair){
+      const contextFor=(value:AmazonDraft)=>this.currentAuthorizationContext(value,this.store.getProduct(value.productId),this.amazon.executionTargetScope(value.targetId).generation);
+      draft=this.amazon.migrateSelectedFirmness({id:draft.id,revision:draft.revision},operation.id,value=>selectedFirmnessCorrection(value,contextFor(value),id=>this.ai.getResult(id)),value=>currentPolicyRemaining(value,contextFor(value),id=>this.ai.getResult(id)));
+      operation=journal.get(operation.id);
+    }
     if(operation.state==='DONE'&&operation.scopedRepair){
       draft=this.amazon.migrateFixedBrand({id:draft.id,revision:draft.revision},operation.id);
       operation=journal.get(operation.id);

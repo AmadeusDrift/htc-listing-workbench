@@ -88,13 +88,20 @@ export function parseFullOutput(raw:unknown):ListingFieldsOutput {
   }
   return result;
 }
+/** A supplied, explicitly bound source image is its own citation, not a made-up text fact.
+ * Source/context freshness and protected-field authority remain checked by their owners. */
+function fullReference(context:Pick<ListingAiContext,'evidence'> & Partial<ListingAiContext>,id:string):boolean {
+  if(context.evidence.some(e=>e.id===id))return true;
+  return !!context.variantId&&context.sourceProduct?.selectedSku.id===context.variantId
+    &&context.sourceProduct.assets.some(asset=>asset.id===id&&asset.variantIds.includes(context.variantId!));
+}
 /** Resolve explicit current-SKU aliases only; never match another variant by text. */
 function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext):void {
   const ids=new Set(c.evidence.map(e=>e.id));
   for(const candidate of [...output.candidates]){
     const bad:string[]=[];
     for(const item of candidate.items)item.evidenceIds=[...new Set(item.evidenceIds.flatMap(id=>{
-      if(ids.has(id))return [id];
+      if(fullReference(c,id))return [id];
       if((id===c.variantId||id===c.sku)&&ids.has(`${c.variantId}:spec`))return [`${c.variantId}:spec`];
       if(id.startsWith(`${c.sku}:`)){const mapped=c.variantId+id.slice(c.sku.length);if(ids.has(mapped))return [mapped];}
       bad.push(id);return [];
@@ -147,7 +154,7 @@ export function assertFullEvidence(output:ListingFieldsOutput,context:Pick<Listi
   const properties=context.fullSchema?.schema.properties;
   for(const c of output.candidates){
     if(properties&&(!object(properties)||!Object.hasOwn(properties,c.field)))fail(`Schema 未定义字段 ${c.field}`);
-    for(const item of c.items)for(const id of item.evidenceIds)if(!context.evidence.some(e=>e.id===id))fail(`字段 ${c.field} 引用不存在的来源 ${id}`);
+    for(const item of c.items)for(const id of item.evidenceIds)if(!fullReference(context,id))fail(`字段 ${c.field} 引用不存在的来源 ${id}`);
   }
 
 }
@@ -173,7 +180,7 @@ export function assertFullReview(review:ListingFieldsReviewOutput,candidate:List
   assertFullEvidence(candidate,context);
   const expected=candidate.candidates.flatMap(c=>c.items.map((_,index)=>`${c.field}:${index}`));
   if(review.checks.length!==expected.length||new Set(review.checks.map(c=>`${c.field}:${c.index}`)).size!==expected.length||review.checks.some(c=>!expected.includes(`${c.field}:${c.index}`)))fail('复核未覆盖全部候选');
-  for(const c of review.checks)for(const id of [...c.evidenceIds,...c.claims.flatMap(claim=>claim.evidenceIds)])if(!context.evidence.some(e=>e.id===id))fail('复核引用不存在的来源');
+  for(const c of review.checks)for(const id of [...c.evidenceIds,...c.claims.flatMap(claim=>claim.evidenceIds)])if(!fullReference(context,id))fail('复核引用不存在的来源');
 }
 const validators=new Map<string,ValidateFunction>();
 function compiled(c:ListingAiContext){let v=validators.get(c.schemaSha256);if(!v){v=compileAttributesSchema(c.fullSchema!.schema,c.fullSchema!.metaSchema);if(validators.size>=32)validators.delete(validators.keys().next().value!);validators.set(c.schemaSha256,v);}return v;}

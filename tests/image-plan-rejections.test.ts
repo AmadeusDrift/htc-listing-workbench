@@ -92,10 +92,14 @@ test('empty prompts require an explicit source refusal and do not relax set-plan
     (raw:any)=>{delete raw.productUnderstanding;},
     (raw:any)=>{raw.productUnderstanding.uncertainties=[];},
     (raw:any)=>{raw.productUnderstanding.referenceAssetIds=[randomUUID()];},
-    (raw:any)=>{raw.setPlan.slots[0].prompt='';},
     (raw:any)=>{raw.setPlan.slots[1].evidenceIds=['unknown-source'];},
     (raw:any)=>{raw.setPlan.slots[1].prompt='Product length is 999 cm.';}
   ]){const {raw,context}=fixture(43);alter(raw);assert.throws(()=>replay(raw,context));}
+});
+
+test('an explicit refusal may omit child instructions but never authorizes generation',()=>{
+ const {raw,context}=fixture(43);raw.setPlan!.slots[0].prompt='';const plan=replay(raw,context);
+ assert.equal(plan.productUnderstanding?.sufficient,false);assert.throws(()=>imageGenerationPrompt(plan,context));
 });
 
 test('Chinese camera clauses separated by enumeration commas are qualitative photography, not product sizes',()=>{

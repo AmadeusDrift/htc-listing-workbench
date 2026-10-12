@@ -20,6 +20,7 @@ import { isGeminiImageModel, relayDefaultQuality } from '../../shared/image-mode
 import { builtInModels, fetchRelayModels } from './catalog.ts';
 import { GeminiRelayAdapter } from './gemini-adapter.ts';
 import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
+import { recordErrorEvidence } from '../error-evidence.ts';
 
 export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
@@ -110,14 +111,14 @@ export class ImageGenerationService {
   private assertConfig(config: ImageGenerationConfig): void {
     const value = this.vault.inspect(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
   }
-  private controlled<T>(task: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
+  private controlled<T>(task: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
     this.ensureOpen(); if (this.running) return Promise.reject(new AiError('BUSY'));
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AiError('TIMEOUT')), this.timeoutMs);
     const cancel = () => controller.abort(callerSignal?.reason instanceof AiError ? callerSignal.reason : new AiError('CANCELLED'));
     if (callerSignal?.aborted) cancel(); else callerSignal?.addEventListener('abort', cancel, { once: true });
     const state = { controller, promise: undefined as unknown as Promise<T> }; this.running = state;
     state.promise = abortable(Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal); }), controller.signal)
-      .catch(error => { throw error instanceof AiError ? error : new AiError('PROVIDER_ERROR'); })
+      .catch(error => { try{beforeMap?.(error);}catch{/* Keep original failure mapping. */} throw error instanceof AiError ? error : new AiError('PROVIDER_ERROR'); })
       .finally(() => { clearTimeout(timer); callerSignal?.removeEventListener('abort', cancel); if (this.running === state) this.running = undefined; });
     return state.promise;
   }
@@ -157,11 +158,13 @@ export class ImageGenerationService {
     return (await this.readCandidate(id)).candidate;
   }
   private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string}):Promise<GeneratedImageCandidate>{
-    let enteredAdapter=false;
+    let enteredAdapter=false,stage='validation',recorded=false;let productId:string|undefined;
+    const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId,requestOutcome:!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
-    const config = this.config(true), input = parseInput(raw, config.provider, config.model); this.assertProduct(input);
+    const config = this.config(true), input = parseInput(raw, config.provider, config.model);productId=input.productId; this.assertProduct(input);
     return await this.controlled(async signal => {
+      stage='references';
       const assets = input.referenceAssetIds.map(id => {
         const asset = this.store.getAssetRecord(id); if (!asset || asset.productId !== input.productId) throw new AiError('SOURCE_CHANGED');
         validateImage(asset, false); return asset;
@@ -182,31 +185,33 @@ export class ImageGenerationService {
       if (assertWorkflowFresh) await abortable(Promise.resolve().then(assertWorkflowFresh), signal);
       throwIfAborted(signal); this.assertProduct(input, assets); this.assertConfig(config);
       const request = { apiKey: config.apiKey, prompt: input.prompt, size: input.size, quality: input.quality, background: input.background, references };
-      enteredAdapter=true;
+      stage='request';enteredAdapter=true;
       const result = config.provider === 'tyai' ? await (isGeminiImageModel(config.model) ? this.gemini : this.relay).generate({ ...request, model: config.model as TyaiImageModel }, signal)
         : await this.adapter.generate({ ...request, model: config.model as OpenAiImageModel }, signal);
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
+      stage='revalidate';
       for (const asset of assets) await readManagedImage(this.directory, asset, signal);
       throwIfAborted(signal); this.assertProduct(input, assets); this.assertConfig(config);
       let preview: Buffer;
+      stage='preview';
       try { preview = this.decodePreview(result.bytes); const shape = inspectRaster(preview); if (shape.mimeType !== 'image/png' || preview.length > 4 * 1024 * 1024) throw new Error(); }
-      catch { throw invalidImageOutput('preview'); }
+      catch(error) { record(error);throw invalidImageOutput('preview'); }
       const candidate: GeneratedImageCandidate = { id: attempt?.requestId??randomUUID(), provider: config.provider, model: config.model, mode: assets.length ? 'edit' : 'generate',
         productId: input.productId, productRevision: input.productRevision, createdAt: new Date().toISOString(), requestId: result.requestId,
         sourceAssets: assets.map(asset => ({ id: asset.id, sha256: asset.sha256 })), reviewState: 'unreviewed', mimeType: 'image/png',
         width: result.width, height: result.height, byteSize: result.bytes.length, sha256: digest(result.bytes), previewUrl: `data:image/png;base64,${preview.toString('base64')}`,...(editSource?{editSource}:{}) };
       // Commit the candidate directory together; no event-loop gap after final freshness checks.
-      this.saveCandidate(candidate, result.bytes, preview);
+      stage='save';this.saveCandidate(candidate, result.bytes, preview,record);
       return candidate;
-    }, callerSignal);
-    }catch(error){throw enteredAdapter?error:imageRequestNotSent(error);}
+    }, callerSignal,error=>{if(!recorded)record(error);});
+    }catch(error){if(!recorded)record(error);throw enteredAdapter?error:imageRequestNotSent(error);}
   }
   /** Main-process workflow entry point; never accepts or returns a caller-selected filesystem path. */
   async readCandidate(id: string): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
     this.ensureOpen(); return readCandidateFiles(this.directory, id, this.decodePreview);
   }
-  private saveCandidate(candidate: GeneratedImageCandidate, bytes: Buffer, preview: Buffer): void {
+  private saveCandidate(candidate: GeneratedImageCandidate, bytes: Buffer, preview: Buffer, record:(error:unknown)=>void): void {
     let temporary: string | undefined;
     try {
       const root = privateDirectory(this.directory, 'image-generation', true), candidates = privateDirectory(root, 'candidates', true);
@@ -215,7 +220,7 @@ export class ImageGenerationService {
       const { previewUrl: _preview, ...metadata } = candidate;
       writeFileSync(join(temporary, 'candidate.json'), JSON.stringify({ ...metadata, previewSha256: digest(preview) }, null, 2) + '\n', { flag: 'wx' });
       renameSync(temporary, join(candidates, candidate.id)); temporary = undefined;
-    } catch { throw invalidImageOutput('save'); }
+    } catch(error) { record(error);throw invalidImageOutput('save'); }
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
   cancel(reason = new AiError('CANCELLED')): void { this.running?.controller.abort(reason); }

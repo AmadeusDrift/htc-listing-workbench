@@ -76,7 +76,10 @@ export function providerError(status: number, body: unknown): AiError {
   const value=status===401?'AUTH_FAILED':status===403?'SERVICE_PERMISSION_REQUIRED':status===402||code==='insufficient_quota'||code==='billing_hard_limit_reached'?'QUOTA_EXCEEDED':status===429?'RATE_LIMITED':'PROVIDER_ERROR';
   // Gateway/server failures can occur after the provider generated and charged for an image.
   // Only explicit request rejections permit a new paid attempt; everything else needs reconciliation.
-  return Object.assign(new AiError(value),{definitive:[400,401,402,403,404,405,413,415,422,429].includes(status)});
+  const definitive=[400,401,402,403,404,405,413,415,422,429].includes(status);
+  const safe=Object.assign(new AiError(value),{definitive,...(Number.isInteger(status)&&status>=400&&status<=599?{httpStatus:status}:{})});
+  safe.message+=`${'httpStatus' in safe?`（HTTP ${safe.httpStatus}）`:''}；${definitive?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}`;
+  return safe;
 }
 export function safeRequestId(raw: string | null, input: Pick<OpenAiImageRequest, 'apiKey' | 'prompt'>): string | null {
   if (raw === null || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw) || raw.includes(input.apiKey) || raw.includes(input.prompt)) return null;

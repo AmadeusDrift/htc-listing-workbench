@@ -1,3 +1,4 @@
+import { openDatabase } from '../src/main/database.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
@@ -368,4 +369,25 @@ test('preview and candidate persistence failures expose static stages without pr
     await assert.rejects(f.service.generate(f.input),error=>{assert.ok(error instanceof AiError);assert.equal(error.code,'OUTPUT_INVALID');assert.match(error.message,stage==='preview'?/预览生成/:/候选保存/);assert.equal(error.message.includes(secret),false);assert.notEqual((error as AiError&{definitive?:boolean}).definitive,true);return true;});
     assert.equal(f.calls.length,1);
   }
+});
+
+test('generation preview records original error code before safe mapping and keeps request ID',async t=>{
+  const f=await fixture(t,{decodePreview:()=>{throw Object.assign(new Error('private '+secret),{code:'ENOMEM'});}});f.enable();
+  const requestId=randomUUID();
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}),code('OUTPUT_INVALID'));
+  const db=openDatabase(f.directory);const audit=db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed'").all();db.close();
+  assert.ok(audit.length);
+  const detail=audit.map(row=>JSON.parse(String(row.detail_json))).find(row=>row.stage==='image-generation.preview'&&row.code==='ENOMEM');
+  assert.ok(detail);assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,'RESULT_UNKNOWN');
+  assert.doesNotMatch(JSON.stringify(audit),/sk-fixture-image-secret/);
+});
+
+for(const failure of [400,502,'network','notSent'] as const)test(`generation persists ${failure} evidence without changing dispatch count`,async t=>{
+  const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('Bearer sk-private https://private.test/path');return Response.json({error:{message:'private '+secret}},{status:typeof failure==='number'?failure:500});}});
+  if(failure!=='notSent')f.enable();
+  const requestId=randomUUID();await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}));
+  const db=openDatabase(f.directory);let detail:any;try{detail=JSON.parse(String(db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' ORDER BY rowid DESC LIMIT 1").get()!.detail_json));}finally{db.close();}
+  assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,failure==='notSent'?'NOT_SENT':failure===400?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN');
+  assert.equal(detail.httpStatus,typeof failure==='number'?failure:undefined);
+  assert.equal(f.calls.length,failure==='notSent'?0:1);assert.doesNotMatch(JSON.stringify(detail),/sk-private|private.test|sk-fixture-image-secret/);
 });

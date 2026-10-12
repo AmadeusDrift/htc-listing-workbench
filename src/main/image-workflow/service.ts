@@ -711,11 +711,11 @@ export class ImageWorkflowService {
                 attempt.candidateId=candidate.id;attempt.state='GENERATED';this.save(run);
               }catch(error){
                 if(error instanceof AiError&&'notSent' in error&&error.notSent===true){
-                  attempt.state='READY';attempt.error=`生图请求尚未发送：${publicError(error)}；本位置和原请求编号已保留，请处理后继续`;
+                  attempt.state='READY';attempt.error=`生图请求尚未发送 [NOT_SENT]：${publicError(error)}；本位置和原请求编号已保留，请处理后继续`;
                   slot.error=attempt.error;slot.status='FAILED';this.save(run);throw new UserFacingError(attempt.error);
                 }
                 const known=error instanceof AiError&&'definitive' in error&&error.definitive===true;
-                attempt.state=known?'RETRYABLE_FAILURE':'UNKNOWN';attempt.error=publicError(error);slot.error=attempt.error;slot.status=known?'FAILED':'UNKNOWN';this.save(run);
+                attempt.state=known?'RETRYABLE_FAILURE':'UNKNOWN';attempt.error=`${known?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}：${publicError(error)}`;slot.error=attempt.error;slot.status=known?'FAILED':'UNKNOWN';this.save(run);
                 if(known&&!signal.aborted)continue;throw error;
               }
             }

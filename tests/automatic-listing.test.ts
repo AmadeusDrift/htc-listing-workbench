@@ -1506,3 +1506,23 @@ for(const shape of ['94-A','94-B'])test(`legacy ${shape} missing workflow is del
  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
  assert.deepEqual(admissionOptions,{legacyImageAttempts:0});assert.equal(f.calls.images,2);assert.equal(f.calls.submissions,0);
 });
+
+for(const phase of ['create','start'] as const)test(`local failure after seven approved images records stage evidence and preserves work: ${phase}`, async t=>{
+  const f=fixture(t), task=await f.create();
+  const failure=Object.assign(new Error('Bearer sk-private https://private.test/path'),phase==='create'?{}:{code:'ENOSPC'});
+  failure.stack='Error: private\n    at save (C:\\private\\src\\main\\execution\\service.ts:88:9)';
+  if(phase==='create')f.dependencies.execution.create=()=>{throw failure;};else f.dependencies.execution.startAuthorized=()=>{throw failure;};
+  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0], workflow=structuredClone(f.workflow.get(row.draftId!));
+  assert.equal(workflow.slots.filter((slot:any)=>slot.status==='PASSED').length,7);assert.match(row.error!,new RegExp(row.sku));assert.match(row.error!,new RegExp(row.stage));
+  assert.equal(row.imageAttempts,7);assert.deepEqual(row.executionTaskIds,[...f.executions.keys()]);assert.equal(row.executionTaskIds.length,phase==='create'?0:1);assert.equal(f.calls.submissions,0);
+  const db=openDatabase(f.directory);try{
+    const record=db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed'").get() as any;
+    assert.ok(record,'failure evidence must exist before public mapping');
+    const detail=JSON.parse(record.detail_json);
+    assert.equal(detail.stage,phase==='create'?'IMAGES':'EXECUTION');assert.equal(detail.taskId,task.id);assert.equal(detail.variantId,row.variantId);
+    assert.equal(detail.code,phase==='create'?'UNKNOWN_LOCAL_ERROR':'ENOSPC');assert.deepEqual(detail.executionTaskIds,row.executionTaskIds);assert.equal(detail.callsite,'src/main/execution/service.ts:88:9');
+    assert.doesNotMatch(record.detail_json,/sk-private|private.test|C:\\\\private/);
+  }finally{db.close();}
+  assert.deepEqual(f.workflow.get(row.draftId!),workflow);
+});

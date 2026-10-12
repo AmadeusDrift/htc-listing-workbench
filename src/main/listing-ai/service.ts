@@ -1,3 +1,4 @@
+import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
 import { plainColorValue, needsPlainColorRefresh } from './plain-colors.ts';
 import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
 import { currentPolicyRemaining, needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
@@ -164,7 +165,9 @@ export class ListingAiService {
     if (listingFingerprint(context) !== listingFingerprint(snapshot)) throw new UserFacingError('来源、店铺或规则已变化，请重新生成建议');
     for(const evidence of snapshot.evidence)if(evidence.imageObservation)await this.ai.assertSourceColorFresh(evidence.imageObservation.context);
     const schema = await this.amazon.getSchema(draft.schema);this.assertSourceConsistency(this.amazon.getDraft(draft.id));
-    if (schema.checksum !== snapshot.schemaChecksum || schema.version !== snapshot.schemaVersion || listingFingerprint({ schema: schema.schema, metaSchema: schema.metaSchema }) !== snapshot.schemaSha256 || listingFingerprint(this.current(reference, snapshot).context) !== listingFingerprint(snapshot)) throw new UserFacingError('Amazon 字段规则或商品资料已更新，请建立新草稿');
+    const unchanged=schema.checksum===snapshot.schemaChecksum&&schema.version===snapshot.schemaVersion&&listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})===snapshot.schemaSha256;
+    const displayOnly=schema.version===snapshot.schemaVersion&&snapshot.fullSchema&&sameSchemaValidation(schema,snapshot.fullSchema);
+    if ((!unchanged&&!displayOnly) || listingFingerprint(this.current(reference, snapshot).context) !== listingFingerprint(snapshot)) throw new UserFacingError('Amazon 字段规则或商品资料已更新，请建立新草稿');
   }
   private result(id: string, c: ListingAiContext): AiResult {
     const result = this.ai.getResult(id), call = result && this.ai.getCall(result.callId);

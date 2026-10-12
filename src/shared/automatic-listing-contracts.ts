@@ -50,7 +50,7 @@ export interface AutomaticListingItem {
   sourceColorEvidenceSha256?: string;
   /** One extra repair for newly available color evidence; old attempts remain counted. */
   sourceColorRepair?: { evidenceSha256: string; previousAttempts: 2 | 3 | 4; grantedAttempts: 1; grantedAt: string };
-  repair: { operationId?: string; phase: 'FIELDS_PENDING' | 'FIELDS_STARTED' | 'RECHECK_PENDING' | 'READY'; sourceWorkflowId: string; draftRevision: number; draftStamp: string; remaining?: string[] } | null;
+  repair: { businessAuthorityRefresh?: 'business-authority/v1'; operationId?: string; phase: 'FIELDS_PENDING' | 'FIELDS_STARTED' | 'RECHECK_PENDING' | 'READY'; sourceWorkflowId: string; draftRevision: number; draftStamp: string; remaining?: string[] } | null;
   batchId: string | null; error: string | null;
   classification?: ProductClassification;
   salesPlan?: import('./sales-plan-contracts.ts').SalesListingPlan;

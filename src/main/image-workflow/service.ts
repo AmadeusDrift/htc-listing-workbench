@@ -1,5 +1,5 @@
 import { imageListingCopyMatches } from './context-compatibility.ts';
-import { LOCAL_LISTING_POLICY,currentPolicyRemaining } from './policy-reevaluation.ts';
+import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
@@ -462,6 +462,20 @@ export class ImageWorkflowService {
     try{
       throwIfAborted(signal);
       this.reevaluatePolicy(run,initial);
+      const cached=run.contentPreparation;
+      if(!run.imageContext&&cached?.operationId&&needsBusinessAuthorityRefresh(initial,cached.remaining)){
+        const op=new CompletionJournal(this.db).get(cached.operationId);
+        if(op.state==='DONE'){
+          if(cached.state==='DONE'&&(cached.draftRevision!==initial.revision||cached.draftSha256&&cached.draftSha256!==imageWorkflowDraftStamp(initial)))throw new UserFacingError('旧事实恢复对应的草稿已变化，原记录保留');
+          // Persist the existing owner's STARTED receipt before the local write.
+          // A crash then resumes this same DONE completion, never a fresh budget.
+          run.contentPreparation={...cached,state:'STARTED'};this.save(run);
+          const refreshed=await this.listing.complete({draftId:initial.id,draftRevision:initial.revision},signal,cached.operationId);
+          result={...refreshed,aiCalls:result.aiCalls+refreshed.aiCalls};initial=refreshed.draft;
+          run.contentPreparation={...cached,state:'DONE',draftRevision:initial.revision,draftSha256:imageWorkflowDraftStamp(initial),remaining:refreshed.remaining};this.save(run);
+          if(refreshed.remaining.length)throw new UserFacingError(('商品字段尚未修复完成，停止生图：'+refreshed.remaining.join('；')).slice(0,2000));
+        }
+      }
       if(run.imageContext)this.assertCurrentEvidence(initial,run.imageContext,run.setPlan,currentWorkflowPlanIds(run));
       if(!run.imageContext&&run.contentPreparation?.state!=='STARTED')this.amazon.assertPricingForPaid(initial.id);
       const pricing=pricingBlockingReason(initial);if(pricing)throw new UserFacingError(pricing);

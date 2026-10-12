@@ -83,15 +83,16 @@ function item(raw: unknown): AutomaticListingItem {
     if(change.phase!=='BIND'&&fingerprint(plan)!==fingerprint(salesPlan))fail();
   }
   if (value.repair !== null) {
-    const repair = record(value.repair, '字段修复进度', ['phase','sourceWorkflowId','draftRevision','draftStamp','remaining','operationId']);
-    if (![4,5,6].includes(Object.keys(repair).length) || !['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING','READY'].includes(String(repair.phase))) fail();
+    const repair = record(value.repair, '字段修复进度', ['phase','sourceWorkflowId','draftRevision','draftStamp','remaining','operationId','businessAuthorityRefresh']);
+    if (![4,5,6,7].includes(Object.keys(repair).length) || !['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING','READY'].includes(String(repair.phase))) fail();
     result.repair = { phase: repair.phase as NonNullable<AutomaticListingItem['repair']>['phase'], sourceWorkflowId: identifier(repair.sourceWorkflowId), draftRevision: counter(repair.draftRevision), draftStamp: hash(repair.draftStamp) };
     if(repair.operationId!==undefined)result.repair.operationId=identifier(repair.operationId);
+    if(repair.businessAuthorityRefresh!==undefined){if(repair.businessAuthorityRefresh!=='business-authority/v1'||!result.repair.operationId)fail();result.repair.businessAuthorityRefresh='business-authority/v1';}
     if (repair.remaining !== undefined) {
       if (!Array.isArray(repair.remaining) || repair.remaining.length > 100 || repair.remaining.some(message => typeof message !== 'string' || !message || message.length > 2000)) fail();
       result.repair.remaining = repair.remaining as string[];
     }
-    if (!result.repair.draftRevision || (!result.repairAttempts && result.repair.phase !== 'FIELDS_PENDING') || !result.draftId || !result.executionTaskIds.length) fail();
+    if (!result.repair.draftRevision || (!result.repairAttempts && result.repair.phase !== 'FIELDS_PENDING' && !result.repair.businessAuthorityRefresh) || !result.draftId || !result.executionTaskIds.length) fail();
   }
   if (value.classification !== undefined) {
     const c = record(value.classification,'商品分类',['productType','reason','keywords','candidateTypes','decisionIds','judged','classifiedAt']);

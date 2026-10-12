@@ -1457,3 +1457,28 @@ test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} with
   const queue=await restarted.queue({productIds:[f.product.id],targetId:f.target.id});
   if(expected==='SCREENED'){assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');assert.match(queue.products[0].rows[0].message,/100.*所需售价/s);}
 });
+
+test('legacy field-started without operation can be selection-screened with history intact and no paid work',async t=>{
+ const f=fixture(t),info={...f.product.variants[0],id:randomUUID(),sku:'legacy-info',originalSpec:'春夏秋冬-可备注颜色',normalizedSpec:'',sourceSpec:'春夏秋冬-可备注颜色'};f.product.variants.push(info);
+ const task=await f.create(),saved=(f.service as any).tasks.get(task.id);
+ const prepared=await f.dependencies.amazon.prepareDrafts({items:[{variantId:info.id}]}),draft=prepared.items[0].draft!;
+ const execution=f.dependencies.execution.create({draftIds:[draft.id],profileId:'alpha'});
+ const repair={phase:'FIELDS_STARTED',sourceWorkflowId:randomUUID(),draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),remaining:['历史字段响应尚未恢复']};
+ saved.status='PAUSED';saved.items=[{...saved.items[0],key:f.product.id+':'+info.id,variantId:info.id,sku:info.sku,status:'FAILED',stage:'IMAGES',draftId:draft.id,executionTaskIds:[execution.id],repairAttempts:1,repair:structuredClone(repair)}];
+ (f.service as any).save(saved);assert.doesNotThrow(()=>validateAutomaticListingTask(saved));
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const after=f.service.get(task.id),row=after.items[0];assert.equal(row.status,'SCREENED');assert.equal(row.outcome?.code,'SKU_SELECTION_FILTERED');assert.deepEqual(row.repair,repair);assert.equal(row.repairAttempts,1);
+ assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.equal(f.calls.sources,0);
+ const db=(f.service as any).db;assert.deepEqual(JSON.parse(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json),after);
+ const wrong=structuredClone(after);wrong.items[0].outcome!.code='ROI_MAX_PRICE';assert.throws(()=>validateAutomaticListingTask(wrong));
+ await f.service.close();const reopened=new AutomaticListingService(f.directory,f.dependencies);try{assert.deepEqual(reopened.get(task.id).items[0].repair,repair);}finally{await reopened.close();}
+});
+
+test('failed start checkpoint restores persisted paused state and permits a clean subsequent start',async t=>{
+ const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id),db=(f.service as any).db;saved.status='PAUSED';(f.service as any).save(saved);const before=f.service.get(task.id);
+ db.exec("CREATE TRIGGER fail_start BEFORE UPDATE ON automatic_listing_tasks WHEN json_extract(NEW.record_json,'$.status')='QUEUED' BEGIN SELECT RAISE(ABORT,'synthetic start save failure'); END");
+ assert.throws(()=>f.service.startAuthorized(f.service.prepareStart(task.id)),/synthetic start save failure/);
+ assert.deepEqual(f.service.get(task.id),before);assert.equal((f.service as any).grants.has(task.id),false);assert.equal(f.service.busy,false);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+ assert.deepEqual(JSON.parse(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json),before);
+ db.exec('DROP TRIGGER fail_start');f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED');
+});

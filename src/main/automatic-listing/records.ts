@@ -144,7 +144,7 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     result.image={kind:image.kind as 'IP_PLAN_BLOCKED'|'IP_IMAGE_BLOCKED',workflowId:identifier(image.workflowId),resultId:identifier(image.resultId),callId:identifier(image.callId),planResultId:identifier(image.planResultId),candidateId:image.candidateId===null?null:identifier(image.candidateId),contextSha256:hash(image.contextSha256),draftRevision:counter(image.draftRevision),references,policyVersion:text(image.policyVersion,'图片规则版本',100,true),message:text(image.message,'图片规则原因',2000,true)};
     if((result.image.kind==='IP_IMAGE_BLOCKED')!==Boolean(result.image.candidateId))fail();
   }
-  if(result.kind==='RULE_FILTERED'&&(!selection&&!result.pricingReport&&!result.image||result.pricingReport&&result.image||row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
+  if(result.kind==='RULE_FILTERED'&&(!selection&&!result.pricingReport&&!result.image||result.pricingReport&&result.image||!selection&&row.repair?.phase==='FIELDS_STARTED'&&!row.repair.operationId||['EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)))fail();
   if(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,result.code)){
     if(result.kind!==AUTOMATIC_SOURCE_ISSUES[result.code as AutomaticSourceIssueCode]||row.stage!=='SOURCES'||result.draftId!==null)fail();
   }else if(Object.hasOwn(SOURCE_CONSISTENCY_OUTCOMES,result.code)){

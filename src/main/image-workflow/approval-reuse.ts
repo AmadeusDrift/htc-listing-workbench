@@ -1,3 +1,5 @@
+import { plainColorValue } from '../listing-ai/plain-colors.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
@@ -39,4 +41,18 @@ export function assertApprovalReuseSource(run:ImageWorkflowRun,source:ImageWorkf
   const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,...rest}=value;return rest;};
   if(listingFingerprint(evidence(source))!==listingFingerprint(evidence(run)))throw new UserFacingError('图片审核复用记录与原审核证据不一致');
   validateApprovalReuse(run.approvalReuse,run);
+}
+
+/** Read-only equivalence for an exact approved draft whose sole change is its
+ * ordinary color spelling. Reconstruct the full old stamp; never rewrite proof. */
+export function plainColorApprovalMatches(run:ImageWorkflowRun,draft:AmazonDraft,product:ProductDetail):boolean {
+  const context=run.imageContext?.listing,oldColor=context?.currentAttributes?.color,currentColor=draft.attributes.color;
+  if(!hasSevenApprovedImages(run)||!context||oldColor===undefined||currentColor===undefined
+    ||run.productId!==product.id||draft.productId!==product.id||run.productRevision!==product.revision||draft.productRevision!==product.revision
+    ||run.variantId!==draft.variantId||!compatibleApprovalRecipe(run,draft.salesPlan?.recipe??null))return false;
+  const variant=product.variants.find(value=>value.id===draft.variantId),source=context.sourceProduct?.variants?.find(value=>value.id===draft.variantId)??context.sourceProduct?.selectedSku;
+  if(!variant||!source||source.id!==variant.id||source.originalSpec!==variant.originalSpec||source.normalizedSpec!==variant.normalizedSpec)return false;
+  if(listingFingerprint(oldColor)===listingFingerprint(currentColor)||listingFingerprint(plainColorValue(oldColor,[variant.originalSpec,variant.normalizedSpec]))!==listingFingerprint(currentColor))return false;
+  const previous={...draft,attributes:{...draft.attributes,color:oldColor}};
+  return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(previous)))===run.draftSha256;
 }

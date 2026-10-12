@@ -24,10 +24,10 @@ export function originalPng():Buffer {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(pixels)),chunk('IEND',Buffer.alloc(0))]);
 }
 /** All source files and SQLite state are real; only network responses and unrelated downstream work are injected. */
-export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'images',color=false,optionalClosure=false){
+export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'images',color=false,optionalClosure=false,sourceSpec='Blue'){
   t.mock.method(globalThis,'fetch',()=>{throw new Error('No external network permitted');});
   const boundary=resolve('.test-data');mkdirSync(boundary,{recursive:true});const root=mkdtempSync(join(boundary,'field-owner-')),directory=join(root,'workspace'),store=new WorkspaceStore(directory);
-  let product=store.createProduct();product=store.saveProduct({...saveInput(product),title:'Coaster',variants:saveInput(product).variants.map(v=>({...v,originalSpec:color?'602Q':'Blue',normalizedSpec:color?'':'Blue'})),facts:[{id:randomUUID(),name:'材质',value:'硅胶',source:'manual',sourceRef:'fixture',state:'human_confirmed'},{id:randomUUID(),name:'产品类型',value:'Coaster',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
+  let product=store.createProduct();product=store.saveProduct({...saveInput(product),title:'Coaster',variants:saveInput(product).variants.map(v=>({...v,originalSpec:color?'602Q':sourceSpec,normalizedSpec:color?'':sourceSpec})),facts:[{id:randomUUID(),name:'材质',value:'硅胶',source:'manual',sourceRef:'fixture',state:'human_confirmed'},{id:randomUUID(),name:'产品类型',value:'Coaster',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   if(optionalClosure)product=store.saveProduct({...saveInput(product),facts:[...product.facts,{id:randomUUID(),name:'closure',value:'Zipper',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   const png=originalPng(),assetId=randomUUID();mkdirSync(join(directory,'assets'),{recursive:true});writeFileSync(join(directory,'assets',assetId+'.png'),png);writeFileSync(join(directory,'assets',assetId+'.preview.png'),png);
   product=store.addAssets({productId:product.id,revision:product.revision},[{id:assetId,fileName:'original.png',mimeType:'image/png',width:32,height:32,byteSize:png.length,originalPath:'assets/'+assetId+'.png',previewPath:'assets/'+assetId+'.preview.png',sha256:createHash('sha256').update(png).digest('hex')}]);

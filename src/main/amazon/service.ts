@@ -659,7 +659,7 @@ export class AmazonService {
       });
     } finally { this.busy.delete(input.id); }
   }
-  private normalizeHaulRecord(record: DraftRecord, completionId?: string): void {
+  private normalizeHaulRecord(record: DraftRecord, completionId?: string): boolean {
     const cleanup=cleanHaulAttributes(record.draft.listingProgram,record.draft.attributes);
     const color=cleanup.attributes.color;
     let colorSources:string[]=[];
@@ -670,22 +670,25 @@ export class AmazonService {
     const plain=color===undefined?undefined:plainColorValue(color,colorSources);
     const colorChanged=JSON.stringify(color)!==JSON.stringify(plain);
     if(colorChanged)cleanup.attributes={...cleanup.attributes,color:plain!};
-    if(!cleanup.removed.length&&!colorChanged)return;
+    if(!cleanup.removed.length&&!colorChanged)return false;
     this.mutable(record);this.currentProduct(record);
     const journal=completionId?new CompletionJournal(this.persistence.db):null,operation=completionId?journal!.get(completionId):null;
     if(operation&&(operation.draftId!==record.draft.id||operation.draftRevision!==record.draft.revision||operation.draftStamp!==completionDraftStamp(record.draft)))throw new UserFacingError('字段操作对应的草稿已修改，未自动清理');
-    record.draft.attributes=cleanup.attributes;record.draft.revision++;record.preview=null;record.draft.previewedAt=null;record.previewResponse=null;
-    record.draft.state='DRAFT';record.draft.localIssues=[];record.draft.previewIssues=[];record.request=this.request(record);
+    record.draft.attributes=cleanup.attributes;record.draft.revision++;record.preview=null;record.draft.previewedAt=null;
+    // The response is an immutable historical receipt, not acceptance of the new color.
+    if(!colorChanged)record.previewResponse=null;
+    record.draft.state='DRAFT';record.draft.localIssues=[];if(!colorChanged)record.draft.previewIssues=[];record.request=this.request(record);
     this.updateSourceMapping(record);if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed));
     if(colorChanged)this.event(record,'save','已将销售颜色规范为普通英文颜色名；来源规格及原始响应保留');
     if(operation){operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal!.save(operation);}
+    return colorChanged;
   }
   private validate(record: DraftRecord, completionId?: string): boolean {
-    this.normalizeHaulRecord(record,completionId);
+    const previousPreviewIssues=clone(record.draft.previewIssues),colorChanged=this.normalizeHaulRecord(record,completionId);
     record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
     try { this.currentProduct(record); record.draft.localIssues.push(...this.declarationIssues(record.draft)); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
     const valid = !record.draft.localIssues.some(issue => issue.severity === 'ERROR');
-    record.draft.state = valid ? 'LOCAL_VALIDATED' : 'BLOCKED'; record.preview = null; record.draft.previewedAt = null; record.draft.previewIssues = [];
+    record.draft.state = valid ? 'LOCAL_VALIDATED' : 'BLOCKED'; record.preview = null; record.draft.previewedAt = null; record.draft.previewIssues = colorChanged?previousPreviewIssues:[];
     this.event(record, 'local_validation', valid ? '当前 Schema 的本地校验通过' : '本地校验未通过，请补全或核对问题字段'); this.persistence.putRecord(record); return valid;
   }
   async validateDraft(input: unknown): Promise<AmazonDraft> {

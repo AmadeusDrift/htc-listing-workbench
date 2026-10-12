@@ -1,4 +1,4 @@
-import { plainColorValue } from './plain-colors.ts';
+import { plainColorValue, needsPlainColorRefresh } from './plain-colors.ts';
 import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
 import { currentPolicyRemaining, needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
@@ -364,7 +364,7 @@ export class ListingAiService {
     if(operation.state==='ACTIVE'&&existingBrandIssues.length)return finish([...existingBrandIssues,...operation.remaining]);
     if(operation.state==='DONE'){
       const platformIssues=[...draft.previewIssues,...draft.listingIssues];
-      if(needsBusinessAuthorityRefresh(draft,operation.remaining)){
+      if(needsBusinessAuthorityRefresh(draft,operation.remaining)||needsPlainColorRefresh(draft,this.store.getProduct(draft.productId))){
         const previousRemaining=[...operation.remaining];
         draft=this.amazon.applyBusinessDefaults({id:draft.id,revision:draft.revision},operation.id,true);
         operation=journal.get(operation.id);

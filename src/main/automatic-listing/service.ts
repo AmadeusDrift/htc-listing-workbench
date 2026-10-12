@@ -1,4 +1,4 @@
-import { needsBusinessAuthorityRefresh } from '../image-workflow/policy-reevaluation.ts';
+import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
@@ -201,6 +201,7 @@ export class AutomaticListingService {
         const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
         const factIssue=draft.listingProgram==='haul'?draft.localIssues.find(issue=>[FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(issue.code)&&issue.severity==='ERROR'&&['fact','compliance'].includes(issue.category)&&issue.source==='local'&&!issue.autoFixable):undefined;
         classification=pricingOutcome(draft,this.deps.rules())??(declarationConflict?{kind:'NEEDS_INPUT',code:DECLARATION_SOURCE_CONFLICT}:factIssue?{kind:'NEEDS_INPUT',code:factIssue.code}:classification);
+        if(classification.kind!=='RULE_FILTERED'&&manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]).length)classification={kind:'NEEDS_INPUT',code:'AMAZON_BRAND_MANUAL'};
         if(classification.kind!=='RULE_FILTERED'&&this.deps.images.getRuleFilterEvidence){
           const image=await this.deps.images.getRuleFilterEvidence(draft.id);
           if(image)classification={kind:'RULE_FILTERED',code:image.kind,image};
@@ -699,6 +700,8 @@ export class AutomaticListingService {
       row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
     }
     while (repair.phase === 'FIELDS_PENDING') {
+      const brandIssues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);
+      if(brandIssues.length)throw incompleteFields(brandIssues);
       if(localRefresh&&row.repairAttempts>=repairLimit(row))throw incompleteFields(repair.remaining??[]);
       assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);

@@ -1,5 +1,5 @@
 import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
-import { currentPolicyRemaining, needsBusinessAuthorityRefresh } from '../image-workflow/policy-reevaluation.ts';
+import { currentPolicyRemaining, needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
@@ -352,7 +352,7 @@ export class ListingAiService {
     const checkpoint=()=>{operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);journal.save(operation);};
     const currentRemaining=(remaining:string[])=>{
       const context=operationContext({draftId:draft.id,draftRevision:draft.revision}).context;
-      return [...new Set([...remaining,...currentDraftEvidenceIssues(draft,isFullSchema(context)?this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),context.targetGeneration):context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
+      return [...new Set([...manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]),...remaining,...currentDraftEvidenceIssues(draft,isFullSchema(context)?this.currentAuthorizationContext(draft,this.store.getProduct(draft.productId),context.targetGeneration):context,id=>this.ai.getResult(id))])].slice(0,100).map(value=>value.slice(0,2000));
     };
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
@@ -399,6 +399,7 @@ export class ListingAiService {
         sourceIssues.push(...currentProseRepairIssues(draft,currentScope,id=>this.ai.getResult(id)).map(issue=>({code:issue.kind==='citation'?'PROSE_ADOPTION_EVIDENCE':'PROSE_SOURCE_EVIDENCE',severity:'ERROR' as const,category:'field' as const,source:'local' as const,autoFixable:false,attributeNames:[issue.field],message:issue.reason})));
         if(draft.state==='AMAZON_VALIDATED'&&!reviewIssues.length&&!sourceIssues.length)return finish([]);
         const issues=[...errors(draft),...reviewIssues,...sourceIssues];remaining=issues.map(i=>(i.attributeNames.join('、')||i.code)+'：'+i.message);
+        if(manualBrandIssues(draft,issues).length)return finish([...manualBrandIssues(draft,issues),...remaining]);
         if(operation.rounds.length>=2)return finish(remaining);
         const reference={draftId:draft.id,draftRevision:draft.revision};
         const repairs=issues.filter(issue=>issue.category==='field').flatMap(issue=>issue.attributeNames.filter(field=>isFullSchema(currentScope)?currentScope.fields.some(f=>f.name===field):LISTING_CANDIDATE_FIELDS.includes(field)).map(field=>({field,code:issue.code.slice(0,100),message:issue.message.slice(0,2000)}))).slice(0,50);

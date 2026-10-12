@@ -163,3 +163,23 @@ test('legacy explicit camera clauses pass saved plan validation without mutating
     }
   }
 });
+
+test('source refusal preserves empty slot briefs and identities without synthesizing instructions',()=>{
+  const p=plan();p.productUnderstanding.sufficient=false;p.productUnderstanding.uncertainties=['Source does not show the selected product.'];p.prompt='';
+  for(const slot of p.setPlan.slots){slot.role=slot.index===1?'main_scene':'scene';slot.prompt='';slot.scene='';slot.evidenceIds=[];slot.textMode='none';slot.expectedText=[];}
+  const parsed=validateImagePlan(p);assert.deepEqual(parsed,p);assert.doesNotThrow(()=>assertImagePlan(parsed,context()));assert.throws(()=>imageGenerationPrompt(parsed,context(),false));
+  const wrong=structuredClone(parsed);wrong.productUnderstanding!.referenceAssetIds=[randomUUID()];assert.throws(()=>assertImagePlan(wrong,context()));
+  const badEvidence=structuredClone(parsed);badEvidence.setPlan!.slots[0].evidenceIds=['missing'];assert.throws(()=>assertImagePlan(badEvidence,context()));
+  p.productUnderstanding.sufficient=true;assert.throws(()=>validateImagePlan(p));
+});
+test('misplaced understanding members normalize only without conflicts',()=>{
+  const raw=plan(),expected=structuredClone(raw);
+  for(const key of ['referenceAssetIds','uncertainties','sufficient']){raw[key]=raw.productUnderstanding[key];delete raw.productUnderstanding[key];}
+  assert.deepEqual(validateImagePlan(raw),expected);
+  raw.productUnderstanding.sufficient=true;assert.deepEqual(validateImagePlan(raw),expected);raw.productUnderstanding.sufficient=false;assert.throws(()=>validateImagePlan(raw));
+});
+test('singleton wrapped expected text evidence normalizes without relaxing evidence validation',()=>{
+  const raw=plan();raw.setPlan.slots[1].expectedText[0].evidenceIds=[['material']];const p=validateImagePlan(raw);assert.deepEqual(p.setPlan!.slots[1].expectedText[0].evidenceIds,['material']);assert.doesNotThrow(()=>assertImagePlan(p,context()));
+  for(const ids of [[['material','other']],[['material'],'other'],[[['material']]],[['material'],['material']]]){raw.setPlan.slots[1].expectedText[0].evidenceIds=ids;assert.throws(()=>validateImagePlan(raw));}
+  raw.setPlan.slots[1].expectedText[0].evidenceIds=[['unknown']];assert.throws(()=>assertImagePlan(validateImagePlan(raw),context()));
+});

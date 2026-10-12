@@ -1,3 +1,4 @@
+import { resultHasOwner } from '../ai/result-owner.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { validateCompletionOperation,type CompletionOperation } from '../listing-ai/completion-journal.ts';
 import type { AiCall,AiResult } from '../../shared/ai-contracts.ts';
@@ -19,7 +20,7 @@ export function assertWorkflowRejectionOwner(run:ImageWorkflowRun,getCall:(id:st
  const invalid=():never=>{throw new UserFacingError('原因记录不属于当前工作流，请核对已有记录');};
  const call=getCall(r.callId);if(!call||call.id!==r.callId||call.productId!==run.productId||call.productRevision!==run.productRevision)invalid();
  if(r.resultId){const result=getResult(r.resultId),context=result?.imageContext;
-  if(!result||!context||result.id!==r.resultId||result.callId!==r.callId||call!.status!=='SUCCEEDED'||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||context.listing.draftId!==run.draftId||result.sourceSha256!==r.contextSha256||listingFingerprint(context)!==r.contextSha256||result.output.kind!=='image-plan'||result.output.productUnderstanding?.sufficient!==false||(context.slot?.index??0)!==r.slot||r.stage!=='planning'||!(run.setPlanResultId===result.id||run.planResultIds.includes(result.id)))invalid();
+  if(!result||!context||result.id!==r.resultId||result.callId!==r.callId||!resultHasOwner(result,call)||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||context.listing.draftId!==run.draftId||result.sourceSha256!==r.contextSha256||listingFingerprint(context)!==r.contextSha256||result.output.kind!=='image-plan'||result.output.productUnderstanding?.sufficient!==false||(context.slot?.index??0)!==r.slot||r.stage!=='planning'||!(run.setPlanResultId===result.id||run.planResultIds.includes(result.id)||r.slot===0&&!!run.imageContext&&listingFingerprint(run.imageContext)===r.contextSha256&&call!.presentationContext?.workflowId===run.id))invalid();
  }else {const p=call!.presentationContext;
   if(r.stage==='planning'){
    const frozen=r.slot===0?run.contextSha256:run.slots?.find(slot=>slot.index===r.slot)?.contextSha256;

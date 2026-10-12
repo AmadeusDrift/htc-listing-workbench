@@ -1,3 +1,4 @@
+import { resultHasOwner } from '../ai/result-owner.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { isProductReference } from '../image-upstream-trace.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
@@ -225,8 +226,7 @@ export class ImageWorkflowService {
       if(listingFingerprint(references)!==listingFingerprint(run.referenceAssets)||listingFingerprint(variants)!==listingFingerprint(base.sourceVariantIds??[draft.variantId]))return null;
       const successful=(result:AiResult|undefined,context:ProductImageContext)=>{
         const call=result&&this.ai.getCall(result.callId);
-        return !!result&&!!call&&call.id===result.callId&&call.status==='SUCCEEDED'&&call.productId===result.productId&&call.productRevision===result.productRevision
-          &&call.providerId===result.providerId&&call.model===result.model&&call.finishedAt===result.createdAt
+        return !!result&&!!call&&resultHasOwner(result,call)
           &&result.productId===run.productId&&result.productRevision===run.productRevision&&result.variantId===run.variantId
           &&result.createdAt>=run.createdAt&&result.createdAt<=run.updatedAt&&result.sourceSha256===listingFingerprint(context)&&listingFingerprint(result.imageContext)===listingFingerprint(context);
       };
@@ -395,7 +395,7 @@ export class ImageWorkflowService {
     if(listingFingerprint(references.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256})))!==listingFingerprint(prior.referenceAssets))return undefined;
     for(const slot of prior.slots!){
       const attempt=slot.attempts.at(-1)!,ip=attempt.ipReviewResultId?this.ai.getResult(attempt.ipReviewResultId):undefined;
-      const successful=(value:typeof ip)=>{const call=value&&this.ai.getCall(value.callId);return !!value&&call?.status==='SUCCEEDED'&&call.productId===value.productId&&call.productRevision===value.productRevision&&call.providerId===value.providerId&&call.model===value.model&&call.finishedAt===value.createdAt&&value.productId===prior.productId&&value.productRevision===prior.productRevision&&value.variantId===prior.variantId&&value.sourceSha256===slot.contextSha256;};
+      const successful=(value:typeof ip)=>{const call=value&&this.ai.getCall(value.callId);return !!value&&resultHasOwner(value,call)&&value.productId===prior.productId&&value.productRevision===prior.productRevision&&value.variantId===prior.variantId&&value.sourceSha256===slot.contextSha256;};
       const plan=attempt.planResultId?this.ai.getResult(attempt.planResultId):undefined;
       if(!successful(plan)||plan?.output.kind!=='image-plan')return undefined;
       const bypass=prior.riskInterceptionEnabled===false&&!this.getRiskSettings().enabled?attempt.riskBypass:undefined;
@@ -611,9 +611,9 @@ export class ImageWorkflowService {
       await fresh();
       if(base.setPolicy){
         if(!run.setPlanResultId){
-          stage('planning');const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(base,fresh,undefined,signal,run.id));result.aiCalls++;
+          stage('planning');const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(base,fresh,undefined,signal,run.id,()=>result.aiCalls++));
           if(plan.output.kind!=='image-plan'||!plan.output.setPlan)throw new AiError('OUTPUT_INVALID');
-          assertImagePlan(plan.output,base);run.listingEvidenceContractVersion=imageEvidenceVersion(base.listing);run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
+          assertImagePlan(plan.output,base);if(!plan.output.productUnderstanding?.sufficient)this.sourceRefusal(run,plan);run.listingEvidenceContractVersion=imageEvidenceVersion(base.listing);run.setPlan=plan.output.setPlan;run.setPlanResultId=plan.id;this.save(run);
         }
         const planned=this.ai.getResult(run.setPlanResultId);
         if(!planned||planned.output.kind!=='image-plan'||listingFingerprint(planned.output.setPlan)!==listingFingerprint(run.setPlan))throw new AiError('SOURCE_CHANGED');
@@ -645,7 +645,7 @@ export class ImageWorkflowService {
             stage('planning');const previous=slot.attempts.at(-2),prior=previous?.reviewResultId?this.ai.getResult(previous.reviewResultId):undefined;
             const issues=prior?.output.kind==='image-text-review'?this.repairIssues(prior.output,previous?.ocrResultId?this.ai.getResult(previous.ocrResultId):undefined,context):previous?.error?[previous.error]:undefined;
             const repair=previous?.planResultId&&issues?.length?{previousPlanId:previous.planResultId,issues}:undefined;
-            const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(context,fresh,repair,signal,run.id));result.aiCalls++;
+            const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(context,fresh,repair,signal,run.id,()=>result.aiCalls++));
             if(plan.output.kind!=='image-plan')throw new AiError('OUTPUT_INVALID');assertImagePlan(plan.output,context);
             attempt.planResultId=plan.id;this.save(run);
             if(!plan.output.productUnderstanding?.sufficient)this.sourceRefusal(run,plan);
@@ -826,7 +826,7 @@ export class ImageWorkflowService {
       let repair: {previousPlanId:string;issues:string[]} | undefined;
       for (let attempt=1;attempt<=run.maxAttempts;attempt++) {
         run.attempt=attempt; stage('planning'); await fresh();
-        const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(context,fresh,repair,signal,run.id)); result.aiCalls++;
+        const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(context,fresh,repair,signal,run.id,()=>result.aiCalls++));
         if (plan.output.kind!=='image-plan') throw new AiError('OUTPUT_INVALID');
         assertImagePlan(plan.output,context);
         run.planResultIds.push(plan.id); this.save(run);

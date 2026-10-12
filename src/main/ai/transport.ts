@@ -4,11 +4,11 @@ import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
   thinking?: boolean;
-  /** Adapter-owned safe capture, enabled only for source observation responses. */
+  /** Adapter-owned safe capture, enabled only for source observation and image planning responses. */
   onInvalidResponseText?: (text:string)=>void;
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;
   onMetadata?: (metadata: ProviderMetadata) => void;
-  /** Secret-checked JSON only; still unapproved and never eligible for adoption. */
+  /** Secret-checked JSON or safely captured raw provider text; still unapproved and never eligible for adoption. */
   onUntrustedOutput?: (output: unknown, stage?: import('./output-diagnostics.ts').AiOutputRejectionStage) => void;
   /** Synchronous reservation at the last boundary before one paid POST. */
   beforeSend?: (body: string | Buffer) => void;

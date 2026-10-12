@@ -47,8 +47,10 @@ test('backup retains receipts and capture aliases after manual SKU deletion but 
   } finally { restored.close(); }
 });
 
-for (const version of [8, 9]) test(`genuine schema ${version} backups migrate to 14 without expanding the older index whitelist`, async t => {
+for (const version of [8, 9]) test(`genuine schema ${version} backups migrate to 21 without expanding the older index whitelist`, async t => {
   const f = await fixture(t), db = new DatabaseSync(join(f.directory, 'red.sqlite'));
+  // Construct an actual old schema, rather than only relabeling the current one.
+  db.exec('DROP TABLE listing_correction_attempts; DROP TABLE listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id');
   db.exec('DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE collection_captures; DROP TABLE collection_receipts'); if (version === 8) for (const index of RECORD_INDEXES) db.exec(`DROP INDEX ${index.name}`);
   db.exec(`DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; PRAGMA user_version=${version}`); db.close();
   const file = join(f.root, 'legacy.htcbackup'); await createWorkspaceBackup(f.directory, file, 'test passphrase 123');

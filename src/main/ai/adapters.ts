@@ -114,7 +114,14 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   let credentialEcho=false;
   const captureSource=(text:string)=>{try{const safe=safeSourceResponseText(text,credentials);credentialEcho ||= safe==='[omitted: credential echo]';context.onUntrustedOutput?.(safe,'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
   const transport=diagnosticOperation?{...context,onInvalidResponseText:captureSource}:context;
-  const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));
+  let raw:unknown;
+  try{raw=await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));}
+  catch(error){
+    // Raw-envelope capture runs inside transport before JSON parsing throws. Keep
+    // its confirmed secret gate, along with the original safe transport metadata.
+    if(imageOperation&&credentialEcho&&error instanceof AiError&&error.code==='OUTPUT_INVALID')error.diagnosticReason='RESPONSE_SECRET_ECHO';
+    throw error;
+  }
   const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=credentialEcho?'RESPONSE_SECRET_ECHO':reason;throw error;};
   return outputError(() => {
     if(imageOperation)captureSource(JSON.stringify(raw));

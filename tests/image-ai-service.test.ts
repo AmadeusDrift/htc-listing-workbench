@@ -1587,3 +1587,13 @@ test('R2 a restored refusal remains nonretryable without diagnostic files and ov
  const ai=new AiService(prepared.stagingDirectory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('Restored refusal must not resend');}});
  try{ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});assert.equal((ai.getCall(call.id) as any).imagePlanRetryBlock,'RESPONSE_NOT_CONTENT');await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(requests,0);assert.equal(ai.listResults(f.product.id).some(result=>result.callId===call.id),false);}finally{await ai.close();await hosting.close();store.close();}
 });
+
+test('R2 malformed envelope credential echo stays blocked after restore without diagnostics',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),file=join(f.directory,'before-malformed-envelope.htcbackup'),passphrase='synthetic malformed envelope restore';await createWorkspaceBackup(f.directory,file,passphrase);
+ const raw='broken envelope image-fixture-deepseek-key';f.respond(operation=>operation==='image-plan'?new Response(raw):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>{assert.equal(e.diagnosticReason,'RESPONSE_SECRET_ECHO');assert.deepEqual(e.responseDiagnostic,{status:200,byteCount:Buffer.byteLength(raw)});return true;});assert.equal(f.requests.length-before,1);
+ const call=f.ai.listCalls().find(c=>c.presentationContext?.workflowId===workflowId)!;assert.equal(call.imagePlanRetryBlock,'RESPONSE_SECRET_ECHO');assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
+ const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase);assert.equal((await import('node:fs')).existsSync(join(prepared.stagingDirectory,'ai-diagnostics')),false);
+ const store=new WorkspaceStore(prepared.stagingDirectory),hosting=new HostingService(prepared.stagingDirectory,store,mockStorage);let requests=0;const ai=new AiService(prepared.stagingDirectory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('Restored secret echo must not resend');}});
+ try{ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});assert.equal(ai.getCall(call.id)!.imagePlanRetryBlock,'RESPONSE_SECRET_ECHO');await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(requests,0);}finally{await ai.close();await hosting.close();store.close();}
+});

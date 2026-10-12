@@ -424,14 +424,21 @@ export class AutomaticListingService {
   }
   private reconcileSelection(task: AutomaticListingTask): void {
     for(const productId of new Set(task.items.map(row=>row.productId))){
-      const product=this.deps.store.getProduct(productId),rows=task.items.filter(row=>row.productId===productId),rules=this.deps.rules();
+      const rows=task.items.filter(row=>row.productId===productId);
+      const candidates=rows.flatMap(row=>{
+        if(row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage))return [];
+        const unknown=this.unknownCode(row,task);
+        if(unknown&&!retryableAiUnknown(unknown))return [];
+        const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):this.deps.amazon.listDrafts(productId).find(d=>this.matching(task,row,d));
+        return draft&&submitted(draft)?[]:[{row,draft}];
+      });
+      // A pricing/input failure is already classified; no row here needs new selection.
+      if(!candidates.length)continue;
+      const product=this.deps.store.getProduct(productId),rules=this.deps.rules();
       const recipes=rows.some(row=>row.salesPlan)?selectSalesRecipes(product,this.deps.previewSales?.(productId)??previewSalesRecipes(product,this.deps.sourceReceipt?.(productId)??null,rules),rules,this.deps.sourceReceipt?.(productId)??null):null;
       const keys=new Set(recipes?recipes.map(r=>r.key):this.selectedVariants(product).map(v=>v.id));
-      for(const row of rows){
-        const unknown=this.unknownCode(row,task);
-        if(row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)||unknown&&!retryableAiUnknown(unknown))continue;
-        const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):this.deps.amazon.listDrafts(productId).find(d=>this.matching(task,row,d));
-        if(draft&&submitted(draft)||keys.has(row.salesPlan?.recipe.key??row.variantId))continue;
+      for(const {row,draft} of candidates){
+        if(keys.has(row.salesPlan?.recipe.key??row.variantId))continue;
         row.status='SCREENED';row.error='SKU 选择规则淘汰：说明性选项或未入选本来源最多 4 个代表规格；来源、草稿、已完成图片及历史保留';
         row.outcome={version:1,kind:'RULE_FILTERED',code:'SKU_SELECTION_FILTERED',message:row.error,classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:row.draftId?draft?.revision??null:null};
       }

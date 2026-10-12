@@ -24,7 +24,7 @@ import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';
 import type { SalesListingPlan } from '../src/shared/sales-plan-contracts.ts';
 import { UserFacingError } from '../src/shared/errors.ts';
 import { FAMILY_REBIND_EVENT_SUMMARY } from '../src/main/amazon/service.ts';
-import { validateAutomaticListingTask } from '../src/main/automatic-listing/records.ts';
+import { sourceStamp, validateAutomaticListingTask } from '../src/main/automatic-listing/records.ts';
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { currentFactAuthority } from '../src/main/amazon/fact-authority.ts';
@@ -1411,9 +1411,12 @@ test('unknown formal submission takes priority over an unknown image and is neve
 
 for(const [cost,expected,spec] of [[2.4,'PENDING','red'],[2.4,'PENDING','repair'],[2.4,'PENDING','repair-other'],[100,'SCREENED','red'],[null,'FAILED','red'],[100,'FAILED','5 pc / 10 pc']] as const)
 test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} without paid calls`,async t=>{
-  const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;f.product.variants[0].originalSpec=spec;f.product.variants[0].sourceSpec=spec;f.product.variants[0].normalizedSpec=spec;
-  await f.dependencies.prepareSourceConsistency!({productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]},new AbortController().signal,()=>{});
+  const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;
   const task=await f.create(),saved=(f.service as any).tasks.get(task.id),row=saved.items[0];
+  // Seed an existing historical row; current creation correctly rejects conflicting quantities.
+  f.product.variants[0].originalSpec=spec;f.product.variants[0].sourceSpec=spec;f.product.variants[0].normalizedSpec=spec;
+  await f.dependencies.prepareSourceConsistency!({productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]},new AbortController().signal,()=>{});
+  row.sourceStamp=sourceStamp(f.product);
   const prepared=await f.dependencies.amazon.prepareDrafts({items:[{variantId:row.variantId}]}),draft=prepared.items[0].draft!;
   draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};
   draft.previewIssues=spec==='repair'?[]:[{code:'PLATFORM_KEEP',severity:'ERROR',message:'Keep platform error',attributeNames:[]} as any];
@@ -1436,6 +1439,7 @@ test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} with
   const actual=f.service.get(task.id).items[0];assert.equal(refreshes,1);assert.equal(actual.status,expected);
   if(expected==='SCREENED'){assert.equal(actual.outcome?.kind,'RULE_FILTERED');assert.match(actual.outcome!.message,/100.*所需售价.*上限/s);}
   if(expected==='FAILED')assert.equal(actual.outcome?.kind,'NEEDS_INPUT');
+  if(spec==='5 pc / 10 pc')assert.match(actual.outcome!.message,/件数|计价|数量/);
   assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.deepEqual(f.workflow.get(draft.id),images);assert.deepEqual(f.drafts.get(draft.id)!.previewIssues,draft.previewIssues);
   await f.service.close();const restarted=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>restarted.close());
   assert.deepEqual(restarted.get(task.id).items[0],actual);
@@ -1448,6 +1452,7 @@ test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} with
   if(expected!=='PENDING'){
     restarted.startAuthorized(restarted.prepareStart(task.id));restarted.pause(task.id);await restarted.waitForIdle();
     assert.equal(restarted.get(task.id).items[0].status,expected);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+    if(spec==='5 pc / 10 pc')assert.equal(restarted.get(task.id).items[0].outcome?.message,actual.outcome?.message);
   }
   const queue=await restarted.queue({productIds:[f.product.id],targetId:f.target.id});
   if(expected==='SCREENED'){assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');assert.match(queue.products[0].rows[0].message,/100.*所需售价/s);}

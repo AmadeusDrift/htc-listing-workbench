@@ -1,5 +1,5 @@
 import type { ListingAiContext, ListingFieldsOutput } from '../../shared/listing-ai-contracts.ts';
-import { isFullSchema, parseFullReview, assertFullReview } from './full-schema.ts';
+import { isFullSchema, parseFullReview, assertFullReview, fullReference } from './full-schema.ts';
 import { validateListingReviewOutput, assertListingEvidence } from './validation.ts';
 import { requireCompleteReview } from './review-coverage.ts';
 
@@ -14,7 +14,7 @@ export function isReviewCoverageOmission(raw:unknown,candidate:ListingFieldsOutp
     for(const check of review.checks){
       const key=`${check.field}:${check.index}`,item=expected.find(v=>v.field===check.field&&v.index===check.index);
       if(!item||keys.has(key))return false;keys.add(key);
-      if([...check.evidenceIds,...check.claims.flatMap(c=>c.evidenceIds)].some(id=>!context.evidence.some(e=>e.id===id)))return false;
+      if([...check.evidenceIds,...check.claims.flatMap(c=>c.evidenceIds)].some(id=>full?!fullReference(context,id):!context.evidence.some(e=>e.id===id)))return false;
       if(!full&&check.claims.some(c=>!item.value.includes(c.text)))return false;
     }
     if(review.checks.length<expected.length)return true;

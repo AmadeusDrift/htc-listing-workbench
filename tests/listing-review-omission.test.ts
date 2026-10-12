@@ -61,3 +61,21 @@ test('review omissions do not consume the two candidate repair rounds or erase a
  assert.ok(secondCandidate.repairRequest.issues.some((i:any)=>i.message.includes('Resin')));
  assert.equal((f.ai.getResult(op.rounds[0].review!.resultId!)!.output as any).verdict,'NEEDS_CHANGES');
 });
+
+import { isReviewCoverageOmission } from '../src/main/listing-ai/review-omission.ts';
+import { assertFullReview,parseFullReview } from '../src/main/listing-ai/full-schema.ts';
+test('partial review accepts the same bound image references as complete full-schema review',async t=>{
+ const f=await fixture(t),suggestion=await f.listing.suggest(f.reference),context=suggestion.listingContext!;
+ assert.equal(suggestion.output.kind,'amazon-fields');if(suggestion.output.kind!=='amazon-fields')throw Error('candidate');
+ const candidate=suggestion.output,asset=context.sourceProduct!.assets.find(a=>a.variantIds.includes(context.variantId))!;assert.ok(asset);
+ const review=reviewFor({candidate});review.checks.forEach((check:any)=>{check.evidenceIds=[asset.id];check.claims=[];});
+ assert.doesNotThrow(()=>assertFullReview(parseFullReview(review),candidate,context));
+ const partial={...review,checks:review.checks.slice(0,1)};assert.ok(partial.checks.length<candidate.candidates.length);
+ assert.equal(isReviewCoverageOmission(partial,candidate,context),true);
+ for(const badContext of [
+   {...context,sourceProduct:{...context.sourceProduct!,assets:context.sourceProduct!.assets.filter(a=>a.id!==asset.id)}},
+   {...context,sourceProduct:{...context.sourceProduct!,assets:context.sourceProduct!.assets.map(a=>a.id===asset.id?{...a,variantIds:['foreign-sku']}:a)}},
+   {...context,sourceProduct:{...context.sourceProduct!,selectedSku:{...context.sourceProduct!.selectedSku,id:'foreign-sku'}}},
+ ])assert.equal(isReviewCoverageOmission(partial,candidate,badContext),false);
+ const foreign=structuredClone(partial);foreign.checks[0].evidenceIds=['foreign-image'];assert.equal(isReviewCoverageOmission(foreign,candidate,context),false);
+});

@@ -419,7 +419,8 @@ function imageObservationText(text:string):string {
   const dimensions=dimension+String.raw`(?:\s*(?:、|与)\s*`+dimension+String.raw`)*`;
   const counts=String.raw`(?:图上\s*\d+\s*个/盒、\s*\d+\s*个/箱、净重与毛重、)?`;
   const exclusion=String.raw`(?:箱规数值[（(]\s*`+dimensions+String.raw`\s*[）)]属于外箱包装，不可当作产品尺寸使用|`+counts+String.raw`箱规\s*`+dimensions+String.raw`\s*均为包装及整箱规格，不是单件属性，本槽不使用)`;
-  const sentence=new RegExp(String.raw`(^|[。；;\n])\s*`+exclusion+String.raw`\s*(?=[。；;\n]|$)`,'g');
+  const ocrExclusion=String.raw`OCR\s*中箱规[（(]\s*`+dimensions+String.raw`\s*[）)]与净重/毛重均为外箱包装数据，不用于单品尺寸图`;
+  const sentence=new RegExp(String.raw`(^|[。；;\n])\s*(?:`+exclusion+'|'+ocrExclusion+String.raw`)\s*(?=[。；;\n]|$)`,'g');
   return text.replace(sentence,'$1 Excluded packaging measurements must not be used as product dimensions or rendered in the image');
 }
 function imagePromptText(plan:ImagePlanOutput):string{

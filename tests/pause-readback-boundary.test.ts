@@ -235,18 +235,31 @@ test('stopping one task keeps another task and independent Followups progressing
   assert.equal(f.followup.get(first.id).status, 'READY'); assert.equal(f.followup.get(second.id).status, 'READY');
   assert.equal(f.automatic.get(stopped.id).status, 'PAUSED'); assert.equal(f.automatic.get(continued.id).status, 'COMPLETED', f.automatic.get(continued.id).error ?? 'healthy sibling completes');
   const batches = f.procurement.list(); assert.equal(batches.length, 1); assert.equal(f.procurement.get(batches[0].id).automaticJobId, continued.id);
-  const label = f.labels.list()[0]; assert.equal(label.jobId, continued.id); assert.equal(label.status, 'READY'); assert.equal((await f.labels.verifyFiles(label.id)).files.length, 1);
+  assert.equal(f.labels.list().length, 0); assert.deepEqual(delta(f.counts, before), { ...zero(), listingsGet: 2 });
+  f.labels.prepareBatch(batches[0].id); await f.labels.runDue();
+  const label = f.labels.list()[0]; assert.equal(label.draftId, second.id); assert.equal(label.sku, second.sku); assert.equal(label.jobId, continued.id); assert.equal(label.status, 'READY'); assert.equal((await f.labels.verifyFiles(label.id)).files.length, 1);
   assert.deepEqual(delta(f.counts, before), { ...zero(), listingsGet: 2, labelPost: 1 });
 });
 
-for (const action of ['pause', 'cancel'] as const) test(`task ${action} stops an already queued real label request across restart`, async t => {
+for (const action of ['pause', 'cancel'] as const) test(`task ${action} preserves an explicitly queued independent label request across restart`, async t => {
   const f = await fixture(t), draft = await f.accepted(), task = await waitingTask(f, draft);
-  f.advance(); await f.followup.runDue(); await f.automatic.refreshWaiting();
-  assert.equal(f.procurement.list().length, 1); assert.equal(f.labels.list()[0].status, 'QUEUED');
-  const before = structuredClone(f.counts); f.automatic[action](task.id); await f.labels.runDue(); await f.automatic.refreshWaiting();
-  assert.equal(f.labels.list()[0].paused, true); assert.equal(f.labels.list()[0].status, action === 'pause' ? 'QUEUED' : 'CANCELLED'); assert.deepEqual(delta(f.counts, before), zero());
-  await f.reopen(); await f.labels.runDue(); await f.automatic.refreshWaiting();
-  assert.equal(f.automatic.get(task.id).status, action === 'pause' ? 'PAUSED' : 'CANCELLED'); assert.equal(f.labels.list()[0].paused, true); assert.deepEqual(delta(f.counts, before), zero());
+  f.advance(); await f.followup.runDue();
+  assert.equal(f.followup.get(draft.id).status, 'READY'); assert.equal(f.labels.list().length, 0);
+  // Explicitly prepare the accepted SKU before the still-waiting automatic task observes readiness.
+  const [batch] = f.procurement.ensureAutomaticBatch(task.id, [draft.id], { [draft.id]: task.items[0].stockSets });
+  const [queued] = f.labels.prepareBatch(batch.id);
+  assert.equal(queued.status, 'QUEUED'); assert.ok(queued.requestedAt); assert.equal(queued.jobId, task.id); assert.equal(queued.draftId, draft.id);
+  const before = structuredClone(f.counts); f.automatic[action](task.id); await f.automatic.refreshWaiting();
+  assert.deepEqual(f.labels.get(queued.id), queued); assert.equal(queued.paused, false); assert.deepEqual(delta(f.counts, before), zero());
+  await f.reopen(); await f.automatic.refreshWaiting();
+  assert.equal(f.automatic.get(task.id).status, action === 'pause' ? 'PAUSED' : 'CANCELLED');
+  assert.deepEqual(f.labels.get(queued.id), queued); assert.deepEqual(delta(f.counts, before), zero());
+  await f.labels.runDue(); const ready = f.labels.get(queued.id);
+  assert.equal(ready.status, 'READY'); assert.equal(ready.paused, false); assert.equal(ready.attempts, 1);
+  assert.equal(ready.sku, draft.sku); assert.equal((await f.labels.verifyFiles(ready.id)).files.length, 1);
+  await f.labels.runDue(); await f.automatic.refreshWaiting();
+  assert.equal(f.automatic.get(task.id).status, action === 'pause' ? 'PAUSED' : 'CANCELLED');
+  assert.deepEqual(delta(f.counts, before), { ...zero(), oauthPost: 1, labelPost: 1 });
 });
 
 test('maintenance pause allows the in-flight GET to settle but blocks the next due SKU', async t => {
@@ -363,7 +376,11 @@ for (const action of ['pause', 'cancel', 'continue'] as const) test(`real Execut
   assert.equal(f.execution.get(child.id).status, action === 'continue' ? 'COMPLETED' : action === 'pause' ? 'PAUSED' : 'CANCELLED');
   if (action === 'continue') {
     assert.equal(f.followup.get(draft.id).status, 'WAITING'); f.advance(); await f.followup.runDue(); await f.automatic.refreshWaiting(); await f.labels.runDue(); await f.automatic.refreshWaiting();
-    assert.equal(f.automatic.get(task.id).status, 'COMPLETED'); assert.equal(f.procurement.list().length, 1); assert.equal(f.labels.list()[0].status, 'READY');
+    assert.equal(f.automatic.get(task.id).status, 'COMPLETED'); assert.equal(f.procurement.list().length, 1); assert.equal(f.labels.list().length, 0);
+    assert.deepEqual(delta(f.counts, before), { ...zero(), listingsGet: 1 });
+    const [label] = f.labels.prepareBatch(f.procurement.list()[0].id); await f.labels.runDue();
+    assert.equal(label.draftId, draft.id); assert.equal(label.jobId, task.id); assert.equal(f.labels.get(label.id).status, 'READY');
+    assert.equal((await f.labels.verifyFiles(label.id)).files.length, 1); await f.labels.runDue();
     assert.deepEqual(delta(f.counts, before), { ...zero(), listingsGet: 1, labelPost: 1 });
   } else {
     await f.followup.runDue(); await f.labels.runDue(); assert.equal(f.followup.list().length, 0); assert.equal(f.procurement.list().length, 0); assert.equal(f.labels.list().length, 0);

@@ -620,7 +620,8 @@ export class AmazonService {
       if (semanticJson(resolved.attributes) !== semanticJson(record.draft.attributes)) {
         record.draft.attributes = resolved.attributes; record.draft.revision++; record.draft.state = 'DRAFT';
         record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
-        record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null; record.previewResponse = null;
+        record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null;
+        if(!revalidateLocal)record.previewResponse = null;
         record.request = this.request(record);
         this.event(record, 'save', '已按当前业务规则补全缺失字段，已有填写内容保留');
       }

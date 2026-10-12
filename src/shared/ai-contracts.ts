@@ -35,6 +35,8 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  /** Fixed safety state survives backup without retaining provider response text. */
+  imagePlanRetryBlock?:'RESPONSE_NOT_CONTENT'|'RESPONSE_SECRET_ECHO';
   /** Provider content was received; independent of local parsing success. */
   responseReceived?: true;
   thinking?: boolean;

@@ -1519,3 +1519,71 @@ test('R2 concurrent repair requests cannot exceed the shared workflow slot budge
  const settled=await Promise.allSettled(['First feedback','Second feedback'].map(issue=>f.ai.imagePlan(f.context,()=>{},{previousPlanId:prior.id,issues:[issue]},undefined,workflowId)));
  assert.ok(settled.every(result=>result.status==='rejected'));assert.equal(f.requests.length-before,2);assert.equal(f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId).length,3);
 });
+
+for(const usage of [undefined,null,{prompt_tokens:'bad',completion_tokens:1}])for(const refusal of [true,false])test('R2 malformed usage cannot hide '+(refusal?'refusal':'tool call')+' '+JSON.stringify(usage),async t=>{
+ const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?Response.json({...(usage===undefined?{}:{usage}),choices:[{finish_reason:refusal?'stop':'tool_calls',message:{content:'{}',...(refusal?{refusal:'Cannot comply'}:{tool_calls:[{id:'safe-fixture'}]})}}]}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.diagnosticReason==='RESPONSE_NOT_CONTENT');assert.equal(f.requests.length-before,1);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(f.requests.length-before,1);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
+});
+
+test('R2 restoring a backup before image planning preserves all three newer planning calls',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),file=join(f.directory,'before-image-planning.htcbackup'),passphrase='synthetic image planning restore';await createWorkspaceBackup(f.directory,file,passphrase);
+ f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));
+ const calls=f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId);assert.equal(calls.length,3);
+ const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase),db=openDatabase(prepared.stagingDirectory);
+ try{const saved=db.prepare("SELECT record_json FROM ai_calls WHERE json_extract(record_json,'$.presentationContext.workflowId')=?").all(workflowId).map(row=>JSON.parse(String(row.record_json)));assert.equal(saved.length,3);assert.deepEqual(saved.sort((a,b)=>a.id.localeCompare(b.id)),calls.sort((a,b)=>a.id.localeCompare(b.id)));}finally{db.close();}
+ const store=new WorkspaceStore(prepared.stagingDirectory),hosting=new HostingService(prepared.stagingDirectory,store,mockStorage);let requests=0;const ai=new AiService(prepared.stagingDirectory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('No remaining planning budget');}});
+ try{ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.code==='OUTPUT_INVALID');assert.equal(requests,0);}finally{await ai.close();await hosting.close();store.close();}
+});
+
+test('R2 standard tool_calls finish reason is nonretryable with valid usage across restart',async t=>{
+ const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?Response.json({usage:{prompt_tokens:2,completion_tokens:3},choices:[{finish_reason:'tool_calls',message:{content:'{}',tool_calls:[{id:'safe-fixture'}]}}]}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.diagnosticReason==='RESPONSE_NOT_CONTENT');assert.equal(f.requests.length-before,1);assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,5);
+ let requests=0;const restarted=new AiService(f.directory,f.store,(f.ai as any).hosting,mockStorage,{fetch:async()=>{requests++;throw Error('Refusal must not resend');}});
+ try{await assert.rejects(restarted.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(requests,0);}finally{await restarted.close();}
+});
+
+test('R2 old backup keeps newer successful planning only as spent budget, without importing the result',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),file=join(f.directory,'before-planning-success.htcbackup'),passphrase='synthetic planning success restore';await createWorkspaceBackup(f.directory,file,passphrase);
+ const result=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),call=f.ai.getCall(result.callId)!;
+ const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase),db=openDatabase(prepared.stagingDirectory);
+ try{const retained=JSON.parse(String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id)!.record_json));assert.deepEqual(retained,{...call,status:'FAILED',errorCode:'INTERRUPTED'});assert.equal(db.prepare('SELECT id FROM ai_results WHERE id=?').get(result.id),undefined);assert.equal(db.prepare("SELECT count(*) n FROM ai_results WHERE json_extract(record_json,'$.callId')=?").get(call.id)!.n,0);assert.deepEqual(JSON.parse(String(db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id)!.record_json)).usage,call.usage);}finally{db.close();}
+});
+
+test('R2 restore commit retains planning calls sent after preparation and still forbids a fourth send',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),file=join(f.directory,'before-prepared-planning.htcbackup'),passphrase='synthetic commit planning restore';await createWorkspaceBackup(f.directory,file,passphrase);const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase);
+ f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));const calls=f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId);
+ await f.ai.close();await (f.ai as any).hosting.close();f.amazon.close();f.store.close();f.store.close=()=>{};
+ await commitWorkspaceRestore(f.directory,prepared);
+ const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let requests=0;const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('No remaining planning budget');}});
+ try{assert.deepEqual(ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId).sort((a,b)=>a.id.localeCompare(b.id)),calls.sort((a,b)=>a.id.localeCompare(b.id)));ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.code==='OUTPUT_INVALID');assert.equal(requests,0);}finally{await ai.close();await hosting.close();store.close();}
+});
+
+test('R2 conflicting planning call identity rejects an old backup without changing current history',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),result=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),file=join(f.directory,'planning-identity.htcbackup'),passphrase='synthetic conflicting planning identity';await createWorkspaceBackup(f.directory,file,passphrase);
+ const call=f.ai.getCall(result.callId)!,changed={...call,presentationContext:{...call.presentationContext!,workflowId:randomUUID()}},db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(changed),call.id);}finally{db.close();}
+ await assert.rejects(prepareWorkspaceRestore(f.directory,file,passphrase));assert.deepEqual(f.ai.getCall(call.id),changed);
+});
+
+test('R2 malformed usage cannot turn a confirmed credential echo into a formatting retry',async t=>{
+ const f=await fixture(t);f.respond(operation=>operation==='image-plan'?Response.json({usage:null,choices:[{finish_reason:'stop',message:{content:'{"note":"image-fixture-deepseek-key"}'}}]}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,randomUUID()),(e:any)=>e.diagnosticReason==='RESPONSE_SECRET_ECHO');assert.equal(f.requests.length-before,1);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
+});
+
+test('R2 exhausted planning budget has a specific visible message without a fourth fee',async t=>{
+ const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ const exhausted=(e:any)=>{assert.equal(e.code,'OUTPUT_INVALID');assert.equal(e.diagnosticReason,'IMAGE_PLAN_ATTEMPTS_EXHAUSTED');assert.match(e.message,/图片规划已达到 3 次尝试/);assert.match(e.message,/已保留原图和请求记录/);return true;};
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);const calls=f.ai.listCalls(),usage=f.ai.getUsageSummary('deepseek'),before=f.requests.length;
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);assert.equal(f.requests.length,before);assert.deepEqual(f.ai.listCalls(),calls);assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);
+});
+
+test('R2 a restored refusal remains nonretryable without diagnostic files and overrides an older running snapshot',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),file=join(f.directory,'before-refusal-response.htcbackup'),passphrase='synthetic refusal safety restore';
+ let respond!:(response:Response)=>void;const waiting=new Promise<Response>(resolve=>{respond=resolve;});f.respond(operation=>operation==='image-plan'?waiting:undefined);
+ let sent!:()=>void;const didSend=new Promise<void>(resolve=>{sent=resolve;});const pending=f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId,sent);const observed=pending.catch(error=>error);await didSend;
+ await createWorkspaceBackup(f.directory,file,passphrase);respond(Response.json({usage:null,choices:[{finish_reason:'tool_calls',message:{content:'{}',tool_calls:[{}]}}]}));await observed;
+ const call=f.ai.listCalls().find(c=>c.presentationContext?.workflowId===workflowId)!;assert.equal((call as any).imagePlanRetryBlock,'RESPONSE_NOT_CONTENT');
+ const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase),store=new WorkspaceStore(prepared.stagingDirectory),hosting=new HostingService(prepared.stagingDirectory,store,mockStorage);let requests=0;
+ const ai=new AiService(prepared.stagingDirectory,store,hosting,mockStorage,{fetch:async()=>{requests++;throw Error('Restored refusal must not resend');}});
+ try{ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});assert.equal((ai.getCall(call.id) as any).imagePlanRetryBlock,'RESPONSE_NOT_CONTENT');await assert.rejects(ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(requests,0);assert.equal(ai.listResults(f.product.id).some(result=>result.callId===call.id),false);}finally{await ai.close();await hosting.close();store.close();}
+});

@@ -114,5 +114,6 @@ export function hasRetainedInvalidAiOutput(directory:string,call:AiCall,operatio
 
 /** Provider refusal/tool requests and credential echoes are not repairable format failures. */
 export function imagePlanRetryForbidden(directory:string,call:AiCall):boolean {
+ if(call.imagePlanRetryBlock)return true;
  return readInvalidAiRecords(directory,call,'image-plan').some(record=>['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(record.rejectionReason??'')||JSON.stringify(record.output??null).includes('[omitted: credential echo]'));
 }

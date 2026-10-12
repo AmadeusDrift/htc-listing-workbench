@@ -42,6 +42,7 @@ const reasons:Record<string,string>={
  SOURCE_CONSISTENCY_IDENTITY_INVALID:'来源图身份或原始文件已变化。请修复来源记录。',SOURCE_CONSISTENCY_INVALID_OUTPUT:'来源观察未通过格式或记录校验。请核对已有调用记录。',
  SOURCE_CONSISTENCY_UNAVAILABLE:'来源一致性校验服务尚不可用。请检查服务配置。',SOURCE_CONSISTENCY_REQUEST_FAILED:'来源一致性观察请求未完成。请核对调用记录。',
  FACT_AUTHORITY_REQUIRED:'资料缺少可用于上架的真实依据。请补充对应原始事实或人工确认。',FACT_SOURCE_CONFLICT:'上架声明与来源资料冲突。请核对原始事实。',DECLARATION_SOURCE_CONFLICT:'安全声明与当前来源资料冲突。请核对声明依据。',
+ AMAZON_BRAND_MANUAL:'品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理。请查看平台具体字段及错误代码；不会自动改品牌或申请品牌批准。',
  SOURCE_INPUT_REQUIRED:'来源资料尚不完整。请进入商品资料核对。',
  ROI_MAX_PRICE:'已确认 ROI 规则未通过：所需价格超过上限。请核对已保存的定价规则与输入。',ROI_PROMOTION_OR_MARGIN:'已确认促销或利润规则未通过。请核对定价记录。',DIMENSIONAL_WEIGHT_LIMIT:'已确认包装抛重超过规则限制。请核对包装测量与规则。',IP_PLAN_BLOCKED:'来源图片触发 IP 风险规则。请核对已保存的风险记录。',IP_IMAGE_BLOCKED:'生成图片触发 IP 风险规则。请核对已保存的风险记录。',
  PRICING_EVIDENCE_STALE:'定价依据已变化。请重新核对实际输入与规则。',COST_CNY_UNCONFIRMED:'采购成本尚未确认。请补充当前销售单位的实际成本。',PACKAGE_MEASUREMENTS_MISSING:'缺少真实包装尺寸或重量。请补充实际测量资料。',PACKAGE_INPUT_UNCONFIRMED:'包装输入尚未确认。请核对实际包装资料。',PACKAGE_SCOPE_UNCONFIRMED:'包装资料范围尚未确认。请核对单件与销售组合。',SOURCE_QUANTITY_CONFLICT:'来源件数存在冲突。请核对销售组合的实际件数。',SOURCE_QUANTITY_UNCONFIRMED:'来源件数尚未确认。请核对实际售卖数量。',SYSTEM_FAILURE:'系统处理未完成，尚无更细的可信归因。请核对已有记录与配置。',EVIDENCE_READ_FAILED:'已保存的依据暂不可读。请检查本地记录，保留当前进度。',

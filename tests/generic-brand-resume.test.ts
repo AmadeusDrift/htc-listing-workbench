@@ -52,6 +52,14 @@ test('automatic owner keeps brand dispute manual and does not consume a repair a
  row.repairAttempts=0;row.repair.draftStamp=imageWorkflowDraftStamp(r.draft);p.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),saved.id);await f.reopen();
  await assert.rejects(f.run(),/人工/);assert.equal((f.progress() as any).repairAttempts,0);assert.equal(f.requests.length,0);assert.equal(f.previews(),0);
  const outcome=await f.classifyFailure();assert.equal(outcome.kind,'NEEDS_INPUT');assert.equal(outcome.code,'AMAZON_BRAND_MANUAL');
+ await f.reopen();assert.deepEqual((f.progress() as any).outcome,outcome);
+ const {validateAutomaticListingTask}=await import('../src/main/automatic-listing/records.ts');
+ const persisted=JSON.parse(p.db.prepare('SELECT record_json FROM automatic_listing_tasks').get().record_json);
+ assert.doesNotThrow(()=>validateAutomaticListingTask(persisted));
+ for(const kind of ['SYSTEM_REPAIR','UNKNOWN','RULE_FILTERED']){const invalid=structuredClone(persisted);invalid.items[0].outcome.kind=kind;assert.throws(()=>validateAutomaticListingTask(invalid));}
+ for(const patch of [{draftId:null,draftRevision:null},{draftRevision:0}]){const invalid=structuredClone(persisted);Object.assign(invalid.items[0].outcome,patch);assert.throws(()=>validateAutomaticListingTask(invalid));}
+ const {presentRejection}=await import('../src/shared/rejection-presentation.ts');assert.match(presentRejection(outcome.code),/Generic.*人工/);
+
 });
 
 test('ordinary brand schema errors are not classified as brand approval disputes',async t=>{

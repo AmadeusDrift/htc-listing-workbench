@@ -834,7 +834,33 @@ export class AutomaticListingService {
       if(!this.matching(task,row,current)||submitted(current)||row.executionTaskIds.some(id=>{const child=this.deps.execution.get(id);return child.items.length!==1||child.items[0].draftId!==current.id||child.items[0].submitStarted;}))throw new UserFacingError('字段修复范围或提交记录已变化，未继续字段请求');
       const op=new CompletionJournal(this.db).get(repair.operationId);
       if(op.draftId!==row.draftId)throw new UserFacingError('字段操作身份不一致，未自动重发');
-      const result=await this.deps.repairFields(row.draftId!,this.controller!.signal,repair.operationId),draft='draft' in result?result.draft:result;
+      let result:Awaited<ReturnType<NonNullable<AutomaticListingDependencies['repairFields']>>>;
+      try{result=await this.deps.repairFields(row.draftId!,this.controller!.signal,repair.operationId);}
+      catch(error){
+        // A local fixed-brand migration commits the owner checkpoint together
+        // with the draft. Do not overwrite it with stale in-memory state if a
+        // caller is interrupted immediately after that transaction returns.
+        if(op.scopedRepair&&op.state==='DONE'){
+          const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
+          if(saved){
+            const durable=validateAutomaticListingTask(JSON.parse(String(saved.record_json))),items=task.items;
+            // pump retains both this array's iterator and the current row. Sync
+            // every row in place so its catch and later siblings save the same
+            // objects, including newly persisted pause/cancel and checkpoints.
+            const current=new Map(items.map(item=>[item.key,item]));
+            const restored=durable.items.map(savedItem=>{
+              const item=current.get(savedItem.key);if(!item)return savedItem;
+              for(const key of Object.keys(item))if(!Object.hasOwn(savedItem,key))Reflect.deleteProperty(item,key);
+              return Object.assign(item,savedItem);
+            });
+            items.splice(0,items.length,...restored);
+            for(const key of Object.keys(task))if(!Object.hasOwn(durable,key))Reflect.deleteProperty(task,key);
+            Object.assign(task,{...durable,items});
+          }
+        }
+        throw error;
+      }
+      const draft='draft' in result?result.draft:result;
       const remaining=localRefresh?[...new Set([...('draft' in result?result.remaining:[]),...fieldRepairRemaining(draft)])]:fieldRepairRemaining(draft,'draft' in result?result.remaining:[]);
       row.repair=repair={...repair,phase:remaining.length?'FIELDS_PENDING':'RECHECK_PENDING',remaining,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);this.checkpoint(task,row);
     }

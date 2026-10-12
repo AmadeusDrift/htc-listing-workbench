@@ -85,3 +85,44 @@ for(const pending of ['candidate','review'] as const)test(`resumed ACTIVE ${pend
  assert.equal(after.state,'DONE');assert.equal(after.rounds[0].review?.sent,false);
  if(pending==='review')assert.ok(f.ai.getResult(after.rounds[0].candidate.resultId!));
 });
+
+test('scoped DONE receives an independent audited brand-only migration and retires only proven stale preview 5665',async t=>{
+ const {randomUUID}=await import('node:crypto');
+ const f=await oldBrand(t),op=f.ai.completionJournal.get(f.op.id),record=f.p.record(f.draft.id);
+ op.scopedRepair={version:'legacy-theme-parser/v1',fields:['theme'],sourceResultId:randomUUID(),sourceCallId:randomUUID(),sourceContextHash:'a'.repeat(64),sourceWorkflowId:randomUUID(),originalDraftStamp:op.draftStamp,previousAttempts:4};f.ai.completionJournal.save(op);
+ record.draft.attributes.theme=[{value:'Animal/Cartoon'}];record.draft.previewIssues.push({...brandingIssue('OTHER','material')});
+ record.exchanges=[{id:randomUUID(),at:new Date().toISOString(),operation:'preview',revision:record.draft.revision,request:{attributes:{brand:record.draft.attributes.brand}},response:{issues:[brandingIssue()]},status:200,requestId:null,schemaChecksum:record.draft.schema.checksum,schemaVersion:record.draft.schema.version}];f.p.putRecord(record);
+ const {completionDraftStamp}=await import('../src/main/listing-ai/completion-journal.ts');op.draftStamp=completionDraftStamp(record.draft);f.ai.completionJournal.save(op);
+ const before=f.p.record(f.draft.id),raw=f.p.db.prepare('SELECT * FROM amazon_exchanges').all();
+ const result=await f.listing.complete(f.reference,undefined,op.id);
+ assert.equal((result.draft.attributes.brand as any)[0].value,'Generic');
+ assert.deepEqual(result.draft.attributes.theme,before.draft.attributes.theme);
+ assert.deepEqual(result.draft.previewIssues.map(i=>i.code),['OTHER']);
+ assert.deepEqual(f.p.record(f.draft.id).previewResponse,before.previewResponse);
+ assert.deepEqual(f.p.db.prepare('SELECT * FROM amazon_exchanges').all(),raw);
+ const afterOp=f.ai.completionJournal.get(op.id);assert.deepEqual(afterOp.rounds,op.rounds);assert.deepEqual(afterOp.scopedRepair,op.scopedRepair);
+ assert.equal(f.p.db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='listing.fixed-brand-migrated'").get().n,1);
+ const again=await f.listing.complete({draftId:result.draft.id,draftRevision:result.draft.revision},undefined,op.id);assert.equal(again.draft.revision,result.draft.revision);assert.equal(f.requests.length,0);
+});
+
+
+for(const guard of ['submitted','stamp','source','lock'] as const)test(`scoped brand migration refuses ${guard} without writes`,async t=>{
+ const {randomUUID}=await import('node:crypto');
+ const f=await oldBrand(t),op=f.ai.completionJournal.get(f.op.id),r=f.p.record(f.draft.id);
+ op.scopedRepair={version:'legacy-theme-parser/v1',fields:['theme'],sourceResultId:randomUUID(),sourceCallId:randomUUID(),sourceContextHash:'a'.repeat(64),sourceWorkflowId:randomUUID(),originalDraftStamp:op.draftStamp,previousAttempts:4};
+ if(guard==='submitted')r.draft.submittedAt=new Date().toISOString();
+ if(guard==='source')r.draft.productRevision++;
+ if(guard==='stamp')r.draft.attributes.material=[{value:'Changed'}];
+ if(guard==='lock')f.p.locked=()=>true;
+ f.p.putRecord(r);f.ai.completionJournal.save(op);const before=f.p.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(r.draft.id).record_json;
+ assert.throws(()=>f.amazon.migrateFixedBrand({id:r.draft.id,revision:r.draft.revision},op.id));assert.equal(f.p.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(r.draft.id).record_json,before);assert.equal(f.requests.length,0);
+});
+
+for(const code of ['5665','5882'])test(`scoped migration retains unproven ${code} and fresh Generic refusal stays manual`,async t=>{
+ const {randomUUID}=await import('node:crypto'),f=await oldBrand(t),op=f.ai.completionJournal.get(f.op.id),r=f.p.record(f.draft.id);
+ op.scopedRepair={version:'legacy-theme-parser/v1',fields:['theme'],sourceResultId:randomUUID(),sourceCallId:randomUUID(),sourceContextHash:'a'.repeat(64),sourceWorkflowId:randomUUID(),originalDraftStamp:op.draftStamp,previousAttempts:4};f.ai.completionJournal.save(op);
+ r.draft.previewIssues=[brandingIssue(code)];f.p.putRecord(r);
+ const result=await f.listing.complete(f.reference,undefined,op.id);assert.ok(result.remaining.some(message=>message.includes('人工')));assert.equal(result.draft.previewIssues[0].code,code);
+ const fresh=f.p.record(f.draft.id);fresh.draft.previewIssues=[brandingIssue(code)];f.p.putRecord(fresh);
+ const again=await f.listing.complete({draftId:f.draft.id,draftRevision:result.draft.revision},undefined,op.id);assert.ok(again.remaining.some(message=>message.includes('人工')));assert.equal(again.draft.revision,result.draft.revision);assert.equal(f.requests.length,0);
+});

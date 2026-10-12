@@ -407,6 +407,10 @@ export class ListingAiService {
     const rejections=()=>operation.rounds.flatMap(round=>{const result=journal.result(round.candidate,round);return result?.fieldRejections?.entries.length?[{resultId:result.id,callId:result.callId,details:result.fieldRejections}]:[];});
     const finish=(remaining:string[])=>{operation.remaining=currentRemaining(remaining);operation.state='DONE';checkpoint();return{draft,aiCalls,previewAttempts,remaining:operation.remaining,rejections:rejections()};};
     refresh();
+    if(operation.state==='DONE'&&operation.scopedRepair){
+      draft=this.amazon.migrateFixedBrand({id:draft.id,revision:draft.revision},operation.id);
+      operation=journal.get(operation.id);
+    }
     // Recover received outputs above and enforce unknown-result protection first.
     // A historical ACTIVE round must not bypass the same manual stop as a new round.
     const existingBrandIssues=manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]);

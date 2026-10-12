@@ -41,8 +41,14 @@ for(const change of ['ordinary','similar','source','present','unknown','candidat
 
 
 
-async function automaticLegacy(t:any,haul=false){
+async function automaticLegacy(t:any,haul=false,priced=false){
  const f=await completionOwnerFixture(t,'automatic',false,false,'Blue',true,haul?'haul':'standard');
+ if(priced){
+   const p=(f.amazon as any).persistence,r=p.record(f.draft.id),measurement={type:'object',properties:{value:{type:'number'},unit:{enum:['inches']}},required:['value','unit']};
+   Object.assign(r.draft.schema.schema.properties,{brand:{type:'array',items:{type:'object',properties:{value:{type:'string'}}}},item_package_dimensions:{type:'array',items:{type:'object',properties:{length:measurement,width:measurement,height:measurement},required:['length','width','height']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']}},required:['value','unit']}}});p.putRecord(r);
+   f.amazon.getSchema=async()=>structuredClone(r.draft.schema);Object.assign(f.draft,f.amazon.applyBusinessDefaults({id:r.draft.id,revision:r.draft.revision}));
+   const owner=f.ownerService() as any,task=[...owner.tasks.values()][0] as any;Object.assign(task.items[0].repair,{draftRevision:f.draft.revision,draftStamp:imageWorkflowDraftStamp(f.draft)});owner.save(task);
+ }
  const context=f.listing.currentContext(f.draft,f.product,1,true);context.fields=context.fields.filter(x=>x.name==='theme');context.repairRequest={issues:[{field:'theme',code:'90220',message:'Missing theme'}],currentValues:{theme:null}};
  f.respond(()=>chat({kind:'amazon-fields',candidates:[],missing:[{field:'theme',reason}]}));await f.ai.listingFields(context,async()=>{},undefined);
  const service=f.ownerService() as any,task=[...service.tasks.values()][0] as any,row=task.items[0],at=new Date().toISOString();
@@ -121,4 +127,51 @@ for(const boundary of ['preview','adoption'] as const)for(const dirty of ['color
    assert.throws(()=>f.amazon.adoptFields({id:f.draft.id,revision:record.draft.revision},after,adoption,()=>{}),/theme 定向修复不能规范化其他字段/);
  }
  assert.equal(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,before);assert.equal(JSON.stringify(db.prepare('SELECT * FROM audit_events').all()),events);assert.equal(f.ai.listCalls().length,calls);assert.equal(f.previews(),0);
+});
+
+async function completedOldBrand(t:any){
+ const f=await automaticLegacy(t,true,true);await assert.rejects(f.run(),/Downstream image recheck sentinel/);
+ const service=f.ownerService() as any,p=(f.amazon as any).persistence,record=p.record(f.draft.id),task=[...service.tasks.values()][0] as any,row=task.items[0];
+ record.draft.schema.schema.properties.brand={type:'array',items:{type:'object',properties:{value:{type:'string'}}}};
+ record.draft.attributes.brand=[{value:'其他'}];delete record.draft.businessRules.fields.brand;
+ const issue={code:'5665',source:'amazon',severity:'ERROR',category:'field',attributeNames:['brand'],autoFixable:false,message:'Old brand approval'};
+ record.draft.previewIssues=[issue];record.previewResponse={issues:[issue]};record.exchanges=[{id:randomUUID(),at:new Date().toISOString(),operation:'preview',revision:record.draft.revision,request:{attributes:{brand:record.draft.attributes.brand}},response:{issues:[issue]},status:200,requestId:null,schemaChecksum:record.draft.schema.checksum,schemaVersion:record.draft.schema.version}];p.putRecord(record);
+ const op=f.listing.getCompletion(row.repair.operationId);op.safetyIdentity=completionSafetyIdentity(record.draft);op.safetyScopeHash=completionSafetyScope(record.draft);op.draftStamp=completionDraftStamp(record.draft);op.scopeHash=(f.listing as any).completionScope(record.draft);f.ai.completionJournal.save(op);
+ row.repair={...row.repair,phase:'FIELDS_PENDING',remaining:['brand：Old brand approval'],draftRevision:record.draft.revision,draftStamp:imageWorkflowDraftStamp(record.draft)};service.save(task);
+ return {f,service,p,record,task,row,op};
+}
+
+test('completed scoped theme migrates old brand atomically with owner and resumes recheck at five attempts',async t=>{
+ const {f,p,record,task,op}=await completedOldBrand(t);
+ const before={draft:p.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,op:f.listing.getCompletion(op.id),task:JSON.parse(p.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json)};
+ p.db.exec("CREATE TRIGGER abort_brand_audit BEFORE INSERT ON audit_events WHEN NEW.action='listing.fixed-brand-migrated' BEGIN SELECT RAISE(ABORT,'injected migration interruption'); END");
+ assert.throws(()=>f.amazon.migrateFixedBrand({id:record.draft.id,revision:record.draft.revision},op.id),/injected migration interruption/);
+ assert.equal(p.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,before.draft);assert.deepEqual(f.listing.getCompletion(op.id),before.op);assert.deepEqual(JSON.parse(p.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json),before.task);
+ p.db.exec('DROP TRIGGER abort_brand_audit');const calls=f.requests.length;
+ const migrate=f.amazon.migrateFixedBrand.bind(f.amazon);let interrupted=false;f.amazon.migrateFixedBrand=(...args)=>{const draft=migrate(...args);if(!interrupted){interrupted=true;throw Error('after migration commit');}return draft;};
+ await assert.rejects(f.run(),/after migration commit/);
+ await f.reopen();await assert.rejects(f.run(),/Downstream image recheck sentinel/);
+ assert.equal((f.amazon.getDraft(f.draft.id).attributes.brand as any)[0].value,'Generic');assert.equal((f.progress() as any).repairAttempts,5);assert.equal((f.progress() as any).repair.phase,'RECHECK_PENDING');assert.equal(f.requests.length,calls);
+ const after=f.listing.getCompletion(op.id);assert.deepEqual(after.rounds,before.op.rounds);assert.deepEqual(after.scopedRepair,before.op.scopedRepair);
+ const revision=f.amazon.getDraft(f.draft.id).revision;await f.reopen();await assert.rejects(f.run(),/Downstream image recheck sentinel/);assert.equal(f.amazon.getDraft(f.draft.id).revision,revision);assert.equal(f.requests.length,calls);
+});
+
+for(const stop of [null,'PAUSED','CANCELLED'] as const)test(`pump preserves row identities and sibling checkpoint after brand commit interruption (${stop??'continue'})`,async t=>{
+ const {f,service,p,task,row}=await completedOldBrand(t);
+ const sibling=structuredClone(row);sibling.variantId=randomUUID();delete sibling.salesPlan;sibling.key=sibling.productId+':'+sibling.variantId;sibling.sku='SIBLING';sibling.draftId=null;sibling.repair=null;sibling.executionTaskIds=[];sibling.repairAttempts=0;delete sibling.legacyThemeRepair;delete sibling.sourceColorRepair;delete sibling.sourceColorEvidenceSha256;delete sibling.repairPolicyMigration;
+ row.status='PENDING';sibling.status='PENDING';task.items.push(sibling);task.status='QUEUED';service.save(task);
+ const items=task.items,calls=f.requests.length,childId=randomUUID();let visits=0;
+ const migrate=f.amazon.migrateFixedBrand.bind(f.amazon);f.amazon.migrateFixedBrand=(...args)=>{
+   migrate(...args);const saved=JSON.parse(p.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json);
+   saved.items[1].executionTaskIds=[childId];saved.items[1].imageAttempts=2;saved.items[1].error='Unknown request retained';
+   if(stop)saved.status=stop;saved.revision++;p.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(saved),task.id);throw Error('after migration commit');
+ };
+ // Run the real pump/outer catch; isolate unrelated later preparation and connections.
+ service.prepareItem=async(current:any,item:any)=>{if(item.key===row.key)return service.finishRepair(current,item);visits++;assert.equal(item,sibling);assert.deepEqual(item.executionTaskIds,[childId]);assert.equal(item.imageAttempts,2);assert.equal(item.error,'Unknown request retained');item.status='FAILED';item.error='sibling checkpoint retained';service.save(current);};
+ service.assertConnections=()=>{};service.refreshWaiting=async()=>{};service.grants.add(task.id);service.pump();await service.worker;
+ assert.equal(task.items,items);assert.equal(task.items[0],row);assert.equal(task.items[1],sibling);
+ const saved=JSON.parse(p.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json);
+ assert.equal(saved.items[0].repairAttempts,5);assert.equal(saved.items[0].repair.draftRevision,f.amazon.getDraft(f.draft.id).revision);assert.deepEqual(saved.items[1].executionTaskIds,[childId]);assert.equal(saved.items[1].imageAttempts,2);
+ if(stop){assert.equal(saved.status,stop);assert.equal(visits,0);}else{assert.equal(saved.items[0].status,'FAILED');assert.ok(saved.items[0].error);assert.equal(saved.items[0].outcome.kind,'SYSTEM_REPAIR');assert.equal(saved.items[1].status,'FAILED');assert.equal(visits,1);}
+ assert.equal(f.requests.length,calls);
 });

@@ -1,3 +1,4 @@
+import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import { CompletionJournal, completionDraftStamp } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
@@ -659,13 +660,23 @@ export class AmazonService {
   }
   private normalizeHaulRecord(record: DraftRecord, completionId?: string): void {
     const cleanup=cleanHaulAttributes(record.draft.listingProgram,record.draft.attributes);
-    if(!cleanup.removed.length)return;
+    const color=cleanup.attributes.color;
+    let colorSources:string[]=[];
+    if(color!==undefined)try{
+      const product=this.getProduct(record.draft.productId),variant=product.variants.find(v=>v.id===record.draft.variantId);
+      if(product.revision===record.draft.productRevision&&variant)colorSources=[variant.originalSpec,variant.normalizedSpec];
+    }catch{/* Existing source validation reports missing products; color cleanup adds no gate. */}
+    const plain=color===undefined?undefined:plainColorValue(color,colorSources);
+    const colorChanged=JSON.stringify(color)!==JSON.stringify(plain);
+    if(colorChanged)cleanup.attributes={...cleanup.attributes,color:plain!};
+    if(!cleanup.removed.length&&!colorChanged)return;
     this.mutable(record);this.currentProduct(record);
     const journal=completionId?new CompletionJournal(this.persistence.db):null,operation=completionId?journal!.get(completionId):null;
     if(operation&&(operation.draftId!==record.draft.id||operation.draftRevision!==record.draft.revision||operation.draftStamp!==completionDraftStamp(record.draft)))throw new UserFacingError('字段操作对应的草稿已修改，未自动清理');
     record.draft.attributes=cleanup.attributes;record.draft.revision++;record.preview=null;record.draft.previewedAt=null;record.previewResponse=null;
     record.draft.state='DRAFT';record.draft.localIssues=[];record.draft.previewIssues=[];record.request=this.request(record);
-    this.updateSourceMapping(record);this.event(record,'save',haulCleanupReason(cleanup.removed));
+    this.updateSourceMapping(record);if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed));
+    if(colorChanged)this.event(record,'save','已将销售颜色规范为普通英文颜色名；来源规格及原始响应保留');
     if(operation){operation.draftRevision=record.draft.revision;operation.draftStamp=completionDraftStamp(record.draft);journal!.save(operation);}
   }
   private validate(record: DraftRecord, completionId?: string): boolean {

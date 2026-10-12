@@ -1,3 +1,5 @@
+import { ListingCorrections, selfPackageDeletion } from './corrections.ts';
+import { PROGRAM_RELATION_FIELDS, packageGraphIssues, unitPackageAttributes } from './program-relations.ts';
 import { isSchemaTransientError } from './schema-retry.ts';
 import { sameSchemaValidation } from './schema-compatibility.ts';
 import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
@@ -117,6 +119,7 @@ function readbackTargetScope(target: AmazonTarget): string {
 
 export class AmazonService {
   private persistence: AmazonPersistence;
+  private corrections: ListingCorrections;
   private vault: CredentialVault;
   private transport: AmazonTransport;
   private getProduct: (id: string) => ProductDetail;
@@ -127,6 +130,7 @@ export class AmazonService {
     this.persistence = new AmazonPersistence(directory); this.vault = new CredentialVault(directory, secretStorage); this.getProduct = getProduct; this.now = dependencies.now ?? Date.now;
     this.transport = new AmazonTransport({ active: id => this.active(id), generation: id => this.persistence.generation(id), credentials: id => this.vault.read(id, this.persistence.generation(id)),
       pause: (id, message) => this.pauseForError(id, message), audit: event => this.persistence.addCall(event), redact: value => this.vault.redact(value), remember: value => this.vault.remember(value) }, dependencies);
+    this.corrections = new ListingCorrections(this.persistence,{active:id=>this.active(id),schema:r=>this.getSchema({...r.draft.schema,forceRefresh:true}),api:(...args)=>this.transport.api(...args),now:this.now});
     try {
       let liveEnabled = false;
       for (const target of this.persistence.targets()) if (target.mode === 'live' && target.configured) {
@@ -137,6 +141,30 @@ export class AmazonService {
       }
       this.persistence.recover(this.at()); this.persistence.cleanup(this.now());
     } catch (error) { this.persistence.close(); throw error; }
+  }
+  listCorrections(draftId:string){this.ensureOpen();return this.corrections.list(draftId);}
+  getCorrection(id:string){this.ensureOpen();return this.corrections.get(id);}
+  prepareCorrection(input:unknown){this.ensureOpen();return this.corrections.prepare(input);}
+  previewCorrection(input:unknown){this.ensureOpen();return this.corrections.preview(input);}
+  sendCorrection(input:unknown,confirmed:boolean){this.ensureOpen();return this.corrections.send(input,confirmed);}
+  readCorrection(input:unknown){this.ensureOpen();return this.corrections.readback(input);}
+  cancelCorrection(input:unknown){this.ensureOpen();return this.corrections.cancel(input);}
+  correctUnsubmittedSelfRelation(input:unknown):AmazonDraft {
+    const r=this.checked(input);this.enter(r.draft.id);
+    try{return this.persistence.transaction(()=>{
+      this.mutable(r);this.currentProduct(r);const d=r.draft,db=this.persistence.db;
+      if(d.schema.parentageLevel!=='NONE'||d.salesPlan&&(!d.salesPlan.familyResolved||d.salesPlan.parentage!=='NONE'))throw new UserFacingError('缺少独立销售角色依据');
+      if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.submitStarted')=1").get(d.id))throw new UserFacingError('已有提交意图，不能局部纠正');
+      if(new CompletionJournal(db).list(d.id).some(op=>!['DONE','RETIRED'].includes(op.state)))throw new UserFacingError('字段操作尚未结束，不能局部纠正');
+      const edge=d.attributes.package_contains_sku;
+      const adoption=d.fieldAdoptions?.findLast(a=>a.fields.includes('package_contains_sku')&&a.changes.some(c=>c.field==='package_contains_sku'&&semanticJson(c.after)===semanticJson(edge??null)));
+      const saved=adoption?db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(adoption.suggestionResultId):null,ai=saved?JSON.parse(String(saved.record_json)):null;
+      if(!ai||ai.listingContext?.draftId!==d.id||ai.output?.kind!=='amazon-fields'||!ai.output.candidates?.some((c:{field:string;nativeValue:JsonValue})=>c.field==='package_contains_sku'&&semanticJson(c.nativeValue)===semanticJson(edge??null)))throw new UserFacingError('缺少旧 AI 采纳自引用的精确依据，未修改草稿');
+      const {after}=selfPackageDeletion(d.attributes,d.sku,d.marketplaceId),before=clone(r);d.attributes=after;d.revision++;d.previewedAt=null;r.preview=null;
+      d.localIssues=[...packageGraphIssues(d,this.persistence.records().map(r=>r.draft)),...validateAttributes(d.schema.schema,after,d.schema.metaSchema),...listingProgramIssues(d.listingProgram,d.schema,after),...imageIssues(after),...copyPolicyIssues(d),...this.declarationIssues(d)];
+      d.state=d.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';r.request=this.request(r);this.event(r,'save','按旧 AI 精确采纳依据删除独立 SKU 包装自引用；原响应、采纳记录和预算保留，旧预览失效');this.persistence.putRecord(r);
+      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
+    });}finally{this.busy.delete(r.draft.id);}
   }
   private at(): string { return new Date(this.now()).toISOString(); }
   private ensureOpen(): void { if (this.closed) throw new UserFacingError('Amazon 服务已关闭'); }
@@ -494,7 +522,7 @@ export class AmazonService {
     const schema = await this.getSchema(selected);
     if (this.getProduct(product.id).revision !== product.revision) throw new UserFacingError('来源商品已变化，请重新创建草稿');
     const measurements = program === 'haul' ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {};
-    const resolved = this.businessDefaults(product, variant, target, schema, { ...this.vault.redact(sourceAttributes(product, variant, schema, target, program, measurements)), ...programAttributes(program, target.marketplaceId, schema.parentageLevel) }, program);
+    const resolved = this.businessDefaults(product, variant, target, schema, { ...this.vault.redact(sourceAttributes(product, variant, schema, target, program, measurements)), ...programAttributes(program, target.marketplaceId, schema.parentageLevel), ...(schema.parentageLevel==='NONE'?unitPackageAttributes(schema,target.marketplaceId):{}) }, program);
     const attributes = resolved.attributes;
     assertListingProgram(program, schema, attributes);
     const record = this.newDraftRecord(product, variant, target, schema, attributes, program, resolved.report);
@@ -559,7 +587,7 @@ export class AmazonService {
           const source = sourceAttributes(product, variant, schema, currentTarget, program, measurements);
           if (product.variants.length > 1) { delete source.color; delete source.size; }
           const resolved = this.businessDefaults(product, variant, currentTarget, schema, { ...source, ...programAttributes(program, currentTarget.marketplaceId, schema.parentageLevel), ...item.attributes,
-            ...(plan?relationshipAttributes(schema,plan,currentTarget.marketplaceId):{}) }, program,undefined,plan);
+            ...(plan?relationshipAttributes(schema,plan,currentTarget.marketplaceId):{}), ...(selected.parentageLevel==='NONE'?unitPackageAttributes(schema,currentTarget.marketplaceId):{}) }, program,undefined,plan);
           attributes = attributesObject(resolved.attributes); businessRules = resolved.report;
           assertListingProgram(program, schema, attributes);
           if (JSON.stringify(this.vault.redact(attributes)) !== JSON.stringify(attributes)) throw new UserFacingError('attributes 中不能包含授权配置或令牌');
@@ -788,6 +816,7 @@ export class AmazonService {
         if (adoption.fromRevision !== record.draft.revision || adoption.toRevision !== record.draft.revision + 1) throw new UserFacingError('采纳修订不匹配');
         const feedback={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
         if(preserveFeedback)this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
+        for(const field of PROGRAM_RELATION_FIELDS)if(adoption.fields.includes(field)||semanticJson(attributes[field]??null)!==semanticJson(record.draft.attributes[field]??null))throw new UserFacingError('关系字段由程序管理，不能采用 AI 候选');
         const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
         const scopedOperation=new CompletionJournal(this.persistence.db).list(input.id).find(op=>op.scopedRepair&&op.rounds.some(round=>round.candidate.resultId===adoption.suggestionResultId));
         if(scopedOperation){
@@ -843,7 +872,7 @@ export class AmazonService {
   }
   private validate(record: DraftRecord, completionId?: string): boolean {
     const previousPreviewIssues=clone(record.draft.previewIssues),colorChanged=this.normalizeHaulRecord(record,completionId);
-    record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
+    record.draft.localIssues = [...packageGraphIssues(record.draft,this.persistence.records().map(r=>r.draft)), ...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
     try { this.currentProduct(record); record.draft.localIssues.push(...this.declarationIssues(record.draft)); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
     const valid = !record.draft.localIssues.some(issue => issue.severity === 'ERROR');
     record.draft.state = valid ? 'LOCAL_VALIDATED' : 'BLOCKED'; record.preview = null; record.draft.previewedAt = null; record.draft.previewIssues = colorChanged?previousPreviewIssues:[];
@@ -905,7 +934,7 @@ export class AmazonService {
       }
       taskGuard?.(); this.currentProduct(record); this.requirePreview(this.persistence.record(record.draft.id), target); this.active(target.id);
       const declarationIssues=this.declarationIssues(record.draft);
-      record.draft.localIssues = [...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft), ...declarationIssues];
+      record.draft.localIssues = [...packageGraphIssues(record.draft,this.persistence.records().map(r=>r.draft)), ...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft), ...declarationIssues];
       if(declarationIssues.length){
         record.draft.state='BLOCKED';record.preview=null;record.draft.previewedAt=null;
         this.persistence.putRecord(record);

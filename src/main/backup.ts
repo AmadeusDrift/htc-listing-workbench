@@ -1,3 +1,4 @@
+import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, invalidateCorrectionAuthorizations } from './amazon/correction-history.ts';
 import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
 import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
@@ -131,7 +132,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (database.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') OR (type='table' AND upper(sql) LIKE 'CREATE VIRTUAL TABLE%')").get()) throw new UserFacingError('备份包含不受支持的数据库对象');
     const version = Number(database.prepare('PRAGMA user_version').get()!.user_version);
     if (version < 1 || version > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
-    for (const [name, expected] of [...Object.entries(requiredTables), ...Object.entries(version >= 2 ? versionTwoTables : {}), ...Object.entries(version >= 3 ? versionThreeTables : {}), ...Object.entries(version >= 4 ? versionFourTables : {}), ...Object.entries(version >= 5 ? versionFiveTables : {}), ...Object.entries(version >= 6 ? versionSixTables : {}), ...Object.entries(version >= 7 ? versionSevenTables : {}), ...Object.entries(version >= 8 ? versionEightTables : {}), ...Object.entries(version >= 10 ? versionTenTables : {}), ...Object.entries(version >= 11 ? versionElevenTables : {}), ...Object.entries(version >= 13 ? versionThirteenTables : {}), ...Object.entries(version >= 14 ? versionFourteenTables : {}), ...Object.entries(version >= 15 ? versionFifteenTables : {}), ...Object.entries(version >= 16 ? versionSixteenTables : {}), ...Object.entries(version >= 17 ? SKU_NAMING_TABLES : {}), ...Object.entries(version >= 18 ? versionEighteenTables : {}), ...Object.entries(version >= 19 ? versionNineteenTables : {}), ...Object.entries(version >= 20 ? CONSISTENCY_TABLES : {})]) {
+    for (const [name, expected] of [...Object.entries(requiredTables), ...Object.entries(version >= 2 ? versionTwoTables : {}), ...Object.entries(version >= 3 ? versionThreeTables : {}), ...Object.entries(version >= 4 ? versionFourTables : {}), ...Object.entries(version >= 5 ? versionFiveTables : {}), ...Object.entries(version >= 6 ? versionSixTables : {}), ...Object.entries(version >= 7 ? versionSevenTables : {}), ...Object.entries(version >= 8 ? versionEightTables : {}), ...Object.entries(version >= 10 ? versionTenTables : {}), ...Object.entries(version >= 11 ? versionElevenTables : {}), ...Object.entries(version >= 13 ? versionThirteenTables : {}), ...Object.entries(version >= 14 ? versionFourteenTables : {}), ...Object.entries(version >= 15 ? versionFifteenTables : {}), ...Object.entries(version >= 16 ? versionSixteenTables : {}), ...Object.entries(version >= 17 ? SKU_NAMING_TABLES : {}), ...Object.entries(version >= 18 ? versionEighteenTables : {}), ...Object.entries(version >= 19 ? versionNineteenTables : {}), ...Object.entries(version >= 20 ? CONSISTENCY_TABLES : {}), ...Object.entries(version >= 21 ? {...CORRECTION_TABLES,amazon_write_locks:[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id']} : {})]) {
       const columns = new Set(database.prepare(`PRAGMA table_xinfo(${name})`).all().map(row => row.name));
       if (expected.some(column => !columns.has(column))) throw new UserFacingError('备份数据库结构不完整，当前工作区未更改');
     }
@@ -158,6 +159,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 18) Object.assign(approved, versionEighteenTables);
     if (version >= 19) Object.assign(approved, versionNineteenTables);
     if (version >= 20) Object.assign(approved, CONSISTENCY_TABLES);
+    if (version >= 21) {Object.assign(approved,CORRECTION_TABLES);approved.amazon_write_locks=[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id'];assertCorrectionHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -330,6 +332,7 @@ function disconnectSnapshot(path: string): void {
   try {
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE;');
     database.exec('UPDATE amazon_targets SET credential_ref=NULL;');
+    invalidateCorrectionAuthorizations(database);
     const columns = database.prepare('PRAGMA table_xinfo(amazon_targets)').all().map(row => row.name);
     if (columns.includes('target_json') && columns.includes('credential_generation')) database.exec(`
       UPDATE amazon_targets SET credential_generation=credential_generation+1,
@@ -368,13 +371,15 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
   try {
     snapshot.exec('BEGIN IMMEDIATE');
     if (current.prepare("SELECT 1 FROM sqlite_master WHERE name='amazon_write_locks' AND type='table'").get() && snapshot.prepare("SELECT 1 FROM sqlite_master WHERE name='amazon_write_locks' AND type='table'").get()) {
-      const insert = snapshot.prepare("INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at) VALUES(?,?,'UNKNOWN',?) ON CONFLICT(listing_hash) DO UPDATE SET state='UNKNOWN'");
-      for (const row of current.prepare('SELECT listing_hash,draft_id,created_at FROM amazon_write_locks').all()) insert.run(row.listing_hash, row.draft_id, row.created_at);
+      const owners=current.prepare('PRAGMA table_info(amazon_write_locks)').all().some(r=>r.name==='owner_kind');
+      const insert = snapshot.prepare("INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at,owner_kind,owner_id) VALUES(?,?,'UNKNOWN',?,?,?) ON CONFLICT(listing_hash) DO UPDATE SET state='UNKNOWN',owner_kind=excluded.owner_kind,owner_id=excluded.owner_id,draft_id=excluded.draft_id");
+      for (const row of current.prepare('SELECT * FROM amazon_write_locks').all()) insert.run(row.listing_hash, row.draft_id, row.created_at,owners?row.owner_kind:'draft',owners?(row.owner_id||row.draft_id):row.draft_id);
     }
     if (current.prepare("SELECT 1 FROM sqlite_master WHERE name='amazon_calls' AND type='table'").get()) {
       const addCall = snapshot.prepare('INSERT OR IGNORE INTO amazon_calls(id,target_id,created_at,event_json) VALUES(?,?,?,?)');
       for (const row of current.prepare('SELECT id,target_id,created_at,event_json FROM amazon_calls').all()) addCall.run(row.id, row.target_id, row.created_at, row.event_json);
     }
+    retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);

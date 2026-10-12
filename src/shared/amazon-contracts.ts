@@ -1,3 +1,4 @@
+import type { ListingCorrection, ListingCorrectionReference } from './listing-correction-contracts.ts';
 import type { AmazonCredentialInput } from './connection-inputs.ts';
 import type { ListingFieldAdoption } from './listing-ai-contracts.ts';
 import type { CredentialStatus } from './credential-status.ts';
@@ -157,6 +158,13 @@ export interface AmazonApi {
   previewAmazonDraft(input: DraftReference): Promise<AmazonDraft>;
   submitAmazonDraft(input: DraftReference): Promise<AmazonDraft | null>;
   readAmazonListing(input: DraftReference): Promise<AmazonDraft>;
+  listAmazonCorrections(draftId:string):Promise<ListingCorrection[]>;
+  prepareAmazonCorrection(input:DraftReference):Promise<ListingCorrection>;
+  previewAmazonCorrection(input:ListingCorrectionReference):Promise<ListingCorrection>;
+  sendAmazonCorrection(input:ListingCorrectionReference):Promise<ListingCorrection|null>;
+  readAmazonCorrection(input:ListingCorrectionReference):Promise<ListingCorrection>;
+  cancelAmazonCorrection(input:ListingCorrectionReference):Promise<ListingCorrection>;
+  correctAmazonSelfRelation(input:DraftReference):Promise<AmazonDraft>;
   listAmazonCalls(): Promise<AmazonCallEvent[]>;
   getAmazonDataPolicy(): Promise<AmazonDataPolicy>;
   saveAmazonDataPolicy(input: { retentionDays: number }): Promise<AmazonDataPolicy>;

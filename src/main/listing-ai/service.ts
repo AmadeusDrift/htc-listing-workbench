@@ -1,3 +1,4 @@
+import { programRelationField } from '../amazon/program-relations.ts';
 import { selectedFirmnessCorrection } from './selected-firmness.ts';
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
@@ -212,7 +213,7 @@ export class ListingAiService {
     for(const original of originals){
       if(original.output.kind!=='amazon-fields'||!original.output.rejectedCandidates?.some(c=>draft.attributes[c.field]===undefined))continue;
       const recovered=this.ai.recoverFieldCandidates(original.id,context);if(!recovered)continue;
-      const candidate=this.candidates(recovered,draft,context),fields=candidate.candidates.filter(c=>draft.attributes[c.field]===undefined&&original.output.kind==='amazon-fields'&&!original.output.candidates.some(old=>old.field===c.field)).map(c=>c.field);
+      const candidate=this.candidates(recovered,draft,context),fields=candidate.candidates.filter(c=>!programRelationField(c.field)&&draft.attributes[c.field]===undefined&&original.output.kind==='amazon-fields'&&!original.output.candidates.some(old=>old.field===c.field)).map(c=>c.field);
       if(!fields.length)continue;
       const attributes=structuredClone(draft.attributes),changes=fields.map(field=>{const c=candidate.candidates.find(c=>c.field===field)!,after=candidateNative(c,draft.schema,draft.marketplaceId);attributes[field]=after;return {field,before:null,after,evidence:context.evidence.filter(e=>c.items.some(item=>item.evidenceIds.includes(e.id)))};});
       const adoption:ListingFieldAdoption={id:listingFingerprint({draftId:draft.id,revision:draft.revision,suggestion:recovered.id,review:null,fields:[...fields].sort(),reviewDisposition:'SKIPPED_DISABLED'}),at:new Date().toISOString(),suggestionResultId:recovered.id,reviewResultId:null,contextSha256:listingFingerprint(context),fromRevision:draft.revision,toRevision:draft.revision+1,fields:[...fields].sort(),changes,reviewDisposition:'SKIPPED_DISABLED'};
@@ -241,6 +242,7 @@ export class ListingAiService {
   }
   async adopt(raw: unknown, signal?:AbortSignal): Promise<AmazonDraft> {
     signal?.throwIfAborted();const reference = input(raw, 'adopt'), reviewEnabled = this.copyReviewEnabled();
+    if(reference.fields.some(programRelationField))throw new UserFacingError('关系字段由程序管理，不能采用 AI 候选');
     const ignored=reference.fields.filter(field=>haulUnsupportedField(this.amazon.getDraft(reference.draftId).listingProgram,field));
     reference.fields=reference.fields.filter(field=>!ignored.includes(field));
     const disposition = !reviewEnabled && reference.reviewResultId === null ? { reviewDisposition: 'SKIPPED_DISABLED' as const } : {};
@@ -348,7 +350,7 @@ export class ListingAiService {
     const suggestion = await this.ai.listingFields(context, async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); }, undefined, signal);
     this.assertReviewSetting(true);
     const candidate = this.candidates(suggestion, draft, context);
-    const fields = candidate.candidates.filter(field => listingFingerprint(wrapCandidateValues(draft.schema,draft.marketplaceId,field.field,field.items.map(item => item.value),draft.attributes[field.field])) !== listingFingerprint(draft.attributes[field.field] ?? null)).map(field => field.field);
+    const fields = candidate.candidates.filter(field => !programRelationField(field.field)&&listingFingerprint(wrapCandidateValues(draft.schema,draft.marketplaceId,field.field,field.items.map(item => item.value),draft.attributes[field.field])) !== listingFingerprint(draft.attributes[field.field] ?? null)).map(field => field.field);
     if (!candidate.candidates.length) return { draft, aiCalls:1, remaining:[...remaining,...candidate.missing.map(item => `${item.field}：${item.reason}`)], blocked:true };
     const reviewed = await this.review({ ...reference, suggestionResultId:suggestion.id }, signal);
     if (reviewed.output.kind !== 'amazon-fields-review') throw new UserFacingError('文案审核结果无效');
@@ -515,7 +517,7 @@ export class ListingAiService {
       }
       const candidate=this.candidates(suggestion,draft,context);
       const citationRepairs=new Set(context.repairRequest?.issues.filter(issue=>issue.code==='PROSE_ADOPTION_EVIDENCE'&&isProseField(issue.field)).map(issue=>issue.field));
-      const fields=candidate.candidates.filter(c=>(!operation.scopedRepair||operation.scopedRepair.fields.includes(c.field as 'theme'))&&!haulUnsupportedField(draft.listingProgram,c.field)&&(citationRepairs.has(c.field)||JSON.stringify(candidateNative(c,draft.schema,draft.marketplaceId,draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field]))).map(c=>c.field);
+      const fields=candidate.candidates.filter(c=>!programRelationField(c.field)&&(!operation.scopedRepair||operation.scopedRepair.fields.includes(c.field as 'theme'))&&!haulUnsupportedField(draft.listingProgram,c.field)&&(citationRepairs.has(c.field)||JSON.stringify(candidateNative(c,draft.schema,draft.marketplaceId,draft.attributes[c.field]))!==JSON.stringify(draft.attributes[c.field]))).map(c=>c.field);
       if(!fields.length){
         const rejected=candidate.missing.filter(m=>!m.omitted&&/^\[/.test(m.reason));
         if(isFullSchema(context)&&rejected.length&&operation.rounds.length<2){operation.reviewIssues=rejected.map(m=>({field:m.field,message:m.reason}));reviewIssues=rejected.map(m=>({code:'FIELD_REPAIR',message:m.reason,severity:'ERROR',category:'field',source:'local',attributeNames:[m.field],autoFixable:false}));round!.resolved=true;checkpoint();continue;}

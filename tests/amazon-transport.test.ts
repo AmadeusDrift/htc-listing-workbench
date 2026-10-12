@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/main/store.ts';
 import type { AmazonDraft, JsonObject } from '../src/shared/amazon-contracts.ts';
+import type {AmazonTransport} from '../src/main/amazon/transport.ts';
 
 const implementation = await import('../src/main/amazon/service.ts').catch(() => null);
 const secretStorage = { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(Buffer.from(s).map(b => b ^ 0xa5)), decryptString: (b: Buffer) => Buffer.from(b.map(v => v ^ 0xa5)).toString() };
@@ -45,6 +46,16 @@ async function draft(f: ReturnType<typeof fixture>) {
   return f.service.createDraft({ targetId: target.id, productId: f.product.id, variantId: f.product.variants[0].id, productType: 'STORAGE_BAG', requirements: 'LISTING', parentageLevel: 'NONE', locale: 'en_US' });
 }
 async function preview(f: ReturnType<typeof fixture>): Promise<AmazonDraft> { return f.service.previewDraft(await draft(f)); }
+
+test('PATCH preview uses preview mode and shared PATCH rate window; formal PATCH is one unknown attempt on incomplete body',async t=>{
+ const f=fixture(t),target=await f.service.importCredentials(creds),transport=(f.service as unknown as {transport:AmazonTransport}).transport,path=`/listings/2021-08-01/items/${target.sellerId}/SKU`,query={marketplaceIds:target.marketplaceId},body={productType:'STORAGE_BAG',patches:[{op:'delete',path:'/attributes/package_contains_sku',value:[{sku:'SKU',marketplace_id:target.marketplaceId}]}]};
+ let calls=0;f.hook((_url,init)=>{if(init.method==='PATCH'){calls++;return json({sku:'SKU',status:'VALID',issues:[]},200,{'x-amzn-ratelimit-limit':'0.5'});}});
+ await transport.api(target,'previewPatchListingsItem',path,{...query,mode:'VALIDATION_PREVIEW'},body);assert.equal(calls,1);
+ await assert.rejects(transport.api(target,'patchListingsItem',path,{...query,mode:'VALIDATION_PREVIEW'},body));assert.equal(calls,1);
+ f.hook((_url,init)=>{if(init.method==='PATCH'){calls++;return new Response('{"sku":',{status:200});}});
+ await assert.rejects(transport.api(target,'patchListingsItem',path,query,body),(e:any)=>e.unknownWrite===true);assert.equal(calls,2);assert.ok(f.delays.includes(2000));
+ const patches=f.requests.filter(r=>r.init.method==='PATCH');assert.equal(patches[0].url.searchParams.get('mode'),'VALIDATION_PREVIEW');assert.equal(patches[1].url.searchParams.has('mode'),false);
+});
 
 test('digit-leading Amazon product types work in full index, keyword search, selection and schema transport', async t => {
   const f = fixture(t), target = await f.service.importCredentials(creds);

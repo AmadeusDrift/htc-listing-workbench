@@ -43,7 +43,7 @@ export class AmazonTransportError extends UserFacingError {
 }
 interface HttpResult { status: number; headers: Headers; bytes: Buffer; bodyUnavailable?: 'limit' | 'read' }
 export interface ApiResult { data: JsonObject; status: number; requestId: string | null }
-type Operation = 'searchDefinitionsProductTypes' | 'getDefinitionsProductType' | 'previewListingsItem' | 'putListingsItem' | 'getListingsItem';
+export type Operation = 'searchDefinitionsProductTypes' | 'getDefinitionsProductType' | 'previewListingsItem' | 'putListingsItem' | 'getListingsItem' | 'patchListingsItem' | 'previewPatchListingsItem';
 const ENDPOINTS = { na: 'https://sellingpartnerapi-na.amazon.com', eu: 'https://sellingpartnerapi-eu.amazon.com', fe: 'https://sellingpartnerapi-fe.amazon.com' };
 
 function publicAddress(address: string): boolean {
@@ -184,16 +184,16 @@ export class AmazonTransport {
   }
   async api(target: AmazonTarget, operation: Operation, path: string, query: Record<string, string>, body?: JsonObject, beforeSend?: () => void): Promise<ApiResult> {
     this.hooks.active(target.id); marketplace(target.marketplaceId, target.region);
-    const write = operation === 'putListingsItem'; const method = write || operation === 'previewListingsItem' ? 'PUT' : 'GET';
+    const write = operation === 'putListingsItem' || operation === 'patchListingsItem'; const method = operation === 'patchListingsItem' || operation === 'previewPatchListingsItem' ? 'PATCH' : operation === 'putListingsItem' || operation === 'previewListingsItem' ? 'PUT' : 'GET';
     const validPath = operation === 'searchDefinitionsProductTypes' ? path === '/definitions/2020-09-01/productTypes'
       : operation === 'getDefinitionsProductType' ? /^\/definitions\/2020-09-01\/productTypes\/[A-Z0-9][A-Z0-9_]*$/.test(path)
       : /^\/listings\/2021-08-01\/items\/[^/]+\/[^/]+$/.test(path);
     if (!validPath || query.marketplaceIds !== target.marketplaceId) throw new UserFacingError('Amazon 请求上下文不匹配');
-    if (operation === 'previewListingsItem' && query.mode !== 'VALIDATION_PREVIEW' || write && 'mode' in query) throw new UserFacingError('Amazon 请求模式无效');
+    if ((operation === 'previewListingsItem' || operation === 'previewPatchListingsItem') && query.mode !== 'VALIDATION_PREVIEW' || write && 'mode' in query) throw new UserFacingError('Amazon 请求模式无效');
     const url = new URL(path, ENDPOINTS[target.region]);
     if (url.pathname !== path) throw new UserFacingError('SKU 或 Amazon 请求路径包含不允许的路径片段');
     url.search = new URLSearchParams(query).toString();
-    const generation = this.hooks.generation(target.id); const start = this.now(); const rateKey = `${target.id}:${operation === 'previewListingsItem' ? 'putListingsItem' : operation}`;
+    const generation = this.hooks.generation(target.id); const start = this.now(); const rateKey = `${target.id}:${operation === 'previewListingsItem' ? 'putListingsItem' : operation === 'previewPatchListingsItem' ? 'patchListingsItem' : operation}`;
     let status: number | null = null; let headers = new Headers(); let attempts = 0; let category: string | null = null; let authPaused = false;
     try {
       const accessToken = await this.token(target, write);

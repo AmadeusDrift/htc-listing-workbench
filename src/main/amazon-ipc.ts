@@ -57,6 +57,19 @@ export function installAmazonIpc(window: BrowserWindow, service: AmazonService, 
     return submitted;
   });
   handle('red:amazon:readback', 1, raw => service.readListing(raw));
+  handle('red:amazon:corrections',1,raw=>service.listCorrections(identifier(raw)));
+  handle('red:amazon:correction-prepare',1,raw=>service.prepareCorrection(raw));
+  handle('red:amazon:correction-preview',1,raw=>service.previewCorrection(raw));
+  handle('red:amazon:correction-read',1,raw=>service.readCorrection(raw));
+  handle('red:amazon:correction-cancel',1,raw=>service.cancelCorrection(raw));
+  handle('red:amazon:self-relation-correct',1,raw=>service.correctUnsubmittedSelfRelation(raw));
+  handle('red:amazon:correction-send',1,async raw=>{
+    const input=record(raw,'修正参数',['id','revision','patchHash']),c=service.getCorrection(identifier(input.id));
+    if(c.state!=='READY'||c.revision!==input.revision||c.patchHash!==input.patchHash)throw new UserFacingError('请重新加载修正案并完成验证预览');
+    const answer=await dialog.showMessageBox(window,{type:'question',title:'确认修正原 SKU 包装关系',message:`删除 SKU ${c.sku} 的包装自引用？`,detail:`卖家：${c.sellerId}\n站点：${c.marketplaceId}\n商品类型：${c.productType}\n\n仅删除 package_contains_sku 中指向自身的关系，保留原 SKU 与提交历史。正式请求仅发送一次；接受后仍需单独核对，不代表已可售。\n\n删除前：${JSON.stringify(c.before.package_contains_sku)}\n删除后：无此关系\n补丁指纹：${c.patchHash}`,buttons:['取消','确认发送原 SKU 修正'],defaultId:0,cancelId:0,noLink:true});
+    if(answer.response!==1)return null;
+    return service.sendCorrection({id:c.id,revision:c.revision,patchHash:c.patchHash},true);
+  });
   handle('red:amazon:calls', 0, () => service.listCalls());
   handle('red:amazon:policy', 0, () => service.getDataPolicy());
   handle('red:amazon:policy-save', 1, raw => service.saveDataPolicy(raw));

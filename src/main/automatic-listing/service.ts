@@ -372,55 +372,70 @@ export class AutomaticListingService {
     const task = this.task(approved.id);
     if (fingerprint(task) !== fingerprint(approved)) throw new UserFacingError('确认期间任务范围发生变化');
     this.prepareStart(task.id);
-    // A user-confirmed image binding may advance only untouched source rows. Submitted
-    // siblings retain their exact draft/product revision and never repeat paid work.
-    for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
-    for(const row of task.items)this.migrateRepairPolicy(task,row);
-    for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
-      if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
-      if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
-        const old=this.deps.amazon.getDraft(row.draftId);
-        const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
-        if(!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
-          let refreshed=old;
-          if(!row.pricingRefresh){
-            try{
-              refreshed=this.deps.amazon.applyBusinessDefaults({id:old.id,revision:old.revision},undefined,true,(draft,db)=>{
-                row.pricingRefresh={draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
-                this.save(task,db);
-              });
-            }catch(error){
-              // Either both writes committed or both rolled back. Reload the durable task
-              // even when a caller interrupts immediately after the transaction returns.
-              const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
-              if(saved)Object.assign(task,validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
-              throw error;
+    const previous=structuredClone(task);
+    try {
+      // A user-confirmed image binding may advance only untouched source rows. Submitted
+      // siblings retain their exact draft/product revision and never repeat paid work.
+      for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
+      for(const row of task.items)this.migrateRepairPolicy(task,row);
+      for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
+        if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
+        if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
+          const old=this.deps.amazon.getDraft(row.draftId);
+          const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
+          if(!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
+            let refreshed=old;
+            if(!row.pricingRefresh){
+              try{
+                refreshed=this.deps.amazon.applyBusinessDefaults({id:old.id,revision:old.revision},undefined,true,(draft,db)=>{
+                  row.pricingRefresh={draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+                  this.save(task,db);
+                });
+              }catch(error){
+                // Either both writes committed or both rolled back. Reload the durable task
+                // even when a caller interrupts immediately after the transaction returns.
+                const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
+                if(saved)Object.assign(task,validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+                throw error;
+              }
+            }
+            const proof=row.pricingRefresh??{draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+            if(refreshed.revision!==proof.draftRevision||imageWorkflowDraftStamp(refreshed)!==proof.draftStamp)throw new UserFacingError('本地定价恢复后草稿已变化，保留原检查点待核对');
+            if(row.repair&&row.repair.draftRevision===proof.previousDraftRevision&&row.repair.draftStamp===proof.previousDraftStamp){
+              const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
+              if(row.repair.phase==='FIELDS_PENDING'&&!remaining.length&&!row.repairAttempts){
+                this.deps.execution.cancel(row.executionTaskIds.at(-1)!);row.repair=null;
+              }else row.repair={...row.repair,remaining,draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),
+                phase:row.repair.phase==='FIELDS_PENDING'&&!remaining.length?'READY':row.repair.phase};
+            }
+            delete row.pricingRefresh;
+            const pricing=pricingOutcome(refreshed,this.deps.rules());
+            if(pricing){
+              row.outcome={version:1,...pricing,message:(refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};
+              row.error=row.outcome.message;row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;
             }
           }
-          const proof=row.pricingRefresh??{draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
-          if(refreshed.revision!==proof.draftRevision||imageWorkflowDraftStamp(refreshed)!==proof.draftStamp)throw new UserFacingError('本地定价恢复后草稿已变化，保留原检查点待核对');
-          if(row.repair&&row.repair.draftRevision===proof.previousDraftRevision&&row.repair.draftStamp===proof.previousDraftStamp){
-            const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
-            if(row.repair.phase==='FIELDS_PENDING'&&!remaining.length&&!row.repairAttempts){
-              this.deps.execution.cancel(row.executionTaskIds.at(-1)!);row.repair=null;
-            }else row.repair={...row.repair,remaining,draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),
-              phase:row.repair.phase==='FIELDS_PENDING'&&!remaining.length?'READY':row.repair.phase};
-          }
-          delete row.pricingRefresh;
-          const pricing=pricingOutcome(refreshed,this.deps.rules());
-          if(pricing){
-            row.outcome={version:1,...pricing,message:(refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};
-            row.error=row.outcome.message;row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;
-          }
         }
+        row.status = 'PENDING';
+        delete row.outcome;
+        // Retain the precise source failure if a ready sibling has frozen this product's revision.
+        if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
       }
-      row.status = 'PENDING';
-      delete row.outcome;
-      // Retain the precise source failure if a ready sibling has frozen this product's revision.
-      if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
+      this.reconcileSelection(task);
+      task.status = 'QUEUED'; task.error = null; this.save(task);
+    } catch(error) {
+      // Preparation can commit an atomic pricing checkpoint before a later
+      // admission failure. Restore the latest durable record, not the queued
+      // in-memory mutations, and never grant a worker after a failed save.
+      let restored=previous;
+      try {
+        const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
+        if(saved)restored=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+      } catch { /* Keep the last known valid pre-start state if storage is unreadable. */ }
+      this.tasks.set(task.id,restored);this.grants.delete(task.id);
+      throw error;
     }
-    this.reconcileSelection(task);
-    task.status = 'QUEUED'; task.error = null; this.grants.add(task.id); this.save(task); this.deps.labels.resumeJob?.(task.id); this.pump(); return structuredClone(task);
+    this.grants.add(task.id);this.deps.labels.resumeJob?.(task.id);this.pump();return structuredClone(task);
   }
   private reconcileSelection(task: AutomaticListingTask): void {
     for(const productId of new Set(task.items.map(row=>row.productId))){

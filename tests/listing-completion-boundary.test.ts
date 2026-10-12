@@ -14,14 +14,14 @@ import { AiService } from '../src/main/ai/service.ts';
 import { mockStorage } from './fixtures/listing-ai.ts';
 
 const issue={code:'90220',message:'Missing material',severity:'ERROR' as const,attributeNames:['material'],autoFixable:false,source:'amazon' as const,category:'field' as const};
-test('a sent field request with a lost response is never repeated by a new completion service',async t=>{
+test('a new completion service retries a lost field response within its original operation',async t=>{
   const f=await fixture(t);
   f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});
   f.respond(()=>{throw new Error('response lost after entering fetch');});
   await assert.rejects(f.listing.complete(f.reference));
   const next=new ListingAiService(f.store,f.amazon,f.ai);
   await assert.rejects(next.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));
-  assert.equal(f.requests.length,1,'durable send intent must prohibit another field POST');
+  assert.equal(f.requests.length,2);assert.equal(next.completionOperations(f.draft.id).length,1);assert.equal(next.completionOperations(f.draft.id)[0].rounds[0].candidate.previous?.length,1);
 });
 
 for(const failure of ['quota','journal-write'] as const)test(`${failure} before fetch rolls back all three records and reuses the fixed call ID`,async t=>{
@@ -95,12 +95,12 @@ test('overlapping completion coordinators cannot overwrite a sent round with an 
   assert.equal(f.requests.length,1);const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(op.rounds.length,1);assert.equal(op.rounds[0].candidate.sent,true);
 });
 
-test('a real child process crash immediately inside fetch preserves the same send guard on process restart',async t=>{
+test('a real child process crash preserves paid history and bounded retries on process restart',async t=>{
   const f=await fixture(t);await f.ai.close();
   const run=(mode:string)=>spawnSync(process.execPath,['tests/fixtures/completion-crash.ts',f.directory,f.draft.id,mode],{encoding:'utf8',timeout:20000,windowsHide:true});
   const crash=run('crash');assert.equal(crash.status,73,crash.stderr);assert.equal(crash.stdout.trim(),'FETCH_ENTERED');
-  const restart=run('recover');assert.equal(restart.status,0,restart.stderr);assert.equal(restart.stdout.trim(),'UNKNOWN_PRESERVED');
-  const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT id FROM ai_calls').all().length,1);assert.equal(db.prepare('SELECT id FROM ai_usage_ledger').all().length,1);assert.equal(db.prepare('SELECT id FROM ai_results').all().length,0);}finally{db.close();}
+  for(let n=0;n<3;n++){const restart=run('recover');assert.equal(restart.status,0,restart.stderr);assert.equal(restart.stdout.trim(),n<2?'FETCH_ENTERED\nUNKNOWN_PRESERVED':'UNKNOWN_PRESERVED');}
+  const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT id FROM ai_calls').all().length,3);assert.equal(db.prepare('SELECT id FROM ai_usage_ledger').all().length,3);assert.equal(db.prepare('SELECT id FROM ai_results').all().length,0);}finally{db.close();}
 });
 
 test('a transport timeout after entering fetch is UNKNOWN after restarting the AI service',async t=>{
@@ -110,7 +110,7 @@ test('a transport timeout after entering fetch is UNKNOWN after restarting the A
   try{
     await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference),(error:any)=>error.code==='TIMEOUT');assert.equal(posts,1);assert.equal(ai.listCalls()[0].errorCode,'TIMEOUT');await ai.close();
     ai=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:async()=>{posts++;throw new Error('Unexpected replay');}});
-    await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference),/未自动重发/);assert.equal(posts,1);
+    await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference));assert.equal(posts,2);
   }finally{await ai.close();}
 });
 

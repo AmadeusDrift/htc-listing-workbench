@@ -16,9 +16,9 @@ for(const owner of ['automatic','images'] as const){
     assert.equal(f.listing.completionOperations(f.draft.id).length,1);assert.equal(f.listing.getCompletion(op.id).state,'DONE');assert.equal(f.requests.filter(p=>p.operation!=='source-color').length,1);
     if(owner==='automatic')assert.equal((f.progress() as any).repairAttempts,1);
   });
-  test(`${owner}: field fetch entered then lost response stays UNKNOWN across restart`,async t=>{
+  test(`${owner}: field fetch lost response retries missing step across restart without resetting operation`,async t=>{
     const f=await completionOwnerFixture(t,owner);f.respond(()=>{throw new Error('lost field response');});await assert.rejects(f.run());assert.equal(f.requests.length,1);
-    const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(f.listing.completionUnknown(op.id),true);await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,1);
+    const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(f.listing.completionUnknown(op.id),true);await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,2);assert.equal(f.listing.getCompletion(op.id).rounds[0].candidate.previous?.length,1);
     if(owner==='automatic')assert.equal((await f.queue())!.products[0].rows[0].kind,'UNKNOWN');
   });
   test(`${owner}: quota failure has no send marker and resumes its reserved local ID`,async t=>{

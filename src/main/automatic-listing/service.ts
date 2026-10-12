@@ -81,6 +81,7 @@ export interface AutomaticListingDependencies {
   ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
+const retryableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
 const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
 const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
 const imageReady = hasSevenApprovedImages;
@@ -171,10 +172,11 @@ export class AutomaticListingService {
     }
   }
   private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
+    const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
+    if(draft&&(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted))))return 'SUBMISSION_UNKNOWN';
     if(sourceConsistencyUnknown(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]))return 'SOURCE_CONSISTENCY_SENT_UNKNOWN';
     const journal=new CompletionJournal(this.db);
     // A retained guard without its old draft uses the same source sale identity as begin().
-    const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
     const identity=completionSafetyIdentity(draft??{mode:task.mode,productId:row.productId,productRevision:row.productRevision,variantId:row.variantId,sku:row.sku,sellerId:task.sellerId,marketplaceId:task.marketplaceId,listingProgram:task.mode==='live'?'haul':'standard',salesPlan:row.salesPlan});
     if(journal.saleOperations(identity).some(op=>journal.unknown(op.id)))return 'FIELD_RESULT_UNKNOWN';
     if(row.repair?.phase==='FIELDS_STARTED'&&(!row.repair.operationId||journal.unknown(row.repair.operationId)))return 'FIELD_RESULT_UNKNOWN';
@@ -220,7 +222,7 @@ export class AutomaticListingService {
         catch(error){if(error instanceof SourceConsistencyError)classification={kind:error.kind,code:error.code};else throw error;}
       }
     }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
-    if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=('上次结果尚未确认，未自动重发。上次错误：'+(row.error??'请核对已有记录')).slice(0,2000);
+    if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=((retryableAiUnknown(classification.code)?'上次结果尚未确认；继续任务时先恢复已有结果，确实缺失则按原次数上限自动重试该 AI 步骤。上次错误：':'上次提交结果尚未确认，未自动重发。上次错误：')+(row.error??'请核对已有记录')).slice(0,2000);
     row.outcome={version:1,...classification,message:(classification.image?.message??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
     if(classification.kind==='RULE_FILTERED')row.status='SCREENED';
   }
@@ -375,7 +377,7 @@ export class AutomaticListingService {
     for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
     for(const row of task.items)this.migrateRepairPolicy(task,row);
     for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
-      if(row.outcome?.kind==='UNKNOWN'&&this.unknownCode(row,task))continue;
+      if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
       row.status = 'PENDING';
       delete row.outcome;
       // Retain the precise source failure if a ready sibling has frozen this product's revision.
@@ -390,7 +392,8 @@ export class AutomaticListingService {
       const recipes=rows.some(row=>row.salesPlan)?selectSalesRecipes(product,this.deps.previewSales?.(productId)??previewSalesRecipes(product,this.deps.sourceReceipt?.(productId)??null,rules),rules,this.deps.sourceReceipt?.(productId)??null):null;
       const keys=new Set(recipes?recipes.map(r=>r.key):this.selectedVariants(product).map(v=>v.id));
       for(const row of rows){
-        if(row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)||this.unknownCode(row,task))continue;
+        const unknown=this.unknownCode(row,task);
+        if(row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage)||unknown&&!retryableAiUnknown(unknown))continue;
         const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):this.deps.amazon.listDrafts(productId).find(d=>this.matching(task,row,d));
         if(draft&&submitted(draft)||keys.has(row.salesPlan?.recipe.key??row.variantId))continue;
         row.status='SCREENED';row.error='SKU 选择规则淘汰：说明性选项或未入选本来源最多 4 个代表规格；来源、草稿、已完成图片及历史保留';
@@ -452,7 +455,7 @@ export class AutomaticListingService {
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
   private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
     const unknown=this.unknownCode(row,task);
-    if(unknown&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
+    if(unknown&&!retryableAiUnknown(unknown)&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
     this.checkpoint(task, row);
     let draft = row.draftId ? this.deps.amazon.getDraft(row.draftId) : undefined;
     if (!draft) {
@@ -467,7 +470,7 @@ export class AutomaticListingService {
       const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
       try { assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds); }
       catch(error) {
-        if(!(error instanceof SourceConsistencyError)||!['SOURCE_CONSISTENCY_NEEDS_INPUT','SOURCE_CONSISTENCY_INVALID_OUTPUT'].includes(error.code))throw error;
+        if(!(error instanceof SourceConsistencyError)||!['SOURCE_CONSISTENCY_NEEDS_INPUT','SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN'].includes(error.code))throw error;
         if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
         await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
         this.checkpoint(task,row);
@@ -483,7 +486,7 @@ export class AutomaticListingService {
         if(!(error instanceof SourceConsistencyError))throw error;
         // A retained format failure already has its exact source scope. Recover it
         // before frozen-sibling delivery guards; recovery never needs another download.
-        if(error.code==='SOURCE_CONSISTENCY_INVALID_OUTPUT'){
+        if(['SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN'].includes(error.code)){
           if(!this.deps.prepareSourceConsistency)throw error;
           const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
           await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
@@ -585,7 +588,7 @@ export class AutomaticListingService {
       row.stage = 'IMAGES'; this.save(task);
       if (!this.imageReady(prior)) {
         const changedRiskPolicy=!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
-        if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
+        if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy && !(prior&&unknown==='IMAGE_RESULT_UNKNOWN')) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
         // complete rejects local preflight synchronously and defers admitted work.
         // Save the conservative unknown marker before awaiting that work, not before
         // the no-send entry checks; a rejected entry must remain recoverable.

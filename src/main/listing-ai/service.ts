@@ -349,7 +349,7 @@ export class ListingAiService {
     let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
     const operationContext=(reference:SuggestAmazonFieldsInput)=>this.current(reference,operation.scopeHash===this.completionScope(draft)?undefined:{} as ListingAiContext);
     const reviewEnabled=operation.copyReviewEnabled;
-    const refresh=()=>{operation=journal.get(operation.id);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);if(journal.unknown(operation.id))unknownCompletion();draft=this.completionDraft(operation);};
+    const refresh=()=>{operation=journal.get(operation.id);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);if(operation.state==='GUARD')unknownCompletion();draft=this.completionDraft(operation);};
     const checkpoint=()=>{operation.draftRevision=draft.revision;operation.draftStamp=completionDraftStamp(draft);journal.save(operation);};
     const currentRemaining=(remaining:string[])=>{
       const context=operationContext({draftId:draft.id,draftRevision:draft.revision}).context;
@@ -420,7 +420,11 @@ export class ListingAiService {
       const context=round.context,reference={draftId:draft.id,draftRevision:context.draftRevision};
       await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
-        const entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;if(entry.sent){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
+        let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;
+        if(entry.sent){
+          if(!journal.unknown(operation.id)){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
+          journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
+        }
         const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
         assertBrandDispatch();
         const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});

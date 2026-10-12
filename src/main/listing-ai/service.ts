@@ -326,7 +326,7 @@ export class ListingAiService {
     const legacy=!!prior&&prior.scopeHash!==this.completionScope(draft)&&prior.scopeHash===this.completionScope(draft,true);
     const preserveDone=prior?.state==='DONE'&&legacy&&draft.listingProgram==='haul'&&operationId!==undefined;
     if(prior?.state==='DONE'&&legacy&&isFullSchema(context)&&!preserveDone)operationId=undefined;
-    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId);
+    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId,draft,this.completionScope(draft,true));
   }
   getCompletion(id:string):CompletionOperation{return this.ai.completionJournal.get(id);}
   completionUnknown(id:string):boolean{return this.ai.completionJournal.unknown(id);}
@@ -409,7 +409,7 @@ export class ListingAiService {
         if(draft.state==='AMAZON_VALIDATED'&&!reviewIssues.length&&!sourceIssues.length)return finish([]);
         const issues=[...errors(draft),...reviewIssues,...sourceIssues];remaining=issues.map(i=>(i.attributeNames.join('、')||i.code)+'：'+i.message);
         if(manualBrandIssues(draft,issues).length)return finish([...manualBrandIssues(draft,issues),...remaining]);
-        if(operation.rounds.length>=2)return finish(remaining);
+        if(operation.rounds.length+(operation.legacyRecovery?.priorRounds??0)>=2)return finish(remaining);
         const reference={draftId:draft.id,draftRevision:draft.revision};
         const repairs=issues.filter(issue=>issue.category==='field').flatMap(issue=>issue.attributeNames.filter(field=>isFullSchema(currentScope)?currentScope.fields.some(f=>f.name===field):LISTING_CANDIDATE_FIELDS.includes(field)).map(field=>({field,code:issue.code.slice(0,100),message:issue.message.slice(0,2000)}))).slice(0,50);
         if(repairs.some(issue=>issue.field==='color'))aiCalls+=(await this.prepareSourceColors(reference,signal,issues)).aiCalls;
@@ -429,7 +429,7 @@ export class ListingAiService {
           journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
         }
         const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
-        assertBrandDispatch();
+        assertBrandDispatch();journal.assertSendBudget(operation.id,kind);
         const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
         aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
       };

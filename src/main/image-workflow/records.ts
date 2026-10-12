@@ -73,7 +73,7 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
 
 export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -115,6 +115,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   for(const slot of slots)if(slot.contextSha256&&(!imageContext||listingFingerprint(validateProductImageContext({...imageContext,...(setPlan?{setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}},evidenceOptions))!==slot.contextSha256))invalid();
   if(o.slotPolicy===IMAGE_SET_POLICY&&slots.some(slot=>slot.attempts.length)&&!setPlan)invalid();
   if(run.status==='COMPLETED'&&(slots.some(slot=>slot.status!=='PASSED')||!run.draftSha256||!run.contextSha256||run.stage!=='complete'||run.error!==null)||run.stage==='complete'&&run.status!=='COMPLETED')invalid();
+  if(o.legacyImageAttempts!==undefined)run.legacyImageAttempts=integer(o.legacyImageAttempts,0,2);
   if(o.copyReviewResultId!==undefined)run.copyReviewResultId=uuid(o.copyReviewResultId);
   if(o.categoryFieldPolicyVersion!==undefined){if(o.categoryFieldPolicyVersion!==CATEGORY_FIELD_REPAIR_POLICY_VERSION)invalid();run.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;}
   if(o.categoryFieldRepair!==undefined){

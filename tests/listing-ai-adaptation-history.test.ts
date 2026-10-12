@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { fixture, saveInput } from './fixtures/listing-ai.ts';
+import { fixture, saveInput, chat, candidateFor, reviewFor } from './fixtures/listing-ai.ts';
 import { assertListingHistory } from '../src/main/listing-ai/history.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
@@ -9,6 +9,25 @@ import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 import { createHash } from 'node:crypto';
 import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { currentDraftEvidenceIssues } from '../src/main/listing-ai/current-evidence.ts';
+
+test('same-value readoption owns current evidence; an invalid newest owner never falls back to historical owners',async t=>{
+ const f=await fixture(t),persistence=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence;
+ f.respond(payload=>{if(payload.candidate)return chat(reviewFor(payload));const output=candidateFor(payload);output.candidates.find((c:any)=>c.field==='item_name')!.items[0].value='Blue Coaster';return chat(output);});
+ const adopt=async(draft:typeof f.draft)=>{const ref={draftId:draft.id,draftRevision:draft.revision},suggestion=await f.listing.suggest(ref),review=await f.listing.review({...ref,suggestionResultId:suggestion.id});return f.listing.adopt({...ref,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['item_name']});};
+ const old=await adopt(f.draft),original=JSON.stringify(old.fieldAdoptions),input=saveInput(f.store.getProductSnapshot(f.product.id));
+ const source=f.store.saveProduct({...input,facts:input.facts.map(fact=>fact.name==='材质'?{...fact,value:'不锈钢'}:fact)});
+ const adapted=persistence.transaction(()=>f.amazon.applyTaskAdaptation(old.id,source,undefined,persistence.db));
+ const latest=await adopt(adapted),context=buildListingContext(latest,source,0),results=new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r]));
+ assert.equal(JSON.stringify(latest.fieldAdoptions!.slice(0,1)),original);assert.equal(latest.fieldAdoptions!.length,2);
+ assert.deepEqual(latest.fieldAdoptions![0].changes[0].after,latest.fieldAdoptions![1].changes[0].after);
+ assert.deepEqual(currentDraftEvidenceIssues(latest,context,id=>results.get(id)),[]);
+ const latestId=latest.fieldAdoptions!.at(-1)!.suggestionResultId;
+ // Give the historical owner matching current evidence, so fallback would pass.
+ const oldContext=buildListingContext(old,f.product,0);
+ assert.deepEqual(currentDraftEvidenceIssues({...latest,fieldAdoptions:latest.fieldAdoptions!.slice(0,1)},oldContext,id=>results.get(id)),[]);
+ assert.ok(currentDraftEvidenceIssues(latest,oldContext,id=>id===latestId?undefined:results.get(id)).some(issue=>issue.includes('来源记录不完整')));
+ assert.ok(currentDraftEvidenceIssues(latest,oldContext,id=>{const result=results.get(id);return id===latestId&&result?{...result,sourceSha256:'invalid'}:result;}).some(issue=>issue.includes('来源记录不完整')));
+});
 
 async function adoptedFixture(t:test.TestContext) {
  const f=await fixture(t),suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});

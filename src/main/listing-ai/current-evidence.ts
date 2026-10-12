@@ -88,8 +88,13 @@ export function currentProseRepairIssues(draft:AmazonDraft,context:ListingAiCont
 export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiContext,getResult?:(id:string)=>AiResult|undefined,options:AdoptionOptions={}):string[]{
   if(isFullSchema(context)){
     const issues=currentCopyIssues(context.fields.flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:[{field:field.name,values:nativeText(field.name,raw)}];}),context);
+    const owners=new Map<string,NonNullable<AmazonDraft['fieldAdoptions']>[number]>();
+    // Select the latest matching owner before checking evidence. A broken latest
+    // record must remain an error instead of falling back to an older candidate.
+    for(const adoption of draft.fieldAdoptions??[])for(const change of adoption.changes)
+      if(listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
     if(getResult)for(const adoption of draft.fieldAdoptions??[]){
-      const active=adoption.changes.filter(change=>listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]));
+      const active=adoption.changes.filter(change=>owners.get(change.field)===adoption);
       if(!active.length)continue;
       const result=getResult(adoption.suggestionResultId);
       if(!result||result.output.kind!=='amazon-fields'||!result.listingContext||result.sourceSha256!==adoption.contextSha256||listingFingerprint(result.listingContext)!==adoption.contextSha256){issues.push('已采用候选的来源记录不完整');continue;}

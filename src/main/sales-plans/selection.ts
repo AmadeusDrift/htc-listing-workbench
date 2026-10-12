@@ -6,11 +6,23 @@ import { quoteListing, type ListingRules } from '../../shared/listing-rules.ts';
 
 /** Match a whole supplier option/axis, never the presence of a remark in a real configuration. */
 export function informationalVariant(variant: Variant): boolean {
-  return [variant.sourceSpec,variant.originalSpec,variant.normalizedSpec].some(spec=>spec.split(/[/;；\n]+/u).some(axis=>{
-    const value=axis.replace(/^[^:：]*[:：]/u,'').trim().replace(/[~～!！。\s]+$/u,'');
-    return /^(?:春夏秋冬\s*[-—·]?\s*)?可备注颜色$/u.test(value)
-      || /^(?:更低价格|低价|优惠价格)?请咨询客服$/u.test(value);
-  }));
+  return [variant.sourceSpec,variant.originalSpec,variant.normalizedSpec].some(spec=>{
+    const axes=spec.split(/[/;；\n]+/u).map(axis=>{
+      const colon=axis.search(/[:：]/u);
+      return {name:colon<0?'':axis.slice(0,colon).trim(),value:(colon<0?axis:axis.slice(colon+1)).trim().replace(/[~～!！。\s]+$/u,'')};
+    });
+    const note=(name:string)=>/^(?:备注|说明|note|remarks?)$/iu.test(name);
+    const option=(value:string)=>/^(?:春夏秋冬\s*[-—·]?\s*)?可备注颜色$/u.test(value)||/^(?:更低价格|低价|优惠价格)?请咨询客服$/u.test(value);
+    const hasConfiguration=axes.some(axis=>!note(axis.name)&&!!axis.value&&!option(axis.value));
+    return axes.some(axis=>{
+      if(!option(axis.value))return false;
+      // An explicit note or an unlabeled trailing remark is ancillary to the
+      // actual configuration. A named supplier axis remains an option even
+      // when another (frequently swapped) axis contains the physical size.
+      if(hasConfiguration&&(note(axis.name)||!axis.name&&axis.value==='可备注颜色'))return false;
+      return true;
+    });
+  });
 }
 
 /** Ranking only: absent/uncertain facts do not become exclusion rules. */

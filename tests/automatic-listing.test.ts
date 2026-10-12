@@ -1363,3 +1363,9 @@ for(const sent of [false,true])test(`selection reconciliation preserves complete
  const row=f.service.get(task.id).items[0];assert.equal(row.draftId,draft.id);assert.equal(row.sku,info.sku);assert.deepEqual(f.workflow.get(draft.id),paid);assert.equal(f.calls.images,0);
  if(sent)assert.notEqual(row.status,'SCREENED');else assert.equal(row.status,'SCREENED');
 });
+
+for(const spec of ['颜色:红色;备注:可备注颜色','红色整机 / 可备注颜色'])test(`selection preview and creation preserve real configuration with note: ${spec}`,async t=>{
+ const f=fixture(t);Object.assign(f.product.variants[0],{originalSpec:spec,normalizedSpec:'',sourceSpec:spec});
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,1);
+ const task=await f.create();assert.equal(task.items.length,1);assert.equal(task.items[0].variantId,f.product.variants[0].id);
+});

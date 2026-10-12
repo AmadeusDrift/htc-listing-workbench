@@ -142,3 +142,8 @@ test('automatic ranking uses supplier image mapping before downloads without rej
  assert.equal(selectSalesRecipes(p,candidates.slice(0,1),rules,receipt).length,1);
 });
 import { selectSalesRecipes } from '../src/main/sales-plans/selection.ts';
+
+test('informational option on swapped supplier axis stays excluded alongside a real size',()=>{
+ const p=product(['red']);Object.assign(p.variants[0],{originalSpec:'尺寸:春夏秋冬-可备注颜色 / 颜色:大号21厘米长青蛙',sourceSpec:'',normalizedSpec:''});
+ assert.equal(previewSalesRecipes(p,null,defaultListingRules()).length,0);
+});

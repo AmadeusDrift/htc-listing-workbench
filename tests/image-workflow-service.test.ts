@@ -1170,3 +1170,28 @@ test('W11 historical BLOCKED verdict is preserved while current policy can adopt
  assert.match(f.service.getProgressPresentation(f.draft.id)!.sourceRiskSummary!,/来源 AI 初筛.*非阿里云/);
  assert.equal(first.workflow.slots!.every(slot=>slot.attempts.length===1),true);
 });
+
+test('W11 completed legacy single-image risk is checked before complete or recheck can spend',async t=>{
+ const f=await fixture(t,{riskScore:95,riskLevel:'low'});
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:99,levelThreshold:'high'});
+ const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
+ const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+ Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ipReviewResultIds:first.workflow.ipReviewResultIds!.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
+ const db=openDatabase(f.root);try{const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(retained.id,JSON.stringify(retained));db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(legacy.id);db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(legacy.id,JSON.stringify(legacy));}finally{db.close();}
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ const before=f.service.getProgress(f.draft.id),calls=f.calls.length,assetIds=f.store.getProduct(f.product.id).assets.map(asset=>asset.id);
+ assert.equal((f.ai.getResult(legacy.ipReviewResultIds![0]).output as any).verdict,'PASS');
+ await assert.rejects(async()=>f.run(),/95.*90/);
+ assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ await assert.rejects(async()=>f.service.recheck({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision,sourceWorkflowId:legacy.id}),/95.*90/);
+ assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ assert.deepEqual(f.store.getProduct(f.product.id).assets.map(asset=>asset.id),assetIds);
+ const ip=f.ai.getResult(legacy.ipReviewResultIds![0]).output as any,original=structuredClone(ip);
+ for(const mismatch of [{candidate:{...original.candidate,id:randomUUID()}},{candidate:{...original.candidate,sha256:'0'.repeat(64)}},{planResultId:randomUUID()}]){
+  Object.assign(ip,original,mismatch);
+  await assert.rejects(async()=>f.run(),/归属不一致/);
+  await assert.rejects(async()=>f.service.recheck({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision,sourceWorkflowId:legacy.id}),/归属不一致/);
+  assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ }
+ Object.assign(ip,original);
+});

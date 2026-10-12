@@ -159,6 +159,11 @@ export class ImageWorkflowService {
   isRiskPolicyCompatible(run:ImageWorkflowRun|null|undefined):boolean{return riskPolicyCompatible(run,this.getRiskSettings(),id=>{const result=this.ai.getResult(id);return result?.output.kind==='image-ip-review'?result.output:undefined;});}
   private assertApprovedRiskPolicy(prior:ImageWorkflowRun|null|undefined):void {
     if(!prior||!this.getRiskSettings().enabled||prior.riskInterceptionEnabled===false)return;
+    if(!prior.slots&&prior.status==='COMPLETED'&&prior.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION){
+      const id=prior.ipReviewResultIds?.at(-1),ip=id?this.ai.getResult(id):undefined;
+      if(ip?.output.kind!=='image-ip-review'||ip.output.candidate.id!==prior.candidateIds.at(-1)||ip.output.candidate.sha256!==prior.approvedSha256||ip.output.planResultId!==prior.planResultIds.at(-1))throw new UserFacingError('旧单图风险检测依据缺失或归属不一致，原图片与历史记录已保留');
+      if(evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='PASS')throw new UserFacingError(describeImageRisk(ip.output,this.getRiskSettings(),prior.sku,1).slice(0,2000));
+    }
     for(const slot of prior.slots??[]){if(slot.status!=='PASSED')continue;const id=slot.attempts.at(-1)?.ipReviewResultId,ip=id?this.ai.getResult(id):undefined;
       if(ip?.output.kind==='image-ip-review'&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='PASS')throw new UserFacingError(describeImageRisk(ip.output,this.getRiskSettings(),prior.sku,slot.index).slice(0,2000));
     }

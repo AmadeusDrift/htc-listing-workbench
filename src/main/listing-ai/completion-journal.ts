@@ -1,3 +1,6 @@
+import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair } from './legacy-theme-repair.ts';
+import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
+import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { isReviewCoverageOmission } from './review-omission.ts';
 import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners,legacyStepDebt} from './legacy-completion.ts';
 import type {LegacyCompletionHistory} from './legacy-completion.ts';
@@ -23,7 +26,7 @@ export interface CompletionRound {
 export interface CompletionOperation {
   id:string; revision:number; draftId:string; scopeHash:string; safetyScopeHash:string; safetyIdentity:ReturnType<typeof completionSafetyIdentity>; copyReviewEnabled:boolean; state:'ACTIVE'|'DONE'|'GUARD'|'RETIRED';
   draftRevision:number; draftStamp:string; rounds:CompletionRound[]; remaining:string[];
-  reviewIssues:{field:string;message:string}[]; createdAt:string; updatedAt:string; legacyRecovery?:LegacyCompletionHistory;
+  reviewIssues:{field:string;message:string}[]; createdAt:string; updatedAt:string; legacyRecovery?:LegacyCompletionHistory; scopedRepair?:LegacyThemeRepair;
 }
 export interface CompletionRequest { operationId:string; callId:string; contextHash:string }
 export function completionDraftStamp(draft:AmazonDraft):string {return listingFingerprint({id:draft.id,revision:draft.revision,productId:draft.productId,productRevision:draft.productRevision,variantId:draft.variantId,sku:draft.sku,targetId:draft.targetId,sellerId:draft.sellerId,marketplaceId:draft.marketplaceId,listingProgram:draft.listingProgram,schema:draft.schema,attributes:draft.attributes,salesPlan:draft.salesPlan??null});}
@@ -39,7 +42,7 @@ function parseCall(raw:unknown):CompletionCall {
   return {id:uuid(o.id),sent:o.sent as boolean,resultId:o.resultId===null?null:uuid(o.resultId),...(previous?{previous}:{})};
 }
 export function validateCompletionOperation(raw:unknown):CompletionOperation {
-  const o=keys(raw,['id','revision','draftId','scopeHash','safetyScopeHash','safetyIdentity','copyReviewEnabled','state','draftRevision','draftStamp','rounds','remaining','reviewIssues','createdAt','updatedAt'],['legacyRecovery']);
+  const o=keys(raw,['id','revision','draftId','scopeHash','safetyScopeHash','safetyIdentity','copyReviewEnabled','state','draftRevision','draftStamp','rounds','remaining','reviewIssues','createdAt','updatedAt'],['legacyRecovery','scopedRepair']);
   if(typeof o.copyReviewEnabled!=='boolean'||!['ACTIVE','DONE','GUARD','RETIRED'].includes(String(o.state))||!Array.isArray(o.rounds)||o.rounds.length>2||!Array.isArray(o.remaining)||o.remaining.length>100||!Array.isArray(o.reviewIssues)||o.reviewIssues.length>100)invalid();
   const identity=keys(o.safetyIdentity,['mode','productId','productRevision','variantId','sku','sellerId','marketplaceId','listingProgram','recipeHash']);
   const safetyIdentity={mode:identity.mode as AmazonDraft['mode'],productId:uuid(identity.productId),productRevision:integer(identity.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(identity.variantId),sku:boundedText(identity.sku,100),sellerId:boundedText(identity.sellerId,100),marketplaceId:boundedText(identity.marketplaceId,100),listingProgram:identity.listingProgram as AmazonDraft['listingProgram'],recipeHash:sha256(identity.recipeHash)};
@@ -59,7 +62,14 @@ export function validateCompletionOperation(raw:unknown):CompletionOperation {
   let legacyRecovery:LegacyCompletionHistory|undefined;
   if(o.legacyRecovery!==undefined){const l=keys(o.legacyRecovery,['checkpointIds','callIds','resultIds','adoptionIds','priorRounds','missingAttemptDebt'],['stepDebts']);const ids=(v:unknown,hash=false)=>{if(!Array.isArray(v)||v.length>1000)invalid();return (v as unknown[]).map(x=>hash?sha256(x):uuid(x));};legacyRecovery={checkpointIds:ids(l.checkpointIds),callIds:ids(l.callIds),resultIds:ids(l.resultIds),adoptionIds:ids(l.adoptionIds,true),priorRounds:integer(l.priorRounds,0,1000),missingAttemptDebt:integer(l.missingAttemptDebt,0,3)};
     if(l.stepDebts!==undefined){if(!Array.isArray(l.stepDebts)||l.stepDebts.length>1000)invalid();legacyRecovery.stepDebts=(l.stepDebts as unknown[]).map(raw=>{const step=keys(raw,['contextHash','kind','callIds']);if(!['candidate','review'].includes(String(step.kind)))invalid();return{contextHash:sha256(step.contextHash),kind:step.kind as 'candidate'|'review',callIds:ids(step.callIds)};});const steps=legacyRecovery.stepDebts;if(new Set(steps.map(step=>step.contextHash+step.kind)).size!==steps.length||steps.some(step=>!step.callIds.length||new Set(step.callIds).size!==step.callIds.length||step.callIds.some(id=>!legacyRecovery!.callIds.includes(id))))invalid();}}
-  return{...(legacyRecovery?{legacyRecovery}:{}),id:uuid(o.id),revision:integer(o.revision,1,Number.MAX_SAFE_INTEGER),draftId:uuid(o.draftId),scopeHash:sha256(o.scopeHash),safetyScopeHash:sha256(o.safetyScopeHash),safetyIdentity,copyReviewEnabled:o.copyReviewEnabled as boolean,state:o.state as CompletionOperation['state'],draftRevision:integer(o.draftRevision,1,Number.MAX_SAFE_INTEGER),draftStamp:sha256(o.draftStamp),rounds,remaining:(o.remaining as unknown[]).map(v=>boundedText(v,2000)),reviewIssues,createdAt,updatedAt};
+  let scopedRepair:LegacyThemeRepair|undefined;
+  if(o.scopedRepair!==undefined){
+    const proof=keys(o.scopedRepair,['version','fields','sourceResultId','sourceCallId','sourceContextHash','sourceWorkflowId','originalDraftStamp','previousAttempts']);
+    if(proof.version!==LEGACY_THEME_REPAIR_VERSION||JSON.stringify(proof.fields)!=='["theme"]'||proof.previousAttempts!==4||legacyRecovery)invalid();
+    scopedRepair={version:LEGACY_THEME_REPAIR_VERSION,fields:['theme'],sourceResultId:uuid(proof.sourceResultId),sourceCallId:uuid(proof.sourceCallId),sourceContextHash:sha256(proof.sourceContextHash),sourceWorkflowId:uuid(proof.sourceWorkflowId),originalDraftStamp:sha256(proof.originalDraftStamp),previousAttempts:4};
+    if(rounds.some(round=>round.context.fields.some(field=>field.name!=='theme')||!round.context.repairRequest||round.context.repairRequest.issues.some(issue=>issue.field!=='theme')))invalid();
+  }
+  return{...(scopedRepair?{scopedRepair}:{}),...(legacyRecovery?{legacyRecovery}:{}),id:uuid(o.id),revision:integer(o.revision,1,Number.MAX_SAFE_INTEGER),draftId:uuid(o.draftId),scopeHash:sha256(o.scopeHash),safetyScopeHash:sha256(o.safetyScopeHash),safetyIdentity,copyReviewEnabled:o.copyReviewEnabled as boolean,state:o.state as CompletionOperation['state'],draftRevision:integer(o.draftRevision,1,Number.MAX_SAFE_INTEGER),draftStamp:sha256(o.draftStamp),rounds,remaining:(o.remaining as unknown[]).map(v=>boundedText(v,2000)),reviewIssues,createdAt,updatedAt};
 }
 export function completionOperations(db:DatabaseSync,draftId?:string):CompletionOperation[] {
   return db.prepare('SELECT id,record_json FROM listing_completion_operations'+(draftId?" WHERE json_extract(record_json,'$.draftId')=?":'')+' ORDER BY rowid').all(...(draftId?[draftId]:[])).map(row=>{
@@ -68,7 +78,7 @@ export function completionOperations(db:DatabaseSync,draftId?:string):Completion
 }
 function save(db:DatabaseSync,raw:CompletionOperation):CompletionOperation {
   const op=validateCompletionOperation(raw),existing=db.prepare('SELECT id FROM listing_completion_operations WHERE id=?').get(op.id);
-  if(existing){const old=validateCompletionOperation(JSON.parse(String(db.prepare('SELECT record_json FROM listing_completion_operations WHERE id=?').get(op.id)!.record_json)));if(old.legacyRecovery&&listingFingerprint(old.legacyRecovery)!==listingFingerprint(op.legacyRecovery))invalid();op.revision++;const result=db.prepare("UPDATE listing_completion_operations SET record_json=? WHERE id=? AND json_extract(record_json,'$.revision')=?").run(JSON.stringify(op),op.id,raw.revision);if(result.changes!==1)throw new UserFacingError('字段操作已由另一请求推进，请重新读取原操作');}
+  if(existing){const old=validateCompletionOperation(JSON.parse(String(db.prepare('SELECT record_json FROM listing_completion_operations WHERE id=?').get(op.id)!.record_json)));if(old.scopedRepair&&listingFingerprint(old.scopedRepair)!==listingFingerprint(op.scopedRepair))invalid();if(old.legacyRecovery&&listingFingerprint(old.legacyRecovery)!==listingFingerprint(op.legacyRecovery))invalid();op.revision++;const result=db.prepare("UPDATE listing_completion_operations SET record_json=? WHERE id=? AND json_extract(record_json,'$.revision')=?").run(JSON.stringify(op),op.id,raw.revision);if(result.changes!==1)throw new UserFacingError('字段操作已由另一请求推进，请重新读取原操作');}
   else db.prepare('INSERT INTO listing_completion_operations(id,record_json) VALUES(?,?)').run(op.id,JSON.stringify(op));
   raw.revision=op.revision;return op;
 }
@@ -99,6 +109,32 @@ export class CompletionJournal {
       const at=new Date().toISOString(),raw:CompletionOperation={...input,id:randomUUID(),revision:1,state:'ACTIVE',rounds:[],remaining:[],reviewIssues:[],createdAt:at,updatedAt:at},next=save(this.db,legacyDraft?recoverLegacyCompletion(this.db,raw,legacyDraft,legacyScopeHash):raw);linkLegacyCompletionOwners(this.db,input.draftId,next.id);this.db.exec('COMMIT');return next;
     }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
+  /** One successor, never an ordinary budget increase. No paid request occurs here. */
+  beginLegacyThemeRepair(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,draft:AmazonDraft,current:ListingAiContext,row:AutomaticListingItem,workflow:ImageWorkflowRun):CompletionOperation|undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const results=this.db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.listingContext.draftId')=? ORDER BY json_extract(record_json,'$.createdAt'),id").all(draft.id).map(r=>validateStoredAiResult(JSON.parse(String(r.record_json))));
+      const source=legacyThemeSource(draft,current,row,workflow,results);
+      if(!source){this.db.exec('COMMIT');return;}
+      const calls=this.db.prepare("SELECT record_json FROM ai_calls WHERE json_extract(record_json,'$.presentationContext.draftId')=? OR id IN (SELECT json_extract(record_json,'$.callId') FROM ai_results WHERE json_extract(record_json,'$.listingContext.draftId')=?)").all(draft.id,draft.id).map(r=>validateAiCall(JSON.parse(String(r.record_json))));
+      for(const call of calls){
+        const result=results.find(r=>r.callId===call.id),usage=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);
+        if(!result||call.status!=='SUCCEEDED'||!resultHasOwner(result,call)||!usage||result.sourceSha256!==listingFingerprint(result.listingContext)||result.productId!==draft.productId||result.productRevision!==draft.productRevision||result.variantId!==draft.variantId||call.model!==result.model||call.providerId!==result.providerId){this.db.exec('COMMIT');return;}
+        const ledger=validateAiUsageRecord(JSON.parse(String(usage.record_json)));
+        if(ledger.id!==call.id||ledger.startedAt!==call.startedAt||ledger.providerId!==call.providerId||this.directory&&hasInvalidAiResponse(this.directory,call,'amazon-fields')){this.db.exec('COMMIT');return;}
+      }
+      if(!calls.some(call=>call.id===source.callId)){this.db.exec('COMMIT');return;}
+      const existing=this.saleOperations(input.safetyIdentity),scoped=existing.filter(op=>op.scopedRepair);
+      if(scoped.length){
+        const op=scoped[0];
+        if(scoped.length!==1||existing.some(other=>other.id!==op.id&&!['DONE','RETIRED'].includes(other.state))||op.state!=='ACTIVE'||op.scopedRepair!.sourceResultId!==source.id||op.scopeHash!==input.scopeHash||op.draftStamp!==input.draftStamp||op.rounds.some(r=>r.candidate.sent||r.review?.sent)){this.db.exec('COMMIT');return;}
+        this.db.exec('COMMIT');return op;
+      }
+      if(existing.some(op=>!['DONE','RETIRED'].includes(op.state))||legacyCompletionOwners(this.db,draft.id).length){this.db.exec('COMMIT');return;}
+      const at=new Date().toISOString(),op=save(this.db,{...input,id:randomUUID(),revision:1,state:'ACTIVE',rounds:[],remaining:[],reviewIssues:[],createdAt:at,updatedAt:at,scopedRepair:{version:LEGACY_THEME_REPAIR_VERSION,fields:['theme'],sourceResultId:source.id,sourceCallId:source.callId,sourceContextHash:source.sourceSha256!,sourceWorkflowId:workflow.id,originalDraftStamp:input.draftStamp,previousAttempts:4}});
+      this.db.exec('COMMIT');return op;
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
   assertSendBudget(id:string,kind:'candidate'|'review'):void {
     const op=this.get(id),round=op.rounds.at(-1);
     if(round&&legacyStepDebt(op,round,kind)+(round[kind]?.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');
@@ -107,6 +143,10 @@ export class CompletionJournal {
   markSent(request:CompletionRequest,call:AiCall):void {
     const op=this.get(request.operationId),round=op.rounds.find(r=>[r.candidate.id,r.review?.id].includes(request.callId));
     if(op.state!=='ACTIVE'||!round||round.contextHash!==request.contextHash||call.id!==request.callId||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision)invalid();
+    if(op.scopedRepair){
+      const grant=this.db.prepare("SELECT 1 FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.repair.phase')='FIELDS_STARTED' AND json_extract(i.value,'$.repair.operationId')=? AND json_extract(i.value,'$.legacyThemeRepair.operationId')=? AND json_extract(i.value,'$.legacyThemeRepair.version')=? AND json_extract(i.value,'$.repairAttempts')=5").get(op.draftId,op.id,op.id,LEGACY_THEME_REPAIR_VERSION);
+      if(!grant)throw new UserFacingError('旧主题修复额度尚未持久化，未发送请求');
+    }
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;
     if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(legacyStepDebt(op,round,entry===round.candidate?'candidate':'review')+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');entry.sent=true;this.save(op);
   }

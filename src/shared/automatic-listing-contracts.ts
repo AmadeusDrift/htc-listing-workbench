@@ -47,6 +47,7 @@ export interface AutomaticListingItem {
   repairPolicyVersion?: typeof FIELD_REPAIR_POLICY_VERSION;
   /** A one-time extra request for legacy exhausted tasks; the original attempts stay counted. */
   repairPolicyMigration?: { version: typeof FIELD_REPAIR_POLICY_VERSION; previousAttempts: 2; grantedAttempts: 1; grantedAt: string; fields: FieldRepairMigrationField[] };
+  legacyThemeRepair?: { version: 'legacy-theme-parser/v1'; operationId:string; previousAttempts:4; grantedAttempts:1; grantedAt:string; fields:['theme'] };
   categoryFieldPolicyVersion?:typeof CATEGORY_FIELD_REPAIR_POLICY_VERSION;
   categoryFieldRepair?:CategoryFieldRepairGrant & {previousAttempts:2|3|4};
   /** Last confirmed source-color evidence actually used by a field repair request. */

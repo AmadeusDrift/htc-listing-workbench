@@ -69,6 +69,7 @@ export interface AutomaticListingDependencies {
   labels: Pick<ItemLabelService, 'syncBatch' | 'list'> & Partial<Pick<ItemLabelService, 'pauseJob' | 'resumeJob' | 'cancelJob'>>;
   labelFormat?(): ItemLabelFormat;
   /** Main-only final field repair + re-review of the existing image; never generates another image. */
+  beginLegacyThemeRepair?: (draftId:string,row:AutomaticListingItem,workflow:ImageWorkflowRun)=>string|undefined;
   beginFieldRepair?: (draftId:string)=>string;
   repairFields?: (draftId: string, signal: AbortSignal, operationId?:string) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
   prepareSourceColors?: (draftId: string, signal: AbortSignal) => Promise<{ aiCalls: number; evidenceChanged: boolean; evidenceSha256?: string }>;
@@ -97,7 +98,7 @@ function fieldRepairRemaining(draft: AmazonDraft, remaining: string[] = []): str
   return [...new Set([...(pricing?[pricing]:[]), ...withoutDeferredImageRemaining(draft,remaining), ...issues.map(issue => `${issue.attributeNames.join('、') || issue.code}：${issue.message}`)])].slice(0,100).map(message=>message.slice(0,2000));
 }
 const incompleteFields = (remaining: string[]) => new UserFacingError(`字段修复后仍有待处理项，已停止图片复核：${remaining.join('；')}`);
-const repairLimit = (row: AutomaticListingItem): number => 2 + (row.repairPolicyMigration?.grantedAttempts ?? 0) + (row.sourceColorRepair?.grantedAttempts ?? 0) + (row.categoryFieldRepair?.grantedAttempts ?? 0);
+const repairLimit = (row: AutomaticListingItem): number => 2 + (row.repairPolicyMigration?.grantedAttempts ?? 0) + (row.sourceColorRepair?.grantedAttempts ?? 0) + (row.categoryFieldRepair?.grantedAttempts ?? 0) + (row.legacyThemeRepair?.grantedAttempts ?? 0);
 const canMigrateCategory=(row:AutomaticListingItem,draft:AmazonDraft):boolean=>!row.categoryFieldPolicyVersion&&!row.categoryFieldRepair&&row.repair?.phase!=='FIELDS_STARTED'&&categoryRepairFields(draft,row.repair?.remaining).length>0;
 const needsSourceColor = (draft: AmazonDraft, remaining: string[] = []): boolean =>
   [...nonDeferredImageIssues(draft),...draft.listingIssues.filter(issue=>issue.severity==='ERROR')].some(issue=>issue.attributeNames.includes('color'))
@@ -857,7 +858,7 @@ export class AutomaticListingService {
     while (repair.phase === 'FIELDS_PENDING') {
       const brandIssues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);
       if(brandIssues.length)throw incompleteFields(brandIssues);
-      if(localRefresh&&row.repairAttempts>=repairLimit(row))throw incompleteFields(repair.remaining??[]);
+      if(localRefresh&&row.repairAttempts>=repairLimit(row)&&!(row.repairAttempts===4&&row.repairPolicyMigration&&row.sourceColorRepair&&row.categoryFieldPolicyVersion&&!row.categoryFieldRepair&&!row.legacyThemeRepair))throw incompleteFields(repair.remaining??[]);
       assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current);if(pricingIssue)throw new UserFacingError(pricingIssue);
       if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
@@ -878,7 +879,13 @@ export class AutomaticListingService {
         if(evidence.evidenceSha256!==undefined&&!/^[a-f0-9]{64}$/.test(evidence.evidenceSha256))throw new UserFacingError('来源颜色证据指纹无效，未继续字段修复');
         evidenceSha256=evidence.evidenceSha256;
       }
-      if(row.repairAttempts>=repairLimit(row)){
+      let scopedOperationId:string|undefined;
+      if(row.repairAttempts>=repairLimit(row)&&!row.legacyThemeRepair){
+        const workflow=this.deps.images.getProgress(current.id);
+        if(workflow&&workflow.id===repair.sourceWorkflowId)scopedOperationId=this.deps.beginLegacyThemeRepair?.(current.id,row,workflow);
+      }
+      if(row.repairAttempts>=repairLimit(row)&&!scopedOperationId){
+        if(localRefresh)throw incompleteFields(repair.remaining??[]);
         if(canMigrateCategory(row,current))row.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,previousAttempts:row.repairAttempts as 2|3|4,grantedAttempts:1,grantedAt:new Date().toISOString(),fields:categoryRepairFields(current,repair.remaining)};
         else if(!evidenceSha256||evidenceSha256===row.sourceColorEvidenceSha256||row.sourceColorRepair)
           throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
@@ -887,7 +894,8 @@ export class AutomaticListingService {
       row.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
       if(evidenceSha256)row.sourceColorEvidenceSha256=evidenceSha256;
       assertRepairScope();
-      const operationId=this.deps.beginFieldRepair?.(current.id);
+      const operationId=scopedOperationId??this.deps.beginFieldRepair?.(current.id);
+      if(scopedOperationId)row.legacyThemeRepair={version:'legacy-theme-parser/v1',operationId:scopedOperationId,previousAttempts:4,grantedAttempts:1,grantedAt:new Date().toISOString(),fields:['theme']};
       row.repairAttempts++;
       // Grant, evidence and consumed attempt share the durable STARTED checkpoint.
       // A cached preparation can resume safely; an unknown field result cannot replay.

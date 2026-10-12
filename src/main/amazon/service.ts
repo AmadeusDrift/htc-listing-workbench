@@ -463,7 +463,11 @@ export class AmazonService {
     const ruleValues=Object.fromEntries(Object.entries(currentRules?.fields??{}).map(([field,entry])=>[field,entry.value]));
     const authority=currentFactAuthority(product,draft.schema,draft,draft.attributes,matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db,product.id,draft.variantId,draft.mode):{},ruleValues);
     const riskFields=new Set(risk.flatMap(issue=>issue.attributeNames));
-    return [...risk,...authority.issues.filter(issue=>!issue.attributeNames.some(field=>riskFields.has(field)))];
+    const fixedField='supplier_declared_dg_hz_regulation';
+    const missingRule=isObject(draft.schema.schema.properties)&&Object.hasOwn(draft.schema.schema.properties,fixedField)
+      &&!Object.hasOwn(ruleValues,fixedField)&&!Object.hasOwn(draft.attributes,fixedField)
+      ?[localIssue('FIXED_DECLARATION_SCHEMA',fixedField+' 的 not_applicable 固定规则未能按当前 Schema 生成，请核对字段结构或枚举；无需再次确认业务值',[fixedField],'compliance')]:[];
+    return [...risk,...missingRule,...authority.issues.filter(issue=>!issue.attributeNames.some(field=>riskFields.has(field)))];
   }
   private newDraftRecord(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram = 'standard', businessRules?: BusinessRuleReport): DraftRecord {
     const now = this.at();

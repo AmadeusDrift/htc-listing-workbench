@@ -39,7 +39,9 @@ export function declarationSafetyIssues(product: ProductDetail, scope: Declarati
   // field name contains 电池. It cannot cancel risk in any other source or SKU text.
   const facts=product.facts.filter(fact=>!(fact.state!=='conflicting'&&sourceFieldName(fact.name,'haul')==='batteries_required'&&noBattery.test(fact.value.trim())));
   const risk=declarationRisks(product,scope,facts),issues:ListingIssue[]=[];
-  for(const [field,blocked] of [['batteries_required',risk.battery],['supplier_declared_dg_hz_regulation',risk.compliance],['required_product_compliance_certificate',risk.compliance]] as const){
+  // Dangerous-goods value follows the explicit project rule; battery/certificate
+  // declarations still use their separate source guards.
+  for(const [field,blocked] of [['batteries_required',risk.battery],['required_product_compliance_certificate',risk.compliance]] as const){
     const values=attributes[field];
     if(!blocked||!Array.isArray(values)||!values.some(value=>isObject(value)&&(field==='batteries_required'?value.value===false:typeof value.value==='string'&&/^not[ _]applicable$/iu.test(value.value.trim()))))continue;
     issues.push({code:DECLARATION_SOURCE_CONFLICT,severity:'ERROR',category:'compliance',source:'local',autoFixable:false,attributeNames:[field],

@@ -42,7 +42,7 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const configuredFields = new Set(['model_number','model_name','part_number','brand','manufacturer']);
   for (const field of configuredFields) if (report.fields[field]) { delete attributes[field]; delete report.fields[field]; }
   const sourceFields = ['brand','manufacturer','country_of_origin','import_designation','model_number','model_name','part_number','condition_type',
-    'gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate','number_of_items'];
+    'gpsr_safety_attestation','batteries_required','required_product_compliance_certificate','number_of_items'];
   for (const field of sourceFields) {
     if (!Object.hasOwn(properties, field) || field === 'number_of_items' && product.variants.length !== 1) continue;
     const facts = product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === field && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
@@ -69,6 +69,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   for (const field of ['model_number','model_name','part_number']) add(field, schema.parentageLevel === 'PARENT' ? input.baseSku??variant.sku : variant.sku, '缺失型号标识使用本行销售 SKU');
   add('country_of_origin', 'CN', '普通商品原产国规则');
   if(target.marketplaceId==='ATVPDKIKX0DER'&&first('country_of_origin')?.value==='CN')add('import_designation','Imported','中国原产国在美国站对应进口商品；不沿用来源网站国内是否进口标签');
+  // Confirmed project-wide declaration: independent of ordinary-product inference.
+  add('supplier_declared_dg_hz_regulation', 'not_applicable', '用户确认所有产品危险品声明不适用；dangerous-goods-fixed/v1', true);
   const risk = declarationRisks(product,input.declarationScope??{variants:[variant],componentSpecifications:[]});
   if (p.ordinaryDeclarations) {
     add('gpsr_safety_attestation', true, '已确认的 GPSR 安全声明规则');
@@ -76,9 +78,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     if (!risk.battery) add('batteries_required', false, '普通无电池商品声明规则');
     else note('来源含电池、供电或电池声明冲突信息，未自动套用不需要电池的默认值');
     if (!risk.compliance) {
-      add('supplier_declared_dg_hz_regulation', 'not_applicable', '普通商品危险品法规不适用规则');
       add('required_product_compliance_certificate', 'Not Applicable', '普通商品适用证书类别规则');
-    } else note('来源含电池、特殊物品或合规冲突信息，未自动套用危险品／证书不适用声明');
+    } else note('来源含电池、特殊物品或合规冲突信息，未自动套用证书不适用声明');
   }
 
   // Parent schemas can require origin and declarations even though the parent

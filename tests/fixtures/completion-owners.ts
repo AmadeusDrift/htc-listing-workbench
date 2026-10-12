@@ -24,17 +24,17 @@ export function originalPng():Buffer {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(pixels)),chunk('IEND',Buffer.alloc(0))]);
 }
 /** All source files and SQLite state are real; only network responses and unrelated downstream work are injected. */
-export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'images',color=false,optionalClosure=false,sourceSpec='Blue'){
+export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'images',color=false,optionalClosure=false,sourceSpec='Blue',theme=false,listingProgram:'standard'|'haul'='standard'){
   t.mock.method(globalThis,'fetch',()=>{throw new Error('No external network permitted');});
   const boundary=resolve('.test-data');mkdirSync(boundary,{recursive:true});const root=mkdtempSync(join(boundary,'field-owner-')),directory=join(root,'workspace'),store=new WorkspaceStore(directory);
-  let product=store.createProduct();product=store.saveProduct({...saveInput(product),title:'Coaster',variants:saveInput(product).variants.map(v=>({...v,originalSpec:color?'602Q':sourceSpec,normalizedSpec:color?'':sourceSpec})),facts:[{id:randomUUID(),name:'材质',value:'硅胶',source:'manual',sourceRef:'fixture',state:'human_confirmed'},{id:randomUUID(),name:'产品类型',value:'Coaster',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
+  let product=store.createProduct();product=store.saveProduct({...saveInput(product),title:'Coaster',variants:saveInput(product).variants.map(v=>({...v,...(listingProgram==='haul'?{purchasePrice:'1'}:{}),originalSpec:color?'602Q':sourceSpec,normalizedSpec:color?'':sourceSpec})),facts:[...(listingProgram==='haul'?[{id:randomUUID(),name:'采购币种',value:'CNY',source:'manual' as const,sourceRef:'fixture',state:'human_confirmed' as const}]:[]),{id:randomUUID(),name:'材质',value:'硅胶',source:'manual',sourceRef:'fixture',state:'human_confirmed'},{id:randomUUID(),name:'产品类型',value:'Coaster',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   if(optionalClosure)product=store.saveProduct({...saveInput(product),facts:[...product.facts,{id:randomUUID(),name:'closure',value:'Zipper',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   const png=originalPng(),assetId=randomUUID();mkdirSync(join(directory,'assets'),{recursive:true});writeFileSync(join(directory,'assets',assetId+'.png'),png);writeFileSync(join(directory,'assets',assetId+'.preview.png'),png);
   product=store.addAssets({productId:product.id,revision:product.revision},[{id:assetId,fileName:'original.png',mimeType:'image/png',width:32,height:32,byteSize:png.length,originalPath:'assets/'+assetId+'.png',previewPath:'assets/'+assetId+'.preview.png',sha256:createHash('sha256').update(png).digest('hex')}]);
   product=store.updateAsset({productId:product.id,revision:product.revision,assetId,role:'main',variantIds:[product.variants[0].id]});
   await confirmSourceConsistencyFixture(directory,store,product.id);
   const field={type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'},language_tag:{type:'string'}},required:['value'],additionalProperties:false}};
-  const schema={$schema:'https://json-schema.org/draft/2019-09/schema',type:'object',properties:{item_name:field,material:field,color:field,...(optionalClosure?{closure:field}:{})},required:[],additionalProperties:true};
+  const schema={$schema:'https://json-schema.org/draft/2019-09/schema',type:'object',properties:{item_name:field,material:field,color:field,...(optionalClosure?{closure:field}:{}),...(theme?{theme:field}:{}),...(listingProgram==='haul'?{is_value_stores_item:{type:'array',items:{type:'object',properties:{value:{type:'boolean'}}}},purchasable_offer:{type:'array',items:{type:'object',properties:{audience:{type:'string',enum:['BZR']}}}}}:{})},required:[],additionalProperties:true};
   const meta={$id:'https://schemas.amazon.com/selling-partners/definitions/product-types/meta-schema/v1',$schema:schema.$schema,type:['object','boolean']};
   const link=(name:string,data:unknown)=>({link:{verb:'GET',resource:'https://fixture.s3.amazonaws.com/'+name+'.json'},checksum:createHash('md5').update(JSON.stringify(data)).digest('base64')});
   let previewFail=false,previews=0;const requests:any[]=[];
@@ -44,11 +44,11 @@ export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'im
     if(url.hostname==='fixture.s3.amazonaws.com')return new Response(JSON.stringify(url.pathname==='/meta.json'?meta:schema));
     if(url.pathname.includes('/productTypes/'))return new Response(JSON.stringify({marketplaceIds:['ATVPDKIKX0DER'],productType:'COASTER',locale:'en_US',requirements:'LISTING',requirementsEnforced:'ENFORCED',productTypeVersion:{version:'fixture-v1'},propertyGroups:{},schema:link('schema',schema),metaSchema:link('meta',meta)}));
     if(!url.pathname.includes('/listings/')||init.method!=='PUT'||url.searchParams.get('mode')!=='VALIDATION_PREVIEW')throw new Error('Only validation previews permitted');
-    previews++;if(previewFail)throw new Error('Injected preview network failure');const attributes=JSON.parse(String(init.body)).attributes,missingField=optionalClosure?'closure':color&&!attributes.color?'color':'material',missing=!attributes[missingField];
+    previews++;if(previewFail)throw new Error('Injected preview network failure');const attributes=JSON.parse(String(init.body)).attributes,missingField=theme?'theme':optionalClosure?'closure':color&&!attributes.color?'color':'material',missing=!attributes[missingField];
     return new Response(JSON.stringify({sku:decodeURIComponent(url.pathname.split('/').at(-1)!),status:missing?'INVALID':'VALID',submissionId:'fixture-preview',issues:missing?[{code:'90220',message:'Missing '+missingField,severity:'ERROR',attributeNames:[missingField]}]:[]}));
   }});
   const target=await amazon.importCredentials({name:'Isolated fixture',sellerId:'FIXTURE_SELLER',marketplaceId:'ATVPDKIKX0DER',region:'na',locale:'en_US',clientId:'fixture_client',clientSecret:'fixture_secret',refreshToken:'fixture_refresh'});
-  let draft=await amazon.createDraft({targetId:target.id,productId:product.id,variantId:product.variants[0].id,productType:'COASTER',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
+  let draft=await amazon.createDraft({listingProgram,targetId:target.id,productId:product.id,variantId:product.variants[0].id,productType:'COASTER',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
   const attributes:import('../../src/shared/amazon-contracts.ts').JsonObject={...draft.attributes,item_name:[{value:'Blue Silicone Coaster',marketplace_id:target.marketplaceId,language_tag:'en_US'}]};delete attributes.material;if(optionalClosure)delete attributes.closure;if(color)delete attributes.color;draft=amazon.saveDraft({id:draft.id,revision:draft.revision,attributes});
   if(color)draft=await amazon.previewDraft({id:draft.id,revision:draft.revision});
   const hosting=new HostingService(directory,store,mockStorage);let response=(p:any):Response|Promise<Response>=>chat(p.operation==='source-color'?{kind:'source-color',verdict:'DETERMINED',colors:['Blue'],reason:'Visible blue product body',referenceAssetIds:p.referenceImages.map((r:any)=>r.assetId)}:p.candidate?reviewFor(p):candidateFor(p));
@@ -57,10 +57,11 @@ export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'im
   const listing=new ListingAiService(store,amazon,ai,()=>false),reference=()=>({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision});
   let images:ImageWorkflowService|undefined,automatic:AutomaticListingService|undefined,taskId:string|undefined;
   const profile={id:'alpha',name:'Alpha',generation:1,enabled:true,configured:true,host:'ftp.example.test',port:21,secure:true,remoteRoot:'/',publicBaseUrl:'https://images.example.test/'};
-  const prior={id:randomUUID(),draftId:draft.id,status:'COMPLETED',stage:'complete',attempt:7,approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64),slots:Array.from({length:7},(_,i)=>({index:i+1,status:'PASSED',approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64)}))};
+  const prior={id:randomUUID(),draftId:draft.id,productId:product.id,productRevision:product.revision,variantId:draft.variantId,sku:draft.sku,status:'COMPLETED',stage:'complete',attempt:7,approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64),slots:Array.from({length:7},(_,i)=>({index:i+1,status:'PASSED',approvedAssetId:randomUUID(),approvedSha256:'a'.repeat(64)}))};
   const child:any={id:randomUUID(),status:'NEEDS_ATTENTION',items:[{draftId:draft.id,submitStarted:false,steps:[]}]};
   const dependencies={store,rules:()=>defaultListingRules(),amazon,hosting:{getProfile:()=>profile},images:{getProgress:()=>prior,cancel:()=>({cancelled:false}),cancelSources:()=>({cancelled:false})},
     execution:{get:()=>child,list:()=>[child]},followup:{},procurement:{},labels:{},
+    beginLegacyThemeRepair:(id:string,row:any,workflow:any)=>listing.beginLegacyThemeRepair(id,row,workflow)?.id,
     beginFieldRepair:()=>listing.beginCompletion(reference()).id,repairFields:(_id:string,signal:AbortSignal,operationId?:string)=>listing.complete(reference(),signal,operationId),
     recheckImage:async()=>{throw new Error('Downstream image recheck sentinel');}} as unknown as AutomaticListingDependencies;
   const openOwner=async()=>{

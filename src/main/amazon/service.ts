@@ -716,6 +716,13 @@ export class AmazonService {
         const feedback={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
         if(preserveFeedback)this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
         const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
+        const scopedOperation=new CompletionJournal(this.persistence.db).list(input.id).find(op=>op.scopedRepair&&op.rounds.some(round=>round.candidate.resultId===adoption.suggestionResultId));
+        if(scopedOperation){
+          const withoutTheme=(value:JsonObject)=>Object.fromEntries(Object.entries(value).filter(([field])=>field!=='theme'));
+          if(JSON.stringify(withoutTheme(record.draft.attributes))!==JSON.stringify(withoutTheme(supplied))||adoption.fields.some(field=>field!=='theme'))throw new UserFacingError('theme 定向修复不能修改其他字段');
+          const planned=this.haulNormalization(record,supplied);
+          if(planned.removed.length||planned.colorChanged)throw new UserFacingError('theme 定向修复不能规范化其他字段；已保留原草稿，请先单独处理');
+        }
         if (JSON.stringify(this.vault.redact(supplied)) !== JSON.stringify(supplied)) throw new UserFacingError('属性不能包含授权配置');
         record.draft.attributes = normalized; record.draft.revision++;
         if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed));
@@ -727,8 +734,13 @@ export class AmazonService {
       });
     } finally { this.busy.delete(input.id); }
   }
-  private normalizeHaulRecord(record: DraftRecord, completionId?: string): boolean {
-    const cleanup=cleanHaulAttributes(record.draft.listingProgram,record.draft.attributes);
+  /** Main-only fail-closed preflight: a theme repair cannot also normalize old attributes. */
+  assertThemeRepairSafe(draftId:string):void {
+    const record=this.persistence.record(draftId),cleanup=this.haulNormalization(record);
+    if(cleanup.removed.length||cleanup.colorChanged)throw new UserFacingError('theme 定向修复不能规范化其他字段；已保留原草稿，请先单独处理');
+  }
+  private haulNormalization(record:DraftRecord,attributes=record.draft.attributes) {
+    const cleanup=cleanHaulAttributes(record.draft.listingProgram,attributes);
     const color=cleanup.attributes.color;
     let colorSources:string[]=[];
     if(color!==undefined)try{
@@ -738,7 +750,12 @@ export class AmazonService {
     const plain=color===undefined?undefined:plainColorValue(color,colorSources);
     const colorChanged=JSON.stringify(color)!==JSON.stringify(plain);
     if(colorChanged)cleanup.attributes={...cleanup.attributes,color:plain!};
+    return {...cleanup,colorChanged};
+  }
+  private normalizeHaulRecord(record: DraftRecord, completionId?: string): boolean {
+    const cleanup=this.haulNormalization(record),colorChanged=cleanup.colorChanged;
     if(!cleanup.removed.length&&!colorChanged)return false;
+    if(completionId&&new CompletionJournal(this.persistence.db).get(completionId).scopedRepair)throw new UserFacingError('theme 定向修复不能规范化其他字段；已保留原草稿，请先单独处理');
     this.mutable(record);this.currentProduct(record);
     const journal=completionId?new CompletionJournal(this.persistence.db):null,operation=completionId?journal!.get(completionId):null;
     if(operation&&(operation.draftId!==record.draft.id||operation.draftRevision!==record.draft.revision||operation.draftStamp!==completionDraftStamp(record.draft)))throw new UserFacingError('字段操作对应的草稿已修改，未自动清理');
@@ -766,7 +783,10 @@ export class AmazonService {
   private listingPath(record: DraftRecord): string { return `/listings/2021-08-01/items/${encodeURIComponent(record.draft.sellerId)}/${encodeURIComponent(record.draft.sku)}`; }
   private listingQuery(record: DraftRecord): Record<string, string> { return { marketplaceIds: record.draft.marketplaceId, issueLocale: record.draft.schema.locale }; }
   async previewDraft(input: unknown, completionId?: string): Promise<AmazonDraft> {
-    const record = this.checked(input); this.enter(record.draft.id);
+    const record = this.checked(input);
+    // Before the preview try/catch: failure must not persist its catch-path feedback either.
+    if(completionId&&new CompletionJournal(this.persistence.db).get(completionId).scopedRepair)this.assertThemeRepairSafe(record.draft.id);
+    this.enter(record.draft.id);
     try {
       this.mutable(record); const target = this.active(record.draft.targetId); const generation = this.persistence.generation(target.id);
       const locallyValid = this.persistence.transaction(()=>this.validate(record,completionId));

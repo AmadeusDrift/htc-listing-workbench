@@ -30,7 +30,7 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','outcome','pricingRefresh']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
@@ -74,8 +74,13 @@ function item(raw: unknown): AutomaticListingItem {
       ||![2,3,4].includes(Number(category.previousAttempts))||!Array.isArray(category.fields)||!category.fields.length||category.fields.length>CATEGORY_FIELD_REPAIR_FIELDS.length||new Set(category.fields).size!==category.fields.length||category.fields.some(field=>!CATEGORY_FIELD_REPAIR_FIELDS.includes(field as typeof CATEGORY_FIELD_REPAIR_FIELDS[number]))||!result.draftId||!result.executionTaskIds.length)fail();
     result.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,previousAttempts:counter(category.previousAttempts,4) as 2|3|4,grantedAttempts:1,grantedAt:date(category.grantedAt),fields:category.fields as typeof CATEGORY_FIELD_REPAIR_FIELDS[number][]};
   }
+  if(value.legacyThemeRepair!==undefined){
+    const grant=record(value.legacyThemeRepair,'旧主题解析修复',['version','operationId','previousAttempts','grantedAttempts','grantedAt','fields']);
+    if(Object.keys(grant).length!==6||grant.version!=='legacy-theme-parser/v1'||grant.previousAttempts!==4||grant.grantedAttempts!==1||JSON.stringify(grant.fields)!=='["theme"]'||result.repairAttempts!==5||!result.repairPolicyMigration||!result.sourceColorRepair||result.categoryFieldRepair||!result.categoryFieldPolicyVersion)fail();
+    result.legacyThemeRepair={version:'legacy-theme-parser/v1',operationId:identifier(grant.operationId),previousAttempts:4,grantedAttempts:1,grantedAt:date(grant.grantedAt),fields:['theme']};
+  }
   const baseLimit=2+(result.repairPolicyMigration?.grantedAttempts??0),grants=[result.sourceColorRepair,result.categoryFieldRepair].filter((grant):grant is NonNullable<typeof grant>=>!!grant).sort((a,b)=>a.previousAttempts-b.previousAttempts);
-  if(grants.some((grant,index)=>grant.previousAttempts!==baseLimit+index||result.repairAttempts<grant.previousAttempts+1)||result.repairAttempts>baseLimit+grants.length)fail();
+  if(grants.some((grant,index)=>grant.previousAttempts!==baseLimit+index||result.repairAttempts<grant.previousAttempts+1)||result.repairAttempts>baseLimit+grants.length+(result.legacyThemeRepair?.grantedAttempts??0))fail();
   if(salesPlan){if(salesPlan.sku!==result.sku||!salesPlan.recipe.components.some(c=>c.variantId===variantId)||salesPlan.parentage==='PARENT')fail();result.salesPlan=salesPlan;}
   if(value.parentDraftId!==undefined)result.parentDraftId=identifier(value.parentDraftId);
   if(value.familyTransition!==undefined){

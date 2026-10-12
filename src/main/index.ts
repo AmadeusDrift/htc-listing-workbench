@@ -158,6 +158,7 @@ async function start() {
       const current=amazonService.getDraft(id);
       return listingService.prepareSourceColors({draftId:id,draftRevision:current.revision},signal);
     },
+    beginLegacyThemeRepair: (id,row,workflow) => listingService.beginLegacyThemeRepair(id,row,workflow)?.id,
     beginFieldRepair: id => {const current=amazonService.getDraft(id);return listingService.beginCompletion({draftId:id,draftRevision:current.revision}).id;},
     repairFields: async (id, signal, operationId) => {
       const current = amazonService.getDraft(id);

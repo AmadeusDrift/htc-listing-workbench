@@ -82,7 +82,7 @@ export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput 
 export interface AiResult {
   fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1';originalResult:unknown;originalSha256:string;recoveredAt:string};
   imagePlanRecovery?: { repair?:{previousPlanId:string;issues:string[]}; parserVersion:'image-plan-recovery/v1'; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
-  localRecovery?: { parserVersion:'full-schema-recovery/v1'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
+  localRecovery?: { parserVersion:'full-schema-recovery/v1'|'full-schema-recovery/v2'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   fieldRejections?: import('./rejection-presentation.ts').FieldRejections;
   id: string; callId: string; providerId: AiProviderId; productId: string; productRevision: number;
   variantId: string | null; assetId: string | null; assetSha256: string | null;

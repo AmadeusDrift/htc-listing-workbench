@@ -1,3 +1,4 @@
+import {validateStoredAiResult} from '../src/main/ai/validation.ts';
 import { retireCompletionDrafts } from '../src/main/listing-ai/completion-journal.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,10 +11,10 @@ import { openDatabase } from '../src/main/database.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore } from '../src/main/backup.ts';
 
 const issue={code:'90220',message:'Missing material',severity:'ERROR' as const,attributeNames:['material'],autoFixable:false,source:'amazon' as const,category:'field' as const};
-async function failed(t:any,reviewed=false){
+async function failed(t:any,reviewed=false,imageCitation=false){
  const f=await fixture(t),listing=new ListingAiService(f.store,f.amazon,f.ai,()=>reviewed);let raw:any;
  f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return {...d,state:d.fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:d.fieldAdoptions?.length?[]:[issue]};};
- f.respond(payload=>{raw=candidateFor(payload);raw.candidates.forEach((c:any)=>c.items.forEach((i:any)=>i.transformation='composed from source facts'));return chat({kind:'amazon-fields',candidates:null,missing:[]});});
+ f.respond(payload=>{raw=candidateFor(payload);if(imageCitation){raw.candidates=raw.candidates.filter((c:any)=>c.field!=='color');raw.candidates.push({field:'color',items:[{value:'Blue',evidenceIds:[f.product.assets[0].id],transformation:'infer'}]});}raw.candidates.forEach((c:any)=>c.items.forEach((i:any)=>i.transformation='composed from source facts'));return chat({kind:'amazon-fields',candidates:null,missing:[]});});
  await assert.rejects(listing.complete(f.reference));
  const op=listing.completionOperations(f.draft.id)[0],call=f.ai.getCall(op.rounds[0].candidate.id)!;
  const path=join(f.directory,'ai-diagnostics',readdirSync(join(f.directory,'ai-diagnostics')).find(n=>n.endsWith(`${call.id}.json`))!);
@@ -30,7 +31,7 @@ test('known invalid response recovers on continuation, preserves failed call and
  assert.equal(completed.aiCalls,0);assert.equal(f.requests.length,1);assert.equal(completed.draft.fieldAdoptions?.length,1);
  assert.deepEqual(db.prepare('SELECT record_json FROM ai_calls ORDER BY id').all(),calls);assert.deepEqual(db.prepare('SELECT record_json FROM ai_usage_ledger ORDER BY id').all(),usage);
  const result=f.ai.getResult(f.listing.getCompletion(f.op.id).rounds[0].candidate.resultId!)!;
- assert.ok(result.localRecovery);assert.equal(result.callId,f.call.id);assert.equal(f.ai.getCall(f.call.id)!.status,'FAILED');
+ assert.ok(result.localRecovery);assert.equal(result.localRecovery.parserVersion,'full-schema-recovery/v2');assert.equal(result.callId,f.call.id);assert.equal(f.ai.getCall(f.call.id)!.status,'FAILED');
  rmSync(join(f.directory,'ai-diagnostics'),{recursive:true});
  const again=await f.listing.complete({draftId:completed.draft.id,draftRevision:completed.draft.revision},undefined,f.op.id);assert.equal(again.aiCalls,0);assert.equal(again.draft.fieldAdoptions?.length,1);
  const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:async()=>{throw Error('No network allowed');}});
@@ -115,4 +116,33 @@ test('an older backup retains recovered candidate history when a later sent revi
  assert.ok(db.prepare('SELECT id FROM ai_results WHERE id=?').get(result.id));
  }finally{db.close();}
  await createWorkspaceBackup(restored.stagingDirectory,join(f.directory,'guarded-again.htcbackup'),pass);
+});
+
+
+test('legacy v1 recovery keeps the original rejected image citation readable without rewriting history or resending',async t=>{
+ const f=await failed(t,false,true),db=openDatabase(f.directory);
+ try{
+ const result=f.ai.completionJournal.recover({operationId:f.op.id,callId:f.call.id,contextHash:f.op.rounds[0].contextHash});
+ assert.equal(result.output.kind,'amazon-fields');if(result.output.kind!=='amazon-fields')throw Error('wrong fixture');
+ const legacy=structuredClone(result),output=legacy.output as typeof result.output;legacy.localRecovery!.parserVersion='full-schema-recovery/v1';
+ const color=output.candidates.find(c=>c.field==='color')!;assert.ok(color);const assetId=color.items[0].evidenceIds[0],reason='color 的来源引用无法对应当前规格：'+assetId;
+ for(const item of color.items)item.evidenceIds=[];(color.normalizationNotes??=[]).push(reason);
+ output.candidates=output.candidates.filter(c=>c!==color);(output.rejectedCandidates??=[]).push(color);output.missing.push({field:'color',reason:'[FIELD_REFERENCE] '+reason+'；待补资料，已保留其他可用字段'});
+ assert.equal(result.localRecovery!.parserVersion,'full-schema-recovery/v2');
+ const transitional=structuredClone(result);transitional.localRecovery!.parserVersion='full-schema-recovery/v1';assert.deepEqual(validateStoredAiResult(transitional),transitional,'the later published v1 shape stays readable too');
+ for(const mutate of [
+  (r:any)=>{r.localRecovery.parserVersion='full-schema-recovery/v2';},
+  (r:any)=>{r.localRecovery.parserVersion='full-schema-recovery/v999';},
+  (r:any)=>{r.output.missing[0].reason='changed history';},
+  (r:any)=>{r.localRecovery.rawOutput.candidates=[];},
+  (r:any)=>{r.localRecovery.contextSha256='0'.repeat(64);},
+ ]){const bad=structuredClone(legacy);mutate(bad);assert.throws(()=>validateStoredAiResult(bad));}
+ const literal=JSON.stringify(legacy);db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(literal,result.id);
+ const calls=db.prepare('SELECT record_json FROM ai_calls ORDER BY id').all(),usage=db.prepare('SELECT record_json FROM ai_usage_ledger ORDER BY id').all();
+ assert.deepEqual(f.ai.getResult(result.id),legacy);assert.equal(f.ai.completionJournal.unknown(f.op.id),false);assert.equal(f.requests.length,1);
+ assert.equal(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json,literal);
+ const backup=join(f.directory,'legacy-image-citation.htcbackup');await createWorkspaceBackup(f.directory,backup,'legacy recovery fixture');const restored=await prepareWorkspaceRestore(f.directory,backup,'legacy recovery fixture'),restoredDb=openDatabase(restored.stagingDirectory);
+ try{assert.equal(restoredDb.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json,literal);}finally{restoredDb.close();}
+ assert.deepEqual(db.prepare('SELECT record_json FROM ai_calls ORDER BY id').all(),calls);assert.deepEqual(db.prepare('SELECT record_json FROM ai_usage_ledger ORDER BY id').all(),usage);
+ }finally{db.close();}
 });

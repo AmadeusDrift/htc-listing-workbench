@@ -1,3 +1,4 @@
+import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
 import { assertImageWorkflowHistory } from './history.ts';
 import { currentImageAdaptation,partialSourceBlocker,partialRiskModeBlocker,workflowHash } from './adaptation.ts';
 import {missingWorkflowBudget} from './legacy-missing.ts';
@@ -17,7 +18,7 @@ import { FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_POLICY_VERSION } fro
 import { join } from 'node:path';
 import { open, unlink } from 'node:fs/promises';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import type { AmazonDraft, AmazonSchema } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { imageEvidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
@@ -43,6 +44,7 @@ import { readManagedImage } from '../ai/source.ts';
 import { AiError, throwIfAborted } from '../ai/errors.ts';
 import { integer, keys, uuid } from '../ai/validation.ts';
 import { privateDirectory } from '../image-generation/vault.ts';
+
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
 import { approvedWorkflowAsset, currentWorkflowPlanIds, imageWorkflowDraftStamp, selectImageReferences, validateStoredImageWorkflowRun, workflowRuns } from './records.ts';
@@ -57,6 +59,11 @@ import { imageListingContextsMatch,imageActualInputsMatch } from './context-comp
 import type { AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 
+function assertImageSchemaCurrent(schema:AmazonSchema,snapshot:ListingAiContext):void {
+  const unchanged=schema.checksum===snapshot.schemaChecksum&&schema.version===snapshot.schemaVersion&&listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})===snapshot.schemaSha256;
+  const displayOnly=schema.version===snapshot.schemaVersion&&snapshot.fullSchema&&sameSchemaValidation(schema,snapshot.fullSchema);
+  if(!unchanged&&!displayOnly)throw new UserFacingError('Amazon 字段规则已更新，当前图片依据与新 Schema 不兼容，请重新核对字段规则');
+}
 type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'hasRetainedFieldReferences'|'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'|'currentAuthorizationContext'>> & {
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
@@ -649,7 +656,7 @@ export class ImageWorkflowService {
         if(base.setPolicy&&listingFingerprint(base.sourceMeasurements??[])!==listingFingerprint(currentSourceImageMeasurements(this.db,draft)))throw new AiError('SOURCE_CHANGED');
         if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
         const schema=await this.amazon.getSchema(draft.schema);throwIfAborted(signal);
-        if(schema.checksum!==base.listing.schemaChecksum||schema.version!==base.listing.schemaVersion||listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})!==base.listing.schemaSha256)throw new AiError('SOURCE_CHANGED');
+        assertImageSchemaCurrent(schema,base.listing);
         for(const ref of run.referenceAssets){const asset=this.store.getAssetRecord(ref.id);if(!asset||asset.productId!==run.productId||asset.sha256!==ref.sha256)throw new AiError('SOURCE_CHANGED');await readManagedImage(this.directory,asset,signal);}
         const after=this.amazon.getDraft(run.draftId),latestTarget=this.amazon.executionTargetScope(after.targetId);
         if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(after)!==run.draftSha256||latestTarget.generation!==base.listing.targetGeneration||latestTarget.target.paused||!latestTarget.target.configured)throw new AiError('SOURCE_CHANGED');
@@ -871,7 +878,7 @@ export class ImageWorkflowService {
         if (current.revision!==run.productRevision || draft.revision!==context.listing.draftRevision || imageWorkflowDraftStamp(draft)!==run.draftSha256 || target.generation!==context.listing.targetGeneration || target.target.paused || !target.target.configured) throw new AiError('SOURCE_CHANGED');
         if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
         const schema=await this.amazon.getSchema(draft.schema); throwIfAborted(signal);
-        if (schema.checksum!==context.listing.schemaChecksum || schema.version!==context.listing.schemaVersion || listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})!==context.listing.schemaSha256) throw new AiError('SOURCE_CHANGED');
+        assertImageSchemaCurrent(schema,context.listing);
         for (const ref of run.referenceAssets) { const asset=this.store.getAssetRecord(ref.id); if (!asset || asset.productId!==run.productId || asset.sha256!==ref.sha256) throw new AiError('SOURCE_CHANGED'); await readManagedImage(this.directory,asset,signal); }
         if (this.store.getProduct(run.productId).revision!==run.productRevision || this.amazon.getDraft(run.draftId).revision!==context.listing.draftRevision) throw new AiError('SOURCE_CHANGED');
         const latestTarget=this.amazon.executionTargetScope(draft.targetId);

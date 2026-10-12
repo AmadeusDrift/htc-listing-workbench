@@ -778,13 +778,11 @@ test('legacy current-copy review reports omitted wording without granting image 
     check.claims[0].text = check.claims[0].text.split(' ')[0];
     return chat(review);
   });
-  const review = await f.ai.reviewCurrentListing(f.context.listing, f.context.currentListingCopy, async () => {});
-  assert.equal(review.output.kind, 'listing-current-review');
-  if (review.output.kind !== 'listing-current-review') throw Error('Unexpected review');
-  assert.equal(review.output.verdict, 'NEEDS_CHANGES');
-  assert.deepEqual(validateAiResult(review), review);
-  await assert.rejects(f.ai.imagePlan({ ...f.context, listingReviewResultId: review.id }, () => {}));
-  assert.equal(f.requests.length, 2);
+  const before=f.requests.length,prior=f.ai.listResults(f.product.id).length;
+  await assert.rejects(f.ai.reviewCurrentListing(f.context.listing,f.context.currentListingCopy,async()=>{}),(error:any)=>error.code==='OUTPUT_INVALID');
+  assert.equal(f.ai.listResults(f.product.id).length,prior,'a failed review never creates a new approval or a fabricated product correction');
+  const failed=f.ai.listCalls().find(call=>call.status==='FAILED');assert.equal(failed?.errorCode,'OUTPUT_INVALID');
+  assert.equal(f.requests.length,before+1);
 });
 
 test('printed reference dimensions retain original OCR provenance and cannot be forged or moved to another image',async t=>{

@@ -4,15 +4,17 @@ import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
   thinking?: boolean;
+  /** Adapter-owned safe capture, enabled only for source observation responses. */
+  onInvalidResponseText?: (text:string)=>void;
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;
   onMetadata?: (metadata: ProviderMetadata) => void;
   /** Secret-checked JSON only; still unapproved and never eligible for adoption. */
-  onUntrustedOutput?: (output: unknown) => void;
+  onUntrustedOutput?: (output: unknown, stage?: import('./output-diagnostics.ts').AiOutputRejectionStage) => void;
   /** Synchronous reservation at the last boundary before one paid POST. */
   beforeSend?: (body: string | Buffer) => void;
 }
 export const emptyUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
-async function readBounded(response: Response, max: number, signal: AbortSignal): Promise<unknown> {
+async function readBounded(response: Response, max: number, signal: AbortSignal, onInvalidResponseText?: (text:string)=>void): Promise<unknown> {
   const length = response.headers.get('content-length');
   if ((length !== null && (!/^\d+$/.test(length) || Number(length) > max)) || !response.body) {
     void response.body?.cancel().catch(() => {}); throw new AiError('OUTPUT_INVALID');
@@ -31,7 +33,11 @@ async function readBounded(response: Response, max: number, signal: AbortSignal)
     }
     throwIfAborted(signal);
     if (!size) throw new AiError('OUTPUT_INVALID');
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+    const text=new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+    try{return JSON.parse(text);}catch{
+      try{onInvalidResponseText?.(text);}catch{/* Adapter capture must not replace the original parse failure. */}
+      const error=new AiError('OUTPUT_INVALID');error.diagnosticReason='RESPONSE_ENVELOPE_JSON_INVALID';throw error;
+    }
   } catch (error) {
     cancel(); throwIfAborted(signal);
     if (error instanceof AiError) throw error;
@@ -56,5 +62,5 @@ export async function postJson(url: string, headers: Record<string, string>, bod
     } catch { throwIfAborted(signal); }
     throw httpError(response.status, code);
   }
-  return readBounded(response, context.maxResponseBytes, signal);
+  return readBounded(response, context.maxResponseBytes, signal, context.onInvalidResponseText);
 }

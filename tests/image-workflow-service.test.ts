@@ -221,15 +221,15 @@ test('field title and description changes reuse completed images and preserve or
   assert.equal(rechecked.workflow.contextSha256,original.contextSha256);
 });
 
-test('field metadata changes cannot resend an unknown paid request with no durable candidate',async t=>{
+test('field metadata changes preserve unknown history while retrying only the missing request',async t=>{
   const f=await fixture(t,{generationError:true}),bridge=currentListingBridge(f);bridge.project(olderFieldMetadata);
   const first=await f.run(),attempt=first.workflow.slots![0].attempts[0];assert.equal(attempt.state,'UNKNOWN');
   bridge.project(context=>context);await f.service.close();const restarted=f.reopen();
   try{
     const resumed=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
     assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.slots![0].status,'UNKNOWN');
-    assert.equal(resumed.workflow.slots![0].attempts.length,1);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,attempt.requestId);
-    assert.equal(f.calls.filter(call=>call==='generate').length,1);
+    assert.equal(resumed.workflow.slots![0].attempts.length,2);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,attempt.requestId);
+    assert.equal(f.calls.filter(call=>call==='generate').length,2);
   }finally{await restarted.close();}
 });
 
@@ -376,16 +376,14 @@ test('reenabling risk never rewrites the provenance of an interrupted disabled w
   assert.deepEqual(f.service.getProgress(f.draft.id),first.workflow);
 });
 
-test('unknown generation stays stopped until an explicit per-request retry and preserves its history',async t=>{
-  const options={generationError:true},f=await fixture(t,options),first=await f.run(),slot=first.workflow.slots![0],attempt=slot.attempts[0];
-  assert.equal(attempt.state,'UNKNOWN');await f.run();assert.equal(f.calls.filter(c=>c==='generate').length,1);
-  await assert.rejects(()=>f.service.approveUnknownRetry({draftId:f.draft.id,slot:1,requestId:randomUUID()}),/变化/);
-  const before=f.calls.length;await f.service.approveUnknownRetry({draftId:f.draft.id,slot:1,requestId:attempt.requestId});
-  assert.equal(f.calls.length,before);options.generationError=false;const next=await f.run();
-  assert.equal(next.workflow.status,'COMPLETED',next.workflow.error??'');
-  assert.equal(next.workflow.slots![0].attempts[0].requestId,attempt.requestId);
-  assert.match(next.workflow.slots![0].attempts[0].error??'',/用户确认/);
-  assert.equal(next.workflow.slots![0].attempts.length,2);
+test('unknown generation automatically retries missing step with three durable attempts',async t=>{
+  const options={generationError:true},f=await fixture(t,options),first=await f.run(),attempt=first.workflow.slots![0].attempts[0];
+  assert.ok(attempt,first.workflow.error??JSON.stringify(first));assert.equal(attempt.state,'UNKNOWN');await f.run();await f.run();await f.run();
+  const stopped=f.service.getProgress(f.draft.id)!;
+  assert.equal(f.calls.filter(c=>c==='generate').length,3);assert.equal(stopped.slots![0].attempts.length,3);
+  assert.equal(stopped.slots![0].attempts[0].requestId,attempt.requestId);
+  options.generationError=false;await f.run();assert.equal(f.calls.filter(c=>c==='generate').length,3);
+
 });
 
 test('legacy completed field checkpoint receives one supported repair and is not paid repeatedly',async t=>{
@@ -690,10 +688,10 @@ test('old completed workflows remain readable but cannot be reused as a vision-r
   const second=await f.run(); assert.equal(second.workflow.status,'COMPLETED');
   assert.notEqual(second.workflow.id,first.workflow.id); assert.equal(f.calls.filter(call=>call==='generate').length,14);
 });
-test('missing configuration stops before paid content; ambiguous timeout never retries or OCRs',async t=>{
+test('missing configuration stops before paid content; ambiguous timeout retries only after authorized resume',async t=>{
   const f=await fixture(t,{configured:false}); assert.equal((await f.run()).workflow.status,'BLOCKED'); assert.deepEqual(f.calls,[]);
   const g=await fixture(t,{generationError:true}); assert.equal((await g.run()).workflow.status,'FAILED'); assert.equal(g.calls.filter(c=>c==='generate').length,1); assert.equal(g.calls.includes('ocr'),false);
-  await g.service.close();const restarted=g.reopen();await restarted.complete({draftId:g.draft.id,draftRevision:g.draft.revision});assert.equal(g.calls.filter(c=>c==='generate').length,1);assert.equal(restarted.getProgress(g.draft.id)!.slots![0].attempts.length,1);await restarted.close();
+  await g.service.close();const restarted=g.reopen();await restarted.complete({draftId:g.draft.id,draftRevision:g.draft.revision});assert.equal(g.calls.filter(c=>c==='generate').length,2);assert.equal(restarted.getProgress(g.draft.id)!.slots![0].attempts.length,2);await restarted.close();
 });
 test('a lost paid response reconciles a durable candidate after restart and resumes without a second generation for that slot',async t=>{
   const f=await fixture(t,{lostResponse:true}),bridge=currentListingBridge(f);
@@ -709,7 +707,7 @@ test('a lost paid response reconciles a durable candidate after restart and resu
     assert.deepEqual(result.workflow.imageContext,context);assert.equal(result.workflow.contextSha256,first.workflow.contextSha256);
   }finally{await restarted.close();}
 });
-test('a paid 502 response remains unknown across restart and is locally reconciled without another POST',async t=>{
+test('a paid 502 response checks recovery before a bounded retry after restart',async t=>{
   const f=await fixture(t);let posts=0,reconciliations=0;
   const adapter=new OpenAiImageAdapter({fetch:async()=>{posts++;return Response.json({error:{message:'gateway failed'}},{status:502});}});
   f.generation.generateForWorkflow=async()=>{await adapter.generate({apiKey:'local-fixture-key',model:'gpt-image-2.5-sunburst',prompt:'Source product',size:'1024x1024',quality:'high',background:'opaque',references:[]},new AbortController().signal);throw new Error('Unexpected generation success');};
@@ -718,8 +716,8 @@ test('a paid 502 response remains unknown across restart and is locally reconcil
   await f.service.close();const restarted=f.reopen();
   try{
     const resumed=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
-    assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.slots![0].attempts.length,1);
-    assert.equal(reconciliations,1);assert.equal(posts,1);assert.equal(resumed.workflow.slots![0].status,'UNKNOWN');
+    assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.slots![0].attempts.length,2);
+    assert.equal(reconciliations,1);assert.equal(posts,2);assert.equal(resumed.workflow.slots![0].status,'UNKNOWN');
   }finally{await restarted.close();}
 });
 test('a proven unsent generation failure preserves its ready attempt and resumes with the same request identity',async t=>{
@@ -1105,4 +1103,15 @@ test('new permissive legacy set plan survives persisted workflow reload with ima
   const first=await f.run();assert.equal(first.workflow.listingEvidenceContractVersion,'listing-evidence/v5');assert.deepEqual(first.workflow.setPlan?.slots[1].expectedText,[{text:'An inviting everyday accent',evidenceIds:[]}],first.workflow.error??'');
   await f.service.close();const db=openDatabase(f.root);
   try{const {workflowRuns}=await import('../src/main/image-workflow/records.ts');const restored=workflowRuns(db,f.draft.id).find(r=>r.id===first.workflow.id)!;assert.ok(restored);assert.deepEqual(restored.setPlan,first.workflow.setPlan);assert.deepEqual(restored.imageContext,first.workflow.imageContext);}finally{db.close();}
+});
+
+test('historical references preserve existing manual source authority for an eligible unbound original',async t=>{
+ const f=await fixture(t),db=openDatabase(f.root);try{
+ const product=f.store.getProduct(f.product.id),asset=product.assets[0],at=new Date().toISOString();
+ const run={id:randomUUID(),draftId:f.draft.id,productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,sku:product.variants[0].sku,status:'BLOCKED',stage:'planning',attempt:0,maxAttempts:2,contextSha256:null,draftSha256:null,referenceAssets:[{id:asset.id,sha256:f.store.getAssetRecord(asset.id)!.sha256}],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:at,updatedAt:at,error:'historical interruption'};
+ db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(run.id,JSON.stringify(run));
+ f.store.getProduct(product.id);
+ assert.equal(db.prepare('SELECT count(*) n FROM variant_assets WHERE asset_id=?').get(asset.id)?.n,0);
+ assert.doesNotThrow(()=>f.store.assertSourceConsistency(product.id,[product.variants[0].id]));
+ }finally{db.close();}
 });

@@ -108,15 +108,19 @@ export function validateProduct(raw: unknown, mode: 'demo' | 'live'): MiaoshouPr
   }); unique(dimensions.map(d => d.id));
   if (Array.isArray(p.skus) && p.skus.length > 200) return fail('TOO_MANY_SKUS');
   const skus = array(p.skus, 200).map(rawSku => {
-    const s = exact(rawSku, ['key', 'itemNum', 'price', 'oriPrice', 'stock', 'oriStock', 'weight', 'packageLength', 'packageWidth', 'packageHeight']);
+    const hasImages=Object.hasOwn(object(rawSku),'imageUrls');
+    const s = exact(rawSku, ['key', 'itemNum', 'price', 'oriPrice', 'stock', 'oriStock', 'weight', 'packageLength', 'packageWidth', 'packageHeight',...(hasImages?['imageUrls']:[])]);
+    const imageUrls=hasImages?array(s.imageUrls,200).map(raw=>{const url=text(raw,2048,true);if(safeUrl(url,mode)!==url)return fail();return url;}):undefined;
+    if(imageUrls)unique(imageUrls);
     const number = (key: string) => { if (s[key] !== null && typeof s[key] !== 'string') return fail(); const value = decimal(s[key]); if (value !== s[key]) return fail(); return value; };
-    return { key: text(s.key, 128, true), itemNum: text(s.itemNum, 200), price: number('price'), oriPrice: number('oriPrice'), stock: number('stock'), oriStock: number('oriStock'), weight: number('weight'), packageLength: number('packageLength'), packageWidth: number('packageWidth'), packageHeight: number('packageHeight') };
+    return { key: text(s.key, 128, true), itemNum: text(s.itemNum, 200), price: number('price'), oriPrice: number('oriPrice'), stock: number('stock'), oriStock: number('oriStock'), weight: number('weight'), packageLength: number('packageLength'), packageWidth: number('packageWidth'), packageHeight: number('packageHeight'),...(imageUrls?{imageUrls}:{}) };
   }); unique(skus.map(s => s.key));
   const images = array(p.images, 200).map(rawImage => {
     const i = exact(rawImage, ['id', 'url', 'role']), id = text(i.id, 64, true), url = text(i.url, 2048, true);
     if (!/^ms_[0-9a-f]{32}$/.test(id) || id !== `ms_${hash(url).slice(0, 32)}` || safeUrl(url, mode) !== url || !['main', 'gallery', 'detail'].includes(String(i.role))) return fail();
     return { id, url, role: i.role as 'main' | 'gallery' | 'detail' };
   }); unique(images.map(i => i.id)); unique(images.map(i => i.url));
+  if(skus.some(s=>s.imageUrls?.some(url=>!images.some(i=>i.url===url))))return fail();
   if (images.filter(i => i.role === 'main').length > 1 || dimensions.some(d => d.values.some(v => v.imageUrls.some(url => !images.some(i => i.url === url))))) return fail();
   const warnings = array(p.warnings, WARNING_VALUES.length).map(rawWarning => { const warning = text(rawWarning, 200, true); if (!WARNING_VALUES.includes(warning)) return fail(); return warning; }); unique(warnings);
   return { remoteId: remoteId(p.remoteId), title: text(p.title, 500), description: text(p.description, 20000), ...(hasDetail ? { detailText: text(p.detailText, 20000, true) } : {}), capturedAt: timestamp(p.capturedAt), sources, attributes, dimensions, skus, images, warnings };
@@ -135,7 +139,8 @@ export function parseMapping(raw: unknown, product: MiaoshouProduct): MiaoshouMa
 }
 export function selectedImageIds(product: MiaoshouProduct, mapping: MiaoshouMapping, sourceKey: string): string[] {
   const selected = mapping.skus.find(s => s.sourceKey === sourceKey)!;
-  const urls = new Set(product.dimensions.flatMap(d => d.values.find(v => v.id === selected.dimensions[d.id])?.imageUrls ?? []));
+  const own=product.skus.find(s=>s.key===sourceKey)?.imageUrls;
+  const urls = new Set(own?.length?own:product.dimensions.flatMap(d => d.values.find(v => v.id === selected.dimensions[d.id])?.imageUrls ?? []));
   return product.images.filter(image => urls.has(image.url)).map(image => image.id).sort(compare);
 }
 export function importWarnings(product: MiaoshouProduct, mapping: MiaoshouMapping): string[] {

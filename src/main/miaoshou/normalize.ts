@@ -82,7 +82,10 @@ export function normalizeDetail(raw: unknown, capturedAt: string, mode: 'demo' |
   // Only image src attributes are recognized; account maps and every other HTML attribute are discarded.
   for (const match of notes.matchAll(/<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) imageUrl(match[1] ?? match[2], 'detail');
   const readSku = (key: string, sku: Record<string, unknown>): MiaoshouSourceSku => ({ key, itemNum: cleanText(sku.itemNum, 200, sanitize), price: decimal(sku.price), oriPrice: decimal(sku.oriPrice), stock: decimal(sku.stock), oriStock: decimal(sku.oriStock), weight: decimal(sku.weight), packageLength: decimal(sku.packageLength), packageWidth: decimal(sku.packageWidth), packageHeight: decimal(sku.packageHeight) });
-  const skuEntries = values(p.skuMap, 200, sanitize); const skus = skuEntries.map(([key, value]) => readSku(key, value));
+  const skuEntries = values(p.skuMap, 200, sanitize); const skus = skuEntries.map(([key, value]) => {
+    const urls=[...array(value.imgUrls ?? [],200),...(value.imgUrl?[value.imgUrl]:[])].map(url=>imageUrl(url,'gallery')).filter(Boolean);
+    return {...readSku(key,value),...(urls.length?{imageUrls:[...new Set(urls)]}:{})};
+  });
   if (!skus.length) { warnings.add(WARNINGS.skus); skus.push(readSku('__single_product__', p)); }
   const attributes = array(p.sourceAttrs ?? [], 100).map(rawAttribute => { const a = object(rawAttribute); return { name: cleanText(a.name, 100, sanitize, true), value: cleanText(a.value, 4000, sanitize) }; });
   const sources = sourceLinks(p.sourceList, mode, warnings, sanitize), title = cleanText(p.title, 500, sanitize);

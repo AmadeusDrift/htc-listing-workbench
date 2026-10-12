@@ -73,3 +73,10 @@ test('rules persist through restart and stale settings writes cannot discard ano
   const second = new ListingRuleStore(directory);
   assert.equal(second.get().pricing.fx, 7.2); assert.equal(second.get().revision, saved.revision); second.close();
 });
+
+for(const cost of [5.3,10,100])test(`blocked pricing explains exact required price at cost ${cost} without changing configured cap`,()=>{
+  const rules=defaultListingRules().pricing,input={costCny:cost,dimensionsInches:[1,1,1] as [number,number,number],weightPounds:.2};
+  const expected=quoteListing(input,{...rules,maxPrice:1000}).price;
+  assert.throws(()=>quoteListing(input,rules),(error:Error)=>{assert.ok(error.message.includes(`所需售价 $${expected.toFixed(2)}`),error.message);return true;});
+  assert.equal(rules.maxPrice,3);
+});

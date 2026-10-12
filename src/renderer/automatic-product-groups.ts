@@ -2,7 +2,28 @@ import { presentRejection } from '../shared/rejection-presentation.ts';
 import type { AutomaticQueueRow, AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
 import type { ProductDetail, ProductSummary, Variant } from '../shared/contracts.ts';
 
-export const automaticItemReason=(item:AutomaticListingItem)=>presentRejection(item.outcome?.kind==='RULE_FILTERED'?item.outcome.code:item.rejection?.detail.code??item.outcome?.code,item.outcome?.kind==='UNKNOWN');
+export function automaticItemReason(item: AutomaticListingItem): string {
+  const code = item.outcome?.kind === 'RULE_FILTERED' ? item.outcome.code : item.rejection?.detail.code ?? item.outcome?.code;
+  const reasons: Record<string, string> = {
+    FIELD_RESULT_UNKNOWN: '字段请求结果未知，请查看已保存的字段调用记录与恢复进度。',
+    IMAGE_RESULT_UNKNOWN: '图片请求结果未知，请查看已保存的图片调用记录与恢复进度；已完成图片保留。',
+    SOURCE_CONSISTENCY_SENT_UNKNOWN: '来源观察请求结果未知，请查看已保存的来源调用记录与恢复进度。',
+    SUBMISSION_UNKNOWN: 'Amazon 正式提交结果未知，禁止自动重发。请查询原提交结果。',
+    READBACK_BRAND_REQUIRES_MANUAL: '品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理；请查看平台字段及错误代码。',
+    LABELS_FAILED: '商品标签处理失败，请查看备货与标签中的具体原因；已提交商品和已保存文件保留。',
+  };
+  if (code && Object.hasOwn(reasons, code)) return reasons[code];
+  if (item.stage === 'READBACK' && (!['DONE', 'FAILED', 'SCREENED'].includes(item.status) || code === 'READBACK_FAILED')) return item.error || item.outcome?.message || '已提交，等待 Amazon 回读确认；接受提交不等于已可售。';
+  if (item.outcome?.kind === 'UNKNOWN') return '结果待核对，请查看当前步骤已保存的调用与恢复记录；正式提交结果未知时禁止自动重发。';
+  if (['FAILED', 'SCREENED'].includes(item.status)) return presentRejection(code);
+  if (item.stage === 'LABELS') return '标签尚未完成，请查看备货与标签中的进度；已提交商品保留。';
+  const waiting: Record<AutomaticListingItem['stage'], string> = {
+    PLAN: '等待销售规格处理。', SOURCES: '等待来源资料与参考图处理。', CLASSIFY: '等待商品类目判断返回。',
+    DRAFT: '等待字段处理返回。', IMAGES: '等待图片生成或检测返回；已完成图片保留。', PARENT: '等待父体建档结果。',
+    EXECUTION: '等待图片上传、验证或正式提交处理结果。', READBACK: '', LABELS: '', COMPLETE: '流程已完成。',
+  };
+  return item.status === 'WAITING' ? waiting[item.stage] : presentRejection(code);
+}
 export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
   if (item.status === 'FAILED'||item.status==='SCREENED') {

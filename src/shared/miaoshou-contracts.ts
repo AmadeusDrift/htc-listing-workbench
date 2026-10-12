@@ -14,6 +14,8 @@ export interface MiaoshouListItem { id: string; title: string; sourceUrl: string
 export interface MiaoshouList { mode: 'demo' | 'live'; pageNo: number; pageSize: number; total: number; items: MiaoshouListItem[] }
 export interface MiaoshouDimension { id: MiaoshouDimensionId; name: string; values: { id: string; name: string; imageUrls: string[] }[] }
 export interface MiaoshouSourceSku {
+  /** Supplier thumbnail attached directly to this SKU; omitted on historical snapshots. */
+  imageUrls?: string[];
   key: string; itemNum: string; price: string | null; oriPrice: string | null;
   stock: string | null; oriStock: string | null; weight: string | null;
   packageLength: string | null; packageWidth: string | null; packageHeight: string | null;

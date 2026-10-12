@@ -7,7 +7,7 @@ export type SourceConsistencyIdentity={kind:'local-original'}|{kind:'native1688'
 export interface SourceConsistencyContext extends SourceComparisonProjection {
   version:typeof SOURCE_CONSISTENCY_VERSION|typeof SOURCE_OBSERVATION_VERSION; productId:string; productRevision:number; variantId:string;
   identity:SourceConsistencyIdentity;
-  referenceAssets:{source:'local-original'|'receipt-image';assetId:string;sha256:string;byteSize:number;bindingEpoch:string;anchorId:string|null;imageId:string|null}[];
+  referenceAssets:{scope?:'product';source:'local-original'|'receipt-image';assetId:string;sha256:string;byteSize:number;bindingEpoch:string;anchorId:string|null;imageId:string|null}[];
 }
 export interface SourceConsistencyOutput {
   kind:'source-image-consistency';
@@ -20,7 +20,7 @@ export interface SourceConsistencyConclusion { decision:'MATCH'|'MISMATCH'|'UNCE
 /** Separate origins survive merging; image observations are never relabeled as supplier facts. */
 export interface SourceObservationEvidence {
   version:typeof SOURCE_OBSERVATION_VERSION; variantId:string; assessmentId:string|null;
-  sourceFields:SourceClaimField[]; images:SourceConsistencyOutput['assets'];
+  sourceFields:SourceClaimField[]; images:SourceConsistencyOutput['assets']; productReferenceAssetIds?:string[];
   conflicts:{claimId:string;fieldId:string;axis:SourceVisualClaim['axis'];sourceValue:string;observedValues:string[];assetIds:string[]}[];
   reasons:string[];
 }

@@ -8,7 +8,7 @@ import type { WorkspaceStore } from '../store.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { keys,uuid,integer,sha256,boundedText,validateAiCall,validateStoredAiResult } from '../ai/validation.ts';
 import { resolveConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
-import { assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt } from './history.ts';
+import { assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt,latestConsistencyAttempt } from './history.ts';
 
 import { SourceConsistencyError } from './errors.ts';
 import { normalizeSourceObservations,reduceSourceConsistency } from './comparison.ts';
@@ -16,7 +16,7 @@ export { SourceConsistencyError } from './errors.ts';
 const NON_VISUAL_AUTHORITY=new Set(['RANDOM_OR_AMBIGUOUS_FULFILLMENT','RAW_NORMALIZED_CONFLICT','NEGATED_CLAIM']);
 export function sourceConsistencyUnknown(db:DatabaseSync,productId:string,variantIds:string[]):boolean {
   for(const row of db.prepare("SELECT record_json FROM source_consistency_attempts WHERE json_extract(record_json,'$.context.productId')=?").all(productId)){
-    const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId))continue;
+    const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId)||latestConsistencyAttempt(db,attempt.context)?.id!==attempt.id)continue;
     const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=callRow?validateAiCall(JSON.parse(String(callRow.record_json))):null;
     if(!call||call.status!=='SUCCEEDED'&&call.errorCode!=='OUTPUT_INVALID')return true;
   }
@@ -30,7 +30,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
   const assessment=assessments.find(a=>consistencyScopeKey(a.context)===scope);
   const decisions=db.prepare('SELECT record_json FROM source_consistency_decisions ORDER BY rowid DESC').all().map(r=>validateConsistencyDecision(JSON.parse(String(r.record_json))));
   const human=decisions.find(d=>d.fingerprint===fingerprint);
-  const row=db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(scope),attempt=row?validateConsistencyAttempt(JSON.parse(String(row.record_json))):null;
+  const attempt=latestConsistencyAttempt(db,context);
   let observations:SourceConsistencyView['observations']=null;
   if(assessment){if(assessment.recovery)observations=assessment.recovery.output;else{const r=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(assessment.resultId);const result=r?validateStoredAiResult(JSON.parse(String(r.record_json))):null;if(result?.output.kind==='source-image-consistency')observations=result.output;}}
   // Historical assessment decisions remain immutable; current v2 use merges their observations anew.
@@ -54,11 +54,12 @@ export function assertConsistencyView(view:SourceConsistencyView):void {
 export function readSourceObservationEvidence(db:DatabaseSync,context:SourceConsistencyContext):import('../../shared/source-image-consistency-contracts.ts').SourceObservationEvidence {
   const view=readConsistencyView(db,context);assertConsistencyView(view);
   const images=view.observations?.assets??[];
+  const productReferenceAssetIds=context.referenceAssets.filter(a=>a.scope==='product').map(a=>a.assetId);
   const conflicts=context.claims.flatMap(claim=>{
-    const observed=images.flatMap(asset=>asset.quality==='clear'&&asset.lighting==='neutral'&&asset.presentation==='single-product'?asset.claims.filter(c=>c.claimId===claim.id&&c.visibility==='visible'&&c.value!==claim.value).map(c=>({value:c.value!,assetId:asset.assetId})):[]);
+    const observed=images.filter(asset=>!productReferenceAssetIds.includes(asset.assetId)).flatMap(asset=>asset.quality==='clear'&&asset.lighting==='neutral'&&asset.presentation==='single-product'?asset.claims.filter(c=>c.claimId===claim.id&&c.visibility==='visible'&&c.value!==claim.value).map(c=>({value:c.value!,assetId:asset.assetId})):[]);
     return observed.length?[{claimId:claim.id,fieldId:claim.fieldId,axis:claim.axis,sourceValue:claim.value,observedValues:[...new Set(observed.map(o=>o.value))],assetIds:[...new Set(observed.map(o=>o.assetId))]}]:[];
   });
-  return {version:SOURCE_OBSERVATION_VERSION,variantId:context.variantId,assessmentId:view.assessmentId,sourceFields:context.fields,images,conflicts,reasons:view.reasons};
+  return {version:SOURCE_OBSERVATION_VERSION,variantId:context.variantId,assessmentId:view.assessmentId,sourceFields:context.fields,images,...(productReferenceAssetIds.length?{productReferenceAssetIds}:{}),conflicts,reasons:view.reasons};
 }
 export async function saveConsistencyDecision(db:DatabaseSync,store:WorkspaceStore,directory:string,raw:unknown,checkpoint:()=>Promise<void>=async()=>{}):Promise<SourceConsistencyView>{
   const o=keys(raw,['productId','productRevision','variantId','fingerprint','decision','reason']);

@@ -1305,6 +1305,20 @@ for(const unknown of [false,true])test(`Haul partial seven-image continuation pr
   // This synthetic image fixture has no procurement input; pricing guards are tested separately.
   const priced=p.record(fixed.id);delete priced.draft.businessRules.pricingDecision;priced.draft.businessRules.notices=[];p.putRecord(priced);
   await workflow.close();workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});
-  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});if(!unknown)assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');else assert.equal(resumed.workflow.slots![2].attempts[0].state,'UNKNOWN');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?3:7);
+  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');if(unknown)assert.equal(resumed.workflow.slots![2].attempts[0].state,'RETRYABLE_FAILURE');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?8:7);
   await createWorkspaceBackup(f.directory,join(f.directory,'partial-rule-reuse.htcbackup'),'synthetic partial rules backup');
+});
+
+test('real image owner retains three unknown generation attempts through encrypted backup',async t=>{
+ const f=await fixture(t);let posts=0;
+ f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
+ const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{posts++;throw Error('synthetic lost response');}});
+ generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+ const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+ f.cleanup(async()=>{await workflow.close();await generation.close();});
+ for(let n=0;n<4;n++)await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+ const run=workflow.getProgress(f.draft.id)!;assert.equal(posts,3);assert.equal(run.slots![0].attempts.length,3);
+ const file=join(f.directory,'unknown-three.htcbackup');await createWorkspaceBackup(f.directory,file,'synthetic unknown image retry');
+ const prepared=await prepareWorkspaceRestore(f.directory,file,'synthetic unknown image retry'),db=openDatabase(prepared.stagingDirectory);
+ try{const saved=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json));assert.equal(saved.slots[0].attempts.length,3);assert.deepEqual(saved.slots[0].attempts.map((a:any)=>a.requestId),run.slots![0].attempts.map(a=>a.requestId));}finally{db.close();}
 });

@@ -11,7 +11,8 @@ import { validateAiUsageRecord } from '../ai/usage.ts';
 import { isFullSchema,nativeCandidateIssues,fullCopyPolicyIssues,parseFullGeneration,retainValidNativeCandidates } from './full-schema.ts';
 import { hasInvalidAiResponse,readInvalidAiOutputs } from '../ai/output-diagnostics.ts';
 
-export interface CompletionCall { id:string; sent:boolean; resultId:string|null }
+export interface CompletionCall { id:string; sent:boolean; resultId:string|null; previous?:CompletionCall[] }
+const wasSent=(call:CompletionCall|null):boolean=>!!call&&(call.sent||!!call.previous?.some(previous=>previous.sent));
 export interface CompletionRound {
   context:ListingAiContext; contextHash:string; candidate:CompletionCall; review:CompletionCall|null;
   resolved:boolean; adoptionId:string|null;
@@ -29,8 +30,10 @@ export function completionSafetyScope(draft:AmazonDraft):string{return listingFi
 function invalid():never {throw new UserFacingError('字段请求进度证据无效，未自动重发');}
 export const unknownCompletion=():never=>{throw new UserFacingError('上次字段请求结果尚未确认，已保留进度，未自动重发');};
 function parseCall(raw:unknown):CompletionCall {
-  const o=keys(raw,['id','sent','resultId']);if(typeof o.sent!=='boolean'||o.resultId!==null&&!o.sent)invalid();
-  return {id:uuid(o.id),sent:o.sent as boolean,resultId:o.resultId===null?null:uuid(o.resultId)};
+  const o=keys(raw,['id','sent','resultId'],['previous']);if(typeof o.sent!=='boolean'||o.resultId!==null&&!o.sent)invalid();
+  const previous=o.previous===undefined?undefined:Array.isArray(o.previous)?o.previous.map(parseCall):invalid();
+  if(previous&&(previous.length>2||previous.some(call=>call.previous||!call.sent||call.resultId)))invalid();
+  return {id:uuid(o.id),sent:o.sent as boolean,resultId:o.resultId===null?null:uuid(o.resultId),...(previous?{previous}:{})};
 }
 export function validateCompletionOperation(raw:unknown):CompletionOperation {
   const o=keys(raw,['id','revision','draftId','scopeHash','safetyScopeHash','safetyIdentity','copyReviewEnabled','state','draftRevision','draftStamp','rounds','remaining','reviewIssues','createdAt','updatedAt']);
@@ -45,9 +48,9 @@ export function validateCompletionOperation(raw:unknown):CompletionOperation {
     if(!!review!==o.copyReviewEnabled||o.state!=='GUARD'&&review?.sent&&!candidate.resultId||r.adoptionId!==null&&(!candidate.resultId||review&&!review.resultId))invalid();
     return {context,contextHash,candidate,review,resolved:r.resolved as boolean,adoptionId:r.adoptionId===null?null:sha256(r.adoptionId)};
   });
-  const ids=rounds.flatMap(r=>[r.candidate.id,...(r.review?[r.review.id]:[])]);if(new Set(ids).size!==ids.length||rounds.slice(0,-1).some(r=>!r.resolved))invalid();
-  if(o.state==='GUARD'&&!rounds.some(r=>r.candidate.sent||r.review?.sent)||o.state==='DONE'&&rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!call.resultId)))invalid();
-  if(o.state==='RETIRED'&&rounds.some(r=>r.candidate.sent||r.review?.sent))invalid();
+  const ids=rounds.flatMap(r=>[r.candidate,r.review].flatMap(c=>c?[...(c.previous??[]),c].map(c=>c.id):[]));if(new Set(ids).size!==ids.length||rounds.slice(0,-1).some(r=>!r.resolved))invalid();
+  if(o.state==='GUARD'&&!rounds.some(r=>wasSent(r.candidate)||wasSent(r.review))||o.state==='DONE'&&rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!call.resultId)))invalid();
+  if(o.state==='RETIRED'&&rounds.some(r=>wasSent(r.candidate)||wasSent(r.review)))invalid();
   const reviewIssues=(o.reviewIssues as unknown[]).map(raw=>{const issue=keys(raw,['field','message']);return{field:boundedText(issue.field,100),message:boundedText(issue.message,2000)};});
   const createdAt=date(o.createdAt),updatedAt=date(o.updatedAt);if(updatedAt<createdAt)invalid();
   return{id:uuid(o.id),revision:integer(o.revision,1,Number.MAX_SAFE_INTEGER),draftId:uuid(o.draftId),scopeHash:sha256(o.scopeHash),safetyScopeHash:sha256(o.safetyScopeHash),safetyIdentity,copyReviewEnabled:o.copyReviewEnabled as boolean,state:o.state as CompletionOperation['state'],draftRevision:integer(o.draftRevision,1,Number.MAX_SAFE_INTEGER),draftStamp:sha256(o.draftStamp),rounds,remaining:(o.remaining as unknown[]).map(v=>boundedText(v,2000)),reviewIssues,createdAt,updatedAt};
@@ -105,6 +108,23 @@ export class CompletionJournal {
   unknown(id:string):boolean {
     const op=this.get(id);return op.state==='GUARD'||op.rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!this.result(call,r)&&!this.received(call,r)));
   }
+  /** The original two repair rounds remain fixed; each missing step has at most three sends. */
+  retryMissing(id:string,kind:'candidate'|'review'):void {
+    const op=this.get(id),round=op.rounds.at(-1),entry=round?.[kind];
+    if(op.state!=='ACTIVE'||!round||round.resolved||!entry||!entry.sent||entry.resultId)invalid();
+    const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
+    const usage=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(entry.id);
+    if(!row||!usage)invalid();
+    const call=validateAiCall(JSON.parse(String(row.record_json))),ledger=validateAiUsageRecord(JSON.parse(String(usage.record_json)));
+    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||call.providerId!==(kind==='candidate'?'deepseek':'deepseek-review')||ledger.id!==call.id||ledger.providerId!==call.providerId||ledger.startedAt!==call.startedAt)invalid();
+    const owner=call.presentationContext;
+    if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
+    if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
+    if(this.received(entry,round))unknownCompletion();
+    if((entry.previous?.length??0)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
+    const {previous,...old}=entry;
+    round[kind]={id:randomUUID(),sent:false,resultId:null,previous:[...(previous??[]),old]};this.save(op);
+  }
   private received(entry:CompletionCall,round:CompletionRound):AiCall|undefined {
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
     if(!row)return;
@@ -118,8 +138,15 @@ export class CompletionJournal {
   recoverReceived(id:string):void {
     const op=this.get(id);if(op.state!=='ACTIVE')return;
     for(const round of op.rounds){
-      const entry=round.candidate;
+      for(const entry of [round.candidate,round.review]){
+      if(!entry)continue;
+      if(entry.sent&&!entry.resultId){
+        const rows=this.db.prepare("SELECT id FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(entry.id);
+        if(rows.length>1)invalid();
+        if(rows.length){entry.resultId=String(rows[0].id);this.result(entry,round);this.save(op);}
+      }
       if(entry.sent&&!entry.resultId&&this.received(entry,round))this.recover({operationId:op.id,callId:entry.id,contextHash:round.contextHash});
+      }
     }
   }
   /** Atomically persist a frozen response; current-source adoption is a separate check. */
@@ -169,13 +196,13 @@ export function assertCompletionHistory(db:DatabaseSync):void {
     if(!draft&&!['GUARD','RETIRED'].includes(op.state)||draft&&completionSafetyScope(draft)!==op.safetyScopeHash)invalid();
     for(const round of op.rounds){
       if(round.adoptionId&&!committedAdoption(draft,round)&&round.resolved)invalid();
-      for(const call of [round.candidate,round.review])if(call){
+      for(const [kind,entry] of [['candidate',round.candidate],['review',round.review]] as const)for(const call of entry?[...(entry.previous??[]),entry]:[]){
         if(ids.has(call.id))invalid();ids.add(call.id);
         if(call.resultId)journal.result(call,round);
         const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id),usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);
         if(call.sent){
           if(!usageRow||!callRow&&op.state!=='GUARD')invalid();const usage=validateAiUsageRecord(JSON.parse(String(usageRow.record_json)));
-          if(usage.id!==call.id||usage.providerId!==(call===round.candidate?'deepseek':'deepseek-review'))invalid();
+          if(usage.id!==call.id||usage.providerId!==(kind==='candidate'?'deepseek':'deepseek-review'))invalid();
           if(callRow){const saved=validateAiCall(JSON.parse(String(callRow.record_json)));if(saved.id!==call.id||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==usage.providerId||saved.startedAt!==usage.startedAt)invalid();}
         }else if(callRow||usageRow||db.prepare('SELECT id FROM ai_results WHERE json_extract(record_json,\'$.callId\')=?').get(call.id))invalid();
       }
@@ -191,10 +218,10 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
   assertCompletionHistory(current);
   const previousRecords=new Map(completionOperations(snapshot).map(op=>[op.id,op])),snapshotJournal=new CompletionJournal(snapshot);
   for(const op of completionOperations(current)){
-    if(!op.rounds.some(r=>r.candidate.sent||r.review?.sent))continue;
+    if(!op.rounds.some(r=>wasSent(r.candidate)||wasSent(r.review)))continue;
     const previous=previousRecords.get(op.id),currentDraftRow=current.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(op.draftId),currentDraft=currentDraftRow?JSON.parse(String(currentDraftRow.record_json)).draft as AmazonDraft:undefined;
     if(previous&&(previous.draftId!==op.draftId||previous.scopeHash!==op.scopeHash||previous.safetyScopeHash!==op.safetyScopeHash))invalid();
-    if(previous)for(let i=0;i<Math.min(previous.rounds.length,op.rounds.length);i++){const a=previous.rounds[i],b=op.rounds[i];if(a.contextHash!==b.contextHash||a.candidate.id!==b.candidate.id||a.review?.id!==b.review?.id)invalid();}
+    if(previous)for(let i=0;i<Math.min(previous.rounds.length,op.rounds.length);i++){const a=previous.rounds[i],b=op.rounds[i];if(a.contextHash!==b.contextHash||(a.candidate.previous?.[0]?.id??a.candidate.id)!==(b.candidate.previous?.[0]?.id??b.candidate.id)||(a.review?.previous?.[0]?.id??a.review?.id)!==(b.review?.previous?.[0]?.id??b.review?.id))invalid();}
     // The selected backup owns reusable results. Sent facts are the monotonic union
     // of both histories, so restoring forwards or backwards never erases a request.
     const retained=structuredClone(previous&&previous.rounds.length>=op.rounds.length?previous:op);
@@ -206,12 +233,13 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
       if(local?.adoptionId&&prior?.adoptionId&&local.adoptionId!==prior.adoptionId)invalid();
       round.adoptionId=prior?.adoptionId??local?.adoptionId??null;
       for(const kind of ['candidate','review'] as const){
-        const call=round[kind];if(!call)continue;
-        const localCall=local?.[kind],priorCall=prior?.[kind];
-        call.sent=!!(localCall?.sent||priorCall?.sent);
-        if(localCall?.resultId&&priorCall?.resultId&&localCall.resultId!==priorCall.resultId)invalid();
-        call.resultId=priorCall?.resultId??null;
-        if(call.sent&&!call.resultId)missing=true;
+        const localEntry=local?.[kind],priorEntry=prior?.[kind];
+        const localCalls=localEntry?[...(localEntry.previous??[]),localEntry]:[],priorCalls=priorEntry?[...(priorEntry.previous??[]),priorEntry]:[];
+        for(let i=0;i<Math.min(localCalls.length,priorCalls.length);i++)if(localCalls[i].id!==priorCalls[i].id)invalid();
+        const longest=localCalls.length>=priorCalls.length?localCalls:priorCalls;if(!longest.length)continue;
+        const combined=longest.map(item=>{const l=localCalls.find(c=>c.id===item.id),p=priorCalls.find(c=>c.id===item.id);if(l?.resultId&&p?.resultId&&l.resultId!==p.resultId)invalid();return{id:item.id,sent:!!(l?.sent||p?.sent),resultId:p?.resultId??null};});
+        const call=combined.at(-1)!;round[kind]={...call,...(combined.length>1?{previous:combined.slice(0,-1)}:{})};
+        if(call.sent&&!call.resultId||combined.some(c=>c.sent&&!snapshot.prepare('SELECT id FROM ai_calls WHERE id=?').get(c.id)))missing=true;
       }
       // A prepared GUARD has deliberately cleared its result references. Only
       // an intact snapshot round can prove adoption; mixed local refs cannot.
@@ -241,7 +269,7 @@ export function retireCompletionDrafts(db:DatabaseSync,cutoff:string):void {
     const operations=completionOperations(db,String(row.id));if(!operations.length)continue;
     const draft=JSON.parse(String(row.record_json)).draft as AmazonDraft;
     for(const op of operations){
-      op.state=op.rounds.some(round=>round.candidate.sent||round.review?.sent)?'GUARD':'RETIRED';
+      op.state=op.rounds.some(round=>wasSent(round.candidate)||wasSent(round.review))?'GUARD':'RETIRED';
       for(const round of op.rounds){round.resolved=committedAdoption(draft,round)||round.resolved;round.candidate.resultId=null;if(round.review)round.review.resultId=null;round.adoptionId=null;}
       save(db,op);
     }

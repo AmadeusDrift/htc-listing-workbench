@@ -187,3 +187,29 @@ test('preview cleanup checkpoints an active completion atomically before caller 
   assert.equal(current.attributes.merchant_suggested_asin,undefined);assert.equal(saved.draftRevision,current.revision);assert.equal(saved.draftStamp,completionDraftStamp(current));assert.notEqual(saved.draftStamp,before);
   assert.equal(f.listing.beginCompletion({draftId:current.id,draftRevision:current.revision},operation.id).id,operation.id);assert.equal(f.requests.length,0);
 });
+
+for (const step of ['candidate','review']) test(`unknown ${step} retries only the missing call and retains the bounded history`, async t=>{
+ const f=await fixture(t);let lost=true;
+ f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:f.amazon.getDraft(f.draft.id).fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:[issue('material')]});
+ f.respond(p=>{if(lost&&Boolean(p.candidate)===(step==='review')){lost=false;throw Error('synthetic lost response');}return chat(p.candidate?reviewFor(p):candidateFor(p));});
+ await assert.rejects(f.listing.complete(f.reference));
+ const before=f.ai.completionJournal.list(f.draft.id)[0], old=structuredClone(before.rounds[0][step as 'candidate'|'review']);
+ const result=await f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},undefined,before.id);
+ assert.equal((result.draft.attributes.material as any)[0].value,'Silicone');
+ const after=f.ai.completionJournal.get(before.id),entry=after.rounds[0][step as 'candidate'|'review']!;
+ assert.deepEqual((entry as any).previous,[old]);assert.equal(f.requests.length,3);
+});
+
+test('saved field candidate with missing journal reference is recovered with zero replacement calls',async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:f.amazon.getDraft(f.draft.id).fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:[issue('material')]});
+ const send=f.ai.listingFields.bind(f.ai);let stop=true;f.ai.listingFields=async(...args)=>{const result=await send(...args);if(stop){stop=false;throw Error('synthetic checkpoint loss');}return result;};
+ await assert.rejects(f.listing.complete(f.reference));const op=f.listing.completionOperations(f.draft.id)[0],resultId=op.rounds[0].candidate.resultId;op.rounds[0].candidate.resultId=null;f.ai.completionJournal.save(op);
+ await f.listing.complete(f.reference);const after=f.listing.getCompletion(op.id);assert.equal(after.rounds[0].candidate.resultId,resultId);assert.equal(after.rounds[0].candidate.previous,undefined);assert.equal(f.requests.length,2);
+});
+
+test('unknown field cannot retry when its saved call owner is corrupt',async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue('material')]});f.respond(()=>{throw Error('synthetic unavailable');});await assert.rejects(f.listing.complete(f.reference));
+ const op=f.listing.completionOperations(f.draft.id)[0],{openDatabase}=await import('../src/main/database.ts'),db=openDatabase(f.directory);
+ try{const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(op.rounds[0].candidate.id)!,call=JSON.parse(String(row.record_json));call.presentationContext.draftId='00000000-0000-4000-8000-000000000099';db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);}finally{db.close();}
+ await assert.rejects(f.listing.complete(f.reference),/证据无效/);assert.equal(f.requests.length,1);assert.equal(f.listing.getCompletion(op.id).rounds[0].candidate.previous,undefined);
+});

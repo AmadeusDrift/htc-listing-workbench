@@ -108,3 +108,11 @@ test('nested successful attribution rolls back with outer transaction and explic
  assert.equal(isProductReference(f.db,f.input.productId,f.input.variantId,f.input.assetId),false);
  }finally{f.dispose();}
 });
+
+test('new running workflow references never mutate source associations mid-flight',()=>{
+ const f=attributionFixture();try{
+ f.db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(f.run.id,JSON.stringify({...f.run,status:'RUNNING'}));
+ restoreWorkflowSourceBindings(f.db,f.input.productId);
+ assert.equal(f.db.prepare('SELECT confirmed FROM variant_assets WHERE asset_id=?').get(f.input.assetId),undefined);
+ }finally{f.dispose();}
+});

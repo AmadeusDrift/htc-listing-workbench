@@ -1104,3 +1104,14 @@ test('new permissive legacy set plan survives persisted workflow reload with ima
   await f.service.close();const db=openDatabase(f.root);
   try{const {workflowRuns}=await import('../src/main/image-workflow/records.ts');const restored=workflowRuns(db,f.draft.id).find(r=>r.id===first.workflow.id)!;assert.ok(restored);assert.deepEqual(restored.setPlan,first.workflow.setPlan);assert.deepEqual(restored.imageContext,first.workflow.imageContext);}finally{db.close();}
 });
+
+test('historical references preserve existing manual source authority for an eligible unbound original',async t=>{
+ const f=await fixture(t),db=openDatabase(f.root);try{
+ const product=f.store.getProduct(f.product.id),asset=product.assets[0],at=new Date().toISOString();
+ const run={id:randomUUID(),draftId:f.draft.id,productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,sku:product.variants[0].sku,status:'BLOCKED',stage:'planning',attempt:0,maxAttempts:2,contextSha256:null,draftSha256:null,referenceAssets:[{id:asset.id,sha256:f.store.getAssetRecord(asset.id)!.sha256}],planResultIds:[],candidateIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:at,updatedAt:at,error:'historical interruption'};
+ db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(run.id,JSON.stringify(run));
+ f.store.getProduct(product.id);
+ assert.equal(db.prepare('SELECT count(*) n FROM variant_assets WHERE asset_id=?').get(asset.id)?.n,0);
+ assert.doesNotThrow(()=>f.store.assertSourceConsistency(product.id,[product.variants[0].id]));
+ }finally{db.close();}
+});

@@ -18,7 +18,7 @@ async function setup(t:any) {
     const variantId=sibling?siblingId:f.product.variants[0].id;
     db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,f.product.id,'generated.png','gallery','image/png',100,100,100,`assets/${id}.png`,`assets/${id}.preview.png`,sha,at);
     db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(id,variantId,at);
-    if(proven){db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(workflowId,JSON.stringify({id:workflowId,productId:f.product.id,variantId,slots:[{index:1,status:'PASSED',approvedAssetId:id,approvedSha256:sha,attempts:[{number:1,state:'PASSED',candidateId}]}]}));db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),f.product.id,'image.workflow.adopted','fixture',JSON.stringify({workflowId,slot:1,attempt:1,assetId:id,candidateId}),at);}
+    if(proven){db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(workflowId,JSON.stringify({id:workflowId,productId:f.product.id,variantId,approvedAssetId:id,slots:[{index:1,status:'PASSED',approvedAssetId:id,approvedSha256:sha,attempts:[{number:1,state:'PASSED',candidateId}]}]}));db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),f.product.id,'image.workflow.adopted','fixture',JSON.stringify({workflowId,slot:1,attempt:1,assetId:id,candidateId}),at);}
     return id;
   }
   return {...f,op,db,output};
@@ -42,4 +42,23 @@ for(const change of ['unproven-asset','source-role','fact','review','generation'
  assert.throws(()=>service.beginCompletion(f.reference,f.op.id));assert.equal(service.getCompletion(f.op.id).state,'DONE');assert.equal(f.requests.length,0);
 });
 
+
+for(const damage of ['slots-object','null-slot','attempts-object','null-attempt','binding','binding-time','audit-time'])test(`broken ${damage} proof rejects both completion entrypoints with scope error`,async t=>{
+ const f=await setup(t),id=f.output();
+ if(damage==='slots-object')f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.slots',json('{}'))").run();
+ if(damage==='null-slot')f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.slots',json('[null]'))").run();
+ if(damage==='attempts-object')f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.slots[0].attempts',json('{}'))").run();
+ if(damage==='null-attempt')f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.slots[0].attempts',json('[null]'))").run();
+ if(damage==='binding')f.db.prepare('UPDATE variant_assets SET confirmed=0 WHERE asset_id=?').run(id);
+ if(damage==='binding-time')f.db.prepare('UPDATE variant_assets SET updated_at=? WHERE asset_id=?').run(f.op.createdAt,id);
+ if(damage==='audit-time')f.db.prepare("UPDATE audit_events SET created_at=? WHERE action='image.workflow.adopted'").run(f.op.createdAt);
+ assert.throws(()=>f.listing.beginCompletion(f.reference,f.op.id),/字段操作来源、店铺或审核策略已变化/);
+ assert.throws(()=>(f.listing as any).completionDraft(f.op),/字段操作来源、店铺或审核策略已变化/);
+ assert.equal(f.requests.length,0);assert.deepEqual(f.listing.getCompletion(f.op.id),f.op);
+});
+for(const table of ['image_workflow_runs','audit_events'])test(`invalid JSON in ${table} never supplies legacy exclusion proof`,async t=>{
+ const f=await setup(t);f.output();const product=f.store.getProduct(f.product.id);
+ f.db.prepare(`UPDATE ${table} SET ${table==='audit_events'?'detail_json':'record_json'}=?`).run('{');
+ assert.deepEqual(f.ai.completionJournal.legacySourceAssets(product,f.op),product.assets);
+});
 

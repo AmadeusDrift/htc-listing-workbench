@@ -61,9 +61,10 @@ function proseAdoptionIssues(draft:AmazonDraft,context:ListingAiContext,getResul
     return [];
   });
 }
-/** Only these structured finite prose failures enter automatic field repair. */
+/** Full-schema repair uses the same explicit attribute conflicts as final checking.
+ * Legacy contexts retain their finite prose-only policy. */
 export function currentProseRepairIssues(draft:AmazonDraft,context:ListingAiContext,getResult?:(id:string)=>AiResult|undefined):ProseEvidenceIssue[]{
-  if(isFullSchema(context))return context.fields.filter(field=>isProseField(field.name)).flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:nativeText(field.name,raw).flatMap(value=>explicitCategoryConflicts(field.name,value,context).map(reason=>({field:field.name,kind:'source' as const,reason})));});
+  if(isFullSchema(context))return context.fields.flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:nativeText(field.name,raw).flatMap(value=>explicitCategoryConflicts(field.name,value,context).map(reason=>({field:field.name,kind:'source' as const,reason})));});
   const issues=context.fields.filter(field=>isProseField(field.name)).flatMap(field=>(candidateTextValues(field.name,draft.attributes[field.name])??[]).flatMap(value=>proseEvidenceIssues(field.name,value,context)));
   return [...issues,...(getResult?proseAdoptionIssues(draft,context,getResult,{},true):[])];
 }

@@ -58,7 +58,7 @@ function proseAdoptionIssues(draft:AmazonDraft,context:ListingAiContext,getResul
   // History validation establishes append order and increasing revisions. Pick
   // responsibility before validation; an invalid latest record never falls back.
   for(const adoption of draft.fieldAdoptions??[])for(const change of adoption.changes)
-    if(isProseField(change.field)&&(!options.adoptionFields||options.adoptionFields.includes(change.field))&&listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
+    if(isProseField(change.field)&&(!options.adoptionFields||options.adoptionFields.includes(change.field))&&draft.attributes[change.field]!==undefined&&listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
   return [...owners].flatMap(([field,adoption])=>{
     const result=getResult(adoption.suggestionResultId),change=adoption.changes.find(change=>change.field===field)!;
     const invalid=(reason:string):ProseEvidenceIssue[]=>repairOnly?[]:[{field,kind:'citation',reason}];
@@ -92,7 +92,7 @@ export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiCo
     // Select the latest matching owner before checking evidence. A broken latest
     // record must remain an error instead of falling back to an older candidate.
     for(const adoption of draft.fieldAdoptions??[])for(const change of adoption.changes)
-      if(listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
+      if(draft.attributes[change.field]!==undefined&&listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
     if(getResult)for(const adoption of draft.fieldAdoptions??[]){
       const active=adoption.changes.filter(change=>owners.get(change.field)===adoption);
       if(!active.length)continue;
@@ -124,7 +124,7 @@ export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiCo
   issues.push(...currentCopyIssues(snapshot.currentListingCopy,snapshot.context));
   if(getResult)issues.push(...proseAdoptionIssues(draft,context,getResult,options).map(issue=>issue.field+'：'+issue.reason));
   if(getResult)for(const adoption of draft.fieldAdoptions??[]){
-    const active=adoption.changes.filter(change=>!isProseField(change.field)&&(!options.adoptionFields||options.adoptionFields.includes(change.field))&&listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]));
+    const active=adoption.changes.filter(change=>!isProseField(change.field)&&(!options.adoptionFields||options.adoptionFields.includes(change.field))&&draft.attributes[change.field]!==undefined&&listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]));
     if(!active.length)continue;
     const result=getResult(adoption.suggestionResultId);
     if(!result||result.output.kind!=='amazon-fields'||!result.listingContext||result.sourceSha256!==adoption.contextSha256||listingFingerprint(result.listingContext)!==adoption.contextSha256){issues.push('已采用候选的来源记录不完整');continue;}

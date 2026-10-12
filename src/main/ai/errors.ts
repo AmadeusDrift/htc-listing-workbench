@@ -19,6 +19,7 @@ export class AiError extends UserFacingError {
   rejection?: import('../../shared/rejection-presentation.ts').OutputRejection;
   callId?:string;
   diagnosticReason?:string;
+  responseDiagnostic?:{status:number;byteCount:number};
   readonly reason?: AiRejectionReason;
   constructor(code: AiErrorCode, reason?: AiRejectionReason) { super(MESSAGES[code]); this.code = code; if (reason) this.reason = reason; }
 }

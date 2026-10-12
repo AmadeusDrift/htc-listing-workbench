@@ -121,3 +121,10 @@ test('a rejection reason is stored as a fixed code and anything else is dropped'
   assert.equal(saved.length,3); assert.equal(saved[0].rejectionReason,'EMPTY_PROMPT');
   assert.equal('rejectionReason' in saved[1],false); assert.equal('rejectionReason' in saved[2],false);
 });
+
+test('R2 old omitted and null diagnostics retain received-response semantics',async t=>{
+ const f=await fixture(t);f.respond(()=>chat(invalidOutput));await assert.rejects(f.listing.suggest(f.reference));
+ const call=f.ai.listCalls()[0],file=join(f.directory,'ai-diagnostics',diagnosticFiles(f.directory)[0]),saved=JSON.parse(readFileSync(file,'utf8'));
+ const {hasInvalidAiResponse}=await import('../src/main/ai/output-diagnostics.ts');
+ for(const outputOmitted of [undefined,'size_limit']){writeFileSync(file,JSON.stringify({...saved,output:null,...(outputOmitted?{outputOmitted}:{})}));assert.equal(hasInvalidAiResponse(f.directory,{...call,responseReceived:undefined},'amazon-fields'),true);}
+});

@@ -14,7 +14,7 @@ import type { AiVendorId } from '../../shared/ai-connection-contracts.ts';
 import type { AiCall, AiErrorCode, AiOutput, AiProfile, AiProviderId, AiResult, AiUsage, ContentReviewCheck, ContentReviewField, ContentSuggestionOutput, RecognizeImageInput, ReviewContentInput, SegmentImageInput, SuggestContentInput, TextReviewOutput } from '../../shared/ai-contracts.ts';
 import { listingFingerprint, validateListingContext, validateListingFieldsOutput, validateListingReviewOutput } from '../listing-ai/validation.ts';
 import { AI_ERROR_CODES, AiError } from './errors.ts';
-import { assertCurrentListingReview, assertImagePlan, parseImagePlanResponse, validateGeneratedImageOcr, validateImagePlan, validateImageTextReview, validateImageIpReview, validateListingCurrentReview, validateProductImageContext } from './image-validation.ts';
+import { assertCurrentListingReview, assertImagePlan, parseImagePlanResponse, parseImagePlanRecovery, validateGeneratedImageOcr, validateImagePlan, validateImageTextReview, validateImageIpReview, validateListingCurrentReview, validateProductImageContext } from './image-validation.ts';
 import { MAX_VISION_REQUEST_BYTES } from './vision.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
 import { validateCategoryDecision } from './category-adapter.ts';
@@ -252,10 +252,10 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   let imagePlanRecovery:AiResult['imagePlanRecovery'];
   if(o.imagePlanRecovery!==undefined){
     const r=keys(o.imagePlanRecovery,['parserVersion','contextSha256','rawSha256','rawOutput','recoveredAt'],['repair']);
-    if(o.localRecovery||r.parserVersion!=='image-plan-recovery/v1'||!imageContext||output.kind!=='image-plan'||Buffer.byteLength(JSON.stringify(r.rawOutput),'utf8')>200000||listingFingerprint(r.rawOutput)!==r.rawSha256||r.contextSha256!==o.sourceSha256||r.recoveredAt!==o.createdAt)invalid();
-    if(listingFingerprint(parseImagePlanResponse(r.rawOutput,imageContext))!==listingFingerprint(output))invalid();
+    if(o.localRecovery||!['image-plan-recovery/v1','image-plan-recovery/v2'].includes(String(r.parserVersion))||!imageContext||output.kind!=='image-plan'||Buffer.byteLength(JSON.stringify(r.rawOutput),'utf8')>200000||listingFingerprint(r.rawOutput)!==r.rawSha256||r.contextSha256!==o.sourceSha256||r.recoveredAt!==o.createdAt)invalid();
+    if(listingFingerprint((r.parserVersion==='image-plan-recovery/v1'?parseImagePlanResponse:parseImagePlanRecovery)(r.rawOutput,imageContext))!==listingFingerprint(output))invalid();
     let repair:NonNullable<AiResult['imagePlanRecovery']>['repair'];if(r.repair!==undefined){const v=keys(r.repair,['previousPlanId','issues']);if(!Array.isArray(v.issues)||!v.issues.length||v.issues.length>50)invalid();repair={previousPlanId:uuid(v.previousPlanId),issues:v.issues.map(v=>boundedText(v,2000))};if(sourceResultIds.at(-1)!==repair.previousPlanId)invalid();}
-    imagePlanRecovery={...(repair?{repair}:{}),parserVersion:r.parserVersion,contextSha256:sha256(r.contextSha256),rawSha256:sha256(r.rawSha256),rawOutput:r.rawOutput,recoveredAt:date(r.recoveredAt)};
+    imagePlanRecovery={...(repair?{repair}:{}),parserVersion:r.parserVersion as 'image-plan-recovery/v1'|'image-plan-recovery/v2',contextSha256:sha256(r.contextSha256),rawSha256:sha256(r.rawSha256),rawOutput:r.rawOutput,recoveredAt:date(r.recoveredAt)};
   }
   if(imageContext&&((imageContext.listing.contract==='listing-full-schema/v1')!==(o.listingEvidenceContractVersion==='listing-evidence/v4')))invalid();
   if (!imageKind && (o.imageContext !== undefined || o.imageRequestBytes !== undefined)) invalid();

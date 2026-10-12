@@ -4,6 +4,7 @@ import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
   thinking?: boolean;
+  imagePlanRetry?:boolean;
   /** Adapter-owned safe capture, enabled only for source observation and image planning responses. */
   onInvalidResponseText?: (text:string)=>void;
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;
@@ -15,33 +16,35 @@ export interface AdapterContext {
 }
 export const emptyUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
 async function readBounded(response: Response, max: number, signal: AbortSignal, onInvalidResponseText?: (text:string)=>void): Promise<unknown> {
+  let size=0;
+  const invalid=(reason:string):AiError=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;error.responseDiagnostic={status:response.status,byteCount:size};return error;};
   const length = response.headers.get('content-length');
-  if ((length !== null && (!/^\d+$/.test(length) || Number(length) > max)) || !response.body) {
-    void response.body?.cancel().catch(() => {}); throw new AiError('OUTPUT_INVALID');
+  if(length!==null&&(!/^\d+$/.test(length)||Number(length)>max)){
+    void response.body?.cancel().catch(()=>{});throw invalid(/^\d+$/.test(length)?'RESPONSE_SIZE_LIMIT':'RESPONSE_LENGTH_INVALID');
   }
+  if(!response.body)throw invalid('RESPONSE_BODY_MISSING');
   const reader = response.body.getReader(), chunks: Uint8Array[] = [];
   const cancel = () => { void reader.cancel().catch(() => {}); };
-  let size = 0;
   try {
     for (;;) {
       throwIfAborted(signal);
       const { value, done } = await abortable(reader.read(), signal, cancel);
       if (done) break;
       size += value.byteLength;
-      if (size > max) throw new AiError('OUTPUT_INVALID');
+      if (size > max) throw invalid('RESPONSE_SIZE_LIMIT');
       chunks.push(value);
     }
     throwIfAborted(signal);
-    if (!size) throw new AiError('OUTPUT_INVALID');
-    const text=new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+    if (!size) throw invalid('RESPONSE_BODY_EMPTY');
+    let text:string;try{text=new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));}catch{throw invalid('RESPONSE_UTF8_INVALID');}
     try{return JSON.parse(text);}catch{
       try{onInvalidResponseText?.(text);}catch{/* Adapter capture must not replace the original parse failure. */}
-      const error=new AiError('OUTPUT_INVALID');error.diagnosticReason='RESPONSE_ENVELOPE_JSON_INVALID';throw error;
+      throw invalid('RESPONSE_ENVELOPE_JSON_INVALID');
     }
   } catch (error) {
     cancel(); throwIfAborted(signal);
     if (error instanceof AiError) throw error;
-    throw new AiError('OUTPUT_INVALID');
+    throw invalid('RESPONSE_READ_FAILED');
   } finally { reader.releaseLock(); }
 }
 /** One paid POST only. A redirect or ambiguous network failure is never retried automatically. */

@@ -1447,3 +1447,75 @@ test('W2 risk threshold adaptation rechecks the exact blocked candidate without 
  const candidate=blocked.workflow.slots![0].attempts[0].candidateId,oldIp=f.ai.getResult(evidence.resultId)!;
  automatic.startAuthorized(automatic.prepareStart(task.id));await automatic.waitForIdle();const completed=workflow.getProgress(f.draft.id)!;assert.equal(completed.status,'COMPLETED',automatic.get(task.id).items[0].error??completed.error??'');assert.equal(posts(),7);assert.equal(completed.slots![0].attempts[0].candidateId,candidate);assert.deepEqual(f.ai.getResult(evidence.resultId),oldIp);assert.equal(row.outcome.kind,'RULE_FILTERED','original exclusion object retained for audit');
 });
+
+test('R2 raw control characters recover locally with immutable v2 evidence and no new paid request',async t=>{
+ const f=await fixture(t),original=await f.ai.imagePlan(f.context,()=>{}),raw=JSON.stringify(original.output).replace('A blue round coaster','A blue\nround\tcoaster');
+ const expected=structuredClone(original.output) as any;expected.productUnderstanding.summary=expected.productUnderstanding.summary.replace('A blue round coaster','A blue\nround\tcoaster');
+ const call={...f.ai.getCall(original.callId)!,status:'FAILED' as const,errorCode:'OUTPUT_INVALID' as const,responseReceived:true as const};
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(original.id);}finally{db.close();}
+ const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');recordInvalidAiOutput(f.directory,{call,operation:'image-plan',createdAt:call.finishedAt!,rejectionStage:'provider-response-validation',rejectionReason:'RESPONSE_JSON_INVALID',output:raw});
+ const before=f.requests.length,usage=f.ai.getUsageSummary('deepseek'),recovered=await f.ai.recoverImagePlan(call.id,f.context,()=>{});
+ assert.ok(recovered);assert.equal(recovered.imagePlanRecovery?.parserVersion,'image-plan-recovery/v2');assert.equal(recovered.imagePlanRecovery?.rawOutput,raw);assert.deepEqual(recovered.output,expected);assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(call.id),call);assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);assert.equal((await f.ai.recoverImagePlan(call.id,f.context,()=>{}))?.id,recovered.id);
+ const aborted=new AbortController();aborted.abort();await assert.rejects(f.ai.recoverImagePlan(call.id,f.context,()=>{},aborted.signal),(e:any)=>e.code==='CANCELLED');
+});
+
+test('R2 workflow planning invalid outputs spend at most three attempts across continuation and changed repair feedback',async t=>{
+ const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.code==='OUTPUT_INVALID');assert.equal(f.requests.length-before,3);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(f.requests.length-before,3);
+});
+
+test('R2 metadata-only response diagnostics do not mark responseReceived or invent known fees',async t=>{
+ const f=await fixture(t);f.respond(operation=>operation==='image-plan'?new Response(null):undefined);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{}));const call=f.ai.listCalls().find(c=>c.errorCode==='OUTPUT_INVALID')!;
+ const {readdirSync}=await import('node:fs'),{hasInvalidAiResponse,hasRetainedInvalidAiOutput,readInvalidAiOutputs}=await import('../src/main/ai/output-diagnostics.ts');
+ const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(name=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',name),'utf8'))).find(d=>d.callId===call.id);
+ assert.ok(saved);assert.equal(saved.rejectionReason,'RESPONSE_BODY_MISSING');assert.equal(saved.output,null);assert.deepEqual(saved.responseDiagnostic,{status:200,byteCount:0});assert.equal(call.responseReceived,undefined);assert.equal(hasInvalidAiResponse(f.directory,call,'image-plan'),false);assert.equal(hasRetainedInvalidAiOutput(f.directory,call,'image-plan'),false);assert.deepEqual(readInvalidAiOutputs(f.directory,call,'image-plan'),[]);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
+});
+
+test('R2 exact successful workflow planning is reused before another paid request',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),one=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),before=f.requests.length;
+ assert.equal((await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)).id,one.id);assert.equal(f.requests.length,before);
+});
+
+test('R2 six approved slots and original OCR ledger survive missing seventh planning retries and restart',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);(workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ let seventh=0;f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-plan'&&payload.slot?.index===7?(seventh++,chat({kind:'image-plan',unexpected:true})):undefined);
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(posts(),6);assert.equal(seventh,3);assert.equal(first.workflow.slots!.filter(s=>s.status==='PASSED').length,6);
+ const frozen=structuredClone(first.workflow.slots!.slice(0,6)),db=openDatabase(f.directory),before=db.prepare('SELECT id,record_json FROM ai_calls ORDER BY id').all(),ledger=db.prepare('SELECT id,record_json FROM ai_usage_ledger ORDER BY id').all();db.close();
+ const restart=new AiService(f.directory,f.store,(f.ai as any).hosting,mockStorage,{fetch:async()=>{throw Error('No paid planning budget remains');}});const old=(workflow as any).ai;(workflow as any).ai=restart;
+ try{const second=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(second.workflow.id,first.workflow.id);assert.deepEqual(second.workflow.slots!.slice(0,6),frozen);assert.equal(posts(),6);assert.equal(seventh,3);const verify=openDatabase(f.directory);try{assert.deepEqual(verify.prepare('SELECT id,record_json FROM ai_calls ORDER BY id').all(),before);assert.deepEqual(verify.prepare('SELECT id,record_json FROM ai_usage_ledger ORDER BY id').all(),ledger);}finally{verify.close();}}finally{(workflow as any).ai=old;await restart.close();}
+});
+
+for(const reason of ['refusal','tool_calls','secret'])test('R2 provider '+reason+' never triggers a paid retry',async t=>{
+ const f=await fixture(t);f.respond(operation=>operation==='image-plan'?Response.json({usage:{prompt_tokens:1,completion_tokens:1},choices:[{finish_reason:'stop',message:{content:reason==='secret'?'{"note":"image-fixture-deepseek-key"}':'{}',...(reason==='refusal'?{refusal:'No'}:reason==='tool_calls'?{tool_calls:[{}]}:{})}}]}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,randomUUID()));assert.equal(f.requests.length-before,1);
+});
+for(const mode of ['cancel','source','config','quota'] as const)test('R2 '+mode+' stops missing-step retries',async t=>{
+ const f=await fixture(t),controller=new AbortController();let invalidSent=false;
+ f.respond(operation=>{if(operation!=='image-plan')return undefined;invalidSent=true;if(mode==='cancel')controller.abort();if(mode==='config')f.ai.setEnabled({id:'deepseek',enabled:false});return chat({kind:'image-plan',unexpected:true});});
+ if(mode==='quota')f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:1,dailyTokenLimit:null});
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{if(mode==='source'&&invalidSent)throw new AiError('SOURCE_CHANGED');},undefined,controller.signal,randomUUID()));assert.equal(f.requests.length-before,1);
+});
+
+test('R2 ordinary uncertainties retain full text while measurements remain validated',async t=>{
+ const f=await fixture(t),context:ProductImageContext={...f.context,setPolicy:'seven-product-v2',referenceMeasurements:[],setPlan:sceneSet(),purpose:'detail',slot:{index:2,total:7,provisional:true}},uncertainty='The surface is partly obscured by lighting, so fine texture remains uncertain. '.repeat(4).trim();
+ f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Preserve the selected product with no added text.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),uncertainties:[uncertainty]}}):undefined);
+ const result=await f.ai.imagePlan(context,()=>{});assert.equal((result.output as any).productUnderstanding.uncertainties[0],uncertainty);
+ f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Preserve the selected product with no added text.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),uncertainties:[uncertainty+' Product size is 7.5 x 7 x 4.2 cm.']}}):undefined);
+ await assert.rejects(f.ai.imagePlan(context,()=>{}),(e:any)=>e.code==='OUTPUT_INVALID');
+});
+
+test('R2 legacy hashless planning calls and changed repair feedback share the durable slot budget',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),prior=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},{previousPlanId:prior.id,issues:['Repair original composition.']},undefined,workflowId));assert.equal(f.requests.length-before,2);assert.equal(f.requests.at(-1)!.payload.validationFeedback.includes('selected SKU'),true);
+ const db=openDatabase(f.directory);try{for(const row of db.prepare('SELECT id,record_json FROM ai_calls').all()){const call=JSON.parse(String(row.record_json));if(call.presentationContext?.workflowId===workflowId){delete call.presentationContext.imagePlanRequestSha256;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),row.id);}}}finally{db.close();}
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},{previousPlanId:prior.id,issues:['Newly worded repair feedback.']},undefined,workflowId));assert.equal(f.requests.length-before,2);
+});
+
+test('R2 concurrent repair requests cannot exceed the shared workflow slot budget',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),prior=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),before=f.requests.length;
+ f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ const settled=await Promise.allSettled(['First feedback','Second feedback'].map(issue=>f.ai.imagePlan(f.context,()=>{},{previousPlanId:prior.id,issues:[issue]},undefined,workflowId)));
+ assert.ok(settled.every(result=>result.status==='rejected'));assert.equal(f.requests.length-before,2);assert.equal(f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId).length,3);
+});

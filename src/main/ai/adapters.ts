@@ -111,10 +111,11 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   const sourceOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='source-image-consistency';
   const imageOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='image-plan';
   const diagnosticOperation=sourceOperation||imageOperation;
-  const captureSource=(text:string)=>{try{context.onUntrustedOutput?.(safeSourceResponseText(text,credentials),'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
+  let credentialEcho=false;
+  const captureSource=(text:string)=>{try{const safe=safeSourceResponseText(text,credentials);credentialEcho ||= safe==='[omitted: credential echo]';context.onUntrustedOutput?.(safe,'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
   const transport=diagnosticOperation?{...context,onInvalidResponseText:captureSource}:context;
   const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));
-  const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error;};
+  const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=credentialEcho?'RESPONSE_SECRET_ECHO':reason;throw error;};
   return outputError(() => {
     if(imageOperation)captureSource(JSON.stringify(raw));
     let phase='RESPONSE_ENVELOPE_INVALID';

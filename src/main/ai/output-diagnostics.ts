@@ -33,7 +33,7 @@ function diagnosticOutput(value: unknown, depth = 0): unknown {
 }
 
 /** Failed-output evidence. Recovery must explicitly revalidate it; never adopt as a successful paid call. */
-export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; output: unknown }): void {
+export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; responseDiagnostic?:{status:number;byteCount:number}; output: unknown }): void {
   let destination: string | undefined, file: number | undefined, complete = false;
   try {
     const { call } = input, name = `${input.createdAt.replace(/[-:.TZ]/g,'')}-${call.id}.json`;
@@ -42,6 +42,7 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
     const metadata = { version:1, approved:false, errorCode:'OUTPUT_INVALID', callId:call.id, operation:input.operation,
       productId:call.productId, productRevision:call.productRevision, providerId:call.providerId, model:call.model,
       createdAt:input.createdAt, rejectionStage:input.rejectionStage,
+      ...(input.responseDiagnostic&&Number.isInteger(input.responseDiagnostic.status)&&input.responseDiagnostic.status>=100&&input.responseDiagnostic.status<=599&&Number.isSafeInteger(input.responseDiagnostic.byteCount)&&input.responseDiagnostic.byteCount>=0?{responseDiagnostic:{status:input.responseDiagnostic.status,byteCount:input.responseDiagnostic.byteCount}}:{}),
       // Only a fixed code is kept; free text never enters the file through this field.
       ...(input.rejectionReason && /^[A-Z][A-Z_]{2,39}$/.test(input.rejectionReason) ? { rejectionReason:input.rejectionReason } : {}), outputByteLength };
     const maxBytes=input.operation==='source-image-consistency'?SOURCE_MAX_BYTES:MAX_BYTES;
@@ -78,9 +79,9 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
 }
 
 /** Only this call's bounded regular diagnostic files, with exact request identity. No network. */
-function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{rejectionStage:string;output?:unknown}[] {
+function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{rejectionStage:string;rejectionReason?:string;output?:unknown;outputOmitted?:unknown;responseDiagnostic?:{status:number;byteCount:number}}[] {
   if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return [];
-  const values:{rejectionStage:string;output?:unknown}[]=[];
+  const values:{rejectionStage:string;rejectionReason?:string;output?:unknown;outputOmitted?:unknown;responseDiagnostic?:{status:number;byteCount:number}}[]=[];
   try{
     const root=resolve(directory),folder=join(root,'ai-diagnostics');safeDirectory(root);safeDirectory(folder);
     for(const entry of readdirSync(folder).filter(name=>managedName.test(name)&&name.endsWith(`-${call.id}.json`)).sort().reverse()){
@@ -96,11 +97,22 @@ function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{re
 }
 
 export function hasInvalidAiResponse(directory:string,call:AiCall,operation:string):boolean {
-  return readInvalidAiRecords(directory,call,operation).length>0;
+  if(call.responseReceived)return true;
+  return readInvalidAiRecords(directory,call,operation).some(record=>{
+    const metadata=record.responseDiagnostic;
+    // Only provably metadata-only new transport records lose the historical received flag.
+    // Legacy omitted/null records still conservatively mean a response was received.
+    return !(record.output===null&&record.outputOmitted===undefined&&metadata&&Number.isInteger(metadata.status)&&metadata.status>=100&&metadata.status<=599&&Number.isSafeInteger(metadata.byteCount)&&metadata.byteCount>=0&&['RESPONSE_BODY_MISSING','RESPONSE_BODY_EMPTY','RESPONSE_UTF8_INVALID','RESPONSE_SIZE_LIMIT','RESPONSE_LENGTH_INVALID','RESPONSE_READ_FAILED'].includes(record.rejectionReason??''));
+  });
 }
 export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
-  return readInvalidAiRecords(directory,call,operation).filter(record=>record.rejectionStage==='operation-output-validation'&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
+  return readInvalidAiRecords(directory,call,operation).filter(record=>(record.rejectionStage==='operation-output-validation'&&(operation!=='image-plan'||typeof record.output==='object')||operation==='image-plan'&&record.rejectionStage==='provider-response-validation'&&record.rejectionReason==='RESPONSE_JSON_INVALID'&&typeof record.output==='string')&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
 }
 
 /** Includes malformed/provider-incomplete text: its presence must never authorize a paid retry. */
 export function hasRetainedInvalidAiOutput(directory:string,call:AiCall,operation:string):boolean {return readInvalidAiRecords(directory,call,operation).some(r=>r.output!==null&&r.output!==undefined);}
+
+/** Provider refusal/tool requests and credential echoes are not repairable format failures. */
+export function imagePlanRetryForbidden(directory:string,call:AiCall):boolean {
+ return readInvalidAiRecords(directory,call,'image-plan').some(record=>['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(record.rejectionReason??'')||JSON.stringify(record.output??null).includes('[omitted: credential echo]'));
+}

@@ -1,3 +1,4 @@
+import {explicitRandomFulfillment} from '../sales-plans/source-meaning.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
@@ -37,6 +38,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
   if(observations&&context.version===SOURCE_OBSERVATION_VERSION)observations=normalizeSourceObservations(observations,context);
   const view:SourceConsistencyView={context,fingerprint,status:'PENDING',reasons:['SOURCE_CONSISTENCY_PENDING'],assessmentId:assessment?.id??null,observations,humanDecision:human?{decision:human.decision,reason:human.reason}:null};
   if(sourceConsistencyUnknown(db,context.productId,[context.variantId])){view.status='UNKNOWN';view.reasons=['SOURCE_CONSISTENCY_SENT_UNKNOWN'];return view;}
+  if(context.fields.some(field=>explicitRandomFulfillment(field.value))){view.status='NEEDS_INPUT';view.reasons=['EXPLICIT_RANDOM_FULFILLMENT'];return view;}
   if(attempt&&!assessment){
     const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
     view.status=call?.errorCode==='OUTPUT_INVALID'?'SYSTEM_REPAIR':call?.status==='SUCCEEDED'?'PENDING':'UNKNOWN';view.reasons=[call?.errorCode==='OUTPUT_INVALID'?'SOURCE_CONSISTENCY_INVALID_OUTPUT':call?.status==='SUCCEEDED'?'SOURCE_CONSISTENCY_RECOVERY_REQUIRED':'SOURCE_CONSISTENCY_SENT_UNKNOWN'];return view;
@@ -48,6 +50,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
 }
 export function assertConsistencyView(view:SourceConsistencyView):void {
   if(view.status==='MATCH'||view.status==='MANUAL')return;
+  if(view.reasons.includes('EXPLICIT_RANDOM_FULFILLMENT'))throw new SourceConsistencyError('NEEDS_INPUT','SOURCE_CONSISTENCY_NEEDS_INPUT','销售规格异常：供应商明确随机发货，不能确定实际款式或颜色；请补充实际销售内容。来源：'+view.context.fields.filter(field=>explicitRandomFulfillment(field.value)).map(field=>field.value).join('；').slice(0,800));
   throw new SourceConsistencyError(view.status==='UNKNOWN'?'UNKNOWN':view.status==='SYSTEM_REPAIR'?'SYSTEM_REPAIR':'NEEDS_INPUT',view.status==='UNKNOWN'?'SOURCE_CONSISTENCY_SENT_UNKNOWN':view.status==='SYSTEM_REPAIR'?'SOURCE_CONSISTENCY_INVALID_OUTPUT':'SOURCE_CONSISTENCY_NEEDS_INPUT',view.status==='UNKNOWN'?'来源图片观察请求结果未知，已阻止自动重发，请核对调用记录':view.status==='SYSTEM_REPAIR'?'来源图片观察未通过格式或记录校验，请修复后核对':'当前来源图片与规格尚未确认一致，请逐 SKU 核对原图和原始规格');
 }
 /** Current-use evidence for schema filling. No product writes and no provider calls. */
@@ -69,7 +72,7 @@ export async function saveConsistencyDecision(db:DatabaseSync,store:WorkspaceSto
   fresh();await checkpoint();
   db.exec('BEGIN IMMEDIATE');try{
     const context=fresh(),view=readConsistencyView(db,context);
-    if(o.decision==='CONFIRMED'&&(view.status==='UNKNOWN'||context.version!==SOURCE_OBSERVATION_VERSION&&context.issues.some(r=>NON_VISUAL_AUTHORITY.has(r))))throw new UserFacingError('图片关联确认不能解决未知付费请求、随机供货或原始规格冲突，请先补充或更正对应资料');
+    if(o.decision==='CONFIRMED'&&(view.status==='UNKNOWN'||view.reasons.includes('EXPLICIT_RANDOM_FULFILLMENT')||context.version!==SOURCE_OBSERVATION_VERSION&&context.issues.some(r=>NON_VISUAL_AUTHORITY.has(r))))throw new UserFacingError('图片关联确认不能解决未知付费请求、随机供货或原始规格冲突，请先补充或更正对应资料');
     const decision=validateConsistencyDecision({version:SOURCE_CONSISTENCY_VERSION,id:randomUUID(),context,fingerprint,assessmentId:view.assessmentId,decision:o.decision,reason,createdAt:new Date().toISOString()});
     db.prepare('INSERT INTO source_consistency_decisions VALUES(?,?)').run(decision.id,JSON.stringify(decision));fresh();db.exec('COMMIT');return readConsistencyView(db,context);
   }catch(error){db.exec('ROLLBACK');throw error;}

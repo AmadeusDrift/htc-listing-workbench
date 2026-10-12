@@ -1,3 +1,4 @@
+import {productReferenceImages} from './reference-purpose.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { isProductReference } from '../image-upstream-trace.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
@@ -55,7 +56,7 @@ type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
-type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'>;
+type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'sourceObservationEvidence'>>;
 type Generator = Pick<ImageGenerationService, 'getConnection' | 'configurationScope' | 'generate' | 'readCandidate' | 'generateForWorkflow' | 'reconcileWorkflowGeneration'>;
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const remaining = (draft: AmazonDraft) => (draft.previewIssues.some(issue => issue.severity === 'ERROR') ? draft.previewIssues : draft.localIssues).filter(issue => issue.severity === 'ERROR').map(issue => issue.message);
@@ -490,7 +491,8 @@ export class ImageWorkflowService {
       const derived=new Set(workflowRuns(this.db).flatMap(record=>record.slots?record.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):record.approvedAssetId?[record.approvedAssetId]:[]));
       const variantIds=[...new Set(initial.salesPlan?.recipe.components.map(component=>component.variantId)??[run.variantId])];
       const confirmed=(assetId:string,variantId:string)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId));
-      const refs=selectImageReferences(product,run.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variantIds,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
+      const referenceProduct=productReferenceImages(product,variantIds.flatMap(variantId=>this.ai.sourceObservationEvidence?.({productId:product.id,productRevision:product.revision,variantId})??[]));
+      const refs=selectImageReferences(referenceProduct,run.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variantIds,run.slotPolicy===IMAGE_SET_POLICY?10:undefined);
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
@@ -784,7 +786,8 @@ export class ImageWorkflowService {
       const profileStamp=listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)));
       const derived = new Set(workflowRuns(this.db).flatMap(r => r.approvedAssetId ? [r.approvedAssetId] : []));
       const product = this.store.getProduct(run.productId);
-      const refs = selectImageReferences(product,run.variantId,derived,(assetId,variantId)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId)),allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)));
+      const referenceProduct=productReferenceImages(product,[run.variantId].flatMap(variantId=>this.ai.sourceObservationEvidence?.({productId:product.id,productRevision:product.revision,variantId})??[]));
+      const refs = selectImageReferences(referenceProduct,run.variantId,derived,(assetId,variantId)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId)),allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)));
       run.referenceAssets=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256})); this.save(run);
       if(reuse){
         if(listingFingerprint(run.referenceAssets)!==listingFingerprint(reuse.referenceAssets))throw new AiError('SOURCE_CHANGED');

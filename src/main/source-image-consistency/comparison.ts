@@ -98,12 +98,12 @@ function validateObservationOutput(raw:unknown):SourceConsistencyOutput {
   if(o.kind!=='source-image-consistency'||o.version!==SOURCE_OBSERVATION_VERSION||!Array.isArray(o.assets)||!o.assets.length||o.assets.length>10)throw new AiError('OUTPUT_INVALID');
   const list=(value:unknown)=>{if(!Array.isArray(value)||value.length>100)throw new AiError('OUTPUT_INVALID');return [...new Set(value.map(v=>boundedText(v,1000)))];};
   const assets=o.assets.map(raw=>{
-    const a=keys(raw,['assetId','quality','visibility','lighting','presentation','colors','appearance','claims'],['observations']);
+    const a=keys(raw,['assetId','quality','visibility','lighting','presentation','colors','appearance','claims'],['observations','contentPurpose']);
     if(!Array.isArray(a.claims)||a.claims.length>400)throw new AiError('OUTPUT_INVALID');
     const claims=a.claims.map(raw=>{const c=keys(raw,['claimId','value','visibility']),visibility=enumValue(c.visibility,['visible','unknown']);if((visibility==='unknown')!==(c.value===null))throw new AiError('OUTPUT_INVALID');return {claimId:boundedText(c.claimId,200),value:c.value===null?null:boundedText(c.value,1000),visibility};});
     let observations:NonNullable<SourceConsistencyOutput['assets'][number]['observations']>|undefined;
     if(a.observations!==undefined){if(!Array.isArray(a.observations)||a.observations.length>100)throw new AiError('OUTPUT_INVALID');observations=a.observations.map(raw=>{const v=keys(raw,['name','values','visibility']);return {name:boundedText(v.name,200),values:list(v.values),visibility:enumValue(v.visibility,['visible','unknown'])};});}
-    return {assetId:uuid(a.assetId),quality:enumValue(a.quality,['clear','low-detail']),visibility:enumValue(a.visibility,['complete','occluded']),lighting:enumValue(a.lighting,['neutral','uncertain']),presentation:enumValue(a.presentation,['single-product','alternatives','unknown']),colors:list(a.colors),appearance:list(a.appearance),claims,...(observations?{observations}:{})};
+    return {assetId:uuid(a.assetId),quality:enumValue(a.quality,['clear','low-detail']),visibility:enumValue(a.visibility,['complete','occluded']),lighting:enumValue(a.lighting,['neutral','uncertain']),presentation:enumValue(a.presentation,['single-product','alternatives','unknown']),colors:list(a.colors),appearance:list(a.appearance),claims,...(a.contentPurpose===undefined?{}:{contentPurpose:enumValue(a.contentPurpose,['product','instructions-only','unknown'])}),...(observations?{observations}:{})};
   });
   if(new Set(assets.map(a=>a.assetId)).size!==assets.length)throw new AiError('OUTPUT_INVALID');
   return {kind:'source-image-consistency',version:SOURCE_OBSERVATION_VERSION,assets};
@@ -117,7 +117,7 @@ export function normalizeSourceObservations(raw:unknown,context:Pick<SourceConsi
   if(o.kind!==undefined&&o.kind!=='source-image-consistency'||o.type!==undefined&&o.type!=='json_object'||o.version!==undefined&&o.version!==SOURCE_OBSERVATION_VERSION)throw new AiError('OUTPUT_INVALID');
   if(!Array.isArray(o.assets))throw new AiError('OUTPUT_INVALID');
   diagnosticReason='SOURCE_ASSET_SCHEMA_INVALID';
-  const assets=o.assets.map(raw=>{const a=keys(raw,['assetId','quality','visibility','lighting','presentation'],['colors','appearance','claims','observations']);return {...a,colors:a.colors??[],appearance:a.appearance??[],claims:a.claims??[]};});
+  const assets=o.assets.map(raw=>{const a=keys(raw,['assetId','quality','visibility','lighting','presentation'],['colors','appearance','claims','observations','contentPurpose']);return {...a,colors:a.colors??[],appearance:a.appearance??[],claims:a.claims??[]};});
   diagnosticReason='SOURCE_OBSERVATION_VALUE_INVALID';
   const output=validateConsistencyOutput({kind:'source-image-consistency',version:SOURCE_OBSERVATION_VERSION,assets});
   diagnosticReason='SOURCE_ASSET_REFERENCE_INVALID';

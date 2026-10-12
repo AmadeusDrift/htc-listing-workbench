@@ -76,3 +76,20 @@ test('legacy attempt debt without a new send survives restoring a backup before 
  const other=await completionOwnerFixture(t,'images'),current=openDatabase(f.directory),snapshot=openDatabase(other.directory);
  try{retainCompletionOperations(current,snapshot);const preserved=new CompletionJournal(snapshot).get(op.id);assert.equal(preserved.state,'GUARD');assert.deepEqual(preserved.legacyRecovery,op.legacyRecovery);}finally{current.close();snapshot.close();}
 });
+import {fixture,candidateFor,reviewFor,chat} from './fixtures/listing-ai.ts';
+function removeJournalForLegacy(f:{directory:string;draft:{id:string}}){const db=openDatabase(f.directory);try{db.prepare('DELETE FROM listing_completion_operations').run();db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(randomUUID(),JSON.stringify({draftId:f.draft.id,contentPreparation:{state:'STARTED'}}));}finally{db.close();}}
+const legacyIssue=(field:string)=>({code:'90220',message:'Missing '+field,severity:'ERROR' as const,attributeNames:[field],autoFixable:false,source:'amazon' as const,category:'field' as const});
+test('legacy exhausted reviews stay bound to saved candidate and never send a fourth review',async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[legacyIssue('material')]});let reviews=0;
+ f.respond(p=>{if(p.candidate){reviews++;throw Error('lost review');}return chat(candidateFor(p));});
+ for(let i=0;i<3;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));assert.equal(reviews,3);removeJournalForLegacy(f);
+ for(let i=0;i<2;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}),/三次/);
+ assert.equal(reviews,3);
+});
+test('legacy exhausted second candidate keeps its own context after the first adoption',async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return {...d,state:'BLOCKED',previewIssues:[legacyIssue(d.fieldAdoptions?.length?'color':'material')]};};let candidates=0;
+ f.respond(p=>{if(p.candidate)return chat(reviewFor(p));if(++candidates>1)throw Error('lost second candidate');return chat(candidateFor(p));});
+ for(let i=0;i<3;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));assert.equal(candidates,4);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length,1);removeJournalForLegacy(f);
+ for(let i=0;i<2;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}),/三次/);
+ assert.equal(candidates,4);
+});

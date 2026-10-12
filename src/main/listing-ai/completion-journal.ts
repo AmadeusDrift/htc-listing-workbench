@@ -1,4 +1,4 @@
-import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners} from './legacy-completion.ts';
+import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners,legacyStepDebt} from './legacy-completion.ts';
 import type {LegacyCompletionHistory} from './legacy-completion.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
@@ -56,7 +56,8 @@ export function validateCompletionOperation(raw:unknown):CompletionOperation {
   const reviewIssues=(o.reviewIssues as unknown[]).map(raw=>{const issue=keys(raw,['field','message']);return{field:boundedText(issue.field,100),message:boundedText(issue.message,2000)};});
   const createdAt=date(o.createdAt),updatedAt=date(o.updatedAt);if(updatedAt<createdAt)invalid();
   let legacyRecovery:LegacyCompletionHistory|undefined;
-  if(o.legacyRecovery!==undefined){const l=keys(o.legacyRecovery,['checkpointIds','callIds','resultIds','adoptionIds','priorRounds','missingAttemptDebt']);const ids=(v:unknown,hash=false)=>{if(!Array.isArray(v)||v.length>1000)invalid();return (v as unknown[]).map(x=>hash?sha256(x):uuid(x));};legacyRecovery={checkpointIds:ids(l.checkpointIds),callIds:ids(l.callIds),resultIds:ids(l.resultIds),adoptionIds:ids(l.adoptionIds,true),priorRounds:integer(l.priorRounds,0,1000),missingAttemptDebt:integer(l.missingAttemptDebt,0,3)};}
+  if(o.legacyRecovery!==undefined){const l=keys(o.legacyRecovery,['checkpointIds','callIds','resultIds','adoptionIds','priorRounds','missingAttemptDebt'],['stepDebts']);const ids=(v:unknown,hash=false)=>{if(!Array.isArray(v)||v.length>1000)invalid();return (v as unknown[]).map(x=>hash?sha256(x):uuid(x));};legacyRecovery={checkpointIds:ids(l.checkpointIds),callIds:ids(l.callIds),resultIds:ids(l.resultIds),adoptionIds:ids(l.adoptionIds,true),priorRounds:integer(l.priorRounds,0,1000),missingAttemptDebt:integer(l.missingAttemptDebt,0,3)};
+    if(l.stepDebts!==undefined){if(!Array.isArray(l.stepDebts)||l.stepDebts.length>1000)invalid();legacyRecovery.stepDebts=(l.stepDebts as unknown[]).map(raw=>{const step=keys(raw,['contextHash','kind','callIds']);if(!['candidate','review'].includes(String(step.kind)))invalid();return{contextHash:sha256(step.contextHash),kind:step.kind as 'candidate'|'review',callIds:ids(step.callIds)};});const steps=legacyRecovery.stepDebts;if(new Set(steps.map(step=>step.contextHash+step.kind)).size!==steps.length||steps.some(step=>!step.callIds.length||new Set(step.callIds).size!==step.callIds.length||step.callIds.some(id=>!legacyRecovery!.callIds.includes(id))))invalid();}}
   return{...(legacyRecovery?{legacyRecovery}:{}),id:uuid(o.id),revision:integer(o.revision,1,Number.MAX_SAFE_INTEGER),draftId:uuid(o.draftId),scopeHash:sha256(o.scopeHash),safetyScopeHash:sha256(o.safetyScopeHash),safetyIdentity,copyReviewEnabled:o.copyReviewEnabled as boolean,state:o.state as CompletionOperation['state'],draftRevision:integer(o.draftRevision,1,Number.MAX_SAFE_INTEGER),draftStamp:sha256(o.draftStamp),rounds,remaining:(o.remaining as unknown[]).map(v=>boundedText(v,2000)),reviewIssues,createdAt,updatedAt};
 }
 export function completionOperations(db:DatabaseSync,draftId?:string):CompletionOperation[] {
@@ -99,14 +100,14 @@ export class CompletionJournal {
   }
   assertSendBudget(id:string,kind:'candidate'|'review'):void {
     const op=this.get(id),round=op.rounds.at(-1);
-    if(kind==='candidate'&&op.rounds.length===1&&(op.legacyRecovery?.missingAttemptDebt??0)+(round?.candidate.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');
+    if(round&&legacyStepDebt(op,round,kind)+(round[kind]?.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');
   }
   /** Invoked only inside the usage reservation transaction on this exact connection. */
   markSent(request:CompletionRequest,call:AiCall):void {
     const op=this.get(request.operationId),round=op.rounds.find(r=>[r.candidate.id,r.review?.id].includes(request.callId));
     if(op.state!=='ACTIVE'||!round||round.contextHash!==request.contextHash||call.id!==request.callId||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision)invalid();
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;
-    if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(round===op.rounds[0]&&entry===round.candidate&&(op.legacyRecovery?.missingAttemptDebt??0)+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');entry.sent=true;this.save(op);
+    if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(legacyStepDebt(op,round,entry===round.candidate?'candidate':'review')+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');entry.sent=true;this.save(op);
   }
   /** Result/call/usage and journal result reference commit together. */
   recordResult(request:CompletionRequest,result:AiResult):void {
@@ -130,7 +131,7 @@ export class CompletionJournal {
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
     if(this.received(entry,round))unknownCompletion();
-    if((entry.previous?.length??0)+(op.rounds.length===1&&kind==='candidate'?(op.legacyRecovery?.missingAttemptDebt??0):0)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
+    if((entry.previous?.length??0)+legacyStepDebt(op,round,kind)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
     const {previous,...old}=entry;
     round[kind]={id:randomUUID(),sent:false,resultId:null,previous:[...(previous??[]),old]};this.save(op);
   }

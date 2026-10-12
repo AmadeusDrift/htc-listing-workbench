@@ -9,7 +9,7 @@ import {validateAiUsageRecord} from '../ai/usage.ts';
 import {listingFingerprint} from './validation.ts';
 import type {CompletionOperation,CompletionRound} from './completion-journal.ts';
 
-export interface LegacyCompletionHistory { checkpointIds:string[]; callIds:string[]; resultIds:string[]; adoptionIds:string[]; priorRounds:number; missingAttemptDebt:number }
+export interface LegacyCompletionHistory { checkpointIds:string[]; callIds:string[]; resultIds:string[]; adoptionIds:string[]; priorRounds:number; missingAttemptDebt:number; stepDebts?:{contextHash:string;kind:'candidate'|'review';callIds:string[]}[] }
 export function legacyCompletionOwners(db:DatabaseSync,draftId:string){
   return db.prepare("SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND json_extract(record_json,'$.contentPreparation.state')='STARTED' AND json_type(record_json,'$.contentPreparation.operationId') IS NULL").all(draftId).map(row=>({id:String(row.id),record:JSON.parse(String(row.record_json))}));
 }
@@ -41,9 +41,23 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
   if(missing.some(call=>call.responseReceived||call.rejection||call.errorCode==='OUTPUT_INVALID'))invalid();
   if(rounds.length&&rounds.some(round=>!isFullSchema(round.context))){if(!legacyScopeHash||rounds.some(round=>isFullSchema(round.context)))invalid();operation.scopeHash=legacyScopeHash!;}
   operation.rounds=rounds;
-  operation.legacyRecovery={checkpointIds:owners.map(owner=>owner.id),callIds:[...new Set([...results.map(result=>result.callId),...bound.map(call=>call.id)])],resultIds:results.map(result=>result.id),adoptionIds:(draft.fieldAdoptions??[]).map(a=>a.id),priorRounds:Math.max(0,candidates.length-selected.length),missingAttemptDebt:Math.min(3,missing.length||(!results.length?1:0))};
+  const stepDebts:NonNullable<LegacyCompletionHistory['stepDebts']>=[];
+  for(const call of missing){
+    if(!['deepseek','deepseek-review'].includes(call.providerId))invalid();
+    const contextHash=call.presentationContext!.sourceSha256,kind=call.providerId==='deepseek'?'candidate':'review';
+    let step=stepDebts.find(step=>step.contextHash===contextHash&&step.kind===kind);
+    if(!step){step={contextHash,kind,callIds:[]};stepDebts.push(step);}step.callIds.push(call.id);
+  }
+  operation.legacyRecovery={checkpointIds:owners.map(owner=>owner.id),callIds:[...new Set([...results.map(result=>result.callId),...bound.map(call=>call.id)])],resultIds:results.map(result=>result.id),adoptionIds:(draft.fieldAdoptions??[]).map(a=>a.id),priorRounds:Math.max(0,candidates.length-selected.length),missingAttemptDebt:!results.length&&!missing.length?1:0,stepDebts};
   return operation;
 }
 export function linkLegacyCompletionOwners(db:DatabaseSync,draftId:string,operationId:string):void {
   for(const owner of legacyCompletionOwners(db,draftId)){owner.record.contentPreparation.operationId=operationId;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(owner.record),owner.id);}
+}
+
+/** The provider identity and frozen hash keep review/candidate and later rounds separate. */
+export function legacyStepDebt(op:CompletionOperation,round:CompletionRound,kind:'candidate'|'review'):number {
+  const legacy=op.legacyRecovery;if(!legacy)return 0;
+  const bound=legacy.stepDebts?.find(step=>step.contextHash===round.contextHash&&step.kind===kind)?.callIds.length??0;
+  return bound+(kind==='candidate'&&round===op.rounds[0]?legacy.missingAttemptDebt:0);
 }

@@ -6,6 +6,8 @@ import {realAmazonSchema} from './fixtures/amazon/schema-fixture.ts';
 import {saveInput} from './fixtures/listing-ai.ts';
 import {sourceStamp} from '../src/main/automatic-listing/records.ts';
 import {imageWorkflowDraftStamp} from '../src/main/image-workflow/records.ts';
+import {pricingOutcome,outcomeScope} from '../src/main/automatic-listing/outcomes.ts';
+import {ListingRuleStore} from '../src/main/listing-rules.ts';
 import {pricingBlockingReason} from '../src/main/image-workflow/deferred-fields.ts';
 
 async function legacyOwner(t:test.TestContext){
@@ -66,4 +68,46 @@ test('external edit after interrupted pricing commit cannot inherit its owner pr
  const owner=f.ownerService();assert.throws(()=>owner.startAuthorized(owner.prepareStart(f.taskId)),/after commit/);
  const draft=f.amazon.getDraft(f.draft.id);f.amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,is_value_stores_item:[{value:true,marketplace_id:draft.marketplaceId}],item_name:[{value:'External edit',marketplace_id:draft.marketplaceId,language_tag:'en_US'}]}});
  await f.reopen();const restarted=f.ownerService();assert.throws(()=>restarted.startAuthorized(restarted.prepareStart(f.taskId)),/本地定价恢复后草稿已变化/);assert.equal(f.requests.length,0);
+});
+
+
+test('profit preview uses current cost and shipping rules locally and never edits historical draft',async t=>{
+ const f=await legacyOwner(t);
+ const initial=f.amazon.getDraft(f.draft.id),before=JSON.stringify(initial);
+ const preview=()=> f.amazon.previewPricing(initial.id,f.store.getProduct(initial.productId));
+ assert.ok(preview().businessRules!.quote);
+ const input=saveInput(f.store.getProduct(initial.productId));input.variants[0].purchasePrice='100';f.store.saveProduct(input);
+ assert.equal(preview().businessRules!.pricingDecision!.status,'business_blocked');
+ const missing=saveInput(f.store.getProduct(initial.productId));missing.variants[0].purchasePrice='';f.store.saveProduct(missing);
+ assert.equal(preview().businessRules!.pricingDecision!.status,'needs_input');
+ assert.equal(JSON.stringify(f.amazon.getDraft(initial.id)),before);assert.equal(f.requests.length,0);assert.equal(f.previews(),0);
+});
+
+
+for(const change of ['copy','source-title','unrelated-rules','price-still-blocked','price-qualified','ceiling-qualified','shipping-still-blocked','package-default','missing-cost','quantity-conflict','invalid-proof'] as const)
+test(`historical profit queue requires qualified local repricing after ${change}`,async t=>{
+ let rules:ListingRuleStore;t.after(()=>rules?.close());const f=await legacyOwner(t);rules=new ListingRuleStore(f.directory);
+ const high=saveInput(f.store.getProduct(f.product.id));high.variants[0].purchasePrice='100';const source=f.store.saveProduct(high);
+ const record=f.p.record(f.draft.id);record.draft.productRevision=source.revision;f.p.putRecord(record);
+ const draft=f.amazon.applyBusinessDefaults({id:record.draft.id,revision:record.draft.revision});
+ assert.equal(draft.businessRules!.pricingDecision!.status,'business_blocked');
+ const owner=f.ownerService(),task=(owner as any).tasks.get(f.taskId),row=task.items[0];
+ Object.assign(row,{productRevision:source.revision,sourceStamp:sourceStamp(source),status:'SCREENED',repair:null});
+ row.outcome={version:1,...pricingOutcome(draft,rules.get()),message:'Historical profit rejection',classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};task.status='COMPLETED';(owner as any).save(task);
+ (owner as any).deps.rules=()=>rules.get();
+ const before=JSON.stringify(owner.get(f.taskId));
+ if(change==='copy'){const r=f.p.record(draft.id);r.draft.revision++;r.draft.attributes.item_name=[{value:'Rewritten copy'}];f.p.putRecord(r);}
+ if(change==='source-title'){const input=saveInput(f.store.getProduct(source.id));input.title='New title';f.store.saveProduct(input);}
+ if(change==='unrelated-rules'){const r=rules.get();r.product.stockSets++;r.product.brand='Different display brand';rules.save(r);}
+ if(change.startsWith('price-')||change==='missing-cost'){const input=saveInput(f.store.getProduct(source.id));input.variants[0].purchasePrice=change==='price-qualified'?'2.4':change==='missing-cost'?'':'110';f.store.saveProduct(input);}
+ if(change==='ceiling-qualified'){const r=rules.get();r.pricing.maxPrice=100;rules.save(r);}
+ if(change==='shipping-still-blocked'){const r=rules.get();r.pricing.deliveryTiers=r.pricing.deliveryTiers.map(tier=>({...tier,ordinary:tier.ordinary+1}));rules.save(r);}
+ if(change==='package-default'){const r=rules.get();r.product.packageWeight=200;rules.save(r);}
+ if(change==='quantity-conflict'){const input=saveInput(f.store.getProduct(source.id));input.variants[0].originalSpec='5 pc / 10 pc';input.variants[0].normalizedSpec='5 pc / 10 pc';f.store.saveProduct(input);}
+ if(change==='invalid-proof'){const r=f.p.record(draft.id);r.draft.businessRules.pricingDecision.inputs.costCny=0;f.p.putRecord(r);}
+ const queue=await owner.queue({productIds:[source.id],targetId:f.target.id}),qualified=['price-qualified','ceiling-qualified'].includes(change);
+ assert.equal(queue.products[0].eligibleCount,qualified?1:0);
+ if(!['missing-cost','quantity-conflict','invalid-proof'].includes(change)&&!qualified)assert.equal(queue.products[0].rows[0].kind,'RULE_FILTERED');
+ assert.equal(JSON.stringify(owner.get(f.taskId)),before,'queue must preserve task, attempts and original outcome');assert.equal(f.requests.length,0);assert.equal(f.previews(),0);
+ if(!qualified)await assert.rejects(owner.create({productIds:[source.id],targetId:f.target.id,profileId:'alpha'}));
 });

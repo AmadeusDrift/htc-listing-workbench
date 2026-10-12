@@ -88,3 +88,13 @@ test('structured rule, repair, input and unknown results remain separate in task
     assert.equal(automaticItemOutcome(row),expected);
   }
 });
+
+
+test('historical 103 SKUs count selection, profit and exceptions exactly once',()=>{
+  const source=product('historical',103);
+  const rows=source.variants.map((_,index)=>item(source,index,index<75?{status:'SCREENED',outcome:{kind:'RULE_FILTERED',code:index<60?'SKU_SELECTION_FILTERED':'ROI_MAX_PRICE',...(index>=60?{pricingReport:{}}:{})} as any}:index<99?{status:'FAILED',outcome:{kind:index<93?'SYSTEM_REPAIR':index===93?'NEEDS_INPUT':'UNKNOWN'} as any}:index<102?{status:'WAITING',stage:'READBACK'}:{status:'WAITING',stage:'LABELS'}));
+  const counts=buildAutomaticProductGroups(rows,[source])[0].outcomeCounts as any;
+  assert.equal(counts.notSelected,60);assert.equal(counts.profitFiltered,15);assert.equal(counts.systemRepair,18);assert.equal(counts.needsInput,1);assert.equal(counts.unknown,5);
+  assert.equal(counts.submittedAwaitingReadback,3);assert.equal(counts.labels,1);
+  assert.equal(Object.values(counts).reduce((a:number,b:any)=>a+b,0),103);
+});

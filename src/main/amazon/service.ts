@@ -39,7 +39,8 @@ import { assertStoredPricingForPaid } from './pricing-guard.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
 import { canSendToPreview } from './preview-validation.ts';
-import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
+import { assertPricingDecision } from '../listing-ai/history.ts';
+import type { SalesRecipe, SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
 import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.ts';
 import { salesStoreScope } from '../sales-plans/planning.ts';
 import { relationshipAttributes } from '../sales-plans/families.ts';
@@ -433,7 +434,7 @@ export class AmazonService {
   }
   private request(record: DraftRecord): JsonObject { return { productType: record.draft.schema.productType, requirements: record.draft.schema.requirements, attributes: record.draft.attributes }; }
   assertPricingForPaid(draftId:string):void { this.ensureOpen(); assertStoredPricingForPaid(this.persistence.db,draftId); }
-  private businessDefaults(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram, previousBusinessReport?: BusinessRuleReport, salesPlan?: SalesListingPlan): { attributes: JsonObject; report?: BusinessRuleReport } {
+  private businessDefaults(product: ProductDetail, variant: Variant, target: AmazonTarget, schema: AmazonSchema, attributes: JsonObject, program: ListingProgram, previousBusinessReport?: BusinessRuleReport, salesPlan?: SalesListingPlan, sourceSnapshot?:ProductDetail): { attributes: JsonObject; report?: BusinessRuleReport } {
     if (program !== 'haul') return { attributes };
     const cleanup=cleanHaulAttributes(program,attributes); attributes=cleanup.attributes;
     const receipt = getReceipt(this.persistence.db, product.id);
@@ -442,7 +443,7 @@ export class AmazonService {
     const costCny = currency.cny ? salesPlan ? salesPlan.recipe.totalCostCny : sourceQuotedCost(variant,validReceipt?receipt:null) : null;
     const matchingPackage=!salesPlan || salesPlan.recipe.components.length===1 && salesPlan.recipe.components[0].quantity===salesPlan.recipe.components[0].sourcePackPieces;
     const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, now: new Date(this.now()),
-      declarationScope:selectedDeclarationScope(salesPlan?this.getProduct(product.id):product,variant.id,salesPlan?.recipe.components),
+      declarationScope:selectedDeclarationScope(salesPlan?(sourceSnapshot??this.getProduct(product.id)):product,variant.id,salesPlan?.recipe.components),
       ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
       measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
     if(cleanup.removed.length)result.report.notices.push(haulCleanupReason(cleanup.removed));
@@ -603,6 +604,33 @@ export class AmazonService {
     const product = projectSalesProduct(this.getProduct(record.draft.productId),record.draft.salesPlan,record.draft.variantId), variant = product.variants.find(v=>v.id===record.draft.variantId);
     const plan=record.draft.salesPlan,matchingPackage=record.draft.schema.parentageLevel!=='PARENT'&&(!plan||plan.recipe.components.length===1&&plan.recipe.components[0].quantity===plan.recipe.components[0].sourcePackPieces);
     if (product.revision === record.draft.productRevision && variant) record.draft.sourceMapping = ruleSourceMapping(sourceMappingReport(product,variant,record.draft.schema,this.getTarget(record.draft.targetId),'haul',record.draft.attributes, matchingPackage?miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, record.draft.mode):{}), record.draft.businessRules, record.draft.attributes);
+  }
+  /** Read-only local gate for historical profit exclusions, also used by task adaptation.
+   * Re-evaluate actual cost, quantity and package inputs; never trust global revisions
+   * as permission to dispatch paid work. No draft, request or attempt is saved here.
+   * The returned pricing projection is evidence only, never a replacement saved draft.
+   */
+  previewPricing(draftId:string, source:ProductDetail, recipe?:SalesRecipe):AmazonDraft {
+    const draft=this.getDraft(draftId);
+    if(source.id!==draft.productId)throw new UserFacingError('定价来源与原商品不一致');
+    if(draft.businessRules)assertPricingDecision(draft.businessRules,draft);
+    let plan=draft.salesPlan;
+    if(plan){
+      const current=recipe??buildSalesRecipes(source,getReceipt(this.persistence.db,source.id),readListingRules(this.persistence.db)).find(value=>value.key===plan!.recipe.key);
+      if(!current)throw new UserFacingError('当前销售组合无法确认，保留原利润淘汰记录待补资料');
+      plan={...clone(plan),recipe:clone(current),namingChildKey:plan.namingChildKey===null?null:current.key};
+    }
+    const product=projectSalesProduct(source,plan,draft.variantId),variant=product.variants.find(value=>value.id===draft.variantId);
+    if(!variant)throw new UserFacingError('当前来源规格缺失，保留原利润淘汰记录待补资料');
+    const attributes=Object.fromEntries(['item_package_dimensions','item_package_weight','number_of_items','unit_count']
+      .filter(field=>Object.hasOwn(draft.attributes,field)).map(field=>[field,clone(draft.attributes[field])])) as JsonObject;
+    // Refresh unchanged generated inputs from current source/default rules. Manual
+    // edits stay visible, including contradictory or incomplete quantity values.
+    for(const [field,entry] of Object.entries(draft.businessRules?.fields??{}))
+      if(Object.hasOwn(attributes,field)&&semanticJson(attributes[field])===semanticJson(entry.value)
+        && !(draft.businessRules?.pricingBasis?.kind==='auto_bundle'&&['number_of_items','unit_count'].includes(field)))delete attributes[field];
+    const resolved=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,'haul',draft.businessRules,plan,source);
+    return {...draft,productRevision:source.revision,...(plan?{salesPlan:plan}:{}),attributes:resolved.attributes,businessRules:resolved.report};
   }
   /** Trusted preview coordinator: fill only missing business fields and retain manual edits. */
   applyBusinessDefaults(input: DraftReference, completionId?:string, revalidateLocal = false, checkpoint?: (draft:AmazonDraft, db:DatabaseSync)=>void): AmazonDraft {

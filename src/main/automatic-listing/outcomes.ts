@@ -47,3 +47,8 @@ export function assertCurrentPricingForPaid(draft:AmazonDraft,rules:ListingRules
   if(draft.businessRules.pricingDecision?.version===2&&!pricingEvidenceCurrent(draft,rules))
     throw new UserFacingError('定价输入已变化，请重新应用商品规则后再执行付费工作');
 }
+
+/** A revision change is never a quote. Admission needs a complete validated result. */
+export function qualifiedPricing(draft:AmazonDraft,rules:ListingRules):boolean {
+  return !!draft.businessRules?.quote&&draft.businessRules.pricingDecision?.status==='quoted'&&pricingEvidenceCurrent(draft,rules);
+}

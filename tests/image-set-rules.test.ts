@@ -187,6 +187,7 @@ test('singleton wrapped expected text evidence normalizes without relaxing evide
 const excludedPackagingNotes=[
   '箱规数值（8 x 6.5 x 32.3 cm、41 x 26 x 34 cm）属于外箱包装，不可当作产品尺寸使用。',
   '图上 10 个/盒、200 个/箱、净重与毛重、箱规 8*6.5*32.3cm 与 41*26*34cm 均为包装及整箱规格，不是单件属性，本槽不使用。',
+  'OCR 中箱规（8*6.5*32.3cm、41*26*34cm）与净重/毛重均为外箱包装数据，不用于单品尺寸图。',
 ];
 test('explicit excluded packaging metadata accepts retained replies without passing excluded numbers to generation',()=>{
   for(const note of excludedPackagingNotes)for(const field of ['summary','uncertainties']){
@@ -201,6 +202,21 @@ test('explicit excluded packaging metadata accepts retained replies without pass
     if(field==='uncertainties')assert.match(handoff,/Material cannot be inferred/);
     assert.deepEqual(p,before,'Retain the original diagnostic text, never rewrite stored replies');
   }
+});
+
+test('OCR packaging exclusions never hide neighboring claims or become creative instructions',()=>{
+  const note=excludedPackagingNotes[2];
+  for(const text of [note+'产品长 99 cm。','产品长 99 cm。'+note,note.replace('，不用于','，产品长 99 cm，不用于'),note.replace('32.3cm','32.3cm，产品长 99 cm')]){
+    const p=plan();p.productUnderstanding.uncertainties=[text];assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));
+  }
+  for(const field of ['prompt','scene','focus','style','caption']){
+    const p=plan();
+    if(field==='style')p.setPlan.style=note;
+    else if(field==='caption')p.setPlan.slots[1].expectedText=[{text:note,evidenceIds:['material']}];
+    else p.setPlan.slots[2][field]=note;
+    assert.throws(()=>assertImagePlan(validateImagePlan(p),context()),field);
+  }
+  const p=plan();p.prompt=note;assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));
 });
 test('excluded packaging metadata cannot exempt positive claims, mixed clauses, prompts or captions',()=>{
   for(const claim of [

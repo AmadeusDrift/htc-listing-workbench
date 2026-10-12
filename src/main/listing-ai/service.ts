@@ -87,7 +87,7 @@ export class ListingAiService {
       context.sourceProduct!.assets=this.sourceAssets(draft,product);
       const observations=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])].map(variantId=>this.ai.sourceObservationEvidence({productId:product.id,productRevision:product.revision,variantId}));
       context.sourceProduct!.observations=observations;
-      for(const source of observations)for(const image of source.images)for(const [index,observation] of (image.observations??[]).entries())context.evidence.push({id:`${source.variantId}:observation:${image.assetId}:${index}`,name:observation.name,value:observation.values.join(', '),meaning:'general',source:'image_observation'});
+      for(const source of observations)for(const image of source.images.filter(image=>!source.productReferenceAssetIds?.includes(image.assetId)))for(const [index,observation] of (image.observations??[]).entries())context.evidence.push({id:`${source.variantId}:observation:${image.assetId}:${index}`,name:observation.name,value:observation.values.join(', '),meaning:'general',source:'image_observation'});
       return validateListingContext(context);
     }
     if(!this.ai.listResults(product.id).some(result=>result.output.kind==='source-color'&&result.productRevision===product.revision))return context;

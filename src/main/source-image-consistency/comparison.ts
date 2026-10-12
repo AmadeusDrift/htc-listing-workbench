@@ -80,7 +80,8 @@ export function assertConsistencyOutput(output:SourceConsistencyOutput,context:P
 /** Host owns all verdicts; a model can only supply bounded, attributed observations. */
 export function reduceSourceConsistency(projection:SourceComparisonProjection,output:SourceConsistencyOutput):SourceConsistencyConclusion {
   if(output.version===SOURCE_OBSERVATION_VERSION){
-    const contradictions=projection.claims.filter(c=>output.assets.some(a=>a.quality==='clear'&&a.lighting==='neutral'&&a.presentation==='single-product'&&a.claims.some(o=>o.claimId===c.id&&o.visibility==='visible'&&o.value!==c.value))).map(c=>`VISIBLE_CONTRADICTION:${c.id}`);
+    const productReferences=new Set((projection as Partial<SourceConsistencyContext>).referenceAssets?.filter(a=>a.scope==='product').map(a=>a.assetId)??[]);
+    const contradictions=projection.claims.filter(c=>output.assets.some(a=>!productReferences.has(a.assetId)&&a.quality==='clear'&&a.lighting==='neutral'&&a.presentation==='single-product'&&a.claims.some(o=>o.claimId===c.id&&o.visibility==='visible'&&o.value!==c.value))).map(c=>`VISIBLE_CONTRADICTION:${c.id}`);
     return {decision:'MATCH',reasons:['SOURCE_BINDING_REUSED',...projection.issues,...contradictions]};
   }
   const reasons=[...projection.issues];

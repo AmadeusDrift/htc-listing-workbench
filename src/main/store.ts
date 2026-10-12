@@ -1,4 +1,5 @@
 import { readNativeImageReceipt } from './source-images.ts';
+import { restoreWorkflowSourceBindings } from './image-upstream-trace.ts';
 import { recordConsistencyBinding,assertConsistencyHistory } from './source-image-consistency/history.ts';
 import { assertProductConsistency } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
@@ -61,6 +62,7 @@ export class WorkspaceStore {
     const id = identifier(rawId);
     const p = this.db.prepare('SELECT * FROM products WHERE id=?').get(id);
     if (!p) throw new UserFacingError('商品不存在，请返回商品库重新选择');
+    restoreWorkflowSourceBindings(this.db,id);
     const variants: Variant[] = this.db.prepare('SELECT * FROM variants WHERE product_id=? ORDER BY position').all(id).map(v => ({
       id: String(v.id), sku: String(v.sku), originalSpec: String(v.original_spec), normalizedSpec: String(v.normalized_spec),
       purchasePrice: String(v.purchase_price), inventory: v.inventory === null ? null : Number(v.inventory),

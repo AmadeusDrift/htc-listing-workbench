@@ -199,7 +199,7 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
     for(const message of categoryConflicts)issues.push({code:'SOURCE_VALUE_CONFLICT',message,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});
     if(candidate.field==='color'){
       const actual=nativeText(candidate.field,candidate.nativeValue!).map(exactSkuColorIdentity).filter(Boolean);
-      const observed=c.sourceProduct?.observations?.flatMap(source=>source.images.flatMap(image=>image.colors.map(exactSkuColorIdentity).filter(Boolean)))??[];
+      const observed=c.sourceProduct?.observations?.flatMap(source=>source.images.filter(image=>!source.productReferenceAssetIds?.includes(image.assetId)).flatMap(image=>image.colors.map(exactSkuColorIdentity).filter(Boolean)))??[];
       const expected=c.evidence.filter(e=>e.meaning==='color'||e.name==='Selected SKU specification').map(e=>exactSkuColorIdentity(e.value)).filter(Boolean);
       if(actual.length&&expected.length&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value)))issues.push({code:'SOURCE_VALUE_CONFLICT',message:'color：候选颜色与当前 SKU 明确颜色矛盾，且没有绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
     }

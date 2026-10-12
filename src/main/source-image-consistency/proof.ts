@@ -54,11 +54,12 @@ export function assertConsistencyView(view:SourceConsistencyView):void {
 export function readSourceObservationEvidence(db:DatabaseSync,context:SourceConsistencyContext):import('../../shared/source-image-consistency-contracts.ts').SourceObservationEvidence {
   const view=readConsistencyView(db,context);assertConsistencyView(view);
   const images=view.observations?.assets??[];
+  const productReferenceAssetIds=context.referenceAssets.filter(a=>a.scope==='product').map(a=>a.assetId);
   const conflicts=context.claims.flatMap(claim=>{
-    const observed=images.flatMap(asset=>asset.quality==='clear'&&asset.lighting==='neutral'&&asset.presentation==='single-product'?asset.claims.filter(c=>c.claimId===claim.id&&c.visibility==='visible'&&c.value!==claim.value).map(c=>({value:c.value!,assetId:asset.assetId})):[]);
+    const observed=images.filter(asset=>!productReferenceAssetIds.includes(asset.assetId)).flatMap(asset=>asset.quality==='clear'&&asset.lighting==='neutral'&&asset.presentation==='single-product'?asset.claims.filter(c=>c.claimId===claim.id&&c.visibility==='visible'&&c.value!==claim.value).map(c=>({value:c.value!,assetId:asset.assetId})):[]);
     return observed.length?[{claimId:claim.id,fieldId:claim.fieldId,axis:claim.axis,sourceValue:claim.value,observedValues:[...new Set(observed.map(o=>o.value))],assetIds:[...new Set(observed.map(o=>o.assetId))]}]:[];
   });
-  return {version:SOURCE_OBSERVATION_VERSION,variantId:context.variantId,assessmentId:view.assessmentId,sourceFields:context.fields,images,conflicts,reasons:view.reasons};
+  return {version:SOURCE_OBSERVATION_VERSION,variantId:context.variantId,assessmentId:view.assessmentId,sourceFields:context.fields,images,...(productReferenceAssetIds.length?{productReferenceAssetIds}:{}),conflicts,reasons:view.reasons};
 }
 export async function saveConsistencyDecision(db:DatabaseSync,store:WorkspaceStore,directory:string,raw:unknown,checkpoint:()=>Promise<void>=async()=>{}):Promise<SourceConsistencyView>{
   const o=keys(raw,['productId','productRevision','variantId','fingerprint','decision','reason']);

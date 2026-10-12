@@ -32,7 +32,7 @@ export interface ProductImageContext {
   listingReviewResultId: string | null;
   /** Explicitly skipped independent copy review; never a passing review result. */
   copyReviewBypass?: { policy: 'copy-review-disabled/v1'; at: string; contextSha256: string; copySha256: string };
-  referenceAssets: { assetId: string; sha256: string; variantId: string | null }[];
+  referenceAssets: { scope?:'product'; assetId: string; sha256: string; variantId: string | null }[];
   purpose: 'main' | 'detail';
   policyVersion: ProductImagePolicyVersion;
   /** Required by ip-v3; absent in historical contexts. */

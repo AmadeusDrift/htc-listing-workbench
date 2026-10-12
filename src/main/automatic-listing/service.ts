@@ -842,7 +842,21 @@ export class AutomaticListingService {
         // caller is interrupted immediately after that transaction returns.
         if(op.scopedRepair&&op.state==='DONE'){
           const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
-          if(saved)Object.assign(task,validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+          if(saved){
+            const durable=validateAutomaticListingTask(JSON.parse(String(saved.record_json))),items=task.items;
+            // pump retains both this array's iterator and the current row. Sync
+            // every row in place so its catch and later siblings save the same
+            // objects, including newly persisted pause/cancel and checkpoints.
+            const current=new Map(items.map(item=>[item.key,item]));
+            const restored=durable.items.map(savedItem=>{
+              const item=current.get(savedItem.key);if(!item)return savedItem;
+              for(const key of Object.keys(item))if(!Object.hasOwn(savedItem,key))Reflect.deleteProperty(item,key);
+              return Object.assign(item,savedItem);
+            });
+            items.splice(0,items.length,...restored);
+            for(const key of Object.keys(task))if(!Object.hasOwn(durable,key))Reflect.deleteProperty(task,key);
+            Object.assign(task,{...durable,items});
+          }
         }
         throw error;
       }

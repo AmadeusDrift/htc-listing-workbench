@@ -62,3 +62,22 @@ for(const table of ['image_workflow_runs','audit_events'])test(`invalid JSON in 
  assert.deepEqual(f.ai.completionJournal.legacySourceAssets(product,f.op),product.assets);
 });
 
+for(const damage of ['missing-candidates','invalid-candidates','wrong-run-id','missing-slot-attempt'])test(`incomplete adoption identity ${damage} cannot exclude generated assets`,async t=>{
+ const f=await setup(t);f.output();
+ if(damage==='missing-candidates'){
+  f.db.prepare("UPDATE audit_events SET detail_json=json_remove(detail_json,'$.candidateId') WHERE action='image.workflow.adopted'").run();
+  f.db.prepare("UPDATE image_workflow_runs SET record_json=json_remove(record_json,'$.slots[0].attempts[0].candidateId')").run();
+ }
+ if(damage==='invalid-candidates'){
+  f.db.prepare("UPDATE audit_events SET detail_json=json_set(detail_json,'$.candidateId','invalid') WHERE action='image.workflow.adopted'").run();
+  f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.slots[0].attempts[0].candidateId','invalid')").run();
+ }
+ if(damage==='wrong-run-id')f.db.prepare("UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.id',?)").run(randomUUID());
+ if(damage==='missing-slot-attempt'){
+  f.db.prepare("UPDATE audit_events SET detail_json=json_remove(detail_json,'$.slot','$.attempt') WHERE action='image.workflow.adopted'").run();
+  f.db.prepare("UPDATE image_workflow_runs SET record_json=json_remove(record_json,'$.slots[0].index','$.slots[0].attempts[0].number')").run();
+ }
+ assert.throws(()=>f.listing.beginCompletion(f.reference,f.op.id),/字段操作来源、店铺或审核策略已变化/);
+ assert.throws(()=>(f.listing as any).completionDraft(f.op),/字段操作来源、店铺或审核策略已变化/);
+ assert.equal(f.requests.length,0);
+});

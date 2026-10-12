@@ -223,11 +223,11 @@ test('confirmed pricing rejection is terminal and excluded only in the same targ
   assert.equal((await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,1);
   f.target.sellerId='seller';f.rules.revision++;
   const changed=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});
-  assert.equal(changed.products[0].eligibleCount,1);assert.match(changed.products[0].rows[0].reconsideration,/规则/);assert.equal(changed.products[0].rows[0].noticeCode,'RULES_CHANGED');
+  assert.equal(changed.products[0].eligibleCount,0,'global revision must not authorize paid retry without local repricing');
   assert.equal(f.service.get(task.id).items[0].status,'SCREENED','read projection preserves audit');
   f.rules.revision--;
   const oldTitle=f.product.title;f.product.title='Updated source facts';
-  const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,1);assert.match(sourceChanged.products[0].rows[0].reconsideration!,/来源/);assert.equal(sourceChanged.products[0].rows[0].noticeCode,'SOURCE_CHANGED');f.product.title=oldTitle;
+  const sourceChanged=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(sourceChanged.products[0].eligibleCount,0,'source title must not reopen profit rejection');f.product.title=oldTitle;
   await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);
   try{assert.deepEqual(restored.get(task.id),saved);assert.equal((await restored.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].filteredCount,1);assert.throws(()=>restored.prepareStart(task.id),/已经结束/);}finally{await restored.close();}
 });
@@ -1353,7 +1353,7 @@ test('demo readback does not require a live followup record',async t=>{
 test('automatic SKU policy is enforced in legacy preview and task creation',async t=>{
  const f=fixture(t);f.product.variants=Array.from({length:7},(_,i)=>({...f.product.variants[0],id:randomUUID(),sku:'selection-'+i,originalSpec:i===0?'更低价格请咨询客服~':['红色','蓝色','白色','黑色','绿色','黄色'][i-1],normalizedSpec:''}));
  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
- assert.equal(queue.products[0].rows.length,4);
+ assert.equal(queue.products[0].rows.length,7);assert.equal(queue.products[0].notSelectedCount,3);assert.equal(queue.products[0].eligibleCount,4);
  const task=await f.create();assert.equal(task.items.length,4);assert.ok(task.items.every(r=>r.variantId!==f.product.variants[0].id));
 });
 test('old unsubmitted informational row is screened without deleting its saved work',async t=>{
@@ -1365,10 +1365,10 @@ test('old unsubmitted informational row is screened without deleting its saved w
 });
 
 
-test('all informational source is visibly rule filtered and creates no task',async t=>{
+test('all informational source is visibly not selected and creates no task',async t=>{
  const f=fixture(t);f.product.variants[0].originalSpec='更低价格请咨询客服~';f.product.variants[0].normalizedSpec='';f.product.variants[0].sourceSpec='';
  const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
- assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].filteredCount,1);assert.match(queue.products[0].rows[0].message,/说明/);
+ assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].filteredCount,0);assert.equal(queue.products[0].notSelectedCount,1);assert.match(queue.products[0].rows[0].message,/未选中/);
  await assert.rejects(f.create,/没有可启动/);
 });
 
@@ -1481,4 +1481,21 @@ test('failed start checkpoint restores persisted paused state and permits a clea
  assert.deepEqual(f.service.get(task.id),before);assert.equal((f.service as any).grants.has(task.id),false);assert.equal(f.service.busy,false);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
  assert.deepEqual(JSON.parse(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json),before);
  db.exec('DROP TRIGGER fail_start');f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED');
+});
+
+
+test('changed recipe quantity cannot bypass a historical profit rejection by changing its key',async t=>{
+ const f=fixture(t,'live');f.rules.pricing.bundleEnabled=false;f.product.variants[0].purchasePrice='100';
+ f.dependencies.planSales=()=>buildSalesRecipes(f.product,null,f.rules).map((recipe):SalesListingPlan=>({namingGroupId:randomUUID(),sourceGroupKey:'same-source',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE-ONE',baseSku:'SALE-ONE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));
+ const prepare=f.dependencies.amazon.prepareDrafts;
+ const reprice=(draft:AmazonDraft,recipe:SalesListingPlan['recipe'])=>{
+   const result=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:recipe.totalCostCny,saleUnit:recipe,packageMatchesSaleUnit:true,now:new Date()},f.rules);
+   return {...draft,salesPlan:{...draft.salesPlan!,recipe},attributes:result.attributes,businessRules:result.report};
+ };
+ f.dependencies.amazon.prepareDrafts=async(raw,plans)=>{const result=await prepare(raw,plans),draft=result.items[0].draft!;draft.sku=plans![0].sku;draft.salesPlan=plans![0];Object.assign(draft,reprice(draft,plans![0].recipe));f.drafts.set(draft.id,structuredClone(draft));return result;};
+ const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ assert.equal(f.service.get(task.id).items[0].status,'SCREENED');
+ f.product.variants[0].originalSpec='red 2 pc';f.product.variants[0].normalizedSpec='red 2 pc';
+ let previews=0;f.dependencies.amazon.previewPricing=(id,_source,recipe)=>{previews++;return reprice(f.drafts.get(id)!,recipe!);};
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,0);assert.equal(previews,1);assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
 });

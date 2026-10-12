@@ -19,6 +19,7 @@ export interface AutomaticListingOutcome {
   version:1; kind:AutomaticOutcomeKind; code:string; message:string; classifiedAt:string;
   scope:{mode:'demo'|'live';sellerId:string;marketplaceId:string;productId:string;recipeKey:string;recipeStamp:string;sourceStamp:string;rulesStamp:string;ruleRevision:number};
   draftId:string|null; draftRevision:number|null;
+  /** Validated business profit evidence; SKU_SELECTION_FILTERED has no pricing report. */
   pricingReport?:import('./listing-rules.ts').BusinessRuleReport;
   image?:AutomaticRuleEvidence;
 }
@@ -31,7 +32,7 @@ export interface AutomaticQueueRow {
 }
 export interface AutomaticListingQueue {
   targetId:string; scope:{mode:'demo'|'live';sellerId:string;marketplaceId:string};ruleRevision:number;
-  products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
+  products:{productId:string;title:string;eligibleCount:number;pendingCount:number;filteredCount:number;profitFilteredCount?:number;notSelectedCount?:number;inputIssue?:string;rows:AutomaticQueueRow[]}[];
 }
 export interface AutomaticListingItem {
   /** Written in the same SQLite transaction as the local pricing draft update. */

@@ -24,9 +24,13 @@ export function automaticItemReason(item: AutomaticListingItem): string {
   };
   return item.status === 'WAITING' ? waiting[item.stage] : presentRejection(code);
 }
-export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
+export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'notSelected' | 'profitFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
   if (item.status === 'FAILED'||item.status==='SCREENED') {
+    if(item.outcome?.kind==='RULE_FILTERED'){
+      if(item.outcome.code==='SKU_SELECTION_FILTERED')return 'notSelected';
+      if(item.outcome.pricingReport)return 'profitFiltered';
+    }
     return item.outcome?({RULE_FILTERED:'ruleFiltered',SYSTEM_REPAIR:'systemRepair',NEEDS_INPUT:'needsInput',UNKNOWN:'unknown',UNCLASSIFIED:'unclassified'} as const)[item.outcome.kind]:'unclassified';
   }
   if (item.status === 'DONE') return 'completed';
@@ -35,7 +39,7 @@ export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemO
   return item.status === 'RUNNING' ? 'running' : item.status === 'WAITING' ? 'waiting' : 'pending';
 }
 export function summarizeAutomaticItems(items: AutomaticListingItem[]): Record<AutomaticItemOutcome, number> {
-  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, ruleFiltered: 0, needsInput: 0, systemRepair: 0, unknown:0,unclassified:0 };
+  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, ruleFiltered: 0, notSelected:0, profitFiltered:0, needsInput: 0, systemRepair: 0, unknown:0,unclassified:0 };
   for (const item of items) counts[automaticItemOutcome(item)]++;
   return counts;
 }
@@ -108,7 +112,7 @@ export function automaticQueueReason(row:AutomaticQueueRow):string {
  if(row.kind==='UNKNOWN')return presentRejection(undefined,true);
  if(row.kind==='COMPLETED')return '流程已完成';
  if(row.kind==='SUBMITTED')return '已提交，等待平台回读或标签';
- const notices:Record<string,string>={RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'定价输入已变化，重新评估',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估',UNKNOWN_RECONCILED:'原未知结果已核对，可重新准备；历史未知记录保留，不会自动重试',EVIDENCE_READ_FAILED:'暂无法核对已保存证据，记录保留待修复'};
+ const notices:Record<string,string>={RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'当前定价已在本地重算合格',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估',UNKNOWN_RECONCILED:'原未知结果已核对，可重新准备；历史未知记录保留，不会自动重试',EVIDENCE_READ_FAILED:'暂无法核对已保存证据，记录保留待修复'};
  const notice=row.noticeCode&&Object.hasOwn(notices,row.noticeCode)?notices[row.noticeCode]:undefined;
  const text=notice?(notice+(['UNKNOWN_RECONCILED','EVIDENCE_READ_FAILED'].includes(row.noticeCode!)?'':'；原淘汰记录保留，旧任务不会自动重启')):row.reasonCode||row.message?presentRejection(row.reasonCode):'';
  return [text,row.continuationRequired?'请继续或取消原任务':''].filter(Boolean).join('；');

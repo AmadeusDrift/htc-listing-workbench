@@ -17,6 +17,8 @@ export function outcomeScope(task:AutomaticListingTask,row:AutomaticListingItem)
 export function pricingEvidenceCurrent(draft:AmazonDraft,rules:ListingRules):boolean {
   const report=draft.businessRules,decision=report?.pricingDecision;if(!report||!decision||report.revision!==rules.revision)return false;
   try{assertPricingDecision(report,draft);}catch{return false;}
+  // A numerical quote does not establish which sale quantity its cost buys.
+  if(decision.status==='quoted'&&(decision.evidence.saleUnit!=='confirmed'||draft.salesPlan&&report.bundleQuantity!==draft.salesPlan.recipe.totalPieces))return false;
   const entry=(field:string):any=>Array.isArray(draft.attributes[field])&&draft.attributes[field].length===1?draft.attributes[field][0]:null;
   const converted=(value:any,kind:'length'|'weight')=>{if(!value)return null;const result=convertMeasurement(value.value,value.unit,kind);return result.status==='mapped'?result.value:null;};
   const dimensions=entry('item_package_dimensions'),axes=['length','width','height'].map(axis=>converted(dimensions?.[axis],'length'));
@@ -31,7 +33,7 @@ export function pricingEvidenceCurrent(draft:AmazonDraft,rules:ListingRules):boo
 export function pricingOutcome(draft:AmazonDraft,rules:ListingRules):Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'>|null {
   const report=draft.businessRules;if(!report)return null;
   if(Object.hasOwn(report,'pricingDecision'))try{assertPricingDecision(report,draft);}catch{return {kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};}
-  if(report.pricingDecision?.version===2&&!pricingEvidenceCurrent(draft,rules))return {kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
+  if(report.pricingDecision&&(report.pricingDecision.version===2||report.quote)&&!pricingEvidenceCurrent(draft,rules))return {kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
   if(report.quote)return report.revision!==rules.revision?{kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'}:null;
   if(!report.pricingDecision)return {kind:'UNCLASSIFIED',code:'LEGACY_FAILURE'};
   if(!pricingEvidenceCurrent(draft,rules))return {kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
@@ -46,4 +48,9 @@ export function assertCurrentPricingForPaid(draft:AmazonDraft,rules:ListingRules
   assertPricingDecision(draft.businessRules,draft);
   if(draft.businessRules.pricingDecision?.version===2&&!pricingEvidenceCurrent(draft,rules))
     throw new UserFacingError('定价输入已变化，请重新应用商品规则后再执行付费工作');
+}
+
+/** A revision change is never a quote. Admission needs a complete validated result. */
+export function qualifiedPricing(draft:AmazonDraft,rules:ListingRules):boolean {
+  return !!draft.businessRules?.quote&&draft.businessRules.pricingDecision?.status==='quoted'&&pricingEvidenceCurrent(draft,rules);
 }

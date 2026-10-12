@@ -43,14 +43,14 @@ import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import { sourceImageMappingDiagnosis } from '../image-workflow/sources.ts';
 import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
 import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow, AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
-import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, recipeKey } from './outcomes.ts';
+import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, qualifiedPricing, recipeKey } from './outcomes.ts';
 import { previewSalesRecipes } from '../sales-plans/planning.ts';
-import { informationalVariant, selectSalesRecipes } from '../sales-plans/selection.ts';
+import { selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
   store: Pick<WorkspaceStore, 'getProduct'>;
   rules(): ListingRules;
-  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults'>>;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults' | 'previewPricing'>>;
   hosting: Pick<HostingService, 'getProfile'>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     getRiskSettings?: () => {enabled:boolean};
@@ -248,14 +248,14 @@ export class AutomaticListingService {
     const taskRevisions=fingerprint(revisions()),evidenceStamp=fingerprint(evidenceState()),receipts=new Map(ids.map(id=>[id,this.deps.sourceReceipt?.(id)??null]));
     const snapshots=ids.map(id=>this.deps.store.getProduct(id)),products:AutomaticListingQueue['products']=[];
     for(const product of snapshots){
-      let recipes:{key:string;specification:string;stamp:string;legacyVariantId:string|null}[],planningError:string|null=null;
-      try{recipes=this.deps.planSales?selectSalesRecipes(product,this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules),rules,receipts.get(product.id)??null).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
+      let recipes:{key:string;specification:string;stamp:string;legacyVariantId:string|null;value?:SalesListingPlan['recipe']}[],planningError:string|null=null;
+      try{recipes=this.deps.planSales?selectSalesRecipes(product,this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules),rules,receipts.get(product.id)??null).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),value:recipe,legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
         :this.selectedVariants(product).map(v=>({key:v.id,specification:v.normalizedSpec||v.originalSpec,stamp:fingerprint({variantId:v.id}),legacyVariantId:v.id}));}
       catch(error){planningError=errorMessage(error);recipes=[];}
       const rows:AutomaticQueueRow[]=[];
       for(const recipe of recipes){
         const histories=[...this.tasks.values()].filter(t=>t.mode===target.target.mode&&t.sellerId===target.target.sellerId&&t.marketplaceId===target.target.marketplaceId)
-          .flatMap(task=>task.items.filter(item=>item.productId===product.id&&(item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)).map(item=>({task,item}))).reverse();
+          .flatMap(task=>task.items.filter(item=>item.productId===product.id&&((item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)||item.outcome?.pricingReport&&recipe.value&&fingerprint((item.salesPlan?.recipe.components.map(c=>c.variantId)??[item.variantId]).sort())===fingerprint(recipe.value.components.map(c=>c.variantId).sort()))).map(item=>({task,item}))).reverse();
         const latest=histories[0],view:AutomaticQueueRow={key:product.id+':'+recipe.key,productId:product.id,recipeKey:recipe.key,specification:recipe.specification,sku:latest?.item.sku??null,kind:'PENDING',eligible:true,message:'',reconsideration:null,taskId:latest?.task.id??null};
         try{
           const unsafe=histories.find(h=>this.unknownCode(h.item,h.task));
@@ -263,7 +263,20 @@ export class AutomaticListingService {
           else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读或标签';}
           else if(latest){
             const {task,item}=latest,outcome=item.outcome;
-            if(outcome?.kind==='RULE_FILTERED'){
+            if(outcome?.kind==='RULE_FILTERED'&&outcome.pricingReport){
+              // A changed global stamp never grants another paid attempt. Only a
+              // validated local quote can reopen a previously profit-blocked sale.
+              const current=item.draftId&&this.deps.amazon.previewPricing?.(item.draftId,product,recipe.value);
+              if(current){
+                const pricing=pricingOutcome(current,rules);
+                if(!pricing&&qualifiedPricing(current,rules)){view.noticeCode='PRICING_CHANGED';view.reconsideration='当前定价已在本地重算合格';view.message=view.reconsideration+'；原淘汰记录保留';}
+                else {view.kind=pricing?.kind??'NEEDS_INPUT';view.reasonCode=pricing?.code??'PRICING_EVIDENCE_STALE';view.eligible=false;view.message=current.businessRules?.notices.join('；')||outcome.message;}
+              }else{
+                const draft=item.draftId?this.deps.amazon.getDraft(item.draftId):null;
+                const unchanged=outcome.scope.rulesStamp===fingerprint(rules)&&outcome.scope.sourceStamp===sourceStamp(product)&&outcome.scope.recipeStamp===recipe.stamp&&draft&&pricingEvidenceCurrent(draft,rules);
+                view.kind=unchanged?'RULE_FILTERED':'NEEDS_INPUT';view.reasonCode=unchanged?outcome.code:'PRICING_EVIDENCE_STALE';view.eligible=false;view.message=unchanged?outcome.message:'需要本地重算定价；原利润淘汰与成果保留';
+              }
+            }else if(outcome?.kind==='RULE_FILTERED'){
               let stale:AutomaticQueueRow['noticeCode']=outcome.scope.rulesStamp!==fingerprint(rules)?'RULES_CHANGED':outcome.scope.sourceStamp!==sourceStamp(product)?'SOURCE_CHANGED':outcome.scope.recipeStamp!==recipe.stamp?'RECIPE_CHANGED':undefined;
               if(!stale&&item.draftId){
                 const draft=this.deps.amazon.getDraft(item.draftId);
@@ -283,8 +296,9 @@ export class AutomaticListingService {
         }catch{view.kind='SYSTEM_REPAIR';delete view.continuationRequired;view.noticeCode='EVIDENCE_READ_FAILED';view.message='暂无法核对已保存证据，记录保留待修复';view.eligible=false;}
         rows.push(view);
       }
-      if(!planningError&&!recipes.length)for(const variant of product.variants.filter(informationalVariant))rows.push({key:product.id+':'+variant.id,productId:product.id,recipeKey:variant.id,specification:variant.originalSpec,sku:null,kind:'RULE_FILTERED',eligible:false,reasonCode:'SKU_SELECTION_FILTERED',message:'说明性/服务性选项不参与自动上架，原始资料保留',reconsideration:null,taskId:null});
-      products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
+      const selectedSourceIds=new Set(recipes.flatMap(recipe=>recipe.value?.components.map(c=>c.variantId)??(recipe.legacyVariantId?[recipe.legacyVariantId]:[])));
+      if(!planningError)for(const variant of product.variants.filter(v=>!selectedSourceIds.has(v.id)))rows.push({key:product.id+':'+variant.id,productId:product.id,recipeKey:variant.id,specification:variant.originalSpec,sku:null,kind:'RULE_FILTERED',eligible:false,reasonCode:'SKU_SELECTION_FILTERED',message:'本次未选中此来源规格，原始资料与历史记录保留',reconsideration:null,taskId:null});
+      products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&r.reasonCode!=='SKU_SELECTION_FILTERED').length,profitFilteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&['ROI_MAX_PRICE','ROI_PROMOTION_OR_MARGIN','DIMENSIONAL_WEIGHT_LIMIT'].includes(r.reasonCode??'')).length,notSelectedCount:rows.filter(r=>r.reasonCode==='SKU_SELECTION_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
     }
     if(fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(revisions())!==taskRevisions||fingerprint(evidenceState())!==evidenceStamp||snapshots.some(p=>fingerprint(this.deps.store.getProduct(p.id))!==fingerprint(p)||fingerprint(this.deps.sourceReceipt?.(p.id)??null)!==fingerprint(receipts.get(p.id))))throw new UserFacingError('读取期间范围已变化，请刷新');
     return {targetId,scope:{mode:target.target.mode,sellerId:target.target.sellerId,marketplaceId:target.target.marketplaceId},ruleRevision:rules.revision,products};

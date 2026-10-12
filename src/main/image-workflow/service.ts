@@ -53,7 +53,7 @@ import { imageListingContextsMatch,imageActualInputsMatch } from './context-comp
 import type { AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 
-type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'|'currentAuthorizationContext'>> & {
+type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'> & Partial<Pick<ListingAiService,'hasRetainedFieldReferences'|'repairCurrentForImages'|'snapshotCurrentForImages'|'beginCompletion'|'currentAuthorizationContext'>> & {
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
@@ -466,7 +466,7 @@ export class ImageWorkflowService {
       throwIfAborted(signal);
       this.reevaluatePolicy(run,initial);
       const cached=run.contentPreparation;
-      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId)))){
+      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId))||this.listing.hasRetainedFieldReferences?.(initial))){
         const op=new CompletionJournal(this.db).get(cached.operationId);
         if(op.state==='DONE'){
           if(cached.state==='DONE'&&(cached.draftRevision!==initial.revision||cached.draftSha256&&cached.draftSha256!==imageWorkflowDraftStamp(initial)))throw new UserFacingError('旧事实恢复对应的草稿已变化，原记录保留');

@@ -1,9 +1,17 @@
+import {listingFingerprint} from '../listing-ai/validation.ts';
+import {validateStoredAiResult} from './validation.ts';
 import { resultHasOwner } from './result-owner.ts';
 import type { AiCall,AiResult } from '../../shared/ai-contracts.ts';
 import { AiError } from './errors.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
 export function assertPresentationResultOwner(result:AiResult,call:AiCall|undefined,database?:DatabaseSync):void{
+ if(result.fieldCandidateRecovery){
+  if(!database||!resultHasOwner(result,call))throw new AiError('INVALID_CONFIG');
+  const original=validateStoredAiResult(result.fieldCandidateRecovery.originalResult),row=database.prepare('SELECT record_json FROM ai_results WHERE id=?').get(original.id);
+  if(!row||listingFingerprint(JSON.parse(String(row.record_json)))!==result.fieldCandidateRecovery.originalSha256)throw new AiError('INVALID_CONFIG');
+  assertPresentationResultOwner(original,call,database);return;
+ }
  if(result.localRecovery){
   if(!database||!resultHasOwner(result,call))throw new AiError('INVALID_CONFIG');
   const operation=new CompletionJournal(database).get(result.localRecovery.operationId);

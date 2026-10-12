@@ -119,34 +119,6 @@ test('two explicit review rejections exhaust automatic repair without adopting e
   assert.ok(JSON.parse(f.requests[2].messages[1].content).repairRequest.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW'));
 });
 
-for (const secondReviewComplete of [true, false]) test(`incomplete claim coverage enters bounded repair; second review complete=${secondReviewComplete}`, async t => {
-  const f = await legacyFixture(t); let reviews = 0;
-  f.amazon.previewDraft = async () => {
-    const draft = f.amazon.getDraft(f.draft.id), adopted = Boolean(draft.fieldAdoptions?.length);
-    return { ...draft, state: adopted ? 'AMAZON_VALIDATED' : 'BLOCKED', previewIssues: adopted ? [] : [issue('product_description')] };
-  };
-  f.respond(payload => {
-    if (!payload.candidate) return chat(candidateFor(payload));
-    const review = reviewFor(payload);
-    if (++reviews === 1 || !secondReviewComplete) review.checks[0].claims[0].text = 'blue silicone';
-    return chat(review);
-  });
-  const result = await f.listing.complete(f.reference);
-  assert.equal(result.aiCalls, 4); assert.equal(f.requests.length, 4); assert.equal(reviews, 2);
-  const repair = JSON.parse(f.requests[2].messages[1].content).repairRequest;
-  assert.ok(repair.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW' && entry.message.includes('coaster')));
-  assert.equal(result.draft.fieldAdoptions?.length ?? 0, secondReviewComplete ? 1 : 0);
-  if (secondReviewComplete) {
-    assert.deepEqual(result.remaining, []);
-    assert.equal((result.draft.attributes.product_description as any)[0].value, 'A blue silicone coaster.');
-    const adoptedReview = f.ai.getResult(result.draft.fieldAdoptions![0].reviewResultId!);
-    assert.equal((adoptedReview!.output as any).verdict, 'PASS');
-  } else {
-    assert.deepEqual(result.draft.attributes.product_description, f.draft.attributes.product_description);
-    assert.ok(result.remaining.some(value => value.includes('复核遗漏文字')));
-  }
-});
-
 for (const secondReviewPass of [true, false]) test(`negative item verdict alias enters bounded completion; second review passes=${secondReviewPass}`, async t => {
   const f = await fixture(t); let reviews = 0;
   f.amazon.previewDraft = async () => {

@@ -90,7 +90,7 @@ export function parseFullOutput(raw:unknown):ListingFieldsOutput {
 }
 /** A supplied, explicitly bound source image is its own citation, not a made-up text fact.
  * Source/context freshness and protected-field authority remain checked by their owners. */
-function fullReference(context:Pick<ListingAiContext,'evidence'> & Partial<ListingAiContext>,id:string):boolean {
+export function fullReference(context:Pick<ListingAiContext,'evidence'> & Partial<ListingAiContext>,id:string):boolean {
   if(context.evidence.some(e=>e.id===id))return true;
   return !!context.variantId&&context.sourceProduct?.selectedSku.id===context.variantId
     &&context.sourceProduct.assets.some(asset=>asset.id===id&&asset.variantIds.includes(context.variantId!));

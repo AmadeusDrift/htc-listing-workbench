@@ -38,7 +38,7 @@ export function negativeReviewAliases(raw: unknown): unknown {
   return { ...root, checks, verdict: 'NEEDS_CHANGES', issues };
 }
 
-/** Missing review coverage is a correction request, never evidence or approval. */
+/** Missing coverage is a reviewer failure, never a product correction or approval. */
 export function requireCompleteReview(raw: unknown, copy: { field: CandidateField; values: string[] }[]): ListingFieldsReviewOutput {
   const review = validateListingReviewOutput(negativeReviewAliases(raw));
   for (const item of copy) for (const [index, value] of item.values.entries()) {
@@ -52,15 +52,7 @@ export function requireCompleteReview(raw: unknown, copy: { field: CandidateFiel
     }
     const uncovered = value.split('').map((char, index) => covered[index] ? ' ' : char).join('');
     if (!/[\p{L}\p{N}]/u.test(uncovered.replace(/\b(?:a|an|the|and|or|of|for|in|with|to|on|at|is|are)\b/gi, ''))) continue;
-    // Retain every original claim so this cannot hide bad citations or contradictions.
-    // Keep the persisted claim bounds; overlong or excessive output still fails closed.
-    if (value.length > 500 || check.claims.length >= 12) throw new AiError('OUTPUT_INVALID');
-    const reason = `复核遗漏文字：${uncovered.trim().replace(/\s+/g, ' ')}。请删除未审核的表述或基于已有事实重写后重新复核。`;
-    check.claims.push({ text: value, verdict: 'UNSUPPORTED', evidenceIds: [], reason });
-    if (check.verdict !== 'CONTRADICTED') check.verdict = 'UNSUPPORTED';
-    check.reason = reason;
-    review.issues.push({ field: item.field, message: reason });
-    if (review.verdict !== 'BLOCKED') review.verdict = 'NEEDS_CHANGES';
+    throw new AiError('OUTPUT_INVALID');
   }
   return validateListingReviewOutput(review);
 }

@@ -1,3 +1,4 @@
+import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -463,7 +464,7 @@ export class ImageWorkflowService {
       throwIfAborted(signal);
       this.reevaluatePolicy(run,initial);
       const cached=run.contentPreparation;
-      if(!run.imageContext&&cached?.operationId&&needsBusinessAuthorityRefresh(initial,cached.remaining)){
+      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId)))){
         const op=new CompletionJournal(this.db).get(cached.operationId);
         if(op.state==='DONE'){
           if(cached.state==='DONE'&&(cached.draftRevision!==initial.revision||cached.draftSha256&&cached.draftSha256!==imageWorkflowDraftStamp(initial)))throw new UserFacingError('旧事实恢复对应的草稿已变化，原记录保留');

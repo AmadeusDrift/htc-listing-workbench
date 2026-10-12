@@ -1,3 +1,4 @@
+import { plainColorValue, needsPlainColorRefresh } from './plain-colors.ts';
 import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-program.ts';
 import { currentPolicyRemaining, needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
@@ -228,7 +229,7 @@ export class ListingAiService {
     }
     const changes = reference.fields.map(field => {
       const c = candidate.candidates.find(c => c.field === field); if (!c) throw new UserFacingError('所选字段没有有效候选值');
-      const before = attributes[field] ?? null, after = candidateNative(c,draft.schema,draft.marketplaceId,attributes[field]); attributes[field] = after;
+      const before = attributes[field] ?? null, native = candidateNative(c,draft.schema,draft.marketplaceId,attributes[field]), after = field==='color'?plainColorValue(native,context.evidence.filter(e=>e.meaning==='color'||e.id===`${context.variantId}:spec`).map(e=>e.value)):native; attributes[field] = after;
       const evidenceIds = new Set(c.items.flatMap(i => i.evidenceIds));
       return { field, before, after, evidence: context.evidence.filter(e => evidenceIds.has(e.id)) };
     });
@@ -363,7 +364,7 @@ export class ListingAiService {
     if(operation.state==='ACTIVE'&&existingBrandIssues.length)return finish([...existingBrandIssues,...operation.remaining]);
     if(operation.state==='DONE'){
       const platformIssues=[...draft.previewIssues,...draft.listingIssues];
-      if(needsBusinessAuthorityRefresh(draft,operation.remaining)){
+      if(needsBusinessAuthorityRefresh(draft,operation.remaining)||needsPlainColorRefresh(draft,this.store.getProduct(draft.productId))){
         const previousRemaining=[...operation.remaining];
         draft=this.amazon.applyBusinessDefaults({id:draft.id,revision:draft.revision},operation.id,true);
         operation=journal.get(operation.id);

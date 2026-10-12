@@ -62,24 +62,32 @@ export class AmazonPersistence {
     if (this.db.isTransaction) persist(); else this.transaction(persist);
   }
   locked(hash: string): boolean { return !!this.db.prepare('SELECT 1 FROM amazon_write_locks WHERE listing_hash=?').get(hash); }
-  lock(hash: string): { draftId: string; state: string } | null {
-    const row = this.db.prepare('SELECT draft_id,state FROM amazon_write_locks WHERE listing_hash=?').get(hash);
-    return row ? { draftId: String(row.draft_id), state: String(row.state) } : null;
+  lock(hash: string): { draftId: string; state: string; ownerKind:string;ownerId:string } | null {
+    const row = this.db.prepare('SELECT draft_id,state,owner_kind,owner_id FROM amazon_write_locks WHERE listing_hash=?').get(hash);
+    return row ? { draftId: String(row.draft_id), state: String(row.state),ownerKind:String(row.owner_kind),ownerId:String(row.owner_id)||String(row.draft_id) } : null;
   }
   beginWrite(hash: string, record: DraftRecord): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.locked(hash)) throw new UserFacingError('此 SKU 有结果未知或尚未确认的提交，请先回读并人工核对；禁止重放');
-      this.db.prepare('INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at) VALUES(?,?,?,?)').run(hash, record.draft.id, 'SUBMITTING', record.draft.updatedAt);
+      this.db.prepare('INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at,owner_kind,owner_id) VALUES(?,?,?,?,?,?)').run(hash, record.draft.id, 'SUBMITTING', record.draft.updatedAt, 'draft', record.draft.id);
       this.putRecord(record); this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   finishWrite(hash: string, record: DraftRecord, invalidated: DraftRecord[] = []): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      if (record.unresolvedWrite) this.db.prepare("UPDATE amazon_write_locks SET state='UNKNOWN' WHERE listing_hash=?").run(hash);
-      else if (record.draft.state === 'SUBMITTED') this.db.prepare("UPDATE amazon_write_locks SET state='SUBMITTED' WHERE listing_hash=?").run(hash);
-      else this.db.prepare('DELETE FROM amazon_write_locks WHERE listing_hash=? AND draft_id=?').run(hash, record.draft.id);
+      const owner=this.lock(hash);
+      // A delayed ordinary PUT must not mutate either a correction lock or its original receipt.
+      if(owner&&(owner.ownerKind!=='draft'||owner.ownerId!==record.draft.id||owner.draftId!==record.draft.id)
+        ||!owner&&this.db.prepare("SELECT 1 FROM listing_correction_attempts WHERE json_extract(record_json,'$.listingHash')=?").get(hash)) {
+        for(const exchange of record.exchanges??[])this.db.prepare('INSERT OR IGNORE INTO amazon_exchanges(id,draft_id,created_at,exchange_json) VALUES(?,?,?,?)').run(exchange.id,record.draft.id,exchange.at,JSON.stringify(exchange));
+        this.db.exec('COMMIT');return;
+      }
+
+      if (record.unresolvedWrite) this.db.prepare("UPDATE amazon_write_locks SET state='UNKNOWN' WHERE listing_hash=? AND owner_kind='draft' AND draft_id=? AND (owner_id=? OR owner_id='')").run(hash, record.draft.id, record.draft.id);
+      else if (record.draft.state === 'SUBMITTED') this.db.prepare("UPDATE amazon_write_locks SET state='SUBMITTED' WHERE listing_hash=? AND owner_kind='draft' AND draft_id=? AND (owner_id=? OR owner_id='')").run(hash, record.draft.id, record.draft.id);
+      else this.db.prepare('DELETE FROM amazon_write_locks WHERE listing_hash=? AND draft_id=? AND owner_kind=\'draft\' AND (owner_id=? OR owner_id=\'\')').run(hash, record.draft.id,record.draft.id);
       this.putRecord(record); this.rememberAcceptedSku(record); for (const other of invalidated) this.putRecord(other); this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -99,14 +107,19 @@ export class AmazonPersistence {
     if (entries.length > 20_000) throw new UserFacingError('已接受 SKU 记录超过安全读取上限');
     return entries.flatMap(entry => { const row = decodeAcceptedSku(entry.value_json, String(entry.key)); return row?.targetId === targetId ? [row] : []; });
   }
-  releaseAccepted(hash: string, draftId: string): void { this.db.prepare("DELETE FROM amazon_write_locks WHERE listing_hash=? AND draft_id=? AND state='SUBMITTED'").run(hash, draftId); }
+  releaseAccepted(hash: string, draftId: string): void { this.db.prepare("DELETE FROM amazon_write_locks WHERE listing_hash=? AND draft_id=? AND state='SUBMITTED' AND owner_kind='draft' AND (owner_id=? OR owner_id='')").run(hash, draftId, draftId); }
   recover(at: string): void {
     const rows = this.db.prepare("SELECT record_json FROM listing_drafts WHERE state='SUBMITTING' AND record_json IS NOT NULL").all();
     for (const row of rows) {
       const r = parseRecord(row.record_json); r.unresolvedWrite = true; r.preview = null; r.draft.state = 'UNKNOWN'; r.draft.previewedAt = null;
       r.draft.events.push({ at, operation: 'submit', state: 'UNKNOWN', requestId: null, summary: '上次提交被中断，结果未知；禁止自动重放，请回读核对' }); this.putRecord(r);
     }
-    this.db.prepare("UPDATE amazon_write_locks SET state='UNKNOWN' WHERE state='SUBMITTING'").run();
+    this.db.prepare("UPDATE amazon_write_locks SET state='UNKNOWN' WHERE state IN ('SUBMITTING','SENDING')").run();
+    for(const row of this.db.prepare("SELECT id,record_json FROM listing_corrections WHERE json_extract(record_json,'$.state')='SENDING'").all()){
+      const c=JSON.parse(String(row.record_json));c.state='UNKNOWN';c.revision++;c.message='上次修正发送被中断，结果未知；禁止重发';
+      this.db.prepare('UPDATE listing_corrections SET record_json=? WHERE id=?').run(JSON.stringify(c),row.id);
+      this.db.prepare("UPDATE listing_correction_attempts SET record_json=json_set(record_json,'$.state','UNKNOWN') WHERE correction_id=?").run(row.id);
+    }
   }
   addCall(event: AmazonCallEvent): void { this.db.prepare('INSERT INTO amazon_calls(id,target_id,created_at,event_json) VALUES(?,?,?,?)').run(event.id, event.targetId, event.at, JSON.stringify(event)); }
   calls(): AmazonCallEvent[] { return this.db.prepare('SELECT event_json FROM amazon_calls ORDER BY created_at DESC,rowid DESC LIMIT 500').all().map(row => JSON.parse(String(row.event_json))); }

@@ -52,14 +52,14 @@ async function preparedFixture(root: string) {
   const db = openDatabase(targetRoot), ledger = new AiUsageLedger(db, () => new Date(at));
   ledger.setPolicy({ providerId: 'deepseek', dailyCallLimit: 10, dailyTokenLimit: null });
   const attempts = [paidAttempt(db, target.productId)];
-  db.prepare('INSERT INTO amazon_write_locks VALUES(?,?,?,?)').run('fault-safety-lock', randomUUID(), 'UNKNOWN', at); db.close();
+  db.prepare('INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at) VALUES(?,?,?,?)').run('fault-safety-lock', randomUUID(), 'UNKNOWN', at); db.close();
   const archive = join(root, 'source.htcbackup');
   await createWorkspaceBackup(sourceRoot, archive, passphrase);
   const prepared = await prepareWorkspaceRestore(targetRoot, archive, passphrase);
   const latest = openDatabase(targetRoot);
   attempts.push(paidAttempt(latest, target.productId));
   new AiUsageLedger(latest, () => new Date(at)).setPolicy({ providerId: 'deepseek', dailyCallLimit: 3, dailyTokenLimit: null });
-  latest.prepare('INSERT INTO amazon_write_locks VALUES(?,?,?,?)').run('fault-after-prepare-lock', randomUUID(), 'UNKNOWN', at); latest.close();
+  latest.prepare('INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at) VALUES(?,?,?,?)').run('fault-after-prepare-lock', randomUUID(), 'UNKNOWN', at); latest.close();
   await writeFile(join(root, 'prepared.json'), JSON.stringify(prepared));
   return { source, target, sourceRoot, targetRoot, attempts, prepared };
 }

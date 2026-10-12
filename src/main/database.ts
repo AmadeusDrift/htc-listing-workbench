@@ -12,7 +12,7 @@ import { MIAOSHOU_INDEXES } from './miaoshou/indexes.ts';
 import { MIAOSHOU_SYNC_INDEXES } from './miaoshou/sync-records.ts';
 import { SKU_NAMING_SCHEMA } from './sku-naming/schema.ts';
 
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 export function openDatabase(directory: string): DatabaseSync {
   mkdirSync(directory, { recursive: true });
   const db = new DatabaseSync(join(directory, 'red.sqlite'));
@@ -232,6 +232,17 @@ export function openDatabase(directory: string): DatabaseSync {
   }
   if (version < 20) {
     try { db.exec('BEGIN IMMEDIATE'); for(const sql of CONSISTENCY_SCHEMA) db.exec(sql); db.exec('PRAGMA user_version=20; COMMIT;'); }
+    catch(error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
+  }
+  if (version < 21) {
+    try { db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE amazon_write_locks ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'draft';
+      ALTER TABLE amazon_write_locks ADD COLUMN owner_id TEXT NOT NULL DEFAULT '';
+      UPDATE amazon_write_locks SET owner_id=draft_id;
+      CREATE TABLE listing_corrections(id TEXT PRIMARY KEY NOT NULL,draft_id TEXT NOT NULL,listing_hash TEXT NOT NULL,record_json TEXT NOT NULL);
+      CREATE INDEX listing_corrections_scope ON listing_corrections(listing_hash);
+      CREATE TABLE listing_correction_attempts(id TEXT PRIMARY KEY NOT NULL,correction_id TEXT NOT NULL UNIQUE,record_json TEXT NOT NULL);
+      PRAGMA user_version=21; COMMIT;`); }
     catch(error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
   }
   try { assertConsistencyHistory(db);assertSourceImageHistory(db); } catch(error) { db.close();throw error; }

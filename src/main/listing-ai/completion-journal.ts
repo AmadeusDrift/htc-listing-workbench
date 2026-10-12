@@ -83,7 +83,7 @@ export class CompletionJournal {
     return this.db.prepare('SELECT id,record_json FROM listing_completion_operations WHERE '+fields.map(name=>`json_extract(record_json,'$.safetyIdentity.${name}')=?`).join(' AND ')).all(...fields.map(name=>input[name])).map(row=>{const op=validateCompletionOperation(JSON.parse(String(row.record_json)));if(op.id!==row.id)invalid();return op;});
   }
   save(op:CompletionOperation):CompletionOperation{op.updatedAt=[op.updatedAt,new Date().toISOString()].sort()[1];return save(this.db,op);}
-  begin(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,id?:string,legacyDraft?:AmazonDraft,legacyScopeHash?:string):CompletionOperation {
+  begin(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,id?:string,legacyDraft?:AmazonDraft,legacyScopeHash?:()=>string):CompletionOperation {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if(this.db.prepare("SELECT 1 FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.repair.phase')='FIELDS_STARTED' AND json_type(i.value,'$.repair.operationId') IS NULL").get(input.draftId)

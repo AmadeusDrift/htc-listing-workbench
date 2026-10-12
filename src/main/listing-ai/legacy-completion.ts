@@ -14,7 +14,7 @@ export function legacyCompletionOwners(db:DatabaseSync,draftId:string){
   return db.prepare("SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND json_extract(record_json,'$.contentPreparation.state')='STARTED' AND json_type(record_json,'$.contentPreparation.operationId') IS NULL").all(draftId).map(row=>({id:String(row.id),record:JSON.parse(String(row.record_json))}));
 }
 /** Only persisted field outputs and exact adoption receipts prove a completed step. */
-export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOperation,draft:AmazonDraft,legacyScopeHash?:string):CompletionOperation {
+export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOperation,draft:AmazonDraft,legacyScopeHash?:()=>string):CompletionOperation {
   const owners=legacyCompletionOwners(db,draft.id);if(!owners.length)return operation;
   const invalid=():never=>{throw new UserFacingError('旧字段请求恢复证据不完整，原调用与费用记录已保留');};
   const results=db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.listingContext.draftId')=? ORDER BY json_extract(record_json,'$.createdAt'),id").all(draft.id).map(row=>JSON.parse(String(row.record_json))).filter(raw=>!raw.fieldCandidateRecovery).map(validateStoredAiResult);
@@ -39,7 +39,7 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
   const missing=bound.filter(call=>!results.some(result=>result.callId===call.id));
   // A received invalid response must use its frozen response recovery, never a blind resend.
   if(missing.some(call=>call.responseReceived||call.rejection||call.errorCode==='OUTPUT_INVALID'))invalid();
-  if(rounds.length&&rounds.some(round=>!isFullSchema(round.context))){if(!legacyScopeHash||rounds.some(round=>isFullSchema(round.context)))invalid();operation.scopeHash=legacyScopeHash!;}
+  if(rounds.length&&rounds.some(round=>!isFullSchema(round.context))){if(!legacyScopeHash||rounds.some(round=>isFullSchema(round.context)))invalid();operation.scopeHash=legacyScopeHash!();}
   operation.rounds=rounds;
   const stepDebts:NonNullable<LegacyCompletionHistory['stepDebts']>=[];
   for(const call of missing){

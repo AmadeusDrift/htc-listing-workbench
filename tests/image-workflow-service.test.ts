@@ -57,7 +57,7 @@ function copyReview(context:ListingAiContext,copy:{field:any;values:string[]}[])
     return {field:item.field,index,verdict:'SUPPORTED' as const,evidenceIds,reason:'Fixture source.',claims:[{text:value,verdict:'SUPPORTED' as const,evidenceIds,reason:'Fixture source.'}]};
   }))};
 }
-async function fixture(t: test.TestContext, options: { familyMigration?:boolean; lostResponse?:boolean; rejectSlot?:number; knownGenerationFailures?:number; rejected?: number; configured?: boolean; generationError?: boolean; mutate?: boolean; hold?: boolean; rotateKeyDuringPlan?: boolean; insufficient?: boolean; legacyPlan?: boolean; ipVerdict?: 'PASS'|'BLOCKED'|'UNCERTAIN'; generatedRisk?: boolean; riskFailure?: boolean } = {}) {
+async function fixture(t: test.TestContext, options: { riskScore?:number|null; riskLevel?:'none'|'low'|'medium'|'high'; familyMigration?:boolean; lostResponse?:boolean; rejectSlot?:number; knownGenerationFailures?:number; rejected?: number; configured?: boolean; generationError?: boolean; mutate?: boolean; hold?: boolean; rotateKeyDuringPlan?: boolean; insufficient?: boolean; legacyPlan?: boolean; ipVerdict?: 'PASS'|'BLOCKED'|'UNCERTAIN'; generatedRisk?: boolean; riskFailure?: boolean } = {}) {
   t.mock.method(globalThis,'fetch',()=>{throw new Error('External network is forbidden in image workflow fixtures');});
   await mkdir(resolve('.test-data'), { recursive:true }); const root = await mkdtemp(resolve('.test-data/image-flow-'));
   const store = new WorkspaceStore(root), amazon = new AmazonService(root, id => store.getProduct(id), {isEncryptionAvailable:()=>false, encryptString:()=>Buffer.alloc(0), decryptString:()=>''});
@@ -104,7 +104,9 @@ async function fixture(t: test.TestContext, options: { familyMigration?:boolean;
     getCall: ()=>({status:'SUCCEEDED'}),
     getProfile: ()=>({enabled:true,configured:true,generation:1}),
     imagePlan: async(imageContext:ProductImageContext,_fresh?:unknown,_repair?:unknown,_signal?:unknown,_workflowId?:unknown,onRequestSent?:()=>void)=>{onRequestSent?.();calls.push(imageContext.setPolicy&&!imageContext.slot?'set-plan':'plan');if(options.rotateKeyDuringPlan)configurationScope=randomUUID();return outputResult({...(imageContext.setPolicy&&!imageContext.slot?{setPlan:sceneSet()}:{}),kind:'image-plan',prompt:'Show this product',textMode:'none',expectedText:[],ipRisk:{verdict:options.ipVerdict??'PASS',findings:options.ipVerdict&&options.ipVerdict!=='PASS'?[{category:'character',name:'Mickey Mouse',evidence:'Distinctive named character in source image.',referenceAssetIds:[imageContext.referenceAssets[0].assetId]}]:[]},...(!options.legacyPlan?{productUnderstanding:{summary:'A blue round coaster with a raised rim.',referenceAssetIds:imageContext.referenceAssets.map(asset=>asset.assetId),uncertainties:options.insufficient?['Selected SKU cannot be identified.']:['Exact size is unknown.'],sufficient:!options.insufficient}}:{})});},
-    reviewGeneratedImageRisk: async(_context:unknown,plan:AiResult,candidate:unknown)=>{calls.push('ip-check'); if(options.riskFailure)throw new AiError('SERVICE_PERMISSION_REQUIRED'); return outputResult({kind:'image-ip-review',candidate,planResultId:plan.id,service:'aigcViolationDetection',verdict:options.generatedRisk?'BLOCKED':'PASS',riskLevel:options.generatedRisk?'high':'none',labels:[{label:options.generatedRisk?'tm_goods':'nonLabel',confidence:options.generatedRisk?99:null,description:options.generatedRisk?'疑似品牌商标':'未检出风险'}]});},
+    reviewGeneratedImageRisk: async(_context:unknown,plan:AiResult,candidate:unknown)=>{calls.push('ip-check'); if(options.riskFailure)throw new AiError('SERVICE_PERMISSION_REQUIRED'); const value=outputResult({kind:'image-ip-review',candidate,planResultId:plan.id,service:'aigcViolationDetection',verdict:options.generatedRisk?'BLOCKED':'PASS',riskLevel:options.riskLevel??(options.generatedRisk?'high':'none'),labels:[{label:options.riskScore!==undefined||options.generatedRisk?'tm_goods':'nonLabel',confidence:options.riskScore!==undefined?options.riskScore:options.generatedRisk?99:null,description:options.generatedRisk?'疑似品牌商标':'未检出风险'}]});
+      const context=_context as ProductImageContext,db=openDatabase(root);
+      try{db.prepare('INSERT INTO ai_results VALUES(?,?)').run(value.id,JSON.stringify({...value,providerId:'aliyun-image-risk',productId:product.id,productRevision:product.revision,variantId:draft.variantId,assetId:null,assetSha256:null,sourceResultIds:[...(context.listingReviewResultId?[context.listingReviewResultId]:[]),plan.id],model:'aigcViolationDetection',createdAt:new Date().toISOString(),reviewState:'unreviewed',imageContext:context,...(context.listing.contract==='listing-full-schema/v1'?{listingEvidenceContractVersion:'listing-evidence/v4'}:{}),sourceSha256:listingFingerprint(context),imageRequestBytes:1}));}finally{db.close();}return value;},
     recognizeGeneratedImage: async(_context:unknown,candidate:unknown)=>{calls.push('ocr');return outputResult({kind:'generated-image-ocr',candidate,text:'',lines:[]});},
     reviewGeneratedImage: async(_c:unknown,plan:AiResult,ocr:AiResult,candidate:unknown)=>{
       calls.push('review'); reviewCount++; if(options.mutate)store.saveProduct({...store.getProduct(product.id),title:'changed'});
@@ -531,7 +533,7 @@ test('a successful policy recheck interrupted before adoption resumes from its s
 test('policy recovery cannot re-review IP refusals, blocked text or incomplete saved evidence', async t => {
   for (const invalid of ['ip-blocked', 'text-blocked', 'missing-ocr'] as const) {
     const f = await fixture(t, { rejectSlot: 1 }), first = await f.run(), last = first.workflow.slots![0].attempts[2];
-    if (invalid === 'ip-blocked') (f.ai.getResult(last.ipReviewResultId!).output as any).verdict = 'BLOCKED';
+    if (invalid === 'ip-blocked') Object.assign(f.ai.getResult(last.ipReviewResultId!).output,{verdict:'BLOCKED',riskLevel:'high',labels:[{label:'tm_goods',confidence:99,description:'Risk fixture'}]});
     if (invalid === 'text-blocked') (f.ai.getResult(last.reviewResultId!).output as any).verdict = 'BLOCKED';
     if (invalid === 'missing-ocr') { const get = f.ai.getResult; f.ai.getResult = id => id === last.ocrResultId ? undefined as never : get(id); }
     const restarted = await reopenWithLegacyTextReviews(f, first.workflow.id);
@@ -1135,4 +1137,61 @@ test('completed seven-image execution preserves approval after plain color migra
   assert.equal(done.status,'COMPLETED',done.error??'');assert.equal(uploadCalls,7);assert.deepEqual(f.calls,calls);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(completed.workflow.id)!.record_json),raw);
   assert.deepEqual(done.items[0].assets.map(a=>a.id),completed.workflow.slots!.map(s=>s.approvedAssetId));
  }finally{db.close();await execution.close();}
+});
+
+
+test('W11 current thresholds apply to actual scores and preserve approved history across restart',async t=>{
+ const f=await fixture(t,{riskScore:85,riskLevel:'medium'});
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
+ const ids=first.workflow.slots!.map(slot=>slot.approvedAssetId),count=f.calls.length;
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:80,levelThreshold:'high'});
+ assert.equal(f.service.isRiskPolicyCompatible(first.workflow),false);
+ const db=openDatabase(f.root);try{assert.throws(()=>approvedWorkflowAssets(db,f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id)),/风险/);}finally{db.close();}
+ await assert.rejects(async()=>f.run(),/85|风险/);assert.equal(f.calls.length,count);
+ const again=f.reopen();try{assert.deepEqual(again.getRiskSettings(),{enabled:true,scoreThreshold:80,levelThreshold:'high'});assert.deepEqual(again.getProgress(f.draft.id)!.slots!.map(slot=>slot.approvedAssetId),ids);assert.match(again.getProgressPresentation(f.draft.id)!.riskEvidence![0].summary,/85.*medium.*80/);}finally{await again.close();}
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ assert.equal(f.service.isRiskPolicyCompatible(first.workflow),true);assert.equal(f.calls.length,count);
+});
+
+test('W11 missing required score stops before OCR and never reports pass',async t=>{
+ const f=await fixture(t,{riskScore:null,riskLevel:'medium'}),result=await f.run();
+ assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(f.calls.includes('ocr'),false);
+ assert.match(result.workflow.error??'',/未完成|缺失/);
+});
+
+
+test('W11 historical BLOCKED verdict is preserved while current policy can adopt medium 85',async t=>{
+ const f=await fixture(t,{generatedRisk:true,riskScore:85,riskLevel:'medium'}),first=await f.run();
+ assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
+ const attempt=first.workflow.slots![0].attempts[0],original=f.ai.getResult(attempt.ipReviewResultId!);
+ assert.equal((original.output as any).verdict,'BLOCKED');assert.deepEqual(attempt.riskPolicy,{enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ assert.match(f.service.getProgressPresentation(f.draft.id)!.riskEvidence![0].summary,/当前解释 PASS.*原结论 BLOCKED/);
+ assert.match(f.service.getProgressPresentation(f.draft.id)!.sourceRiskSummary!,/来源 AI 初筛.*非阿里云/);
+ assert.equal(first.workflow.slots!.every(slot=>slot.attempts.length===1),true);
+});
+
+test('W11 completed legacy single-image risk is checked before complete or recheck can spend',async t=>{
+ const f=await fixture(t,{riskScore:95,riskLevel:'low'});
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:99,levelThreshold:'high'});
+ const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
+ const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+ Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ipReviewResultIds:first.workflow.ipReviewResultIds!.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
+ const db=openDatabase(f.root);try{const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(retained.id,JSON.stringify(retained));db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(legacy.id);db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(legacy.id,JSON.stringify(legacy));}finally{db.close();}
+ f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ const before=f.service.getProgress(f.draft.id),calls=f.calls.length,assetIds=f.store.getProduct(f.product.id).assets.map(asset=>asset.id);
+ assert.equal((f.ai.getResult(legacy.ipReviewResultIds![0]).output as any).verdict,'PASS');
+ await assert.rejects(async()=>f.run(),/95.*90/);
+ assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ await assert.rejects(async()=>f.service.recheck({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision,sourceWorkflowId:legacy.id}),/95.*90/);
+ assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ assert.deepEqual(f.store.getProduct(f.product.id).assets.map(asset=>asset.id),assetIds);
+ const ip=f.ai.getResult(legacy.ipReviewResultIds![0]).output as any,original=structuredClone(ip);
+ for(const mismatch of [{candidate:{...original.candidate,id:randomUUID()}},{candidate:{...original.candidate,sha256:'0'.repeat(64)}},{planResultId:randomUUID()}]){
+  Object.assign(ip,original,mismatch);
+  await assert.rejects(async()=>f.run(),/归属不一致/);
+  await assert.rejects(async()=>f.service.recheck({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision,sourceWorkflowId:legacy.id}),/归属不一致/);
+  assert.equal(f.calls.length,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ }
+ Object.assign(ip,original);
 });

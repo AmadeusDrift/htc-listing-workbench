@@ -4,12 +4,13 @@ import type { CategoryFieldRepairGrant, CATEGORY_FIELD_REPAIR_POLICY_VERSION } f
 import { IMAGE_TEXT_REVIEW_POLICY_VERSION } from './image-ai-contracts.ts';
 import type { ProductImageContext, ProductImagePolicyVersion, ImageSetPlan, ImageTextReviewPolicyVersion, CandidateImageIdentity } from './image-ai-contracts.ts';
 
-export interface ImageRiskSettings { enabled:boolean }
+export interface ImageRiskSettings { enabled:boolean; scoreThreshold?:number; levelThreshold?:'low'|'medium'|'high' }
 export interface CopyReviewSettings { enabled:boolean }
 
 export const IMAGE_WORKFLOW_STAGES = ['content', 'planning', 'generating', 'ip-check', 'ocr', 'reviewing', 'adopting', 'complete'] as const;
 export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
 export interface ImageSlotAttempt {
+  riskPolicy?:ImageRiskSettings;
   number:number; requestId:string;
   state:'PLANNING'|'READY'|'GENERATING'|'GENERATED'|'PASSED'|'RETRYABLE_FAILURE'|'BLOCKED'|'UNKNOWN';
   planResultId:string|null;candidateId:string|null;ipReviewResultId:string|null;ocrResultId:string|null;reviewResultId:string|null;
@@ -58,6 +59,9 @@ export interface ImageWorkflowRun {
   contentPreparation?:{operationId?:string;state:'STARTED'|'DONE';draftRevision:number;remaining:string[];repairPolicyVersion?:'field-evidence/v2';copyReviewEnabled?:boolean;sourceColorEvidenceSha256?:string;draftSha256?:string};
   /** Missing on old records means risk interception was enabled. */
   riskInterceptionEnabled?:boolean;
+  /** Policy at single-image adoption; slot workflows keep it per attempt. */
+  riskPolicy?:ImageRiskSettings;
+
   /** Absent on existing runs means independent listing-copy review was enabled. */
   copyReviewEnabled?:boolean;
 }
@@ -78,7 +82,7 @@ export const AUTOMATIC_SOURCE_ISSUES = {
 } as const;
 export type AutomaticSourceIssueCode = keyof typeof AUTOMATIC_SOURCE_ISSUES;
 /** Read-only IPC projection; never persist resultUnknown in an ImageWorkflowRun. */
-export type ImageWorkflowProgress = ImageWorkflowRun & {resultUnknown?:boolean};
+export type ImageWorkflowProgress = ImageWorkflowRun & {resultUnknown?:boolean;sourceRiskSummary?:string;riskEvidence?:{slot:number;summary:string}[]};
 export interface ImageWorkflowApi {
   getAutomaticImageCandidatePreview(input:{draftId:string;slot:number;candidateId:string}):Promise<AutomaticImageCandidatePreview>;
   approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowProgress>;

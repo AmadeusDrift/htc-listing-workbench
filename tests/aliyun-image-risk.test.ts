@@ -43,10 +43,16 @@ test('local candidate is uploaded with temporary credentials then bound to one m
   for(const secret of [credentials.accessKeyId,credentials.accessKeySecret,token.AccessKeySecret,token.SecurityToken])assert.ok(!JSON.stringify(result).includes(secret));
 });
 
-test('official none and low levels pass while medium and high stop; label wording is not a threshold',async()=>{
-  for(const riskLevel of ['none','low'])assert.equal((await fixture({riskLevel,labels:[{Label:'tm_goods',Confidence:30,Description:'疑似商标'}]}).run()).output.verdict,'PASS');
-  for(const riskLevel of ['medium','high'])assert.equal((await fixture({riskLevel,labels:[{Label:'tm_goods',Confidence:82,Description:'商标'}]}).run()).output.verdict,'BLOCKED');
-  for(const label of ['nonLabel_lib','unknown_new_label','tm_goods'])assert.equal((await fixture({labels:[{Label:label,Confidence:90}]}).run()).output.verdict,'PASS');
+test('official risk confidence uses strict threshold and independent high level',async()=>{
+  for(const riskLevel of ['none','low','medium'])assert.equal((await fixture({riskLevel,labels:[{Label:'tm_goods',Confidence:30,Description:'疑似商标'}]}).run()).output.verdict,'PASS');
+  for(const riskLevel of ['high'])assert.equal((await fixture({riskLevel,labels:[{Label:'tm_goods',Confidence:82,Description:'商标'}]}).run()).output.verdict,'BLOCKED');
+  for(const label of ['nonLabel_lib','tm_goods'])assert.equal((await fixture({labels:[{Label:label,Confidence:90}]}).run()).output.verdict,'PASS');
+});
+
+test('unknown risk label is incomplete and allowlist similarity is never a risk score',async()=>{
+ assert.equal((await fixture({labels:[{Label:'unknown_new_label',Confidence:99}]}).run()).output.verdict,'UNCERTAIN');
+ assert.equal((await fixture({labels:[{Label:'nonLabel_lib',Confidence:99}]}).run()).output.verdict,'PASS');
+ assert.equal((await fixture({riskLevel:'medium',labels:[{Label:'tm_goods'}]}).run()).output.verdict,'UNCERTAIN');
 });
 
 test('provider QPS and permission error codes are distinguished',async()=>{

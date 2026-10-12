@@ -48,6 +48,7 @@ window.red = {
  exportFtpProfileTemplate:async id=>{record('templateHosting',id);return {cancelled:false}},
  setFtpProfileEnabled:async input=>{record('enableHosting',input);state.profiles[0].enabled=input.enabled;return copy(state.profiles[0])},
  searchAmazonProductTypes:async input=>{record('search',input);return [{name:'STORAGE_BAG',displayName:'Storage bags'}]},
+ previewAutomaticListingAdaptation:async id=>({taskId:id,token:'mock-preview',sources:copy(state.products),blockers:[],changes:[],canApply:false}),
  listAutomaticListingTasks:async()=>{state.polls++;return copy(state.tasks)}, getAutomaticListingTask:async id=>copy(state.tasks.find(task=>task.id===id)),
  startAutomaticListing:async input=>{record('start',input);if(!state.consent)return null;const task={id:'task-1',revision:1,status:'RUNNING',targetId:target.id,targetName:target.name,mode:'live',productType:input.productType??'AUTO',profileId:input.profileId,ruleRevision:7,createdAt:'2026-10-08T00:00:00Z',updatedAt:'2026-10-08T00:00:00Z',error:null,items:product.variants.slice(0,2).map((variant,index)=>({key:variant.id,productId:product.id,productTitle:product.title,variantId:variant.id,sku:variant.sku,stockSets:5,status:index?'RUNNING':'WAITING',stage:index?'LABELS':'READBACK',draftId:'draft-'+index,executionTaskIds:['execute-'+index],imageAttempts:1,repairAttempts:0,batchId:index?'batch-1':null,error:null}))};state.tasks=[task];return copy(task)},
  pauseAutomaticListingTask:async id=>{record('pause',id);state.tasks[0].status='PAUSED';return copy(state.tasks[0])},
@@ -55,6 +56,7 @@ window.red = {
  cancelAutomaticListingTask:async id=>{record('cancel',id);state.tasks[0].status='CANCELLED';return copy(state.tasks[0])},
  listItemLabels:async()=>copy(state.labels), getItemLabel:async id=>copy(state.labels.find(value=>value.id===id)),
  getItemLabelFormat:async()=>copy(state.format),saveItemLabelFormat:async input=>{record('format',input);state.format=copy(input);return copy(input)},
+ prepareItemLabels:async id=>{record('prepareLabels',id);return copy(state.labels)},
  retryItemLabel:async id=>{record('retry',id);const value=state.labels.find(item=>item.id===id);value.status='QUEUED';return copy(value)},
  openItemLabel:async input=>{record('openLabel',input);if(state.labelOpenError)throw Error('标签文件不存在，请重新获取')},exportItemLabels:async input=>{record('export',input);return {cancelled:false}},
  exportProcurementBatch:async()=>({cancelled:true}),
@@ -98,7 +100,7 @@ try {
 
 
  await page.evaluate(()=>window.fixture.queueMode='status');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await page.getByRole('tab',{name:/已提交与完成/}).click();await page.getByTestId('automatic-product-1').locator('summary').click();
- await expect(page.getByTestId('automatic-product-1')).toContainText('流程已完成');await expect(page.getByTestId('automatic-product-1')).toContainText('已提交，等待平台回读或标签');await expect(page.getByTestId('automatic-product-1')).not.toContainText('无法归因');
+ await expect(page.getByTestId('automatic-product-1')).toContainText('流程已完成');await expect(page.getByTestId('automatic-product-1')).toContainText('已提交，等待平台回读');await expect(page.getByTestId('automatic-product-1')).not.toContainText('无法归因');
  await page.evaluate(()=>window.fixture.queueMode='guidance');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await page.getByRole('tab',{name:/待上架/}).click();
  if(!await page.getByTestId('automatic-product-1').getAttribute('open'))await page.getByTestId('automatic-product-1').locator('summary').click();
  await expect(page.getByTestId('automatic-product-1')).toContainText('来源资料已变化，重新评估');await expect(page.getByTestId('automatic-product-1')).toContainText('原未知结果已核对');await expect(page.getByTestId('automatic-product-1')).toContainText('请继续或取消原任务');await expect(page.getByTestId('automatic-product-1')).not.toContainText('secret.invalid');
@@ -140,8 +142,8 @@ try {
  await expect(page.getByTestId('automatic-result-v-z')).toHaveCount(0);
  await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();
  await expect(page.getByTestId('automatic-result-v-z')).toContainText('已提交，等待读回');
- await expect(page.getByTestId('automatic-result-v-a')).toContainText('准备商品标签');
- await expect(page.getByTestId('automatic-result-v-a')).toContainText('标签尚未完成');
+ await expect(page.getByTestId('automatic-result-v-a')).toContainText('核对平台建档结果');
+ await expect(page.getByTestId('automatic-result-v-a')).toContainText('平台建档结果待核对');
  await expect(page.getByTestId('automatic-result-v-z')).toContainText('等待 Amazon 回读');
  pass('single start passes the selected source-order scope; cancelled native confirmation creates no task; submission and label stages remain distinct');
  await page.getByRole('button',{name:'离开测试页面',exact:true}).click();
@@ -241,6 +243,9 @@ try {
  await page.getByRole('button',{name:'查看标签',exact:true}).click();
  await expect(page.getByTestId('item-label-line-1')).toContainText('5 张');
  await expect(page.getByTestId('item-label-line-1')).not.toContainText('15 张');
+ await page.getByRole('button',{name:'准备本批次标签',exact:true}).click();
+ assert.equal(await page.evaluate(()=>window.fixture.calls.filter(call=>call.name==='prepareLabels').length),1);
+ assert.equal(await page.evaluate(()=>window.fixture.calls.find(call=>call.name==='prepareLabels').input),'batch-1');
  await page.getByRole('button',{name:'打开标签文件 2',exact:true}).click();
  assert.deepEqual(await page.evaluate(()=>window.fixture.calls.find(call=>call.name==='openLabel').input),{id:'label-1',fileIndex:3});
  await page.getByRole('button',{name:'导出本批次标签',exact:true}).click();

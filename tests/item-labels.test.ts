@@ -47,65 +47,65 @@ test('automatic procurement is incremental and idempotent and preserves sales un
   f.draft.state='UNKNOWN'; assert.throws(()=>f.procurement.ensureAutomaticBatch(randomUUID(),[f.draft.id],{[f.draft.id]:5}));
 });
 test('all documents are persisted and checksum verified before READY, reopening does not request again',async t=>{
-  const f=fixture(t),batch=f.batch(); const [queued]=f.service.syncBatch(batch.id); assert.equal(queued.status,'QUEUED');
-  f.service.syncBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,1); assert.equal((f.requests[0].mskuQuantities as {quantity:number}[])[0].quantity,5);
+  const f=fixture(t),batch=f.batch(); const [queued]=f.service.prepareBatch(batch.id); assert.equal(queued.status,'QUEUED');
+  f.service.prepareBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,1); assert.equal((f.requests[0].mskuQuantities as {quantity:number}[])[0].quantity,5);
   const ready=f.service.get(queued.id); assert.equal(ready.status,'READY'); assert.equal(ready.files.length,2); assert.equal(f.procurement.get(batch.id).lines[0].labelStatus,'READY');
-  assert.equal((await f.service.verifyFiles(ready.id)).files.length,2); await f.reopen(); f.service.syncBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,1);
+  assert.equal((await f.service.verifyFiles(ready.id)).files.length,2); await f.reopen(); f.service.prepareBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,1);
   writeFileSync(join(f.dir,ready.files[0].relativePath),Buffer.from('corrupted'));
   await assert.rejects(f.service.verifyFiles(ready.id)); assert.equal(f.service.get(ready.id).status,'FAILED');
 });
 test('late response stays stale after quantity changes, including cleared quantity',async t=>{
-  const f=fixture(t),batch=f.batch(); const [old]=f.service.syncBatch(batch.id); let resolveRequest!: (v:{data:JsonObject;status:number;requestId:string})=>void;
+  const f=fixture(t),batch=f.batch(); const [old]=f.service.prepareBatch(batch.id); let resolveRequest!: (v:{data:JsonObject;status:number;requestId:string})=>void;
   f.setCreate(()=>new Promise(resolve=>{resolveRequest=resolve;})); const running=f.service.runDue(); await new Promise(resolve=>setImmediate(resolve));
   const edit=f.procurement.get(batch.id); f.procurement.update({id:edit.id,revision:edit.revision,lines:edit.lines.map(line=>({...(({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed}))(line),stockQuantity:null})),shipmentConfirmationId:''});
-  const [newest]=f.service.syncBatch(batch.id); assert.equal(newest.status,'WAITING_QUANTITY');
+  const [newest]=f.service.prepareBatch(batch.id); assert.equal(newest.status,'WAITING_QUANTITY');
   resolveRequest({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf'}]},status:200,requestId:'old'}); await running;
   assert.equal(f.service.get(old.id).status,'STALE'); assert.equal(f.service.get(newest.id).status,'WAITING_QUANTITY'); assert.equal(f.procurement.get(batch.id).lines[0].labelStatus,'WAITING_QUANTITY');
 });
 test('download errors and malformed PDFs never become READY or leak a signed URL',async t=>{
   const f=fixture(t),batch=f.batch(); f.setDownload(async()=>Buffer.from('<html>access denied</html>'));
-  const [record]=f.service.syncBatch(batch.id); await f.service.runDue(); const failed=f.service.get(record.id);
+  const [record]=f.service.prepareBatch(batch.id); await f.service.runDue(); const failed=f.service.get(record.id);
   assert.equal(failed.status,'FAILED'); assert.equal(failed.files.length,0); assert.ok(!JSON.stringify(failed).includes('https://'));
 });
 test('retry counters survive restart and stop after finite attempts',async t=>{
   const f=fixture(t),batch=f.batch(); f.setCreate(async()=>{throw new AmazonTransportError('temporary',503,'retry-1');});
-  const [record]=f.service.syncBatch(batch.id); for(let i=0;i<3;i++){await f.service.runDue(); await f.reopen(); f.advance(120000);}
+  const [record]=f.service.prepareBatch(batch.id); for(let i=0;i<3;i++){await f.service.runDue(); await f.reopen(); f.advance(120000);}
   await f.service.runDue(); assert.equal(f.requests.length,3); assert.equal(f.service.get(record.id).status,'FAILED'); assert.equal(f.service.get(record.id).attempts,3);
-  f.service.syncBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,3);
+  f.service.prepareBatch(batch.id); await f.service.runDue(); assert.equal(f.requests.length,3);
 });
 test('pause and cancel prevent dispatch while an already sent label result is preserved',async t=>{
-  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.syncBatch(batch.id,{jobId:job});
+  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.prepareBatch(batch.id);
   f.service.pauseJob(job);await f.service.runDue();assert.equal(f.requests.length,0);await f.reopen();await f.service.runDue();assert.equal(f.requests.length,0);
   f.service.resumeJob(job);let release!:()=>void;f.setCreate(async()=>{await new Promise<void>(resolve=>{release=resolve;});return {data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/a.pdf'}]},status:200,requestId:'finish-after-pause'};});
   const pending=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));f.service.pauseJob(job);release();await pending;assert.equal(f.service.get(row.id).status,'READY');assert.equal(f.requests.length,1);
 });
 test('a cancelled queued record remains cancelled when a stale dispatch snapshot is drained',async t=>{
-  const f=fixture(t),first=f.batch();f.service.syncBatch(first.id);const job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.syncBatch(batch.id,{jobId:job});
+  const f=fixture(t),first=f.batch();f.service.prepareBatch(first.id);const job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.prepareBatch(batch.id);
   let release!:()=>void;f.setCreate(async()=>{await new Promise<void>(resolve=>{release=resolve;});return {data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/a.pdf'}]},status:200,requestId:'first'};});
   const running=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));f.service.cancelJob(job);release();await running;assert.equal(f.service.get(row.id).status,'CANCELLED');assert.equal(f.requests.length,1);
 });
 test('batch file export requires one current complete label set for every row',async t=>{
-  const f=fixture(t),batch=f.batch();f.service.syncBatch(batch.id);await f.service.runDue();assert.equal((await f.service.filesForBatch(batch.id)).length,2);
+  const f=fixture(t),batch=f.batch();f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal((await f.service.filesForBatch(batch.id)).length,2);
   const db=openDatabase(f.dir),updated=f.procurement.get(batch.id);updated.lines.push({...updated.lines[0],id:randomUUID(),draftId:randomUUID(),variantId:randomUUID(),sku:'SKU-TWO',labelStatus:'NOT_REQUESTED'});db.prepare('UPDATE procurement_batches SET record_json=? WHERE id=?').run(JSON.stringify(updated),batch.id);db.close();await assert.rejects(f.service.filesForBatch(batch.id));
 });
 test('changed target identity invalidates existing labels and creates an explicit context failure',async t=>{
-  const f=fixture(t),batch=f.batch(),[old]=f.service.syncBatch(batch.id);await f.service.runDue();f.amazon.executionTargetScope().target.sellerId='NEW_SELLER';
-  const [current]=f.service.syncBatch(batch.id);assert.equal(f.service.get(old.id).status,'STALE');assert.equal(current.status,'FAILED');assert.equal(current.errorCode,'TARGET_CONTEXT_CHANGED');await f.service.runDue();assert.equal(f.requests.length,1);
+  const f=fixture(t),batch=f.batch(),[old]=f.service.prepareBatch(batch.id);await f.service.runDue();f.amazon.executionTargetScope().target.sellerId='NEW_SELLER';
+  const [current]=f.service.prepareBatch(batch.id);assert.equal(f.service.get(old.id).status,'STALE');assert.equal(current.status,'FAILED');assert.equal(current.errorCode,'TARGET_CONTEXT_CHANGED');await f.service.runDue();assert.equal(f.requests.length,1);
 });
 test('pause cannot turn an unknown sent request into an automatic replay, but explicit retry clears pause',async t=>{
-  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.syncBatch(batch.id,{jobId:job});
+  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.prepareBatch(batch.id);
   let fail!:(error:unknown)=>void;f.setCreate(()=>new Promise((_resolve,reject)=>{fail=reject;}));const running=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));f.service.pauseJob(job);fail(new AmazonTransportError('unknown',null,null,true));await running;
   assert.equal(f.service.get(row.id).status,'FAILED');assert.equal(f.service.get(row.id).errorCode,'REQUEST_UNKNOWN');f.service.resumeJob(job);await f.service.runDue();assert.equal(f.requests.length,1);
   f.service.pauseJob(job);const retried=f.service.retry(row.id);assert.equal(retried.paused,false);assert.equal(retried.attempts,1);
 });
 test('verification refuses a label superseded while its files are being read',async t=>{
-  const f=fixture(t),batch=f.batch(),[old]=f.service.syncBatch(batch.id);await f.service.runDue();
+  const f=fixture(t),batch=f.batch(),[old]=f.service.prepareBatch(batch.id);await f.service.runDue();
   const pending=f.service.verifyFiles(old.id);const newest=changeQuantity(f,batch.id,8);
   await assert.rejects(pending,/过期|变化/);
-  assert.equal(f.service.get(old.id).current,false);assert.equal(f.service.get(newest.id).status,'QUEUED');
+  assert.equal(f.service.get(old.id).current,false);assert.equal(f.service.get(newest.id).status,'NOT_REQUESTED');
 });
 test('an integrity failure during verification never resurrects a superseded row',async t=>{
-  const f=fixture(t),batch=f.batch(),[old]=f.service.syncBatch(batch.id);await f.service.runDue();
+  const f=fixture(t),batch=f.batch(),[old]=f.service.prepareBatch(batch.id);await f.service.runDue();
   writeFileSync(join(f.dir,f.service.get(old.id).files[0].relativePath),'broken');
   const pending=f.service.verifyFiles(old.id);const newest=changeQuantity(f,batch.id,null);await assert.rejects(pending);
   assert.equal(f.service.get(old.id).current,false);assert.equal(f.service.get(old.id).status,'STALE');
@@ -113,37 +113,37 @@ test('an integrity failure during verification never resurrects a superseded row
   assert.equal(f.service.get(newest.id).status,'WAITING_QUANTITY');assert.equal(f.procurement.get(batch.id).lines[0].labelStatus,'WAITING_QUANTITY');
 });
 test('batch export takes one coherent current snapshot after all file reads',async t=>{
-  const f=fixture(t),batch=f.batch();f.service.syncBatch(batch.id);await f.service.runDue();
+  const f=fixture(t),batch=f.batch();f.service.prepareBatch(batch.id);await f.service.runDue();
   const verify=f.service.verifyFiles.bind(f.service);f.service.verifyFiles=async id=>{const result=await verify(id);changeQuantity(f,batch.id,8);return result;};
   await assert.rejects(f.service.filesForBatch(batch.id),/过期|变化|未就绪/);
 });
 test('verified export bytes remain the checked bytes when the source file changes',async t=>{
-  const f=fixture(t),batch=f.batch();f.service.syncBatch(batch.id);await f.service.runDue();
+  const f=fixture(t),batch=f.batch();f.service.prepareBatch(batch.id);await f.service.runDue();
   const [file]=await f.service.filesForBatch(batch.id);writeFileSync(file.path,'replacement after verification');
   assert.deepEqual((file as typeof file&{bytes:Buffer}).bytes,pdfBytes());
 });
 test('export callers can synchronously recheck their final snapshot after writing files',async t=>{
-  const f=fixture(t),batch=f.batch();f.service.syncBatch(batch.id);await f.service.runDue();const files=await f.service.filesForBatch(batch.id);
+  const f=fixture(t),batch=f.batch();f.service.prepareBatch(batch.id);await f.service.runDue();const files=await f.service.filesForBatch(batch.id);
   const guard=(f.service as typeof f.service&{assertBatchSnapshot:(id:string,rows:typeof files[number]['record'][])=>void}).assertBatchSnapshot;
   assert.equal(typeof guard,'function');guard.call(f.service,batch.id,files.map(file=>file.record));changeQuantity(f,batch.id,8);
   assert.throws(()=>guard.call(f.service,batch.id,files.map(file=>file.record)),/变化|未就绪|过期/);
 });
 for(const failure of ['REQUEST_UNKNOWN','RETRY_EXHAUSTED'] as const)test(`credential rotation preserves ${failure} and its attempt budget until explicit retry`,async t=>{
   const f=fixture(t),batch=f.batch();f.setCreate(async()=>{throw new AmazonTransportError('failed',failure==='REQUEST_UNKNOWN'?null:503,null,failure==='REQUEST_UNKNOWN');});
-  const [old]=f.service.syncBatch(batch.id);for(let i=0;i<(failure==='REQUEST_UNKNOWN'?1:3);i++){await f.service.runDue();f.advance(120000);}
+  const [old]=f.service.prepareBatch(batch.id);for(let i=0;i<(failure==='REQUEST_UNKNOWN'?1:3);i++){await f.service.runDue();f.advance(120000);}
   const attempts=f.service.get(old.id).attempts,count=f.requests.length,target=f.amazon.executionTargetScope().target;
-  f.amazon.executionTargetScope=()=>({target,generation:2});const [rotated]=f.service.syncBatch(batch.id);await f.service.runDue();
+  f.amazon.executionTargetScope=()=>({target,generation:2});const [rotated]=f.service.prepareBatch(batch.id);await f.service.runDue();
   assert.equal(rotated.status,'FAILED');assert.equal(rotated.attempts,attempts);assert.equal(f.requests.length,count);
-  await f.reopen();f.service.syncBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,count);
+  await f.reopen();f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,count);
   const explicit=f.service.retry(rotated.id);assert.equal(explicit.attempts,attempts);await f.service.runDue();assert.equal(f.requests.length,count+1);
 });
 test('credential rotation does not bypass a cancelled job',async t=>{
-  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});f.service.syncBatch(batch.id,{jobId:job});f.service.cancelJob(job);
-  const target=f.amazon.executionTargetScope().target;f.amazon.executionTargetScope=()=>({target,generation:2});const [cancelled]=f.service.syncBatch(batch.id);f.service.resumeJob(job);await f.service.runDue();
+  const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});f.service.prepareBatch(batch.id);f.service.cancelJob(job);
+  const target=f.amazon.executionTargetScope().target;f.amazon.executionTargetScope=()=>({target,generation:2});const [cancelled]=f.service.prepareBatch(batch.id);f.service.resumeJob(job);await f.service.runDue();
   assert.equal(cancelled.status,'CANCELLED');assert.equal(f.requests.length,0);
 });
 test('suspending scheduling leaves queued records intact until scheduling resumes',async t=>{
-  const f=fixture(t),batch=f.batch(),[row]=f.service.syncBatch(batch.id);
+  const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);
   const suspend=(f.service as typeof f.service&{suspendScheduling:()=>void}).suspendScheduling;assert.equal(typeof suspend,'function');
   f.service.resume();suspend.call(f.service);await new Promise(resolve=>setTimeout(resolve,35));
   assert.equal(f.requests.length,0);assert.equal(f.service.get(row.id).status,'QUEUED');assert.equal(f.service.get(row.id).paused,false);
@@ -156,10 +156,60 @@ for(const failure of ['download','pdf','response','unexpected'] as const)test(`l
   if(failure==='pdf')f.setDownload(async()=>Buffer.from('not a PDF'));
   if(failure==='response')f.setCreate(async()=>({data:{},status:200,requestId:'local-test'}));
   if(failure==='unexpected')f.setDownload(async()=>{throw new Error('private signed URL secret');});
-  const [row]=f.service.syncBatch(batch.id);await f.service.runDue();
+  const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
   const failed=f.service.get(row.id);
   assert.equal(failed.status,'FAILED');
   assert.match(failed.message,failure==='download'?/解析失败或超时/:failure==='pdf'?/不是有效 PDF/:failure==='response'?/没有返回完整标签文件列表/:/标签文件下载失败/);
   assert.equal(failed.message.includes('secret'),false);
   await f.reopen();await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(row.id).message,failed.message);
+});
+test('ordinary reconciliation never authorizes labels and explicit preparation reuses READY',async t=>{
+ const f=fixture(t),batch=f.batch();const [row]=f.service.syncBatch(batch.id);
+ assert.equal(row.status,'NOT_REQUESTED');assert.equal(row.requestedAt,undefined);
+ await f.service.runDue();await f.reopen();f.service.resume();await f.service.runDue();assert.equal(f.requests.length,0);
+ f.service.prepareBatch(batch.id);await f.service.runDue();const ready=f.service.get(row.id);assert.equal(ready.status,'READY');assert.ok(ready.requestedAt);
+ f.service.prepareBatch(batch.id);await f.service.runDue();assert.deepEqual(f.service.get(row.id),ready);assert.equal(f.requests.length,1);
+ const changed=changeQuantity(f,batch.id,8);assert.equal(changed.status,'NOT_REQUESTED');assert.equal(changed.requestedAt,undefined);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+test('legacy queued rows preserve evidence and cannot dispatch through startup or resumeJob',async t=>{
+ const f=fixture(t),batch=f.batch(),[row]=f.service.syncBatch(batch.id);const db=openDatabase(f.dir);
+ row.status='QUEUED';row.nextDueAt=row.updatedAt;row.attempts=2;row.requestId='legacy-request';delete row.requestedAt;
+ db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();
+ await f.reopen();f.service.resume();f.service.resumeJob(row.jobId!);await f.service.runDue();const held=f.service.get(row.id);
+ assert.equal(f.requests.length,0);assert.equal(held.status,'QUEUED');assert.equal(held.attempts,2);assert.equal(held.requestId,'legacy-request');assert.equal(held.paused,true);
+ f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+test('prepare never retries failed unknown or exhausted labels and strict intent leaves fingerprints compatible',async t=>{
+ const f=fixture(t),batch=f.batch();f.setCreate(async()=>{throw new AmazonTransportError('unknown',null,'unknown-id',true);});const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
+ const failed=f.service.get(row.id);f.service.prepareBatch(batch.id);await f.service.runDue();assert.deepEqual(f.service.get(row.id),failed);assert.equal(f.requests.length,1);
+ f.service.retry(row.id);await f.service.runDue();assert.equal(f.requests.length,2);assert.equal(f.service.get(row.id).attempts,2);
+ const {validateItemLabelRecord}=await import('../src/main/item-labels/records.ts');for(const requestedAt of [null,123,'bad'])assert.throws(()=>validateItemLabelRecord({...failed,requestedAt}));
+ const legacy={...failed};delete legacy.requestedAt;assert.equal(validateItemLabelRecord(legacy).fingerprint,failed.fingerprint);
+});
+test('legacy in-flight labels retain original evidence and require explicit retry',async t=>{
+ const f=fixture(t),batch=f.batch(),[row]=f.service.syncBatch(batch.id),db=openDatabase(f.dir);row.status='REQUESTING';row.attempts=1;row.requestId='sent-id';
+ db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();await f.reopen();const held=f.service.get(row.id);
+ assert.equal(held.status,'FAILED');assert.equal(held.errorCode,'INTERRUPTED');assert.equal(held.requestId,'sent-id');assert.equal(held.attempts,1);
+ f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,0);
+ const audit=openDatabase(f.dir);const evidence=audit.prepare("SELECT detail_json FROM audit_events WHERE action='item-labels.legacy-interrupted'").get();audit.close();assert.equal(JSON.parse(String(evidence?.detail_json)).status,'REQUESTING');
+ f.service.retry(row.id);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+test('prepare IPC is explicit and ordinary procurement saves remain local',async t=>{
+ const f=fixture(t),batch=f.batch(),handlers=new Map<string,Function>();
+ const {installItemLabelIpc}=await import('../src/main/item-labels-ipc.ts');const {installOperationsIpc}=await import('../src/main/operations-ipc.ts');
+ const handle=(name:string,_arity:number,fn:Function)=>{handlers.set(name,fn);};
+ installItemLabelIpc(f.dir,{labels:f.service,labelSettings:{get:()=>({labelType:'STANDARD_FORMAT',pageType:'A4_21',localeCode:'en_US'})}} as any,handle as any,{} as any);
+ installOperationsIpc(f.dir,{procurement:f.procurement,labels:f.service} as any,handle as any,{audit:()=>{}} as any);
+ const current=f.procurement.get(batch.id);handlers.get('red:procurement:update')!({id:current.id,revision:current.revision,lines:current.lines.map(({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed,stockQuantity})=>({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed,stockQuantity})),shipmentConfirmationId:''});
+ await f.service.runDue();assert.equal(f.requests.length,0);assert.equal(f.service.list({batchId:batch.id})[0].status,'NOT_REQUESTED');
+ handlers.get('red:item-labels:prepare')!(batch.id);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+test('beforeSend rejects revoked intent after scheduler selection',async t=>{
+ const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);
+ f.amazon.createMarketplaceItemLabels=async(_id,body,guard)=>{const db=openDatabase(f.dir),stored=f.service.get(row.id);delete stored.requestedAt;db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(stored),row.id);db.close();guard?.();f.requests.push(body);return {data:{},status:200,requestId:null};};
+ await f.service.runDue();assert.equal(f.requests.length,0);assert.equal(f.service.get(row.id).attempts,0);assert.equal(f.service.get(row.id).requestedAt,undefined);
+});
+test('explicitly requested waiting SKU may continue after readiness without a second request intent',async t=>{
+ const f=fixture(t),batch=f.batch();f.draft.state='UNKNOWN';const [row]=f.service.prepareBatch(batch.id);assert.equal(row.status,'WAITING_SKU');assert.ok(row.requestedAt);await f.service.runDue();assert.equal(f.requests.length,0);
+ f.draft.state='PROCESSING';await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(row.id).status,'READY');
 });

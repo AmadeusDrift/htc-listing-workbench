@@ -16,7 +16,7 @@ export function automaticItemReason(item: AutomaticListingItem): string {
   if (item.stage === 'READBACK' && (!['DONE', 'FAILED', 'SCREENED'].includes(item.status) || code === 'READBACK_FAILED')) return item.error || item.outcome?.message || '已提交，等待 Amazon 回读确认；接受提交不等于已可售。';
   if (item.outcome?.kind === 'UNKNOWN') return '结果待核对，请查看当前步骤已保存的调用与恢复记录；正式提交结果未知时禁止自动重发。';
   if (['FAILED', 'SCREENED'].includes(item.status)) return presentRejection(code);
-  if (item.stage === 'LABELS') return '标签尚未完成，请查看备货与标签中的进度；已提交商品保留。';
+  if (item.stage === 'LABELS') return '平台建档结果待核对，请查看备货与标签中的进度；已提交商品保留。';
   const waiting: Record<AutomaticListingItem['stage'], string> = {
     PLAN: '等待销售规格处理。', SOURCES: '等待来源资料与参考图处理。', CLASSIFY: '等待商品类目判断返回。',
     DRAFT: '等待字段处理返回。', IMAGES: '等待图片生成或检测返回；已完成图片保留。', PARENT: '等待父体建档结果。',
@@ -111,7 +111,7 @@ export function filterAutomaticProductGroups(groups: AutomaticProductGroup[], se
 export function automaticQueueReason(row:AutomaticQueueRow):string {
  if(row.kind==='UNKNOWN')return presentRejection(undefined,true);
  if(row.kind==='COMPLETED')return '流程已完成';
- if(row.kind==='SUBMITTED')return '已提交，等待平台回读或标签';
+ if(row.kind==='SUBMITTED')return '已提交，等待平台回读';
  const notices:Record<string,string>={RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'当前定价已在本地重算合格',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估',UNKNOWN_RECONCILED:'原未知结果已核对，可重新准备；历史未知记录保留，不会自动重试',EVIDENCE_READ_FAILED:'暂无法核对已保存证据，记录保留待修复'};
  const notice=row.noticeCode&&Object.hasOwn(notices,row.noticeCode)?notices[row.noticeCode]:undefined;
  const text=notice?(notice+(['UNKNOWN_RECONCILED','EVIDENCE_READ_FAILED'].includes(row.noticeCode!)?'':'；原淘汰记录保留，旧任务不会自动重启')):row.reasonCode||row.message?presentRejection(row.reasonCode):'';

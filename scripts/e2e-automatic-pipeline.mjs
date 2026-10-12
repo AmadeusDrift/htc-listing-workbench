@@ -27,14 +27,14 @@ try{
   assert.equal(await page.evaluate(input=>window.red.startAutomaticListing(input),input),null);assert.equal((await page.evaluate(()=>window.red.listExecutionTasks())).length,0);checks.push('Native cancellation performs no upload/submission');
   await app.evaluate(({dialog})=>{dialog.showMessageBox=async()=>({response:1});});
   const task=await page.evaluate(input=>window.red.startAutomaticListing(input),input);assert.ok(task);
-  await expect.poll(async()=> (await page.evaluate(id=>window.red.getAutomaticListingTask(id),task.id)).status,{timeout:30000}).toBe('NEEDS_ATTENTION');
+  await expect.poll(async()=> (await page.evaluate(id=>window.red.getAutomaticListingTask(id),task.id)).status,{timeout:30000}).toBe('COMPLETED');
   const state=await page.evaluate(async id=>{const task=await window.red.getAutomaticListingTask(id);return{task,children:await window.red.listExecutionTasks(),drafts:await window.red.listAmazonDrafts(task.items[0].productId),labels:await window.red.listItemLabels({jobId:id}),batch:await window.red.getProcurementBatch(task.items[0].batchId)};},task.id);
   assert.equal(state.children.length,1);assert.equal(state.children[0].status,'COMPLETED');assert.ok(state.children[0].items[0].steps.every(step=>['DONE','SKIPPED'].includes(step.status)));
   assert.ok(state.drafts[0].submittedAt);assert.ok(state.drafts[0].attributes.main_product_image_locator);assert.equal(state.batch.lines[0].stockQuantity,5);
-  assert.equal(state.labels[0].errorCode,'DEMO_LABEL_UNAVAILABLE');assert.equal(state.labels[0].attempts,0);
+  assert.equal(state.labels.length,0);assert.equal(state.task.items[0].stage,'COMPLETE');
   const ftp=await app.evaluate(()=>globalThis.__executionHarness.snapshot());assert.ok(ftp.stor>0&&ftp.probes>0);
   checks.push('One native start completes real local FTP upload, URL fill, demo validation/submission/readback and sales-unit procurement binding');
-  checks.push('Demo reaches label boundary and truthfully reports no real Amazon label, with zero label API attempts');
+  checks.push('Demo listing completes without requesting labels; labels remain an independent on-demand action');
   await writeFile(join('artifacts','automatic-pipeline-e2e-report.json'),JSON.stringify({passed:true,dataRoot,checks,state,ftp},null,2));
   console.log(checks.map(value=>'PASS '+value).join('\n'));
 }finally{await app?.close();}

@@ -39,9 +39,10 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const currentBytes=JSON.stringify(currentScreen),legacyBytes=JSON.stringify(screened);
   const history=openDatabase(source);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(currentScreen.id,currentBytes);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(screened.id,JSON.stringify(screened));history.close();
   const [batch]=procurement.ensureAutomaticBatch(task.id,[draft.id],{[draft.id]:5});
-  const [label]=labels.syncBatch(batch.id,{jobId:task.id});await labels.runDue();const ready=labels.get(label.id);assert.equal(ready.status,'READY',JSON.stringify(ready));
+  const [label]=labels.prepareBatch(batch.id);await labels.runDue();const ready=labels.get(label.id);assert.equal(ready.status,'READY',JSON.stringify(ready));
   const current=procurement.get(batch.id);procurement.update({id:batch.id,revision:current.revision,lines:current.lines.map(({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})),shipmentConfirmationId:'FBA12345678'});
   const input=join(root,'carton.pdf');await writeFile(input,simplePdf());const document=await docs.importDocument(batch.id,input);
+  assert.ok(ready.requestedAt);const legacyReady={...ready};delete legacyReady.requestedAt;const legacyDb=openDatabase(source);legacyDb.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(legacyReady),ready.id);legacyDb.close();
   const readyArchive=join(root,'ready.htcbackup'),readyDestination=join(root,'ready-restored');await createWorkspaceBackup(source,readyArchive,'automatic-backup-test-2026');
   await commitWorkspaceRestore(readyDestination,await prepareWorkspaceRestore(readyDestination,readyArchive,'automatic-backup-test-2026'));
   assert.deepEqual(await readFile(join(readyDestination,ready.files[0].relativePath)),simplePdf());

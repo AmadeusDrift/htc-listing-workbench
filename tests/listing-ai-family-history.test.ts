@@ -14,7 +14,7 @@ import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 import type { JsonObject } from '../src/shared/amazon-contracts.ts';
 import type { SalesListingPlan } from '../src/shared/sales-plan-contracts.ts';
 
-async function fixture(t:test.TestContext) {
+async function fixture(t:test.TestContext,adaptBeforeRebind=false) {
   let naming:SkuNamingService|undefined;t.after(()=>naming?.close());
   const f=await listingFixture(t);naming=new SkuNamingService(f.directory);
   const input=saveInput(f.product),product=f.store.saveProduct({...input,variants:input.variants.map(v=>({...v,originalSpec:'颜色: 蓝色 / 包装: 1个装',normalizedSpec:'Blue',purchasePrice:'20'}))});
@@ -28,7 +28,9 @@ async function fixture(t:test.TestContext) {
   const prepared=await f.amazon.prepareDrafts({targetId:f.draft.targetId,productType:f.draft.schema.productType,parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',items:[{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,attributes:f.draft.attributes}]},[plan]);
   const initial=prepared.items[0].draft;assert.ok(initial,prepared.items[0].error??'missing fixture draft');
   const ref={draftId:initial.id,draftRevision:initial.revision},suggestion=await f.listing.suggest(ref),review=await f.listing.review({...ref,suggestionResultId:suggestion.id});
-  const adopted=await f.listing.adopt({...ref,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});
+  let adopted=await f.listing.adopt({...ref,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});
+  if(adaptBeforeRebind){const input=saveInput(f.store.getProductSnapshot(product.id));const source=f.store.saveProduct({...input,variants:input.variants.map(v=>({...v,purchasePrice:'21'}))});const persistence=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence;
+    adopted=persistence.transaction(()=>f.amazon.applyTaskAdaptation(adopted.id,source,undefined,persistence.db));}
   const getSchema=f.amazon.getSchema.bind(f.amazon);
   f.amazon.getSchema=async input=>{const schema=await getSchema(input);if(schema.parentageLevel!=='CHILD')return schema;
     const fields=schema.schema.properties as JsonObject,marketplace_id={type:'string',const:adopted.marketplaceId};
@@ -47,6 +49,13 @@ async function fixture(t:test.TestContext) {
   const results=new Map(f.ai.listResults(product.id).map(result=>[result.id,result])),calls=new Map(f.ai.listCalls().map(call=>[call.id,call]));
   return {...f,adopted,migrated,persistence,row,results,calls};
 }
+
+test('source adaptation and family rebind compose in either order without rewriting adopted fields',async t=>{
+ const f=await fixture(t,true);assert.doesNotThrow(()=>assertListingHistory(f.migrated,f.results,f.calls,f.persistence.db));
+ const input=saveInput(f.store.getProductSnapshot(f.product.id)),source=f.store.saveProduct({...input,variants:input.variants.map(v=>({...v,purchasePrice:'22'}))});
+ const latest=f.persistence.transaction(()=>f.amazon.applyTaskAdaptation(f.migrated.id,source,undefined,f.persistence.db));
+ assert.doesNotThrow(()=>assertListingHistory(latest,f.results,f.calls,f.persistence.db));
+});
 
 test('recorded NONE to CHILD migration proves the original adoption schema and survives encrypted backup restore',async t=>{
   const f=await fixture(t);

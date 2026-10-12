@@ -12,6 +12,23 @@ import { candidateTextValues } from '../amazon/field-mapping.ts';
 import { imageEvidence,imageListingSnapshot } from '../image-workflow/image-facts.ts';
 import { isFullSchema,nativeText,assertFullEvidence } from './full-schema.ts';
 import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
+import { translatedFabricEvidence } from './semantic-evidence.ts';
+
+// Current reuse only: a known affirmative material replaced by a different known
+// material invalidates its old citation. Unknown or composite wording is not a conflict.
+function changedMaterialCitation(old:ListingAiContext,current:ListingAiContext,ids:string[]):boolean {
+  const material=(value:string):string|null=>{
+    const aliases:Record<string,string>={'硅胶':'silicone','塑料':'plastic','不锈钢':'stainless steel','金属':'metal','木材':'wood','玻璃':'glass','陶瓷':'ceramic'};
+    const text=(aliases[value.trim()]??translatedFabricEvidence(value)).trim().toLowerCase();
+    return /^(?:silicone|plastic|stainless steel|metal|wood|glass|ceramic|cotton|polyester|nylon|wool|linen|acrylic|spandex|silk|rayon|viscose)$/.test(text)?text:null;
+  };
+  return ids.some(id=>{
+    const before=old.evidence.find(e=>e.id===id),after=current.evidence.find(e=>e.id===id);
+    if(before?.meaning!=='material'||after?.meaning!=='material')return false;
+    const a=material(before.value),b=material(after.value);
+    return !!a&&!!b&&a!==b&&![a,b].every(v=>['metal','stainless steel'].includes(v));
+  });
+}
 
 export function currentCopyIssues(copy:CurrentListingCopy[],context:ListingAiContext):string[]{
   if(isFullSchema(context))return copy.flatMap(item=>item.values.flatMap(value=>explicitCategoryConflicts(item.field,value,context)));
@@ -71,14 +88,20 @@ export function currentProseRepairIssues(draft:AmazonDraft,context:ListingAiCont
 export function currentDraftEvidenceIssues(draft:AmazonDraft,context:ListingAiContext,getResult?:(id:string)=>AiResult|undefined,options:AdoptionOptions={}):string[]{
   if(isFullSchema(context)){
     const issues=currentCopyIssues(context.fields.flatMap(field=>{const raw=draft.attributes[field.name];return raw===undefined?[]:[{field:field.name,values:nativeText(field.name,raw)}];}),context);
+    const owners=new Map<string,NonNullable<AmazonDraft['fieldAdoptions']>[number]>();
+    // Select the latest matching owner before checking evidence. A broken latest
+    // record must remain an error instead of falling back to an older candidate.
+    for(const adoption of draft.fieldAdoptions??[])for(const change of adoption.changes)
+      if(listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]))owners.set(change.field,adoption);
     if(getResult)for(const adoption of draft.fieldAdoptions??[]){
-      const active=adoption.changes.filter(change=>listingFingerprint(change.after)===listingFingerprint(draft.attributes[change.field]));
+      const active=adoption.changes.filter(change=>owners.get(change.field)===adoption);
       if(!active.length)continue;
       const result=getResult(adoption.suggestionResultId);
       if(!result||result.output.kind!=='amazon-fields'||!result.listingContext||result.sourceSha256!==adoption.contextSha256||listingFingerprint(result.listingContext)!==adoption.contextSha256){issues.push('已采用候选的来源记录不完整');continue;}
       for(const change of active){
         const candidate=result.output.candidates.find(candidate=>candidate.field===change.field);
         if(!candidate||(Object.hasOwn(candidate,'nativeValue')?listingFingerprint(candidate.nativeValue)!==listingFingerprint(change.after):listingFingerprint(candidate.items.map(item=>item.value))!==listingFingerprint(candidateTextValues(change.field,change.after)))){issues.push(`${change.field}：已采用候选与当前字段值不一致`);continue;}
+        if(options.adoptionContext!=='stored'&&changedMaterialCitation(result.listingContext,context,candidate.items.flatMap(item=>item.evidenceIds)))issues.push(`${change.field}：旧候选引用的材质与当前明确来源材质冲突`);
         try{assertFullEvidence({kind:'amazon-fields',candidates:[candidate],missing:[]},options.adoptionContext==='stored'?result.listingContext:context);}
         catch(error){if(!(error instanceof ListingValidationError))throw error;issues.push(`${change.field}：${error.validationReason}`);}
       }

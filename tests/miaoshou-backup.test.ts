@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WorkspaceStore } from '../src/main/store.ts';
-import { openDatabase } from '../src/main/database.ts';
+import { openDatabase, SCHEMA_VERSION } from '../src/main/database.ts';
 import { MiaoshouService } from '../src/main/miaoshou/service.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { testMiaoshouStorage } from './helpers/miaoshou-fixture.ts';
@@ -49,7 +49,7 @@ test('genuine v10 backup restores and upgrades without altering original product
     const archive = join(root, 'legacy.htcbackup'); await createWorkspaceBackup(source, archive, 'test-backup-password');
     const prepared = await prepareWorkspaceRestore(target, archive, 'test-backup-password'); await commitWorkspaceRestore(target, prepared);
     const restored = new WorkspaceStore(target);
-    try { assert.deepEqual(restored.getProduct(product.id), product); assert.equal(restored.getStats().schemaVersion, 20); }
+    try { assert.deepEqual(restored.getProduct(product.id), product); assert.equal(restored.getStats().schemaVersion, SCHEMA_VERSION); }
     finally { restored.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

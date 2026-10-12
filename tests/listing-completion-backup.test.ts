@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixture, mockStorage, chat, candidateFor, reviewFor } from './fixtures/listing-ai.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
-import { openDatabase } from '../src/main/database.ts';
+import { openDatabase, SCHEMA_VERSION } from '../src/main/database.ts';
 import { CompletionJournal } from '../src/main/listing-ai/completion-journal.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
@@ -57,7 +57,7 @@ test('schema 17 encrypted backup migrates without inventing a completion operati
   const f=await fixture(t),db=openDatabase(f.directory);db.exec('DROP TABLE listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; PRAGMA user_version=17;');db.close();
   const file=join(f.directory,'schema17.htcbackup');await createWorkspaceBackup(f.directory,file,pass);
   const restored=await prepareWorkspaceRestore(f.directory,file,pass),snapshot=openDatabase(restored.stagingDirectory);
-  try{assert.equal(snapshot.prepare('PRAGMA user_version').get()!.user_version,20);assert.equal(snapshot.prepare('SELECT id FROM listing_completion_operations').all().length,0);}finally{snapshot.close();}
+  try{assert.equal(snapshot.prepare('PRAGMA user_version').get()!.user_version,SCHEMA_VERSION);assert.equal(snapshot.prepare('SELECT id FROM listing_completion_operations').all().length,0);}finally{snapshot.close();}
 });
 
 for(const sent of [false,true])test(`normal draft retention keeps exportable ${sent?'sent safety':'unsent historical'} operation records`,async t=>{

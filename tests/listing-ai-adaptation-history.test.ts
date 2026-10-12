@@ -29,9 +29,9 @@ test('same-value readoption owns current evidence; an invalid newest owner never
  assert.ok(currentDraftEvidenceIssues(latest,oldContext,id=>{const result=results.get(id);return id===latestId&&result?{...result,sourceSha256:'invalid'}:result;}).some(issue=>issue.includes('来源记录不完整')));
 });
 
-async function adoptedFixture(t:test.TestContext) {
+async function adoptedFixture(t:test.TestContext,field:'material'|'item_name'='material') {
  const f=await fixture(t),suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
- const adopted=await f.listing.adopt({...f.reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});
+ const adopted=await f.listing.adopt({...f.reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:[field]});
  const persistence=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence;
  const results=new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),calls=new Map(f.ai.listCalls().map(c=>[c.id,c]));
  const adapt=()=>{const source=f.store.getProductSnapshot(f.product.id),input=saveInput(source);const next=f.store.saveProduct({...input,variants:input.variants.map(v=>({...v,purchasePrice:String(Number(v.purchasePrice||0)+1)}))});
@@ -92,4 +92,12 @@ for(const kind of ['missing','legacy','duplicate','hash','identity','revision','
  if(kind==='missing')db.prepare('DELETE FROM audit_events WHERE id=?').run(row.id);
  if(kind==='duplicate')db.prepare("INSERT INTO audit_events SELECT 'duplicate',product_id,action,summary,detail_json,created_at FROM audit_events WHERE id=?").run(row.id);
  assert.throws(()=>assertListingHistory(latest,f.results,f.calls,db));
+});
+
+
+for(const legacy of [false,true])for(const field of ['material','item_name'] as const)test('removed adopted attribute is historical only and cannot crash current evidence; '+field+' legacy='+legacy,async t=>{
+ const f=await adoptedFixture(t,field),draft=structuredClone(f.adopted),history=JSON.stringify(draft.fieldAdoptions);delete draft.attributes[field];
+ const context=buildListingContext(draft,f.product,0,legacy);
+ assert.deepEqual(currentDraftEvidenceIssues(draft,context,()=>{throw Error('removed field must not claim current ownership');}),[]);
+ assert.equal(JSON.stringify(draft.fieldAdoptions),history);
 });

@@ -1,6 +1,6 @@
 import {validateListingContext} from '../listing-ai/validation.ts';
 import {replayReferenceCandidates,sameRecoverySource} from '../listing-ai/candidate-recovery.ts';
-import { parseImagePlanResponse } from './image-validation.ts';
+import { parseImagePlanRecovery } from './image-validation.ts';
 import { parseFunctionSettings } from './validation.ts';
 import { resultHasOwner } from './result-owner.ts';
 import { evidenceVersion,imageEvidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
@@ -33,7 +33,7 @@ import type { HostingService } from '../hosting/service.ts';
 import type { StoredAsset, WorkspaceStore } from '../store.ts';
 import { recognizeWithAliyun, segmentWithAidge, suggestWithDeepSeek } from './adapters.ts';
 import type { AdapterResult, TextPayload } from './adapters.ts';
-import { AiError, abortable, safeError, throwIfAborted } from './errors.ts';
+import { AiError, ImagePlanningLimitError, abortable, safeError, throwIfAborted } from './errors.ts';
 import { AiRequestControl, requestKey } from './request-control.ts';
 import { AiUsageLedger } from './usage.ts';
 import { readManagedImage, sameAsset, validateImage } from './source.ts';
@@ -63,7 +63,7 @@ import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.t
 import { referenceMeasurementEvidence } from '../image-workflow/image-facts.ts';
 import { currentSourceImageMeasurements } from '../image-workflow/source-measurements.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
-import { recordInvalidAiOutput,readInvalidAiOutputs,hasRetainedInvalidAiOutput } from './output-diagnostics.ts';
+import { recordInvalidAiOutput,readInvalidAiOutputs,hasRetainedInvalidAiOutput,imagePlanRetryForbidden } from './output-diagnostics.ts';
 import type { AiOutputRejectionStage } from './output-diagnostics.ts';
 import { readCopyReviewSettings } from '../listing-ai/review-settings.ts';
 import { SOURCE_COLOR_POLICY_VERSION } from '../../shared/source-color-contracts.ts';
@@ -640,16 +640,40 @@ export class AiService {
       const saved=this.getResult(String(row.id));if(saved?.imagePlanRecovery&&resultHasOwner(saved,call)&&saved.sourceSha256===hash)return saved;
     }
     for(const rawOutput of readInvalidAiOutputs(this.directory,call,'image-plan')){
-      let output;try{output=parseImagePlanResponse(rawOutput,context);}catch{continue;}
+      let output;try{output=parseImagePlanRecovery(rawOutput,context);}catch{continue;}
       await this.assertImageFresh(context,assertContextFresh,activeSignal);
-      const createdAt=this.finishedAt(call.finishedAt),result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:context.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:[...imageCopySourceIds(context),...(repair?[repair.previousPlanId]:[])],model:call.model,createdAt,reviewState:'unreviewed',output,sourceSha256:hash,listingEvidenceContractVersion:imageEvidenceVersion(context.listing),imageContext:context,imagePlanRecovery:{...(repair?{repair}:{}),parserVersion:'image-plan-recovery/v1',contextSha256:hash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt:createdAt}});
+      const createdAt=this.finishedAt(call.finishedAt),result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:context.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:[...imageCopySourceIds(context),...(repair?[repair.previousPlanId]:[])],model:call.model,createdAt,reviewState:'unreviewed',output,sourceSha256:hash,listingEvidenceContractVersion:imageEvidenceVersion(context.listing),imageContext:context,imagePlanRecovery:{...(repair?{repair}:{}),parserVersion:'image-plan-recovery/v2',contextSha256:hash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt:createdAt}});
       if(!resultHasOwner(result,call))throw new AiError('SOURCE_CHANGED');
       for(const row of this.db.prepare("SELECT id FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(call.id)){const saved=this.getResult(String(row.id));if(saved?.imagePlanRecovery&&resultHasOwner(saved,call)&&saved.sourceSha256===hash)return saved;}
       this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));return result;
     }
     return undefined;
   }
-  async imagePlan(rawContext: ProductImageContext, assertContextFresh: () => void | Promise<void>, rawRepair?: { previousPlanId: string; issues: string[] }, signal?: AbortSignal, workflowId?:string,onRequestSent?:()=>void): Promise<AiResult> {
+  async imagePlan(rawContext:ProductImageContext,assertContextFresh:()=>void|Promise<void>,rawRepair?:{previousPlanId:string;issues:string[]},signal?:AbortSignal,workflowId?:string,onRequestSent?:()=>void):Promise<AiResult>{
+    for(let attempt=0;;attempt++){
+      throwIfAborted(signal??new AbortController().signal);
+      try{return await this.imagePlanOnce(rawContext,assertContextFresh,rawRepair,signal,workflowId,onRequestSent);}
+      catch(error){
+        if(!(error instanceof AiError)||error.code!=='OUTPUT_INVALID'||!error.callId||!workflowId||['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(error.diagnosticReason??''))throw error;
+        const recovered=await this.recoverImagePlan(error.callId,rawContext,assertContextFresh,signal,rawRepair);
+        if(recovered)return recovered;
+        if(attempt>=2||this.imagePlanningAttempts(rawContext,workflowId)>=3)throw new ImagePlanningLimitError(error.callId);
+      }
+    }
+  }
+  private imagePlanningAttempts(context:ProductImageContext,workflowId:string):number {
+    // Count in SQLite, including legacy records without a request hash. During reserve this
+    // uses the same connection/write transaction and includes the newly inserted call.
+    const row=this.db.prepare(`SELECT count(*) AS attempts FROM ai_calls WHERE
+      json_extract(record_json,'$.providerId')='deepseek' AND json_extract(record_json,'$.model')='deepseek-flash'
+      AND json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.productRevision')=?
+      AND json_extract(record_json,'$.presentationContext.kind')='image'
+      AND json_extract(record_json,'$.presentationContext.draftId')=? AND json_extract(record_json,'$.presentationContext.variantId')=?
+      AND json_extract(record_json,'$.presentationContext.sourceSha256')=? AND json_extract(record_json,'$.presentationContext.slot')=?
+      AND json_extract(record_json,'$.presentationContext.workflowId')=?`).get(context.listing.productId,context.listing.productRevision,context.listing.draftId,context.listing.variantId,listingFingerprint(context),context.slot?.index??0,workflowId);
+    return Number(row!.attempts);
+  }
+  private async imagePlanOnce(rawContext: ProductImageContext, assertContextFresh: () => void | Promise<void>, rawRepair?: { previousPlanId: string; issues: string[] }, signal?: AbortSignal, workflowId?:string,onRequestSent?:()=>void): Promise<AiResult> {
     this.ensureOpen(); const context = validateProductImageContext(rawContext), profile = { ...this.assertProfile('deepseek'), model: 'deepseek-flash' };
     if (context.policyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new AiError('SOURCE_CHANGED');
     let repair: { previousPlanId: string; issues: string[] } | undefined;
@@ -664,10 +688,10 @@ export class AiService {
       const requestHash=listingFingerprint({context,repair:repair??null});
       const call=this.listCalls().filter(call=>(call.presentationContext?.imagePlanRequestSha256===requestHash||!repair&&call.presentationContext?.imagePlanRequestSha256===undefined)&&call.presentationContext?.sourceSha256===listingFingerprint(context)&&call.presentationContext?.workflowId===workflowId).sort((a,b)=>b.startedAt.localeCompare(a.startedAt))[0];
       if(call?.status==='SUCCEEDED'){
-        const refusal=this.listResults(call.productId).find(result=>result.callId===call.id&&result.output.kind==='image-plan'&&result.output.productUnderstanding?.sufficient===false&&result.sourceSha256===listingFingerprint(context));
+        const refusal=this.listResults(call.productId).find(result=>result.callId===call.id&&result.output.kind==='image-plan'&&(result.output.productUnderstanding?.sufficient===false||!!workflowId&&call.presentationContext?.imagePlanRequestSha256===requestHash)&&result.sourceSha256===listingFingerprint(context));
         if(refusal){await this.assertImageFresh(context,assertContextFresh,signal??new AbortController().signal);this.successfulResult(refusal);return refusal;}
       }
-      if(call){const recovered=await this.recoverImagePlan(call.id,context,assertContextFresh,signal,repair);if(recovered)return recovered;}
+      if(call){const recovered=await this.recoverImagePlan(call.id,context,assertContextFresh,signal,repair);if(recovered)return recovered;if(imagePlanRetryForbidden(this.directory,call))throw new AiError('OUTPUT_INVALID');}
     }
     return this.start(profile, context.listing, { operation: 'image-plan', context, repair, ...(workflowId?{workflowId:uuid(workflowId)}:{}) }, async activeSignal => {
       const assertFresh = async () => { await this.assertImageFresh(context, assertContextFresh, activeSignal); if (prior) this.imageResult(prior, context, 'image-plan'); };
@@ -679,7 +703,8 @@ export class AiService {
       }
       await assertFresh();
       return { imagePlanRequestSha256:listingFingerprint({context,repair:repair??null}),...(workflowId?{workflowId:uuid(workflowId)}:{}), variantId: context.listing.variantId, assetId: null, assetSha256: null, sourceResultIds: [...imageCopySourceIds(context), ...(prior ? [prior.id] : [])], sourceSha256: listingFingerprint(context), imageContext: context, assertFresh,
-        invoke: (credentials, adapterContext) => planProductImage(context, repair?{...repair,previousPlan:prior?.output as import('../../shared/image-ai-contracts.ts').ImagePlanOutput}:undefined, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, {...adapterContext,beforeSend:body=>{adapterContext.beforeSend?.(body);onRequestSent?.();}}, images) };
+        assertBeforeSend:()=>{if(workflowId&&this.imagePlanningAttempts(context,workflowId)>=3)throw new ImagePlanningLimitError();},
+        invoke: (credentials, adapterContext) => planProductImage(context, repair?{...repair,previousPlan:prior?.output as import('../../shared/image-ai-contracts.ts').ImagePlanOutput}:undefined, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, {...adapterContext,imagePlanRetry:!!workflowId&&this.imagePlanningAttempts(context,workflowId)>0,beforeSend:body=>{adapterContext.beforeSend?.(body);onRequestSent?.();}}, images) };
     }, signal);
   }
   async recognizeGeneratedImage(rawContext: ProductImageContext, rawCandidate: CandidateImageIdentity, bytes: Buffer, assertContextFresh: () => void | Promise<void>, signal?: AbortSignal): Promise<AiResult> {
@@ -737,7 +762,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = this.usage.reserve({ id, ...(isDeepSeek(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
+            call = this.usage.reserve({ id, ...(isDeepSeek(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>3)throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },
@@ -761,11 +786,11 @@ export class AiService {
         if (call) {
           safe.callId=call.id;
           const finishedAt = this.finishedAt(call.startedAt); this.db.exec('BEGIN IMMEDIATE');
-          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(safe.code==='OUTPUT_INVALID'&&untrustedOutput?{responseReceived:true as const}:{}), ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
+          try { this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'FAILED', errorCode: safe.code, ...(safe.code==='OUTPUT_INVALID'&&['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(safe.diagnosticReason??'')&&source&&typeof source==='object'&&'operation' in source&&source.operation==='image-plan'?{imagePlanRetryBlock:safe.diagnosticReason as AiCall['imagePlanRetryBlock']}:{}), ...(safe.code==='OUTPUT_INVALID'&&untrustedOutput?{responseReceived:true as const}:{}), ...(safe.rejection||safe.reason?{rejection:safe.rejection??{version:'rejection-presentation/v1',code:safe.reason!}}:{}), finishedAt }); this.usage.settle(id, metadata.usageKnown, metadata.usage, finishedAt); this.db.exec('COMMIT'); }
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
-          if (safe.code === 'OUTPUT_INVALID' && untrustedOutput) {
+          if (safe.code === 'OUTPUT_INVALID' && (untrustedOutput||safe.responseDiagnostic)) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;
-            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage,rejectionReason:safe.diagnosticReason??safe.reason,output:untrustedOutput.value});
+            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage:untrustedOutput?rejectionStage:'provider-response-validation',rejectionReason:safe.diagnosticReason??safe.reason,responseDiagnostic:safe.responseDiagnostic,output:untrustedOutput?.value??null});
           }
         }
         throw safe;

@@ -19,8 +19,16 @@ export class AiError extends UserFacingError {
   rejection?: import('../../shared/rejection-presentation.ts').OutputRejection;
   callId?:string;
   diagnosticReason?:string;
+  responseDiagnostic?:{status:number;byteCount:number};
   readonly reason?: AiRejectionReason;
   constructor(code: AiErrorCode, reason?: AiRejectionReason) { super(MESSAGES[code]); this.code = code; if (reason) this.reason = reason; }
+}
+/** Local planning-budget guard; never creates a provider call or changes its recorded reason. */
+export class ImagePlanningLimitError extends AiError {
+  constructor(callId?:string){
+    super('OUTPUT_INVALID');this.diagnosticReason='IMAGE_PLAN_ATTEMPTS_EXHAUSTED';this.callId=callId;
+    this.message='图片规划已达到 3 次尝试，已保留原图和请求记录。请先核对失败规划；已通过图片保留。';
+  }
 }
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason instanceof AiError ? signal.reason : new AiError('CANCELLED');

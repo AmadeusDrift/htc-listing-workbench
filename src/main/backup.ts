@@ -27,7 +27,7 @@ import { assertPresentationResultOwner } from './ai/presentation-history.ts';
 import { validateAiProfile, validateAiCall, validateStoredAiResult } from './ai/validation.ts';
 import { assertSourceColorHistory } from './ai/source-color-validation.ts';
 import { assertListingHistory } from './listing-ai/history.ts';
-import { AiUsageLedger, retainAiUsage, retainSourceColorAttempts, validateAiUsageRecord, validateStoredAiUsagePolicy } from './ai/usage.ts';
+import { AiUsageLedger, retainAiUsage, retainSourceColorAttempts, retainImagePlanningAttempts, validateAiUsageRecord, validateStoredAiUsagePolicy } from './ai/usage.ts';
 import { validateImageVersion, validateImageSelection } from './image-versions/validation.ts';
 import { validateImageWriteOperation } from './image-versions/recovery.ts';
 import { assertContentHistory, validateContentVersion } from './content/validation.ts';
@@ -376,6 +376,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainAiUsage(current, snapshot);
     retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);
+    retainImagePlanningAttempts(current, snapshot);
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
     snapshot.exec('COMMIT');

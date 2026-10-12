@@ -158,7 +158,7 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
   let productUnderstanding: ImagePlanOutput['productUnderstanding'];
   if (value.productUnderstanding !== undefined) {
     const understanding = keys(value.productUnderstanding,['summary','referenceAssetIds','uncertainties','sufficient']);
-    const referenceAssetIds = list(understanding.referenceAssetIds,10,uuid), uncertainties = list(understanding.uncertainties,10,item=>boundedText(item,200)), sufficient = flag(understanding.sufficient);
+    const referenceAssetIds = list(understanding.referenceAssetIds,10,uuid), uncertainties = list(understanding.uncertainties,10,item=>boundedText(item,1000)), sufficient = flag(understanding.sufficient);
     if (!referenceAssetIds.length || new Set(referenceAssetIds).size !== referenceAssetIds.length || (!sufficient && !uncertainties.length)) fail();
     productUnderstanding = {summary:boundedText(understanding.summary,1000),referenceAssetIds,uncertainties,sufficient};
   }
@@ -464,4 +464,23 @@ export function parseImagePlanResponse(raw:unknown,context:ProductImageContext):
   const envelope=raw&&typeof raw==='object'&&!Array.isArray(raw)&&'type' in raw&&raw.type==='json_object'?Object.fromEntries(Object.entries(raw).filter(([key])=>key!=='type')):raw;
   const plan=repairImagePlanCaptions(validateImagePlan(fillSetPlanPrompt(normalizeImagePlanStructure(envelope),context)),context);
   assertImagePlan(plan,context);return plan;
+}
+
+/** Escape only unescaped control characters inside JSON strings. No structural repair. */
+export function parseImagePlanRecovery(raw:unknown,context:ProductImageContext):ImagePlanOutput {
+  if(typeof raw!=='string')return parseImagePlanResponse(raw,context);
+  if(Buffer.byteLength(raw,'utf8')>200000||raw.includes('[omitted:'))fail();
+  let quoted=false,escaped=false,text='';
+  for(const character of raw){
+    if(quoted&&character.charCodeAt(0)<32){
+      if(escaped)fail();
+      text+='\\u'+character.charCodeAt(0).toString(16).padStart(4,'0');continue;
+    }
+    text+=character;
+    if(escaped){escaped=false;continue;}
+    if(quoted&&character==='\\'){escaped=true;continue;}
+    if(character==='"')quoted=!quoted;
+  }
+  let value:unknown;try{value=JSON.parse(text);}catch{fail();}
+  return parseImagePlanResponse(value,context);
 }

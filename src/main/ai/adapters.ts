@@ -111,20 +111,37 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   const sourceOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='source-image-consistency';
   const imageOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='image-plan';
   const diagnosticOperation=sourceOperation||imageOperation;
-  const captureSource=(text:string)=>{try{context.onUntrustedOutput?.(safeSourceResponseText(text,credentials),'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
+  let credentialEcho=false;
+  const captureSource=(text:string)=>{try{const safe=safeSourceResponseText(text,credentials);credentialEcho ||= safe==='[omitted: credential echo]';context.onUntrustedOutput?.(safe,'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
   const transport=diagnosticOperation?{...context,onInvalidResponseText:captureSource}:context;
-  const raw = await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));
-  const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error;};
+  let raw:unknown;
+  try{raw=await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));}
+  catch(error){
+    // Raw-envelope capture runs inside transport before JSON parsing throws. Keep
+    // its confirmed secret gate, along with the original safe transport metadata.
+    if(imageOperation&&credentialEcho&&error instanceof AiError&&error.code==='OUTPUT_INVALID')error.diagnosticReason='RESPONSE_SECRET_ECHO';
+    throw error;
+  }
+  const invalidSource=(reason:string):never=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=credentialEcho?'RESPONSE_SECRET_ECHO':reason;throw error;};
   return outputError(() => {
     if(imageOperation)captureSource(JSON.stringify(raw));
     let phase='RESPONSE_ENVELOPE_INVALID';
     try{
     const body = object(raw);
     if(diagnosticOperation&&Array.isArray(body.choices)&&body.choices.length===1){const value=body.choices[0]?.message?.content;if(typeof value==='string')captureSource(value)}
-    const usage = object(body.usage);
-    const reported = { promptTokens: integer(usage.prompt_tokens, 0, 1000000000), completionTokens: integer(usage.completion_tokens, 0, 1000000000), processedImages: 0 };
-    if (usage.total_tokens !== undefined && integer(usage.total_tokens, 0, 2000000000) !== reported.promptTokens + reported.completionTokens) throw new AiError('OUTPUT_INVALID');
-    const meta = metadata(body, reported, credentials, context);
+    const readMetadata=()=>{
+      const usage = object(body.usage);
+      const reported = { promptTokens: integer(usage.prompt_tokens, 0, 1000000000), completionTokens: integer(usage.completion_tokens, 0, 1000000000), processedImages: 0 };
+      if (usage.total_tokens !== undefined && integer(usage.total_tokens, 0, 2000000000) !== reported.promptTokens + reported.completionTokens) throw new AiError('OUTPUT_INVALID');
+      return metadata(body, reported, credentials, context);
+    };
+    // A confirmed refusal/tool request is never a repairable formatting failure, even
+    // when token metadata is absent or its finish_reason is the standard tool_calls.
+    const nonContent=diagnosticOperation&&Array.isArray(body.choices)&&body.choices.some(choice=>
+      choice&&typeof choice==='object'&&(choice.finish_reason==='tool_calls'||choice.finish_reason==='function_call'||
+      choice.message&&typeof choice.message==='object'&&(choice.message.refusal||choice.message.tool_calls!==undefined&&(!Array.isArray(choice.message.tool_calls)||choice.message.tool_calls.length>0))));
+    if(nonContent||credentialEcho){try{readMetadata();}catch{/* Missing fees remain unknown; they cannot authorize retry. */}invalidSource(credentialEcho?'RESPONSE_SECRET_ECHO':'RESPONSE_NOT_CONTENT');}
+    const meta = readMetadata();
     if (!Array.isArray(body.choices) || body.choices.length !== 1) throw new AiError('OUTPUT_INVALID');
     const choice = object(body.choices[0]), message = object(choice.message);
     if (choice.finish_reason !== 'stop' || message.refusal || (message.tool_calls !== undefined && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0))) {if(diagnosticOperation)invalidSource(choice.finish_reason!=='stop'?'RESPONSE_NOT_COMPLETE':'RESPONSE_NOT_CONTENT');throw new AiError('OUTPUT_INVALID');}

@@ -181,3 +181,36 @@ export function retainSourceColorAttempts(current: DatabaseSync, snapshot: Datab
     snapshot.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(retained.id,JSON.stringify(retained));
   }
 }
+
+/** Retain paid planning budget across an older backup without importing missing image results.
+ * The caller holds the same restore transaction as the usage-ledger merge. */
+export function retainImagePlanningAttempts(current:DatabaseSync,snapshot:DatabaseSync):void {
+  const hasCalls=(db:DatabaseSync)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_calls'").get();
+  if(!hasCalls(current)||!hasCalls(snapshot))return;
+  const identity=(call:AiCall)=>({providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,
+    model:call.model,generation:call.generation,startedAt:call.startedAt,presentationContext:call.presentationContext});
+  for(const row of current.prepare(`SELECT id,record_json FROM ai_calls WHERE
+    json_extract(record_json,'$.providerId')='deepseek' AND json_extract(record_json,'$.model')='deepseek-flash'
+    AND json_extract(record_json,'$.presentationContext.kind')='image'
+    AND json_type(record_json,'$.presentationContext.workflowId')='text'`).all()){
+    const call=validateAiCall(JSON.parse(String(row.record_json)));
+    if(call.id!==row.id)throw new AiError('INVALID_CONFIG');
+    const existing=snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
+    if(existing){
+      const previous=validateAiCall(JSON.parse(String(existing.record_json)));
+      if(previous.id!==call.id||!isDeepStrictEqual(identity(previous),identity(call)))throw new AiError('INVALID_CONFIG');
+      if(call.imagePlanRetryBlock&&!previous.imagePlanRetryBlock){
+        // An older RUNNING/INTERRUPTED snapshot cannot erase a later confirmed refusal.
+        // Conflicting success evidence is not silently invalidated during restore.
+        if(previous.status==='SUCCEEDED'||snapshot.prepare("SELECT id FROM ai_results WHERE json_extract(record_json,'$.callId')=? LIMIT 1").get(call.id))throw new AiError('INVALID_CONFIG');
+        snapshot.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
+      }
+      continue;
+    }
+    // The selected snapshot has no result for this newly retained call. A success is
+    // only spent budget, never evidence authorizing generation or a fabricated result.
+    const finishedAt=call.finishedAt??[call.startedAt,new Date().toISOString()].sort()[1];
+    const retained=validateAiCall({...call,status:'FAILED',errorCode:call.errorCode??'INTERRUPTED',finishedAt});
+    snapshot.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(retained.id,JSON.stringify(retained));
+  }
+}

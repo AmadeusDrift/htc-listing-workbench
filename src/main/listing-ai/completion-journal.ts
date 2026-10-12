@@ -184,7 +184,7 @@ export class CompletionJournal {
         let result:AiResult;
         try{
           const output=retainValidNativeCandidates(parseFullGeneration(rawOutput,round.context),round.context),recoveredAt=[new Date().toISOString(),call!.finishedAt!].sort()[1];
-          result=validateStoredAiResult({id:randomUUID(),callId:call!.id,providerId:call!.providerId,productId:call!.productId,productRevision:call!.productRevision,variantId:round.context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call!.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:round.context,sourceSha256:round.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',localRecovery:{parserVersion:'full-schema-recovery/v1',operationId:op.id,contextSha256:round.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
+          result=validateStoredAiResult({id:randomUUID(),callId:call!.id,providerId:call!.providerId,productId:call!.productId,productRevision:call!.productRevision,variantId:round.context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call!.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:round.context,sourceSha256:round.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',localRecovery:{parserVersion:'full-schema-recovery/v2',operationId:op.id,contextSha256:round.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
         }catch{continue;}
         this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));
         this.recordResult(request,result);this.db.exec('COMMIT');return result;

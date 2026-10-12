@@ -96,12 +96,13 @@ export function fullReference(context:Pick<ListingAiContext,'evidence'> & Partia
     &&context.sourceProduct.assets.some(asset=>asset.id===id&&asset.variantIds.includes(context.variantId!));
 }
 /** Resolve explicit current-SKU aliases only; never match another variant by text. */
-function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext):void {
+export type FullGenerationReferencePolicy='text-evidence/v1'|'selected-image/v2';
+function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext,policy:FullGenerationReferencePolicy):void {
   const ids=new Set(c.evidence.map(e=>e.id));
   for(const candidate of [...output.candidates]){
     const bad:string[]=[];
     for(const item of candidate.items)item.evidenceIds=[...new Set(item.evidenceIds.flatMap(id=>{
-      if(fullReference(c,id))return [id];
+      if(policy==='text-evidence/v1'?ids.has(id):fullReference(c,id))return [id];
       if((id===c.variantId||id===c.sku)&&ids.has(`${c.variantId}:spec`))return [`${c.variantId}:spec`];
       if(id.startsWith(`${c.sku}:`)){const mapped=c.variantId+id.slice(c.sku.length);if(ids.has(mapped))return [mapped];}
       bad.push(id);return [];
@@ -119,7 +120,7 @@ function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext):vo
   }
 }
 /** Accept the previous text envelope as an input convenience; persist only native values. */
-export function parseFullGeneration(raw:unknown,c:ListingAiContext):ListingFieldsOutput {
+export function parseFullGeneration(raw:unknown,c:ListingAiContext,referencePolicy:FullGenerationReferencePolicy='selected-image/v2'):ListingFieldsOutput {
   if(!object(raw))fail('字段响应不是 JSON 对象');
   const root=raw as Record<string,unknown>;
   const candidates=Array.isArray(root.candidates)?root.candidates.map(value=>{
@@ -138,7 +139,7 @@ export function parseFullGeneration(raw:unknown,c:ListingAiContext):ListingField
     const values=nativeText('color',candidate.nativeValue);
     candidate.items=candidate.items.map((item,index)=>({...item,value:values[index]??item.value}));
   }
-  normalizeFullEvidence(output,c);assertFullEvidence(output,c);return output;
+  normalizeFullEvidence(output,c,referencePolicy);assertFullEvidence(output,c);return output;
 }
 export function validateFullContext(raw:unknown):ListingAiContext {
   if(!object(raw)||raw.contract!==FULL_SCHEMA_CONTRACT||!object(raw.fullSchema)||!object(raw.fullSchema.schema)||!object(raw.fullSchema.metaSchema)||!object(raw.currentAttributes)||!object(raw.businessValues)||!object(raw.sourceProduct)||!Array.isArray(raw.fields)||!Array.isArray(raw.evidence))fail('完整 Schema 上下文不完整');

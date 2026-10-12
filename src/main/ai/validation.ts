@@ -239,9 +239,13 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   let localRecovery:AiResult['localRecovery'];
   if(o.localRecovery!==undefined){
     const r=keys(o.localRecovery,['parserVersion','operationId','contextSha256','rawSha256','rawOutput','recoveredAt']);
-    if(r.parserVersion!=='full-schema-recovery/v1'||!listingContext||listingContext.contract!=='listing-full-schema/v1'||output.kind!=='amazon-fields'||Buffer.byteLength(JSON.stringify(r.rawOutput),'utf8')>200000||listingFingerprint(r.rawOutput)!==r.rawSha256||r.contextSha256!==o.sourceSha256||r.recoveredAt!==o.createdAt)invalid();
-    const replay=retainValidNativeCandidates(parseFullGeneration(r.rawOutput,listingContext),listingContext);
-    if(listingFingerprint(replay)!==listingFingerprint(output))invalid();
+    if((r.parserVersion!=='full-schema-recovery/v1'&&r.parserVersion!=='full-schema-recovery/v2')||!listingContext||listingContext.contract!=='listing-full-schema/v1'||output.kind!=='amazon-fields'||Buffer.byteLength(JSON.stringify(r.rawOutput),'utf8')>200000||listingFingerprint(r.rawOutput)!==r.rawSha256||r.contextSha256!==o.sourceSha256||r.recoveredAt!==o.createdAt)invalid();
+    // v1 shipped both before and after selected-image citations were introduced.
+    // Accept only an exact replay of one of those two published interpretations;
+    // never upgrade or overwrite the stored output. New recoveries are stamped v2.
+    const policies=r.parserVersion==='full-schema-recovery/v1'?['text-evidence/v1','selected-image/v2'] as const:['selected-image/v2'] as const;
+    const expected=listingFingerprint(output);
+    if(!policies.some(policy=>{try{return listingFingerprint(retainValidNativeCandidates(parseFullGeneration(r.rawOutput,listingContext,policy),listingContext))===expected;}catch{return false;}}))invalid();
     localRecovery={parserVersion:r.parserVersion,operationId:uuid(r.operationId),contextSha256:sha256(r.contextSha256),rawSha256:sha256(r.rawSha256),rawOutput:r.rawOutput,recoveredAt:date(r.recoveredAt)};
   }
   const imageContext = imageKind ? validateProductImageContext(o.imageContext,evidenceOptions) : undefined;

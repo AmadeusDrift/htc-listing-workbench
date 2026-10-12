@@ -362,7 +362,7 @@ export class ListingAiService {
     const legacy=!!prior&&prior.scopeHash!==this.completionScope(draft)&&prior.scopeHash===this.completionScope(draft,true);
     const preserveDone=prior?.state==='DONE'&&legacy&&draft.listingProgram==='haul'&&operationId!==undefined;
     if(prior?.state==='DONE'&&legacy&&isFullSchema(context)&&!preserveDone)operationId=undefined;
-    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId,draft,this.completionScope(draft,true));
+    return this.ai.completionJournal.begin({draftId:draft.id,scopeHash:this.completionScope(draft,!isFullSchema(context)||!!legacy&&(prior?.state!=='DONE'||preserveDone)),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},operationId,draft,()=>this.completionScope(draft,true));
   }
   getCompletion(id:string):CompletionOperation{return this.ai.completionJournal.get(id);}
   completionUnknown(id:string):boolean{return this.ai.completionJournal.unknown(id);}

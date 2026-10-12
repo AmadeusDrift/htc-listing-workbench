@@ -93,3 +93,13 @@ test('legacy exhausted second candidate keeps its own context after the first ad
  for(let i=0;i<2;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}),/三次/);
  assert.equal(candidates,4);
 });
+import {legacyFixture} from './fixtures/listing-ai.ts';
+test('legacy scope is resolved only for recovered legacy results and its failures roll back recovery',async t=>{
+ const f=await legacyFixture(t);await f.listing.suggest(f.reference);const original=f.listing.beginCompletion(f.reference);removeJournalForLegacy(f);
+ const db=openDatabase(f.directory),journal=new CompletionJournal(db);let resolutions=0;
+ try{
+  assert.throws(()=>journal.begin(original,undefined,f.draft,()=>{resolutions++;throw Error('legacy scope corruption sentinel');}),/legacy scope corruption sentinel/);
+  assert.equal(resolutions,1);assert.equal(journal.list(f.draft.id).length,0);const owner=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs').get()!.record_json));assert.equal(owner.contentPreparation.operationId,undefined);
+  const recovered=journal.begin(original,undefined,f.draft,()=>{resolutions++;return original.scopeHash;});assert.equal(resolutions,2);assert.equal(recovered.rounds.length,1);assert.equal(recovered.scopeHash,original.scopeHash);
+ }finally{db.close();}
+});

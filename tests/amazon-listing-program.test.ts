@@ -94,7 +94,12 @@ test('existing parent drafts restore missing confirmed declarations once while k
   assert.equal(fixed.attributes.purchasable_offer,undefined);
   assert.equal(fixed.attributes.manufacturer,undefined,'unmapped demo shop still has no manufacturer');
   if(Object.hasOwn(fixed.schema.schema.properties as JsonObject,'gpsr_safety_attestation')) assert.ok(fixed.attributes.gpsr_safety_attestation);
-  for(const fact of facts)assert.deepEqual(fixed.sourceMapping!.find(mapping=>mapping.field===fact.name)!.sourceFactIds,[fact.id]);
+  for(const fact of facts){
+    const mapping=fixed.sourceMapping!.find(mapping=>mapping.field===fact.name)!;
+    if(fact.name==='supplier_declared_dg_hz_regulation'){
+      assert.equal(mapping.status,'mapped');assert.deepEqual(mapping.sourceFactIds,[]);assert.ok(mapping.reason.includes('dangerous-goods-fixed/v1'));
+    }else assert.deepEqual(mapping.sourceFactIds,[fact.id]);
+  }
   assert.equal(f.service.applyBusinessDefaults({id:fixed.id,revision:fixed.revision}).revision,fixed.revision);
   assert.equal(f.service.listCalls().length,0);
 });

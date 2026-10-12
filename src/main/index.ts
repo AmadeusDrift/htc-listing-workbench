@@ -128,6 +128,7 @@ async function start() {
     rules: () => { const rules = new ListingRuleStore(dataRoot); try { return rules.get(); } finally { rules.close(); } },
     labelFormat: () => formatSettings.get(),
     sourceReceipt: productId => miaoshouService.getReceipt(productId),
+    planSalesForAdaptation: (source,targetId,transactionDb) => {const naming=new SkuNamingService(dataRoot,transactionDb),rules=new ListingRuleStore(dataRoot);try{return planSalesListings(source,miaoshouService.getReceipt(source.id),amazonService.getTarget(targetId),rules.get(),naming);}finally{rules.close();}},
     planSales: (productId,targetId) => {const rules=new ListingRuleStore(dataRoot);try{return planSalesListings(db.getProduct(productId),miaoshouService.getReceipt(productId),amazonService.getTarget(targetId),rules.get(),namingService);}finally{rules.close();}},
     existingSale:(productId,plan,targetId)=>amazonService.findSalesDraft(productId,plan,targetId),
     resolveFamily: (input,signal) => resolveSalesFamily(amazonService,input,signal),

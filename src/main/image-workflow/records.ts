@@ -1,3 +1,4 @@
+import { currentImageAdaptation } from './adaptation.ts';
 import { isFullSchema } from '../listing-ai/full-schema.ts';
 import { imageActualInputsMatch } from './context-compatibility.ts';
 import { validateWorkflowRejection, assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
@@ -158,7 +159,8 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   if(!riskPolicyCompatible(run,readImageRiskSettings(db).enabled))throw new UserFacingError('风险拦截已开启，这套图片曾在关闭状态下通过，请先重新检查已有图片');
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
-  if (run.status !== 'COMPLETED' || run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || (run.draftSha256 !== imageWorkflowDraftStamp(draft)&&!plainColorApprovalMatches(run,draft,product))) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
+  const adapted=currentImageAdaptation(db,run,draft,product);
+  if (run.status !== 'COMPLETED' || !adapted&&run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || (!adapted&&run.draftSha256 !== imageWorkflowDraftStamp(draft)&&!plainColorApprovalMatches(run,draft,product))) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
   const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.

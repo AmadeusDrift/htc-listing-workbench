@@ -1,3 +1,4 @@
+import { adaptationState, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -48,9 +49,9 @@ import { previewSalesRecipes } from '../sales-plans/planning.ts';
 import { selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
-  store: Pick<WorkspaceStore, 'getProduct'>;
+  store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'>>;
   rules(): ListingRules;
-  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults' | 'previewPricing'>>;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
   hosting: Pick<HostingService, 'getProfile'>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     getRiskSettings?: () => {enabled:boolean};
@@ -74,6 +75,7 @@ export interface AutomaticListingDependencies {
   preflight?: () => void;
   sourceReceipt?: (productId: string) => MiaoshouReceipt | null;
   classify?: (input: { productId: string; productRevision: number; targetId: string }, signal: AbortSignal) => Promise<ProductClassification>;
+  planSalesForAdaptation?: (source:ProductDetail,targetId:string,db:DatabaseSync)=>SalesListingPlan[];
   planSales?: (productId:string,targetId:string) => SalesListingPlan[];
   previewSales?: (productId:string) => SalesListingPlan['recipe'][];
   existingSale?: (productId:string,plan:SalesListingPlan,targetId:string) => AmazonDraft|undefined;
@@ -119,7 +121,7 @@ export class AutomaticListingService {
     try {
       for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
         const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
-        assertAutomaticRejectionHistory(this.db,task);
+        assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
         if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT')) {
@@ -135,11 +137,42 @@ export class AutomaticListingService {
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
-    assertAutomaticRejectionHistory(this.db,task);
+    assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
+  private adaptationState(task:AutomaticListingTask){
+    const products=[...new Set(task.items.map(row=>row.productId))],drafts=task.items.flatMap(row=>row.draftId?[row.draftId]:[]);
+    const calls=this.db.prepare("SELECT id,json_extract(record_json,'$.status') status,json_extract(record_json,'$.finishedAt') finishedAt,json_extract(record_json,'$.responseReceived') responseReceived FROM ai_calls WHERE json_extract(record_json,'$.productId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(products));
+    const operations=this.db.prepare("SELECT id,json_extract(record_json,'$.revision') revision,json_extract(record_json,'$.state') state,json_extract(record_json,'$.updatedAt') updatedAt FROM listing_completion_operations WHERE json_extract(record_json,'$.draftId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(drafts));
+    const state=adaptationState(task,this.deps,this.busy||calls.some(call=>call.status==='RUNNING'));
+    const naming={settings:this.db.prepare("SELECT value_json FROM amazon_settings WHERE key='sku_naming_v1'").get()??null,groups:this.db.prepare('SELECT record_json FROM sku_naming_groups ORDER BY id').all()};
+    state.preview.token=fingerprint({base:state.preview.token,naming,calls:calls.map(call=>[call.id,call.status,call.finishedAt,call.responseReceived]),operations});
+    return state;
+  }
+  previewAdaptation(id:string){return this.adaptationState(this.get(id)).preview;}
+  applyAdaptation(raw:unknown):AutomaticListingTask {
+    const input=record(raw,'旧任务适配',['taskId','token']),id=identifier(input.taskId),token=text(input.token,'适配检查标识',64,true);
+    const prior=this.db.prepare("SELECT detail_json FROM audit_events WHERE action='automatic-listing.adapted' AND json_extract(detail_json,'$.token')=?").get(token);
+    if(prior){const checkpoint=JSON.parse(String(prior.detail_json));if(checkpoint.taskId!==id)throw new UserFacingError('适配身份不一致');return this.get(id);}
+    const before=this.get(id),state=this.adaptationState(before);
+    if(state.preview.token!==token)throw new UserFacingError('检查后任务、来源、规则或请求发生变化，请重新检查');
+    if(!state.preview.canApply)throw new UserFacingError(state.preview.blockers.join('；'));
+    const next=structuredClone(before);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const persisted=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(id);
+      if(!persisted)throw new UserFacingError('任务记录已变化，请重新检查');
+      const current=this.adaptationState(validateAutomaticListingTask(JSON.parse(String(persisted.record_json))));
+      if(current.preview.token!==token)throw new UserFacingError('应用前资料发生变化，请重新检查');
+      next.adaptation={version:1,token,at:new Date().toISOString(),blockedKeys:state.preview.changes.filter(c=>c.kind==='BLOCKED').map(c=>c.key),previousRules:[...(before.adaptation?.previousRules??[]),{stamp:before.rulesStamp,revision:before.ruleRevision}].filter((r,i,a)=>a.findIndex(v=>v.stamp===r.stamp&&v.revision===r.revision)===i)};
+      applyAdaptationRows(next,this.deps,state,this.db);
+      this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'automatic-listing.adapted','用户显式适配当前规则；等待用户继续',JSON.stringify({taskId:id,token,before,changes:state.preview.changes,afterRevision:before.revision+1}),new Date().toISOString());
+      this.save(next,this.db);this.db.exec('COMMIT');
+    }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
+    this.tasks.set(id,next);return structuredClone(next);
+  }
   get busy(): boolean { return this.worker !== null || this.observing !== null; }
   start(): void {
     this.schedulingSuspended = false;
@@ -163,7 +196,7 @@ export class AutomaticListingService {
       ['READBACK','LABELS','COMPLETE'].includes(sibling.stage)&&!!sibling.draftId&&submitted(this.deps.amazon.getDraft(sibling.draftId)));
   }
   private assertScope(task: AutomaticListingTask, row?: AutomaticListingItem, allowSourceRecovery=false): void {
-    const rows = row ? [row] : task.items.filter(value => value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
+    const rows = row ? [row] : task.items.filter(value => !task.adaptation?.blockedKeys.includes(value.key)&&value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
     if (!rows.length) return;
     this.assertConnections(task);
     for (const item of rows) {
@@ -392,7 +425,7 @@ export class AutomaticListingService {
       // siblings retain their exact draft/product revision and never repeat paid work.
       for(const row of task.items)if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
       for(const row of task.items)this.migrateRepairPolicy(task,row);
-      for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
+      for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN'&&!task.adaptation?.blockedKeys.includes(row.key)) {
         if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
         if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
           const old=this.deps.amazon.getDraft(row.draftId);
@@ -497,7 +530,7 @@ export class AutomaticListingService {
             // Yield between SKUs, then recheck pause/cancel before touching the next one.
             await yieldToEventLoop();
             if (!this.running(task)) break;
-            if (['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
+            if (task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
             try { await this.prepareItem(task, row); }
             catch (error) {
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }

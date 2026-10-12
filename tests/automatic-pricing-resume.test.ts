@@ -129,3 +129,18 @@ test(`historical profit queue requires qualified local repricing after ${change}
  assert.equal(JSON.stringify(owner.get(f.taskId)),before,'queue must preserve task, attempts and original outcome');assert.equal(f.requests.length,0);assert.equal(f.previews(),0);
  if(!qualified)await assert.rejects(owner.create({productIds:[source.id],targetId:f.target.id,profileId:'alpha'}));
 });
+
+for(const change of ['unrelated','cost-still-blocked','cost-qualified'] as const)test(`W2 explicit apply classifies current real pricing and retains histories: ${change}`,async t=>{
+ const f=await legacyOwner(t),owner=f.ownerService(),rules=new ListingRuleStore(f.directory);(owner as any).deps.images.getProgress=()=>null;
+ let source=f.store.getProductSnapshot(f.product.id);source=f.store.saveProduct({...saveInput(source),variants:saveInput(source).variants.map(v=>({...v,purchasePrice:'100'}))});
+ let r=f.p.record(f.draft.id);r.draft.productRevision=source.revision;f.p.putRecord(r);
+ let blocked=f.amazon.applyBusinessDefaults({id:r.draft.id,revision:r.draft.revision},undefined,true);assert.equal(blocked.businessRules?.pricingDecision?.status,'business_blocked');
+ const stored=(owner as any).tasks.get(f.taskId),row=stored.items[0];row.productRevision=source.revision;row.sourceStamp=sourceStamp(source);row.status='SCREENED';row.outcome={version:1,...pricingOutcome(blocked,rules.get())!,message:'saved ROI exclusion',classifiedAt:new Date().toISOString(),scope:outcomeScope(stored,row),draftId:blocked.id,draftRevision:blocked.revision};(owner as any).save(stored);
+ const before=owner.get(f.taskId),journal=JSON.stringify(f.ai.completionJournal.list(f.draft.id));
+ if(change==='unrelated'){const current=rules.get();current.product.stockSets++;rules.save(current);(owner as any).deps.rules=()=>rules.get();}
+ else f.store.saveProduct({...saveInput(source),variants:saveInput(source).variants.map(v=>({...v,purchasePrice:change==='cost-qualified'?'2.4':'110'}))});
+ const preview=owner.previewAdaptation(f.taskId);assert.equal(preview.canApply,true);assert.equal(preview.changes.some(c=>c.kind==='BLOCKED'),false,JSON.stringify(preview.changes));
+ const applied=owner.applyAdaptation({taskId:f.taskId,token:preview.token}),next=applied.items[0];
+ assert.equal(applied.status,'PAUSED');assert.equal(next.imageAttempts,before.items[0].imageAttempts);assert.equal(next.repairAttempts,2);assert.deepEqual(next.executionTaskIds,before.items[0].executionTaskIds);assert.equal(JSON.stringify(f.ai.completionJournal.list(f.draft.id)),journal);assert.equal(f.requests.length,0);
+ assert.equal(next.status,change==='cost-qualified'?'PENDING':'SCREENED',JSON.stringify(next.outcome));assert.equal(next.outcome?.kind,change==='cost-qualified'?undefined:'RULE_FILTERED');rules.close();
+});

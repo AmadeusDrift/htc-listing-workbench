@@ -16,6 +16,8 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
     try { const started = await start(task.id); if (!started) service.cancel(task.id); return started; }
     catch (error) { service.cancel(task.id); throw error; }
   });
+  handle('red:automatic-listing:adaptation-preview',1,id=>service.previewAdaptation(identifier(id)));
+  handle('red:automatic-listing:adaptation-apply',1,input=>service.applyAdaptation(input));
   handle('red:automatic-listing:list', 0, () => service.list());
   handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));

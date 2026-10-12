@@ -1,3 +1,5 @@
+import { resolveConsistencyContext } from '../src/main/source-image-consistency/scope.ts';
+import { reduceSourceConsistency } from '../src/main/source-image-consistency/comparison.ts';
 import { persistSourceImageFixture, sourceImageId } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -51,7 +53,7 @@ async function fixture(t: test.TestContext, options: { fallback?: boolean; unmap
   }});
   const source={getReceipt:()=>receipt,images};
   t.after(async()=>{release(); await images.close();db.close();store.close();await rm(directory,{recursive:true,force:true});});
-  return {product,store,receipt,db,downloads,images,started,release,run:(variantIds=product.variants.map(v=>v.id),signal=new AbortController().signal)=>prepareImageWorkflowSources(store,db,source,{productId:product.id,productRevision:store.getProduct(product.id).revision,variantIds},signal)};
+  return {directory,product,store,receipt,db,downloads,images,started,release,run:(variantIds=product.variants.map(v=>v.id),signal=new AbortController().signal)=>prepareImageWorkflowSources(store,db,source,{productId:product.id,productRevision:store.getProduct(product.id).revision,variantIds},signal)};
 }
 
 test('new source URLs are downloaded and SKU-bound before drafts, then reused without another download',async t=>{
@@ -125,4 +127,21 @@ test('identical source images retain all SKU mappings across automatic download 
   assert.deepEqual(new Set(result.product.assets[0].variantIds),new Set(f.product.variants.map(v=>v.id)));
   const edited=f.store.updateAsset({productId:f.product.id,revision:result.product.revision,assetId:result.product.assets[0].id,role:'gallery',variantIds:[]});
   const retry=await f.run();assert.equal(retry.product.revision,edited.revision);assert.equal(retry.missing.length,21,'a later run preserves the user-cleared associations');
+});
+
+test('named SKU without thumbnail uses unowned product reference and persists specification scope without inventing supplier mapping',async t=>{
+ const f=await fixture(t,{unmapped:true});
+ let p=f.store.getProduct(f.product.id);
+ p=f.store.saveProduct({...editable(p),variants:p.variants.map(({sourceSpec:_s,sourcePurchasePrice:_p,...v},i)=>({...v,originalSpec:i===0?'白色':v.originalSpec}))});
+ const result=await f.run([p.variants[0].id]);
+ assert.deepEqual(result.missing,[]);
+ assert.deepEqual(f.receipt.skuMappings[0].imageIds,[]);
+ assert.ok(result.product.assets.some(a=>a.variantIds.includes(p.variants[0].id)));
+ assert.ok(f.downloads.every(url=>!url.endsWith('/blue.png')));
+ assert.equal(f.db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='source-image.product-reference'").get()?.n,1);
+ await f.run([p.variants[0].id]); assert.equal(f.downloads.length,1);
+ const context=resolveConsistencyContext(f.db,f.store,f.directory,{productId:p.id,productRevision:result.product.revision,variantId:p.variants[0].id});
+ assert.equal(context.referenceAssets[0].scope,'product');
+ const conclusion=reduceSourceConsistency(context,{kind:'source-image-consistency',version:'source-image-consistency/v2',assets:[{assetId:context.referenceAssets[0].assetId,quality:'clear',lighting:'neutral',visibility:'complete',presentation:'single-product',colors:['Blue'],appearance:[],claims:context.claims.map(c=>({claimId:c.id,value:'Blue',visibility:'visible'}))}]});
+ assert.ok(!conclusion.reasons.some(r=>r.startsWith('VISIBLE_CONTRADICTION')));
 });

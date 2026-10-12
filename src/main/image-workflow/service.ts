@@ -1,4 +1,5 @@
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
+import { isProductReference } from '../image-upstream-trace.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -561,7 +562,7 @@ export class ImageWorkflowService {
         if(!copyReviewEnabled&&!this.listing.snapshotCurrentForImages)throw new UserFacingError('文案快照服务尚未初始化');
         const snapshot=copyReviewEnabled?copy!:await this.listing.snapshotCurrentForImages!({draftId:run.draftId,draftRevision:result.draft.revision},signal);
         const bypass=copyReviewEnabled?undefined:{policy:'copy-review-disabled/v1' as const,at:new Date().toISOString(),contextSha256:listingFingerprint(snapshot.context),copySha256:listingFingerprint(snapshot.currentListingCopy)};
-        const base=validateProductImageContext({listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,listingReviewResultId:copyReviewEnabled?copy!.review.id:null,...(bypass?{copyReviewBypass:bypass}:{}),referenceAssets:references.map(ref=>({assetId:ref.id,sha256:ref.sha256,variantId:variantIds.find(id=>refs.find(asset=>asset.id===ref.id)!.variantIds.includes(id)&&confirmed(ref.id,id))??null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,run.variantId),sourceVariantIds:variantIds});
+        const base=validateProductImageContext({listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,listingReviewResultId:copyReviewEnabled?copy!.review.id:null,...(bypass?{copyReviewBypass:bypass}:{}),referenceAssets:references.map(ref=>({...(isProductReference(this.db,product.id,run.variantId,ref.id)?{scope:'product' as const}:{}),assetId:ref.id,sha256:ref.sha256,variantId:variantIds.find(id=>refs.find(asset=>asset.id===ref.id)!.variantIds.includes(id)&&confirmed(ref.id,id))??null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,run.variantId),sourceVariantIds:variantIds});
         if(run.slotPolicy===IMAGE_SET_POLICY){
           base.setPolicy=IMAGE_SET_POLICY;base.referenceMeasurements=reuse?.imageContext?.referenceMeasurements??[];base.sourceMeasurements=currentSourceImageMeasurements(this.db,result.draft);
           if(!reuse&&!sourceDimensionEvidence(base).length){
@@ -793,7 +794,7 @@ export class ImageWorkflowService {
       if (copy.review.output.kind !== 'listing-current-review' || copy.review.output.verdict !== 'PASS') throw new UserFacingError('商品文案复核未通过，已停止后续生图');
       assertCurrentListingReview({...copy.review.output,kind:'amazon-fields-review'},copy.currentListingCopy,copy.context);
       const context: ProductImageContext = validateProductImageContext({ listing:copy.context,currentListingCopy:copy.currentListingCopy,listingReviewResultId:copy.review.id,ipSource:imageRiskSourceSnapshot(product,run.variantId),
-        referenceAssets:run.referenceAssets.map(ref=>({assetId:ref.id,sha256:ref.sha256,variantId:refs.find(a=>a.id===ref.id)!.variantIds.includes(run.variantId)?run.variantId:null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION });
+        referenceAssets:run.referenceAssets.map(ref=>({...(isProductReference(this.db,product.id,run.variantId,ref.id)?{scope:'product' as const}:{}),assetId:ref.id,sha256:ref.sha256,variantId:refs.find(a=>a.id===ref.id)!.variantIds.includes(run.variantId)?run.variantId:null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION });
       if(reuse){
         const priorReview=this.ai.getResult(reuse.reviewResultIds.at(-1)!),call=priorReview&&this.ai.getCall(priorReview.callId),previous=priorReview?.imageContext;
         if(!previous||priorReview?.output.kind!=='image-text-review'||priorReview.output.verdict!=='PASS'||call?.status!=='SUCCEEDED'

@@ -63,10 +63,11 @@ export function validateProductImageContext(raw: unknown,options:ImageEvidenceOp
   const sourceVariantIds=value.sourceVariantIds===undefined?undefined:list(value.sourceVariantIds,200,uuid);
   if(sourceVariantIds&&(!sourceVariantIds.includes(listing.variantId)||new Set(sourceVariantIds).size!==sourceVariantIds.length))fail();
   const referenceAssets = list(value.referenceAssets, 10, raw => {
-    const asset = keys(raw, ['assetId','sha256','variantId']);
+    const asset = keys(raw, ['assetId','sha256','variantId'],['scope']);
+    if(asset.scope!==undefined&&asset.scope!=='product')fail();
     const variantId = asset.variantId === null ? null : uuid(asset.variantId);
     if (variantId !== null && !(sourceVariantIds??[listing.variantId]).includes(variantId)) fail();
-    return { assetId: uuid(asset.assetId), sha256: sha256(asset.sha256), variantId };
+    return { ...(asset.scope==='product'?{scope:'product' as const}:{}),assetId: uuid(asset.assetId), sha256: sha256(asset.sha256), variantId };
   });
   if (!referenceAssets.length || new Set(referenceAssets.map(asset => asset.assetId)).size !== referenceAssets.length || Buffer.byteLength(JSON.stringify(value)) > (isFullSchema(listing)?20*1024*1024:180000)) fail();
   if(value.policyVersion!==PRODUCT_IMAGE_POLICY_VERSION && value.ipSource!==undefined)fail();

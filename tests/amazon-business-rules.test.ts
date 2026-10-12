@@ -23,23 +23,23 @@ function run(extra: Partial<Parameters<typeof applyBusinessRules>[0]> = {}, rule
 const legacyMeasurements:JsonObject={item_dimensions:[{length:{value:1.97,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:target.marketplaceId}],item_package_dimensions:[{length:{value:1.97,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'},marketplace_id:target.marketplaceId}],item_package_weight:[{value:.22,unit:'pounds',marketplace_id:target.marketplaceId}]};
 const confirmedPackage = { package: { length: { value: 5, unit: 'cm' }, width: { value: 5, unit: 'cm' }, height: { value: 5, unit: 'cm' }, weight: { value: 100, unit: 'g' } } };
 
-test('pricing decisions distinguish confirmed ROI rejection from default and unverified package attempts', () => {
+test('pricing decisions distinguish confirmed and approved-default ROI rejection from unverified package attempts', () => {
   const confirmed = run({ costCny: 999, measurements: confirmedPackage }).report;
   assert.equal(confirmed.pricingDecision?.status, 'business_blocked');
   assert.equal(confirmed.pricingDecision?.code, 'ROI_MAX_PRICE');
   assert.deepEqual(confirmed.pricingDecision?.inputs, { costCny: 999, dimensionsInches: [1.97,1.97,1.97], weightPounds: .22 });
   assert.equal(confirmed.pricingDecision?.evidence.dimensions, 'confirmed_source');
   const defaults = run({ costCny: 999 });
-  assert.equal(defaults.report.pricingDecision?.status, 'needs_input');
-  assert.equal(defaults.report.pricingDecision?.code, 'PACKAGE_INPUT_UNCONFIRMED');
+  assert.equal(defaults.report.pricingDecision?.status, 'business_blocked');
+  assert.equal(defaults.report.pricingDecision?.code, 'ROI_MAX_PRICE');
   assert.equal(defaults.report.pricingDecision?.quoteError, 'ROI_MAX_PRICE');
   const repeated = run({ costCny: 999, attributes: defaults.attributes, previousBusinessReport: defaults.report });
   assert.equal(repeated.report.pricingDecision?.evidence.dimensions, 'business_default');
-  assert.equal(repeated.report.pricingDecision?.status, 'needs_input');
+  assert.equal(repeated.report.pricingDecision?.status, 'business_blocked');
   const legacy = structuredClone(defaults.report); delete legacy.pricingDecision;
   const old = run({ costCny: 999, attributes: legacyMeasurements, previousBusinessReport: legacy });
   assert.equal(old.report.pricingDecision?.evidence.dimensions, 'business_default');
-  assert.equal(old.report.pricingDecision?.status, 'needs_input');
+  assert.equal(old.report.pricingDecision?.status, 'business_blocked');
   const manual = run({ costCny: 999, attributes: legacyMeasurements });
   assert.equal(manual.report.pricingDecision?.evidence.weight, 'unverified');
   assert.equal(manual.report.pricingDecision?.status, 'needs_input');

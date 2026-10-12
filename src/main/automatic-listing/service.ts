@@ -50,7 +50,7 @@ import { informationalVariant, selectSalesRecipes } from '../sales-plans/selecti
 export interface AutomaticListingDependencies {
   store: Pick<WorkspaceStore, 'getProduct'>;
   rules(): ListingRules;
-  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'>;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'applyBusinessDefaults'>>;
   hosting: Pick<HostingService, 'getProfile'>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     getRiskSettings?: () => {enabled:boolean};
@@ -132,11 +132,11 @@ export class AutomaticListingService {
   }
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
-  private save(task: AutomaticListingTask): void {
+  private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
     assertAutomaticRejectionHistory(this.db,task);
-    this.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
+    db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
@@ -223,7 +223,7 @@ export class AutomaticListingService {
       }
     }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
     if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=((retryableAiUnknown(classification.code)?'上次结果尚未确认；继续任务时先恢复已有结果，确实缺失则按原次数上限自动重试该 AI 步骤。上次错误：':'上次提交结果尚未确认，未自动重发。上次错误：')+(row.error??'请核对已有记录')).slice(0,2000);
-    row.outcome={version:1,...classification,message:(classification.image?.message??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
+    row.outcome={version:1,...classification,message:(classification.image?.message??(classification.pricingReport?(draft?.businessRules?.notices.join('；')||undefined):undefined)??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
     if(classification.kind==='RULE_FILTERED')row.status='SCREENED';
   }
   private selectedVariants(product: ProductDetail) {
@@ -272,11 +272,11 @@ export class AutomaticListingService {
                 else if(outcome.image){const proof=await this.deps.images.getRuleFilterEvidence?.(draft.id);if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='IMAGE_EVIDENCE_CHANGED';}
               }
               if(stale){view.noticeCode=stale;view.reconsideration=({RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'定价输入已变化，重新评估',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估'} as const)[stale];view.message=view.reconsideration+'；原淘汰记录保留，旧任务不会自动重启';}
-              else {view.kind='RULE_FILTERED';view.eligible=false;view.reasonCode=outcome.code;view.message=presentRejection(view.reasonCode);}
+              else {view.kind='RULE_FILTERED';view.eligible=false;view.reasonCode=outcome.code;view.message=outcome.pricingReport?outcome.message:presentRejection(view.reasonCode);}
             }else if(outcome?.kind==='UNKNOWN'){
               // Live request/submit markers were checked above. Keep the old outcome as audit only.
               view.kind='SYSTEM_REPAIR';view.noticeCode='UNKNOWN_RECONCILED';view.reconsideration='原未知结果已核对，可重新准备';view.message=view.reconsideration+'；历史未知记录保留，不会自动重试';
-            }else if(outcome){view.kind=outcome.kind;view.reasonCode=item.rejection?.detail.code??outcome.code;view.message=presentRejection(view.reasonCode);}
+            }else if(outcome){view.kind=outcome.kind;view.reasonCode=item.rejection?.detail.code??outcome.code;view.message=outcome.pricingReport?outcome.message:presentRejection(view.reasonCode);}
             else if(item.status==='FAILED'){view.kind='UNCLASSIFIED';view.reasonCode='LEGACY_FAILURE';view.message=presentRejection(view.reasonCode);}
             if(!final(task)&&view.kind!=='RULE_FILTERED'){view.continuationRequired=true;view.eligible=false;view.message=(view.message?view.message+'；':'')+'请继续或取消原任务';}
           }
@@ -378,6 +378,42 @@ export class AutomaticListingService {
     for(const row of task.items)this.migrateRepairPolicy(task,row);
     for (const row of task.items) if (row.status === 'FAILED'&&row.stage!=='PLAN') {
       if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
+      if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
+        const old=this.deps.amazon.getDraft(row.draftId);
+        const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
+        if(!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
+          let refreshed=old;
+          if(!row.pricingRefresh){
+            try{
+              refreshed=this.deps.amazon.applyBusinessDefaults({id:old.id,revision:old.revision},undefined,true,(draft,db)=>{
+                row.pricingRefresh={draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+                this.save(task,db);
+              });
+            }catch(error){
+              // Either both writes committed or both rolled back. Reload the durable task
+              // even when a caller interrupts immediately after the transaction returns.
+              const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
+              if(saved)Object.assign(task,validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
+              throw error;
+            }
+          }
+          const proof=row.pricingRefresh??{draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
+          if(refreshed.revision!==proof.draftRevision||imageWorkflowDraftStamp(refreshed)!==proof.draftStamp)throw new UserFacingError('本地定价恢复后草稿已变化，保留原检查点待核对');
+          if(row.repair&&row.repair.draftRevision===proof.previousDraftRevision&&row.repair.draftStamp===proof.previousDraftStamp){
+            const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
+            if(row.repair.phase==='FIELDS_PENDING'&&!remaining.length&&!row.repairAttempts){
+              this.deps.execution.cancel(row.executionTaskIds.at(-1)!);row.repair=null;
+            }else row.repair={...row.repair,remaining,draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),
+              phase:row.repair.phase==='FIELDS_PENDING'&&!remaining.length?'READY':row.repair.phase};
+          }
+          delete row.pricingRefresh;
+          const pricing=pricingOutcome(refreshed,this.deps.rules());
+          if(pricing){
+            row.outcome={version:1,...pricing,message:(refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};
+            row.error=row.outcome.message;row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;
+          }
+        }
+      }
       row.status = 'PENDING';
       delete row.outcome;
       // Retain the precise source failure if a ready sibling has frozen this product's revision.

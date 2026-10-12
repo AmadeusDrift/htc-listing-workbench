@@ -1,3 +1,4 @@
+import { plainColorValue } from './plain-colors.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { isFullSchema,candidateNative } from './full-schema.ts';
 import { assertStoredListingEvidence, assertStoredListingReview } from './stored-evidence.ts';
@@ -61,7 +62,7 @@ export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonD
     attempted();
   } else if (d.status === 'business_blocked') {
     if (!businessFailure || d.code !== d.quoteError || report.quote !== null || e.cost !== 'confirmed_cny'
-      || e.dimensions !== 'confirmed_source' || e.weight !== 'confirmed_source' || e.packageScope !== 'source_sale_unit'
+      || !['confirmed_source',...(d.version===2?['business_default']:[])].includes(e.dimensions) || !['confirmed_source',...(d.version===2?['business_default']:[])].includes(e.weight) || e.packageScope !== 'source_sale_unit'
       || e.saleUnit !== 'confirmed' || marketplaceId !== 'ATVPDKIKX0DER') invalid();
     attempted();
   } else if (d.status === 'system_error') {
@@ -167,7 +168,8 @@ export function assertListingHistory(draft: AmazonDraft, results: Map<string,AiR
       if(isFullSchema(c)&&JSON.stringify(c.currentAttributes?.[change.field]??null)!==JSON.stringify(change.before))invalid();
       const expected=candidateNative(candidate,schema,draft.marketplaceId,change.before??undefined);
       const evidenceIds=new Set(candidate.items.flatMap(item=>item.evidenceIds));
-      if(JSON.stringify(expected)!==JSON.stringify(change.after)||JSON.stringify(c.evidence.filter(e=>evidenceIds.has(e.id)))!==JSON.stringify(change.evidence))invalid();
+      const plain=change.field==='color'?plainColorValue(expected,c.evidence.filter(e=>e.meaning==='color'||e.id===`${c.variantId}:spec`).map(e=>e.value)):expected;
+      if(JSON.stringify(expected)!==JSON.stringify(change.after)&&JSON.stringify(plain)!==JSON.stringify(change.after)||JSON.stringify(c.evidence.filter(e=>evidenceIds.has(e.id)))!==JSON.stringify(change.evidence))invalid();
     }
   }
 }

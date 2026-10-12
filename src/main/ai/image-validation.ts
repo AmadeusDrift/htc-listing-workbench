@@ -63,10 +63,11 @@ export function validateProductImageContext(raw: unknown,options:ImageEvidenceOp
   const sourceVariantIds=value.sourceVariantIds===undefined?undefined:list(value.sourceVariantIds,200,uuid);
   if(sourceVariantIds&&(!sourceVariantIds.includes(listing.variantId)||new Set(sourceVariantIds).size!==sourceVariantIds.length))fail();
   const referenceAssets = list(value.referenceAssets, 10, raw => {
-    const asset = keys(raw, ['assetId','sha256','variantId']);
+    const asset = keys(raw, ['assetId','sha256','variantId'],['scope']);
+    if(asset.scope!==undefined&&asset.scope!=='product')fail();
     const variantId = asset.variantId === null ? null : uuid(asset.variantId);
     if (variantId !== null && !(sourceVariantIds??[listing.variantId]).includes(variantId)) fail();
-    return { assetId: uuid(asset.assetId), sha256: sha256(asset.sha256), variantId };
+    return { ...(asset.scope==='product'?{scope:'product' as const}:{}),assetId: uuid(asset.assetId), sha256: sha256(asset.sha256), variantId };
   });
   if (!referenceAssets.length || new Set(referenceAssets.map(asset => asset.assetId)).size !== referenceAssets.length || Buffer.byteLength(JSON.stringify(value)) > (isFullSchema(listing)?20*1024*1024:180000)) fail();
   if(value.policyVersion!==PRODUCT_IMAGE_POLICY_VERSION && value.ipSource!==undefined)fail();
@@ -117,8 +118,13 @@ export function fillSetPlanPrompt(raw: unknown, context: ProductImageContext): u
   const prompt = first && typeof first === 'object' ? (first as Record<string, unknown>).prompt : undefined;
   return typeof prompt === 'string' && prompt.trim() ? { ...value, prompt } : raw;
 }
+function cameraFocalLength(raw:unknown):string {
+  const value=boundedText(raw,50);
+  if(!/^\d+(?:\.\d+)?(?:\s*(?:-|–|to)\s*\d+(?:\.\d+)?)?\s*mm$/i.test(value)||value.match(/\d+(?:\.\d+)?/g)!.some(n=>Number(n)<=0))fail();
+  return value;
+}
 export function validateImagePlan(raw: unknown): ImagePlanOutput {
-  const value = keys(raw, ['kind','prompt','textMode','expectedText'], ['productUnderstanding','ipRisk','setPlan']);
+  const value = keys(raw, ['kind','prompt','textMode','expectedText'], ['productUnderstanding','ipRisk','setPlan','cameraFocalLength']);
   if (value.kind !== 'image-plan' || !['none','planned'].includes(String(value.textMode))) fail();
   const expectedText = list(value.expectedText, 20, raw => { const line = keys(raw, ['text','evidenceIds']); return { text: englishText(boundedText(line.text, 300)), evidenceIds:ids(line.evidenceIds) }; });
   if ((value.textMode === 'none') !== (expectedText.length === 0) || new Set(expectedText.map(line => line.text)).size !== expectedText.length) fail();
@@ -146,16 +152,16 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
   }
   // A source refusal is a valid, cacheable observation, but never a generation
   // instruction. Slot prompts, source identities and all claims remain checked.
-  return { kind: 'image-plan', prompt: planPrompt(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan)}) };
+  return { kind: 'image-plan', ...(value.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(value.cameraFocalLength)}), prompt: planPrompt(value.prompt, productUnderstanding ? 8000 : 12000, productUnderstanding?.sufficient===false), textMode: value.textMode as 'none' | 'planned', expectedText, ...(productUnderstanding ? {productUnderstanding} : {}),...(ipRisk?{ipRisk}:{}),...(value.setPlan===undefined?{}:{setPlan:validateImageSetPlan(value.setPlan)}) };
 }
 export function validateImageSetPlan(raw:unknown):ImageSetPlan{
   const value=keys(raw,['style','dimensionEvidenceIds','dimensionReason','slots']);
   const slots=list(value.slots,7,raw=>{
-    const item=keys(raw,['index','role','focus','evidenceIds','scene','prompt','textMode','expectedText']);
+    const item=keys(raw,['index','role','focus','evidenceIds','scene','prompt','textMode','expectedText'],['cameraFocalLength']);
     if(!['main_scene','selling_point','dimensions','scene'].includes(String(item.role)))fail();
     const text=validateImagePlan({kind:'image-plan',prompt:item.prompt,textMode:item.textMode,expectedText:item.expectedText});
     if(text.expectedText.length>3||text.expectedText.some(line=>line.text.length>100))fail();
-    return {index:integer(item.index,1,7),role:item.role as ImageSetSlot['role'],focus:boundedText(item.focus,200),evidenceIds:ids(item.evidenceIds),scene:boundedText(item.scene,500),prompt:boundedText(text.prompt,2000),textMode:text.textMode,expectedText:text.expectedText};
+    return {...(item.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(item.cameraFocalLength)}),index:integer(item.index,1,7),role:item.role as ImageSetSlot['role'],focus:boundedText(item.focus,200),evidenceIds:ids(item.evidenceIds),scene:boundedText(item.scene,500),prompt:boundedText(text.prompt,2000),textMode:text.textMode,expectedText:text.expectedText};
   });
   if(slots.length!==7||slots.some((slot,index)=>slot.index!==index+1))fail();
   return {style:boundedText(value.style,1000),dimensionEvidenceIds:ids(value.dimensionEvidenceIds),dimensionReason:boundedText(value.dimensionReason,1000),slots};
@@ -372,13 +378,13 @@ export function imageGenerationPrompt(plan: ImagePlanOutput,context?:ProductImag
   assertImagePlan(plan,context);
   const slot=context.setPlan?.slots[(context.slot?.index??0)-1]??fail();
   const role=slot.role==='main_scene'?'Main image: a realistic, relevant product-use scene. The product must remain the hero.':slot.role==='selling_point'?'Feature image: exactly one selling point, using the single focus below.':slot.role==='dimensions'?'One size diagram: show only cited dimensions, label product versus package clearly.':'A distinct, relevant lifestyle scene featuring the actual product.';
-  return imagePromptText(plan)+'\n\nMANDATORY IMAGE RULES (take precedence over creative wording):\n'+role+
+  return imagePromptText({...plan,cameraFocalLength:plan.cameraFocalLength??slot.cameraFocalLength})+'\n\nMANDATORY IMAGE RULES (take precedence over creative wording):\n'+role+
     '\nPreserve the selected SKU, color, structure and supported sale quantity. Never invent accessories, functions, material, measurements or certifications. Scene props are not included items. No collage or multiple independent panels. No logos, watermarks, prices or unplanned claims.'+
     '\nSet style: '+context.setPlan!.style+'\nSingle focus: '+slot.focus+'\nScene: '+slot.scene+
     (plan.textMode==='none'?'\nNo visible text anywhere in this image: no captions, labels, signs, measurement arrows or lettering. Preserve actual product identity; do not disguise protected markings.':'\nRender only these short US English captions, clearly readable, with no extra text:\n'+plan.expectedText.map(line=>line.text).join('\n'));
 }
 function imagePromptText(plan:ImagePlanOutput):string{
-  return `Selected SKU visual observations (not verified specifications):\n${plan.productUnderstanding?.summary??''}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}`;
+  return `Selected SKU visual observations (not verified specifications):\n${plan.productUnderstanding?.summary??''}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}${plan.cameraFocalLength?`\n\nPhotography only — camera focal length: ${cameraFocalLength(plan.cameraFocalLength)}. This describes the taking camera, never product dimensions or visible text.`:""}`;
 }
 const normalizeText = (value: string): string => value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 export function assertImageTextReview(review: ImageTextReviewOutput, context: ProductImageContext, plan: AiResult, ocr: AiResult, candidate: CandidateImageIdentity,options:ImageEvidenceOptions={}): void {

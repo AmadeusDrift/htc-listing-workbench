@@ -2,10 +2,11 @@ import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, r
 import { join, resolve } from 'node:path';
 import type { AiCall } from '../../shared/ai-contracts.ts';
 
+const SOURCE_MAX_BYTES=16*1024*1024;
 const MAX_BYTES = 200000, MAX_FILES = 10000, MAX_TOTAL_BYTES = 128 * 1024 * 1024;
 const managedName = /^\d{17}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/;
 const canonical = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
-export type AiOutputRejectionStage = 'operation-output-validation' | 'source-freshness' | 'result-record-validation';
+export type AiOutputRejectionStage = 'provider-response-validation' | 'operation-output-validation' | 'source-freshness' | 'result-record-validation';
 
 function safeDirectory(path: string): void {
   const info = lstatSync(path);
@@ -13,6 +14,8 @@ function safeDirectory(path: string): void {
 }
 function diagnosticText(value: string): string {
   return value
+    .replace(/("(?:authorization|api[_-]?key|password|access[_-]?token|secret|headers)"\s*:\s*")[^"\r\n]*("|$)/gi,'$1[omitted: sensitive field]$2')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,'Bearer [omitted: sensitive field]')
     .replace(/data:image\/[^\s;,]+(?:;[^,\s]*)?;?base64,[A-Za-z0-9+/=_-]+/gi,'[omitted: image bytes]')
     .replace(/(?:iVBORw0KGgo|\/9j\/|R0lGOD[lh]|UklGR)[A-Za-z0-9+/_=-]*/g,'[omitted: image bytes]')
     .replace(/[A-Za-z0-9+/_-]{256,}={0,2}/g,'[omitted: encoded bytes]');
@@ -41,9 +44,10 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
       createdAt:input.createdAt, rejectionStage:input.rejectionStage,
       // Only a fixed code is kept; free text never enters the file through this field.
       ...(input.rejectionReason && /^[A-Z][A-Z_]{2,39}$/.test(input.rejectionReason) ? { rejectionReason:input.rejectionReason } : {}), outputByteLength };
+    const maxBytes=input.operation==='source-image-consistency'?SOURCE_MAX_BYTES:MAX_BYTES;
     let json = JSON.stringify({ ...metadata, output });
-    if (Buffer.byteLength(json,'utf8') > MAX_BYTES) json = JSON.stringify({ ...metadata, output:null, outputOmitted:'size_limit' });
-    if (Buffer.byteLength(json,'utf8') > MAX_BYTES) return;
+    if (Buffer.byteLength(json,'utf8') > maxBytes) json = JSON.stringify({ ...metadata, output:null, outputOmitted:'size_limit' });
+    if (Buffer.byteLength(json,'utf8') > maxBytes) return;
     const root = resolve(directory), folder = join(root,'ai-diagnostics');
     safeDirectory(root);
     try { mkdirSync(folder); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
@@ -56,6 +60,9 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
       const path = join(folder,entry), info = lstatSync(path);
       safeDirectory(root); safeDirectory(folder);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || canonical(realpathSync(path)) !== canonical(path)) return;
+      // Source failures are recovery evidence, not a disposable diagnostic cache.
+      // Keep them even when ordinary diagnostics exceed retention quotas.
+      try{if(info.size<=SOURCE_MAX_BYTES&&JSON.parse(readFileSync(path,'utf8')).operation==='source-image-consistency')continue;}catch{continue;}
       unlinkSync(path);
       remaining--;total-=info.size;
     }
@@ -79,9 +86,9 @@ function readInvalidAiRecords(directory:string,call:AiCall,operation:string):{re
     for(const entry of readdirSync(folder).filter(name=>managedName.test(name)&&name.endsWith(`-${call.id}.json`)).sort().reverse()){
       try{
         const path=join(folder,entry),info=lstatSync(path);
-        if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>MAX_BYTES||canonical(realpathSync(path))!==canonical(path))continue;
+        if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>(operation==='source-image-consistency'?SOURCE_MAX_BYTES:MAX_BYTES)||canonical(realpathSync(path))!==canonical(path))continue;
         const raw=JSON.parse(readFileSync(path,'utf8'));
-        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&['operation-output-validation','source-freshness','result-record-validation'].includes(raw.rejectionStage))values.push(raw);
+        if(raw.version===1&&raw.approved===false&&raw.errorCode==='OUTPUT_INVALID'&&raw.operation===operation&&raw.callId===call.id&&raw.productId===call.productId&&raw.productRevision===call.productRevision&&raw.providerId===call.providerId&&raw.model===call.model&&['provider-response-validation','operation-output-validation','source-freshness','result-record-validation'].includes(raw.rejectionStage))values.push(raw);
       }catch{/* A damaged diagnostic does not hide another retained response. */}
     }
   }catch{/* Missing evidence remains an explicit unrecoverable output. */}
@@ -94,3 +101,6 @@ export function hasInvalidAiResponse(directory:string,call:AiCall,operation:stri
 export function readInvalidAiOutputs(directory:string,call:AiCall,operation:string):unknown[] {
   return readInvalidAiRecords(directory,call,operation).filter(record=>record.rejectionStage==='operation-output-validation'&&record.output!==null&&record.output!==undefined&&!JSON.stringify(record.output).includes('[omitted:')).map(record=>record.output);
 }
+
+/** Includes malformed/provider-incomplete text: its presence must never authorize a paid retry. */
+export function hasRetainedInvalidAiOutput(directory:string,call:AiCall,operation:string):boolean {return readInvalidAiRecords(directory,call,operation).some(r=>r.output!==null&&r.output!==undefined);}

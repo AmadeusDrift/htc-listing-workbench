@@ -41,14 +41,14 @@ test('concurrent service instances reserve exactly one send and no second usage 
   const f=await fixture(t),other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
   try{const results=await Promise.allSettled([f.observe(),other.observeSourceConsistency(f.context(),()=>{})]);assert.ok(results.some(r=>r.status==='fulfilled'));assert.equal(f.count(),1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);}finally{await other.close();}
 });
-test('malformed paid output and unknown transport remain durable no-resend scopes',async t=>{
+test('malformed paid output remains recoverable while unknown transport gets bounded retries',async t=>{
   for(const kind of ['malformed','unknown']){
     const f=await fixture(t);f.respond(()=>{if(kind==='unknown')throw new TypeError('synthetic transport unknown');return chat({kind:'source-image-consistency',verdict:'PASS'});});
-    await assert.rejects(f.observe());assert.equal(f.count(),1);await assert.rejects(f.observe());assert.equal(f.count(),1);
+    await assert.rejects(f.observe(),e=>{assert.equal(f.count(),1,String(e));return true;});assert.equal(f.count(),1);await assert.rejects(f.observe());assert.equal(f.count(),kind==='unknown'?2:1);
     assert.ok(f.db.prepare('SELECT id FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(f.context())));
     assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_assessments').get()!.n,0);
     await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
-    try{restarted.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});restarted.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false});restarted.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:0});await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),1);}finally{await restarted.close();}
+    try{restarted.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});restarted.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false});restarted.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:0});await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),kind==='unknown'?2:1);}finally{await restarted.close();}
   }
 });
 test('presend cancellation and quota rejection do not reserve consistency attempt',async t=>{
@@ -94,11 +94,11 @@ test('midflight pause and managed-byte replacement retain liability without acce
   }
 });
 
-test('assessment write failure rolls back success atomically and never resends the paid attempt',async t=>{
+test('assessment write failure rolls back success atomically and retries when original result is unavailable',async t=>{
   const f=await fixture(t);f.db.exec("CREATE TRIGGER synthetic_assessment_failure BEFORE INSERT ON source_consistency_assessments BEGIN SELECT RAISE(ABORT,'synthetic storage failure'); END");
   await assert.rejects(f.observe());f.db.exec('DROP TRIGGER synthetic_assessment_failure');
   assert.equal(f.db.prepare('SELECT count(*) n FROM ai_results').get()!.n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_assessments').get()!.n,0);assert.equal(f.count(),1);
-  await assert.rejects(f.observe());assert.equal(f.count(),1);
+  await f.observe();assert.equal(f.count(),2);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);
 });
 
 test('actual older encrypted restore retains unknown send guard without restoring positive proof',async t=>{
@@ -175,4 +175,93 @@ test('v1 successful uncertain history remains intact while current use merges it
   const prior=String(f.db.prepare('SELECT record_json FROM source_consistency_assessments').get()!.record_json);assert.equal(JSON.parse(prior).decision,'UNCERTAIN');assertConsistencyHistory(f.db,f.directory);
   assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.equal(f.ai.sourceObservationEvidence(f.context()).images[0].colors[0],'Blue');
   assert.equal(String(f.db.prepare('SELECT record_json FROM source_consistency_assessments').get()!.record_json),prior);assert.equal(f.count(),1);
+});
+
+test('prepare retries only missing source response, preserves immutable paid history and product, survives backup/restart',async t=>{
+  const f=await fixture(t),before=f.store.getProduct(f.p.id);
+  f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,unlinkSync,existsSync}=await import('node:fs');
+  for(const name of (existsSync(join(f.directory,'ai-diagnostics'))?readdirSync(join(f.directory,'ai-diagnostics')):[]))unlinkSync(join(f.directory,'ai-diagnostics',name));
+  const old=f.ai.listCalls()[0],oldAttempt=String(f.db.prepare('SELECT record_json FROM source_consistency_attempts').get()!.record_json);
+  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))}));
+  const input={productId:f.p.id,productRevision:before.revision,variantId:f.p.variants[0].id};
+  assert.equal((await f.ai.prepareSourceConsistency(input)).status,'MATCH');assert.equal(f.count(),2);
+  assert.deepEqual(f.ai.listCalls().find(c=>c.id===old.id),old);assert.equal(String(f.db.prepare('SELECT record_json FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(f.context()))!.record_json),oldAttempt);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);assert.deepEqual(f.store.getProduct(f.p.id),before);
+  assertConsistencyHistory(f.db,f.directory);const backup=join(f.directory,'retry.htcbackup');await createWorkspaceBackup(f.directory,backup,'synthetic-retry-backup');const snapshot=await prepareWorkspaceRestore(f.directory,backup,'synthetic-retry-backup');
+  await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
+  const restoredStore=new WorkspaceStore(f.directory),restoredDb=openDatabase(f.directory),restoredHosting=new HostingService(f.directory,restoredStore,mockStorage),restarted=new AiService(f.directory,restoredStore,restoredHosting,mockStorage,f.dependencies);
+  try{assert.equal((await restarted.prepareSourceConsistency(input)).status,'MATCH');assert.equal(f.count(),2);assert.equal(restoredDb.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);assert.deepEqual(restarted.listCalls().find(c=>c.id===old.id),old);}finally{await restarted.close();await restoredHosting.close();restoredDb.close();restoredStore.close();}
+});
+
+test('missing responses consume at most three durable source attempts across repeated preparation',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));const {readdirSync,unlinkSync,existsSync}=await import('node:fs');
+  for(let i=0;i<6;i++){
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));
+    for(const name of (existsSync(join(f.directory,'ai-diagnostics'))?readdirSync(join(f.directory,'ai-diagnostics')):[]))unlinkSync(join(f.directory,'ai-diagnostics',name));
+  }
+  assert.equal(f.count(),3);assert.equal(f.ai.getUsageSummary('deepseek').attempts,3);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,3);assertConsistencyHistory(f.db,f.directory);
+});
+
+
+test('source invalid JSON retains full useful response and fixed reason without another paid preparation',async t=>{
+  const f=await fixture(t),raw='{"assets":['+' '.repeat(210000);
+  f.respond(()=>new Response(JSON.stringify({id:'source-invalid-json',usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150},choices:[{finish_reason:'stop',message:{content:raw}}]})));
+  await assert.rejects(f.observe());const {readdirSync,readFileSync}=await import('node:fs');
+  const files=readdirSync(join(f.directory,'ai-diagnostics')),saved=JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',files[0]),'utf8'));
+  assert.equal(saved.output,raw);assert.equal(saved.rejectionReason,'RESPONSE_JSON_INVALID');
+  await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+});
+
+test('retention never evicts a saved source response while pruning disposable diagnostics',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,readFileSync,writeFileSync,truncateSync,existsSync}=await import('node:fs');
+  const folder=join(f.directory,'ai-diagnostics'),source=readdirSync(folder)[0];
+  const disposable=join(folder,'20990101000000000-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.json');writeFileSync(disposable,'');truncateSync(disposable,129*1024*1024);
+  recordInvalidAiOutput(f.directory,{call:{...f.ai.listCalls()[0],id:randomUUID()},operation:'image-plan',createdAt:'2099-01-02T00:00:00.000Z',rejectionStage:'operation-output-validation',output:{bad:true}});
+  assert.ok(existsSync(join(folder,source)));assert.deepEqual(JSON.parse(readFileSync(join(folder,source),'utf8')).output,{bad:true});assert.equal(existsSync(disposable),false);
+});
+
+test('concurrent missing-response preparation sends only one replacement and retains both attempts',async t=>{
+  const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const {readdirSync,unlinkSync}=await import('node:fs');for(const n of readdirSync(join(f.directory,'ai-diagnostics')))unlinkSync(join(f.directory,'ai-diagnostics',n));
+  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:[],claims:[]}))}));
+  const other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies),input={productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id};
+  try{const results=await Promise.allSettled([f.ai.prepareSourceConsistency(input),other.prepareSourceConsistency(input)]);assert.ok(results.some(r=>r.status==='fulfilled'));assert.equal(f.count(),2);assert.equal(f.ai.getUsageSummary('deepseek').attempts,2);}finally{await other.close();}
+});
+
+test('source diagnostic rejects unicode-escaped credential echoes before retaining raw content',async t=>{
+  const {readdirSync,readFileSync}=await import('node:fs');
+  for(const malformed of [false,true]){
+    const f=await fixture(t),escaped='\\u0063onsistency-synthetic-key',raw='{"note":"'+escaped+'"'+(malformed?'':'}');
+    f.respond(()=>new Response(JSON.stringify({id:'synthetic-escaped',usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150},choices:[{finish_reason:'stop',message:{content:raw}}]})));
+    await assert.rejects(f.observe());
+    const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
+    assert.ok(saved.length);for(const record of saved){assert.equal(JSON.stringify(record).includes('onsistency-synthetic-key'),false);}
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+  }
+});
+
+test('source malformed HTTP 200 envelope retains safe text and never becomes a missing-response retry',async t=>{
+  const {readdirSync,readFileSync}=await import('node:fs');
+  for(const raw of ['{"choices":[', '{"note":"\\u0063onsistency-synthetic-key"']){
+    const f=await fixture(t);f.respond(()=>new Response(raw));await assert.rejects(f.observe());
+    const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
+    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,'RESPONSE_ENVELOPE_JSON_INVALID');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
+    if(raw==='{"choices":[')assert.equal(saved[0].output,raw);
+    await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
+  }
+});
+
+test('unknown source owner resumes at most three sends and never resets history',async t=>{
+ const f=await fixture(t);f.respond(()=>{throw Error('synthetic unavailable');});const input={productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id};
+ for(let n=0;n<5;n++)await assert.rejects(f.ai.prepareSourceConsistency(input));
+ assert.equal(f.count(),3);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,3);assert.equal(f.ai.getUsageSummary('deepseek').attempts,3);
+ await createWorkspaceBackup(f.directory,join(f.directory,'source-retry.htcbackup'),'synthetic source retry backup');
+});
+
+test('unknown source call with corrupt ownership stops without another paid reservation',async t=>{
+ const f=await fixture(t);f.respond(()=>{throw Error('synthetic unavailable');});await assert.rejects(f.observe());
+ const row=f.db.prepare('SELECT record_json FROM ai_calls').get()!,call=JSON.parse(String(row.record_json));call.productRevision++;f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
+ await assert.rejects(f.observe());assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);
 });

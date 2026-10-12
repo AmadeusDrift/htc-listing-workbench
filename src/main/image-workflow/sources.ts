@@ -11,6 +11,7 @@ import { listingFingerprint } from '../listing-ai/validation.ts';
 import { selectImageReferences, workflowRuns } from './records.ts';
 import { SourceImageIdentityError, readSourceImageReceipt, allowSourceUnbound, sourceImageReceipt, sourceImageMappings } from '../source-images.ts';
 import type { SourceImageReceipt } from '../source-images.ts';
+import { bindProductReference } from '../image-upstream-trace.ts';
 
 export interface AutomaticImageSources { getReceipt(id: string): MiaoshouReceipt | null; images: Pick<MiaoshouImageService, 'download'> }
 export type AutomaticSourcesResult = Awaited<ReturnType<ImageWorkflowApi['prepareAutomaticProductSources']>>;
@@ -69,9 +70,16 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   const receiptStamp=listingFingerprint(source),attempted=new Set<string>(),failedUrls=new Map<string,string>();
   const imageUrl=(id:string)=>receipt?.snapshot.images.find(i=>i.id===id)?.url??'';
   const session={createdAssets:new Set<string>(),variantIds:input.variantIds};
+  const productReferences=new Set<string>();
   const candidates=new Map(input.variantIds.map(variantId=>{
     const mapped=[...(mappings.find(row=>row.localVariantId===variantId)?.images??[])].sort((a,b)=>Number(a.basis==='spec-value')-Number(b.basis==='spec-value')).map(i=>i.imageId);
-    const ids=source?.kind==='native1688'?mapped.filter(id=>imageUrl(id).trim()):receipt?.snapshot.images.filter(image=>image.url.trim() && (mapped.includes(image.id) || allowUnbound)).map(image=>image.id)??[];
+    let ids=source?.kind==='native1688'?mapped.filter(id=>imageUrl(id).trim()):receipt?.snapshot.images.filter(image=>image.url.trim() && (mapped.includes(image.id) || allowUnbound)).map(image=>image.id)??[];
+    const variant=product.variants.find(v=>v.id===variantId)!,spec=(variant.sourceSpec||variant.originalSpec).trim();
+    if(!ids.length&&!mapped.length&&mappings.some(m=>m.localVariantId===variantId)&&spec&&!/规格待核对/.test(spec)){
+      // Known sibling thumbnails are not generic gallery references.
+      ids=receipt?.snapshot.images.filter(i=>i.url.trim()&&i.role!=='detail'&&!mappings.some(m=>m.images.some(image=>image.imageId===i.id))).map(i=>i.id)??[];
+      if(ids.length)productReferences.add(variantId);
+    }
     return [variantId,ids.slice(0,3)];
   }));
   const fresh=()=>{
@@ -91,6 +99,12 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
       fresh();const imageIds=ids.slice(offset,offset+20);imageIds.forEach(id=>attempted.add(id));
       const downloaded=await sources.images.download({productId:product.id,revision:product.revision,imageIds},signal,session);
       product=downloaded.product; fresh();
+      for(const variantId of productReferences){
+        if(ready(variantId))continue;
+        const ids=candidates.get(variantId)!;
+        const anchor=db.prepare("SELECT record_json FROM source_image_provenance WHERE json_extract(record_json,'$.productId')=? ORDER BY rowid DESC").all(product.id).map(row=>JSON.parse(String(row.record_json))).find(row=>row.receiptId===receipt.id&&row.receiptKind===source?.kind&&ids.includes(row.imageId)&&imageIds.includes(row.imageId));
+        if(anchor){const variant=product.variants.find(v=>v.id===variantId)!;bindProductReference(db,{productId:product.id,variantId,assetId:anchor.assetId,imageId:anchor.imageId,sourceSku:mappings.find(m=>m.localVariantId===variantId)!.sourceSku,spec:variant.sourceSpec||variant.originalSpec});product=store.getProduct(product.id);}
+      }
       for(const failure of downloaded.failures)failedUrls.set(imageUrl(failure.imageId),failure.message);
     }
   }

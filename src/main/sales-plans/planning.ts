@@ -6,13 +6,16 @@ import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
 import type { SkuNamingService } from '../sku-naming/service.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { buildSalesRecipes } from './recipes.ts';
+import { informationalVariant, selectSalesRecipes } from './selection.ts';
 import { confirmedPurchaseCurrency } from '../amazon/business-currency.ts';
 
 export const salesStoreScope=(target:Pick<AmazonTarget,'mode'|'sellerId'>)=>JSON.stringify([target.mode,target.sellerId]);
 /** Preview uses the exact currency and recipe rules without allocating a SKU. */
 export function previewSalesRecipes(product:ProductDetail,receipt:MiaoshouReceipt|null,rules:ListingRules){
   const currency=confirmedPurchaseCurrency(product.facts,!!receipt?.snapshot.sources.some(s=>s.source==='1688')||receipt?.mapping.currency==='CNY');
-  return buildSalesRecipes(currency.cny?product:{...product,variants:product.variants.map(v=>({...v,purchasePrice:''}))},currency.cny?receipt:null,rules);
+  const source={...product,variants:product.variants.filter(v=>!informationalVariant(v))};
+  const recipes=buildSalesRecipes(currency.cny?source:{...source,variants:source.variants.map(v=>({...v,purchasePrice:''}))},currency.cny?receipt:null,{...rules,product:{...rules.product,variantLimit:source.variants.length}});
+  return selectSalesRecipes(product,recipes,rules,receipt);
 }
 export function planSalesListings(product:ProductDetail,receipt:MiaoshouReceipt|null,target:AmazonTarget,rules:ListingRules,naming:SkuNamingService):SalesListingPlan[] {
   const settings=naming.getSettings(),binding=settings.bindings.find(b=>b.targetId===target.id);

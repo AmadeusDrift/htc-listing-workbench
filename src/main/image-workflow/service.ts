@@ -1,3 +1,5 @@
+import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
+import { isProductReference } from '../image-upstream-trace.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -463,7 +465,7 @@ export class ImageWorkflowService {
       throwIfAborted(signal);
       this.reevaluatePolicy(run,initial);
       const cached=run.contentPreparation;
-      if(!run.imageContext&&cached?.operationId&&needsBusinessAuthorityRefresh(initial,cached.remaining)){
+      if(!run.imageContext&&cached?.operationId&&(cached.state==='STARTED'||needsBusinessAuthorityRefresh(initial,cached.remaining)||needsPlainColorRefresh(initial,this.store.getProduct(initial.productId)))){
         const op=new CompletionJournal(this.db).get(cached.operationId);
         if(op.state==='DONE'){
           if(cached.state==='DONE'&&(cached.draftRevision!==initial.revision||cached.draftSha256&&cached.draftSha256!==imageWorkflowDraftStamp(initial)))throw new UserFacingError('旧事实恢复对应的草稿已变化，原记录保留');
@@ -492,7 +494,7 @@ export class ImageWorkflowService {
       const references=refs.map(ref=>({id:ref.id,sha256:this.store.getAssetRecord(ref.id)!.sha256}));
       if(run.referenceAssets.length&&listingFingerprint(references)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');
       run.referenceAssets=references;this.save(run);
-      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||new CompletionJournal(this.db,this.directory).unknown(run.contentPreparation.operationId)))throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
+      if(!run.imageContext&&run.contentPreparation?.state==='STARTED'&&!run.contentPreparation.operationId)throw new UserFacingError('上次字段准备结果尚未确认，保留进度，不自动重复付费请求');
       let sourceColorEvidenceSha256:string|undefined;
       if(this.listing.prepareSourceColors){
         const prepared=await this.listing.prepareSourceColors({draftId:run.draftId,draftRevision:initial.revision},signal);
@@ -560,7 +562,7 @@ export class ImageWorkflowService {
         if(!copyReviewEnabled&&!this.listing.snapshotCurrentForImages)throw new UserFacingError('文案快照服务尚未初始化');
         const snapshot=copyReviewEnabled?copy!:await this.listing.snapshotCurrentForImages!({draftId:run.draftId,draftRevision:result.draft.revision},signal);
         const bypass=copyReviewEnabled?undefined:{policy:'copy-review-disabled/v1' as const,at:new Date().toISOString(),contextSha256:listingFingerprint(snapshot.context),copySha256:listingFingerprint(snapshot.currentListingCopy)};
-        const base=validateProductImageContext({listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,listingReviewResultId:copyReviewEnabled?copy!.review.id:null,...(bypass?{copyReviewBypass:bypass}:{}),referenceAssets:references.map(ref=>({assetId:ref.id,sha256:ref.sha256,variantId:variantIds.find(id=>refs.find(asset=>asset.id===ref.id)!.variantIds.includes(id)&&confirmed(ref.id,id))??null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,run.variantId),sourceVariantIds:variantIds});
+        const base=validateProductImageContext({listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,listingReviewResultId:copyReviewEnabled?copy!.review.id:null,...(bypass?{copyReviewBypass:bypass}:{}),referenceAssets:references.map(ref=>({...(isProductReference(this.db,product.id,run.variantId,ref.id)?{scope:'product' as const}:{}),assetId:ref.id,sha256:ref.sha256,variantId:variantIds.find(id=>refs.find(asset=>asset.id===ref.id)!.variantIds.includes(id)&&confirmed(ref.id,id))??null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,run.variantId),sourceVariantIds:variantIds});
         if(run.slotPolicy===IMAGE_SET_POLICY){
           base.setPolicy=IMAGE_SET_POLICY;base.referenceMeasurements=reuse?.imageContext?.referenceMeasurements??[];base.sourceMeasurements=currentSourceImageMeasurements(this.db,result.draft);
           if(!reuse&&!sourceDimensionEvidence(base).length){
@@ -655,7 +657,10 @@ export class ImageWorkflowService {
           if(!plan.output.productUnderstanding?.sufficient||riskEnabled&&plan.output.ipRisk?.verdict!=='PASS')throw new UserFacingError('原图片规划尚未通过来源或 IP 初筛');
           if(['GENERATING','UNKNOWN'].includes(attempt.state)){
             const recovered=await this.generation.reconcileWorkflowGeneration(attempt.requestId);
-            if(!recovered){attempt.state='UNKNOWN';slot.status='UNKNOWN';slot.error=attempt.error='生图响应结果未知，已核对本地生成记录仍无法确认；保留次数并停止，不重发付费请求';this.save(run);throw new UserFacingError(slot.error);}
+            if(!recovered){
+              if(slot.attempts.length>=run.maxAttempts){slot.status='FAILED';slot.error=attempt.error='生图结果无法恢复且已用完尝试次数；原请求和费用记录保留';this.save(run);throw new UserFacingError(slot.error);}
+              attempt.state='RETRYABLE_FAILURE';slot.status='PENDING';attempt.error='已核对原生图记录仍无法恢复；按已授权规则重试缺失步骤，原请求和费用记录保留';this.save(run);continue;
+            }
             attempt.candidateId=recovered.id;attempt.state='GENERATED';attempt.error=null;this.save(run);
           }
           let local:Awaited<ReturnType<Generator['readCandidate']>>;
@@ -792,7 +797,7 @@ export class ImageWorkflowService {
       if (copy.review.output.kind !== 'listing-current-review' || copy.review.output.verdict !== 'PASS') throw new UserFacingError('商品文案复核未通过，已停止后续生图');
       assertCurrentListingReview({...copy.review.output,kind:'amazon-fields-review'},copy.currentListingCopy,copy.context);
       const context: ProductImageContext = validateProductImageContext({ listing:copy.context,currentListingCopy:copy.currentListingCopy,listingReviewResultId:copy.review.id,ipSource:imageRiskSourceSnapshot(product,run.variantId),
-        referenceAssets:run.referenceAssets.map(ref=>({assetId:ref.id,sha256:ref.sha256,variantId:refs.find(a=>a.id===ref.id)!.variantIds.includes(run.variantId)?run.variantId:null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION });
+        referenceAssets:run.referenceAssets.map(ref=>({...(isProductReference(this.db,product.id,run.variantId,ref.id)?{scope:'product' as const}:{}),assetId:ref.id,sha256:ref.sha256,variantId:refs.find(a=>a.id===ref.id)!.variantIds.includes(run.variantId)?run.variantId:null})),purpose:'main',policyVersion:PRODUCT_IMAGE_POLICY_VERSION });
       if(reuse){
         const priorReview=this.ai.getResult(reuse.reviewResultIds.at(-1)!),call=priorReview&&this.ai.getCall(priorReview.callId),previous=priorReview?.imageContext;
         if(!previous||priorReview?.output.kind!=='image-text-review'||priorReview.output.verdict!=='PASS'||call?.status!=='SUCCEEDED'

@@ -127,7 +127,7 @@ try {
  await page.evaluate(()=>window.fixture.queueMode=null);await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(start).toBeEnabled();
  pass('selected target drives recipe counts, partial filters retain healthy recipes, all filtered products leave pending and remain in the reason tab');
  await expect(start).toBeEnabled();
- await expect(page.getByText(/每件商品按来源顺序取前 2 个来源规格/)).toBeVisible();
+ await expect(page.getByText(/每个来源链接按配置、资料和代表性选择，最多 2 个销售 SKU，不含说明性选项/)).toBeVisible();
  await page.evaluate(()=>window.fixture.consent=false);await start.click();
  await expect(start).toBeEnabled();assert.equal(await page.evaluate(()=>window.fixture.tasks.length),0);
  await page.evaluate(()=>window.fixture.consent=true);await start.click();
@@ -141,6 +141,8 @@ try {
  await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();
  await expect(page.getByTestId('automatic-result-v-z')).toContainText('已提交，等待读回');
  await expect(page.getByTestId('automatic-result-v-a')).toContainText('准备商品标签');
+ await expect(page.getByTestId('automatic-result-v-a')).toContainText('标签尚未完成');
+ await expect(page.getByTestId('automatic-result-v-z')).toContainText('等待 Amazon 回读');
  pass('single start passes the selected source-order scope; cancelled native confirmation creates no task; submission and label stages remain distinct');
  await page.getByRole('button',{name:'离开测试页面',exact:true}).click();
  const polls=await page.evaluate(()=>window.fixture.polls);await page.waitForTimeout(2200);
@@ -167,6 +169,9 @@ try {
  await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史记录未保存可信的结构化细因');
  assert.equal(await page.evaluate(()=>window.fixture.tasks[0].items[0].outcome.message),'历史标签失败测试原因');
  pass('completed sales rows retain failure audit without displaying an old fault as the current result');
+ await page.evaluate(()=>{const task=window.fixture.tasks[0];task.revision++;task.status='NEEDS_ATTENTION';Object.assign(task.items[0],{status:'FAILED',stage:'READBACK',error:'原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交',outcome:{kind:'SYSTEM_REPAIR',code:'READBACK_FAILED'}});});
+ await expect(page.getByTestId('automatic-result-v-z')).toContainText('24 小时');
+ await expect(page.getByTestId('automatic-result-v-z')).toContainText('禁止重复提交');
  await page.evaluate(()=>{const fixture=window.fixture,background=structuredClone(fixture.tasks[0]);background.id='task-background';background.revision=1;background.status='RUNNING';background.items=background.items.map(row=>({...row,status:'PENDING',stage:'DRAFT',outcome:undefined}));fixture.tasks.push(background);fixture.queueMode=null;});
  await expect(page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).locator('option')).toHaveCount(2);
  await page.getByRole('combobox',{name:'选择自动上架任务',exact:true}).selectOption('task-1');await page.getByRole('combobox',{name:/目标店铺与站点/}).selectOption('target-1');await expect(page.getByRole('tab',{name:'待上架 1',exact:true})).toBeVisible();
@@ -187,6 +192,8 @@ try {
    Object.assign(items.find(item=>item.sku==='SALE-2-0'),{status:'FAILED',stage:'DRAFT',error:'定价未通过：售价上限内无法满足目标 ROI'});
    Object.assign(items.find(item=>item.sku==='SALE-3-0'),{status:'FAILED',stage:'SOURCES',error:'来源图片映射为空'});
    Object.assign(items.find(item=>item.sku==='SALE-4-0'),{status:'WAITING',stage:'READBACK',error:null});
+   Object.assign(items.find(item=>item.sku==='SALE-5-0'),{status:'RUNNING',stage:'DRAFT',error:null});
+   Object.assign(items.find(item=>item.sku==='SALE-6-0'),{status:'WAITING',stage:'IMAGES',error:null});
    fixture.products=[template,...products];fixture.tasks=[{...fixture.tasks[0],id:'task-bulk',status:'NEEDS_ATTENTION',items}];
  });
  await page.getByRole('button',{name:'查看自动任务',exact:true}).click();
@@ -195,6 +202,10 @@ try {
  await expect(bulk.getByLabel('当前任务范围')).toHaveText('来源商品链接12来源规格192本次销售 SKU103');
  await expect(bulk.getByLabel('任务待确认分类')).toContainText('规则淘汰 0');await expect(bulk.getByLabel('任务待确认分类')).toContainText('历史未分类 3');
  await expect(bulk.getByRole('status')).toContainText('已提交待回读 1 · 流程完成 0 / 103');
+ await expect(bulk.getByRole('status')).toContainText('处理中 1');
+ await expect(bulk.getByRole('status')).toContainText('等待服务 1');
+ const displayedCounts=await bulk.locator('.automatic-task-counts .outcome-count').allTextContents();
+ assert.equal(displayedCounts.reduce((sum,text)=>sum+Number(text.match(/ (\d+)/)[1]),0),103,'all visible summary buckets must total current sales SKUs exactly once');
  await expect(bulk.locator('[data-testid^="automatic-result-"]')).toHaveCount(0);
  await capture('grouped-products-collapsed.png','[aria-label="当前任务范围"]',1900);
  const bulkGroup=page.getByTestId('automatic-product-group-bulk-1');

@@ -18,6 +18,8 @@ export interface ReferenceMeasurement {
 }
 export interface SourceImageMeasurement {id:string;name:string;value:string;variantId:string;sourceSha256:string}
 export interface ImageSetSlot {
+  /** Photography focal length only, never a product measurement or overlay. */
+  cameraFocalLength?:string;
   index:number; role:'main_scene'|'selling_point'|'dimensions'|'scene';
   focus:string; evidenceIds:string[]; scene:string; prompt:string;
   textMode:'none'|'planned'; expectedText:{text:string;evidenceIds:string[]}[];
@@ -32,7 +34,7 @@ export interface ProductImageContext {
   listingReviewResultId: string | null;
   /** Explicitly skipped independent copy review; never a passing review result. */
   copyReviewBypass?: { policy: 'copy-review-disabled/v1'; at: string; contextSha256: string; copySha256: string };
-  referenceAssets: { assetId: string; sha256: string; variantId: string | null }[];
+  referenceAssets: { scope?:'product'; assetId: string; sha256: string; variantId: string | null }[];
   purpose: 'main' | 'detail';
   policyVersion: ProductImagePolicyVersion;
   /** Required by ip-v3; absent in historical contexts. */
@@ -48,6 +50,8 @@ export interface ProductImageContext {
 export interface CandidateImageIdentity { id: string; sha256: string; width: number; height: number }
 export function imageCopySourceIds(context: ProductImageContext): string[] { return context.listingReviewResultId === null ? [] : [context.listingReviewResultId]; }
 export interface ImagePlanOutput {
+  /** Photography focal length only, never a product measurement or overlay. */
+  cameraFocalLength?:string;
   kind: 'image-plan'; prompt: string; textMode: 'none' | 'planned';
   expectedText: { text: string; evidenceIds: string[] }[];
   setPlan?:ImageSetPlan;

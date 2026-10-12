@@ -26,7 +26,7 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping }: Acti
       <span><strong>{item.sku}</strong>{specification && <small>{specification}</small>}<small>{stageLabels[item.stage]}{item.stage === 'READBACK' ? '；Amazon 接受提交不等于已可售。' : ''}</small></span>
       <Badge tone={itemTone}>{itemLabels[outcome]}</Badge><ChevronDown size={16} className={expanded ? 'is-expanded' : ''} />
     </button>
-    {(['FAILED','SCREENED'].includes(item.status)||item.error)&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{automaticItemReason(item)}</p>}
+    {(['FAILED','SCREENED','WAITING'].includes(item.status)||['READBACK','LABELS'].includes(item.stage)&&item.status!=='DONE'||item.error)&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{automaticItemReason(item)}</p>}
     {expanded && <div className="automatic-sale-body">
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
@@ -42,7 +42,7 @@ function SourceVariants({ group, query }: { group: AutomaticProductGroup; query:
   useEffect(() => { if (query) setExpanded(true); }, [query]);
   return <details className="automatic-source-variants" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary>查看全部 {group.sourceVariantCount} 个来源规格 · {group.excludedCount} 个未纳入本次任务</summary>
-    <p className="small-copy">来源规格完整保留。销售 SKU 可由组套规则组合；下表展示每个来源规格对应的本次销售 SKU。</p>
+    <p className="small-copy">来源规格完整保留，未纳入不等于失败；来源规格数与销售 SKU 数不能相减计算失败数。销售 SKU 可由组套规则组合；下表展示每个来源规格对应的本次销售 SKU。</p>
     <ul>{group.sourceVariants.map(({ variant, items }) => <li key={variant.id} data-testid={`automatic-source-variant-${variant.id}`} data-selected={Boolean(items.length)} data-search-match={query ? [variant.sku, variant.originalSpec, variant.normalizedSpec, variant.sourceSpec].some(value => value?.toLocaleLowerCase().includes(query)) : undefined}>
       <span><strong>{variant.normalizedSpec || variant.originalSpec || variant.sourceSpec || '未填写规格'}</strong><small>来源 SKU：{variant.sku}</small></span>
       <span>{items.length ? <><Badge tone="info">已纳入本次任务</Badge><small>销售 SKU：{items.map(item => item.sku).join('、')}</small></> : <Badge tone="neutral">未纳入本次任务</Badge>}</span>

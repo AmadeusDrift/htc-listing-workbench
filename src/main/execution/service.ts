@@ -1,3 +1,5 @@
+import { plainColorValue } from '../listing-ai/plain-colors.ts';
+import { manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { canSendToPreview, isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import { cleanHaulAttributes } from '../amazon/listing-program.ts';
 import { randomUUID } from 'node:crypto';
@@ -197,13 +199,23 @@ export class ExecutionService {
       item.status = 'RUNNING'; this.save(task);
       if(!submitted(this.amazon.getDraft(item.draftId))){
         const current=this.current(item),cleanup=cleanHaulAttributes(current.listingProgram,current.attributes);
-        if(cleanup.removed.length){
+        const variant=this.store.getProduct(current.productId).variants.find(value=>value.id===current.variantId);
+        const color=current.attributes.color,plain=color===undefined?undefined:plainColorValue(color,variant?[variant.originalSpec,variant.normalizedSpec]:[]);
+        const colorChanged=JSON.stringify(color)!==JSON.stringify(plain);
+        if(colorChanged)cleanup.attributes={...cleanup.attributes,color:plain!};
+        if(cleanup.removed.length||colorChanged){
           item.intendedAttributesHash=fingerprint(cleanup.attributes);this.save(task);
-          const saved=this.amazon.saveDraft({...ref(current),attributes:current.attributes});
+          // Color validation makes the same single local revision and preserves
+          // the platform receipt. Checkpoint its exact intent before any upload.
+          const saved=colorChanged?await this.amazon.validateDraft(ref(current)):this.amazon.saveDraft({...ref(current),attributes:current.attributes});
           item.draftRevision=saved.revision;item.attributesHash=fingerprint(saved.attributes);item.intendedAttributesHash=null;this.save(task);
         }
       }
       const beforeUpload = this.amazon.getDraft(item.draftId);
+      if(!submitted(beforeUpload)){
+        const brandIssues=manualBrandIssues(beforeUpload,[...beforeUpload.previewIssues,...beforeUpload.listingIssues]);
+        if(brandIssues.length)throw new UserFacingError(brandIssues.join('；'));
+      }
       if (!submitted(beforeUpload) && item.steps.find(value => value.name === 'upload')?.status !== 'DONE') {
         const draft = this.current(item);
         if (validateAttributes(draft.schema.schema, draft.attributes, draft.schema.metaSchema,Infinity).some(issue => issue.severity === 'ERROR' && !isDeferredImageIssue(draft,issue,item.assets.length) && !isPlatformFieldIssue(draft.listingProgram,issue))) {

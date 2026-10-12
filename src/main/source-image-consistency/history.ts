@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiResult,AiCall } from '../../shared/ai-contracts.ts';
-import { randomUUID } from 'node:crypto';
+import { createHash,randomUUID } from 'node:crypto';
 import type { SourceConsistencyContext,SourceConsistencyConclusion,SourceConsistencyOutput } from '../../shared/source-image-consistency-contracts.ts';
 import { SOURCE_CONSISTENCY_VERSION,SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
 import { keys,uuid,date,boundedText,sha256,validateAiCall,validateStoredAiResult } from '../ai/validation.ts';
@@ -9,21 +9,22 @@ import { readManagedImageSync } from '../ai/source.ts';
 import { validateSourceImageProvenance,assertSourceImageProvenance } from '../source-image-provenance.ts';
 import { assertUnambiguousRecordJson } from '../record-json.ts';
 import { readSourceImageReceipt,sourceImageMappings } from '../source-images.ts';
+import { validateAiUsageRecord } from '../ai/usage.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { validateConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
 import { assertConsistencyOutput,reduceSourceConsistency,normalizeSourceObservations } from './comparison.ts';
 
 export const CONSISTENCY_TABLES={source_consistency_attempts:['id','record_json'],source_consistency_assessments:['id','record_json'],source_consistency_decisions:['id','record_json'],source_consistency_bindings:['id','record_json']};
 export const CONSISTENCY_SCHEMA=Object.keys(CONSISTENCY_TABLES).map(table=>`CREATE TABLE ${table} (id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)`);
-export interface ConsistencyAttempt {version:typeof SOURCE_CONSISTENCY_VERSION;id:string;context:SourceConsistencyContext;callId:string;sentAt:string}
+export interface ConsistencyAttempt {version:typeof SOURCE_CONSISTENCY_VERSION;id:string;context:SourceConsistencyContext;callId:string;sentAt:string;attemptNumber?:number}
 export interface ConsistencyRecovery {source:'local-diagnostic';version:typeof SOURCE_OBSERVATION_VERSION;rawOutput:unknown;rawOutputSha256:string;output:SourceConsistencyOutput}
 export interface ConsistencyAssessment extends SourceConsistencyConclusion {version:typeof SOURCE_CONSISTENCY_VERSION;id:string;context:SourceConsistencyContext;callId:string;resultId:string|null;createdAt:string;recovery?:ConsistencyRecovery}
 export interface ConsistencyDecision {version:typeof SOURCE_CONSISTENCY_VERSION;id:string;context:SourceConsistencyContext;fingerprint:string;assessmentId:string|null;decision:'CONFIRMED'|'CORRECTION_NEEDED';reason:string;createdAt:string}
 const invalid=():never=>{throw new UserFacingError('来源图片一致性历史不完整或已变化');};
 function version(o:Record<string,unknown>){if(o.version!==SOURCE_CONSISTENCY_VERSION)invalid();}
 export function validateConsistencyAttempt(raw:unknown):ConsistencyAttempt {
-  const o=keys(raw,['version','id','context','callId','sentAt']);version(o);const context=validateConsistencyContext(o.context),id=sha256(o.id);if(id!==consistencyScopeKey(context))invalid();
-  return{version:SOURCE_CONSISTENCY_VERSION,id,context,callId:uuid(o.callId),sentAt:date(o.sentAt)};
+  const o=keys(raw,['version','id','context','callId','sentAt'],['attemptNumber']);version(o);const context=validateConsistencyContext(o.context),id=sha256(o.id);const n=o.attemptNumber===undefined?1:Number(o.attemptNumber);if(!Number.isInteger(n)||n<1||n>MAX_SOURCE_ATTEMPTS||o.attemptNumber!==undefined&&(typeof o.attemptNumber!=='number'||n===1)||id!==consistencyAttemptId(context,n))invalid();
+  return{version:SOURCE_CONSISTENCY_VERSION,id,context,callId:uuid(o.callId),sentAt:date(o.sentAt),...(o.attemptNumber===undefined?{}:{attemptNumber:n})};
 }
 export function validateConsistencyAssessment(raw:unknown):ConsistencyAssessment {
   const o=keys(raw,['version','id','context','callId','resultId','createdAt','decision','reasons'],['recovery']);version(o);
@@ -31,7 +32,7 @@ export function validateConsistencyAssessment(raw:unknown):ConsistencyAssessment
   const context=validateConsistencyContext(o.context);let recovery:ConsistencyRecovery|undefined;
   if(o.recovery!==undefined){
     const r=keys(o.recovery,['source','version','rawOutput','rawOutputSha256','output']);
-    if(r.source!=='local-diagnostic'||r.version!==SOURCE_OBSERVATION_VERSION||o.resultId!==null||Buffer.byteLength(JSON.stringify(r.rawOutput))>200000||listingFingerprint(r.rawOutput)!==r.rawOutputSha256)invalid();
+    if(r.source!=='local-diagnostic'||r.version!==SOURCE_OBSERVATION_VERSION||o.resultId!==null||Buffer.byteLength(JSON.stringify(r.rawOutput))>16*1024*1024||listingFingerprint(r.rawOutput)!==r.rawOutputSha256)invalid();
     const output=normalizeSourceObservations(r.rawOutput,context);if(listingFingerprint(output)!==listingFingerprint(r.output))invalid();
     recovery={source:'local-diagnostic',version:SOURCE_OBSERVATION_VERSION,rawOutput:r.rawOutput,rawOutputSha256:sha256(r.rawOutputSha256),output};
   }
@@ -52,9 +53,18 @@ export function recordConsistencyBinding(db:DatabaseSync,productId:string,varian
   const record=validateConsistencyBinding({version:SOURCE_CONSISTENCY_VERSION,id:randomUUID(),productId,variantId,assetId,createdAt:new Date().toISOString()});
   db.prepare('INSERT INTO source_consistency_bindings VALUES(?,?)').run(record.id,JSON.stringify(record));
 }
+export const MAX_SOURCE_ATTEMPTS=3;
+function consistencyAttemptId(context:SourceConsistencyContext,n:number):string {return n===1?consistencyScopeKey(context):createHash('sha256').update(`${consistencyScopeKey(context)}:attempt:${n}`).digest('hex');}
+/** Append-only records, including legacy scope-key records. Never reset paid history. */
+export function listConsistencyAttempts(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyAttempt[] {
+  return rows(db,'source_consistency_attempts',validateConsistencyAttempt).filter(a=>consistencyScopeKey(a.context)===consistencyScopeKey(context)).sort((a,b)=>(a.attemptNumber??1)-(b.attemptNumber??1));
+}
+export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyAttempt|undefined {return listConsistencyAttempts(db,context).at(-1);}
 /** Called only in AiUsageLedger.reserve's transaction, before the transport sends bytes. */
 export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string}):void {
-  const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyScopeKey(context),context,callId:call.id,sentAt:call.startedAt});
+  const attempts=listConsistencyAttempts(db,context),latest=attempts.at(-1),n=(latest?.attemptNumber??(latest?1:0))+1;
+  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||prior.providerId!=='deepseek'||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(prior.errorCode??'')||n>MAX_SOURCE_ATTEMPTS)invalid();}
+  const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyAttemptId(context,n),context,callId:call.id,sentAt:call.startedAt,...(n>1?{attemptNumber:n}:{})});
   db.prepare('INSERT INTO source_consistency_attempts VALUES(?,?)').run(record.id,JSON.stringify(record));
 }
 /** Same transaction as successful call/result. Also recovers a historical saved result locally. */
@@ -129,6 +139,7 @@ export function assertConsistencyHistory(db:DatabaseSync,directory?:string):{rel
     if(columns.length!==2||columns.some(c=>!['id','record_json'].includes(String(c.name))||c.type!=='TEXT'||c.notnull!==1||c.pk!==(c.name==='id'?1:0)||c.hidden!==0||c.dflt_value!==null)||indexes.length!==1||indexes[0].origin!=='pk'||indexes[0].unique!==1||db.prepare(`PRAGMA foreign_key_list(${table})`).all().length)invalid();
   }
   const attempts=rows(db,'source_consistency_attempts',validateConsistencyAttempt),assessments=rows(db,'source_consistency_assessments',validateConsistencyAssessment),decisions=rows(db,'source_consistency_decisions',validateConsistencyDecision);
+  for(const a of attempts){const n=a.attemptNumber??1;if(n>1&&!attempts.some(prior=>consistencyScopeKey(prior.context)===consistencyScopeKey(a.context)&&(prior.attemptNumber??1)===n-1))invalid();}
   for(const binding of rows(db,'source_consistency_bindings',validateConsistencyBinding)){
     const asset=db.prepare('SELECT product_id FROM assets WHERE id=?').get(binding.assetId),variant=db.prepare('SELECT product_id FROM variants WHERE id=?').get(binding.variantId);
     if(!asset||asset.product_id!==binding.productId||variant&&variant.product_id!==binding.productId)invalid();
@@ -138,7 +149,7 @@ export function assertConsistencyHistory(db:DatabaseSync,directory?:string):{rel
     const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(a.callId);
     if(!callRow)invalid();const call=validateAiCall(JSON.parse(String(callRow!.record_json)));
     if(a.recovery){
-      const attempt=attempts.find(t=>t.id===consistencyScopeKey(a.context)&&t.callId===a.callId);
+      const attempt=attempts.find(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId);
       if(!attempt||call.id!==a.callId||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID'||call.productId!==a.context.productId||call.productRevision!==a.context.productRevision||attempt.sentAt!==call.startedAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(a.context)||listingFingerprint(attempt.context)!==listingFingerprint(a.context))invalid();
       const reduced=reduceSourceConsistency(a.context,a.recovery.output);
       if(a.decision!==reduced.decision||listingFingerprint(a.reasons)!==listingFingerprint(reduced.reasons))invalid();
@@ -146,9 +157,9 @@ export function assertConsistencyHistory(db:DatabaseSync,directory?:string):{rel
     }
     const resultRow=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(a.resultId);
     if(!resultRow)invalid();const result=validateStoredAiResult(JSON.parse(String(resultRow!.record_json)));
-    const context=result.sourceConsistencyContext,attempt=attempts.find(t=>t.id===consistencyScopeKey(a.context)&&t.callId===a.callId);
+    const context=result.sourceConsistencyContext,attempt=attempts.find(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId);
     if(!attempt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(a.context)||listingFingerprint(attempt.context)!==listingFingerprint(a.context)||call.productRevision!==a.context.productRevision||attempt.sentAt!==call.startedAt)invalid();
-    if(result.id!==a.resultId||result.callId!==a.callId||call.id!==a.callId||call.status!=='SUCCEEDED'||call.productId!==a.context.productId||call.finishedAt!==a.createdAt||result.createdAt!==a.createdAt||result.providerId!==call.providerId||result.model!==call.model||listingFingerprint(context)!==listingFingerprint(a.context)||!attempts.some(t=>t.id===consistencyScopeKey(a.context)&&t.callId===a.callId))invalid();
+    if(result.id!==a.resultId||result.callId!==a.callId||call.id!==a.callId||call.status!=='SUCCEEDED'||call.productId!==a.context.productId||call.finishedAt!==a.createdAt||result.createdAt!==a.createdAt||result.providerId!==call.providerId||result.model!==call.model||listingFingerprint(context)!==listingFingerprint(a.context)||!attempts.some(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId))invalid();
     if((result.output.kind as string)!=='source-image-consistency')invalid();
     const output=result.output as unknown as import('../../shared/source-image-consistency-contracts.ts').SourceConsistencyOutput;
     assertConsistencyOutput(output,a.context);const reduced=reduceSourceConsistency(a.context,output);

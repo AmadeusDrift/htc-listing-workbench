@@ -1,3 +1,4 @@
+import { plainColorName, plainColorValue } from './plain-colors.ts';
 import { isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import { haulUnsupportedField } from '../amazon/listing-program.ts';
 import type { ValidateFunction, ErrorObject } from 'ajv';
@@ -125,6 +126,11 @@ export function parseFullGeneration(raw:unknown,c:ListingAiContext):ListingField
     }catch{return value;}
   }):root.candidates;
   const output=parseFullOutput({kind:'amazon-fields',contract:FULL_SCHEMA_CONTRACT,candidates,missing:root.missing??[]});
+  for(const candidate of output.candidates)if(candidate.field==='color'){
+    candidate.nativeValue=plainColorValue(candidate.nativeValue!,c.evidence.filter(e=>e.meaning==='color'||e.id===`${c.variantId}:spec`).map(e=>e.value));
+    const values=nativeText('color',candidate.nativeValue);
+    candidate.items=candidate.items.map((item,index)=>({...item,value:values[index]??item.value}));
+  }
   normalizeFullEvidence(output,c);assertFullEvidence(output,c);return output;
 }
 export function validateFullContext(raw:unknown):ListingAiContext {
@@ -198,9 +204,10 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
     const categoryConflicts=nativeText(candidate.field,candidate.nativeValue!).flatMap(value=>explicitCategoryConflicts(candidate.field,value,c));
     for(const message of categoryConflicts)issues.push({code:'SOURCE_VALUE_CONFLICT',message,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});
     if(candidate.field==='color'){
-      const actual=nativeText(candidate.field,candidate.nativeValue!).map(exactSkuColorIdentity).filter(Boolean);
-      const observed=c.sourceProduct?.observations?.flatMap(source=>source.images.flatMap(image=>image.colors.map(exactSkuColorIdentity).filter(Boolean)))??[];
-      const expected=c.evidence.filter(e=>e.meaning==='color'||e.name==='Selected SKU specification').map(e=>exactSkuColorIdentity(e.value)).filter(Boolean);
+      const identity=(value:string)=>exactSkuColorIdentity(plainColorName(value).replace(/([a-z])([A-Z])/g,'$1 $2'));
+      const actual=nativeText(candidate.field,candidate.nativeValue!).map(identity).filter(Boolean);
+      const observed=c.sourceProduct?.observations?.flatMap(source=>source.images.filter(image=>!source.productReferenceAssetIds?.includes(image.assetId)).flatMap(image=>image.colors.map(identity).filter(Boolean)))??[];
+      const expected=c.evidence.filter(e=>e.meaning==='color'||e.name==='Selected SKU specification').map(e=>identity(e.value)).filter(Boolean);
       if(actual.length&&expected.length&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value)))issues.push({code:'SOURCE_VALUE_CONFLICT',message:'color：候选颜色与当前 SKU 明确颜色矛盾，且没有绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
     }
     if(Object.hasOwn(c.businessValues??{},candidate.field))for(const path of changedBusinessLeaves(c.businessValues![candidate.field],candidate.nativeValue,`/${candidate.field}`))issues.push({code:'BUSINESS_VALUE_LOCKED',message:`${path}：不能覆盖已经确定的业务值`,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});

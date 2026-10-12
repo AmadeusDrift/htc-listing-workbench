@@ -1,3 +1,4 @@
+import { isProductReference } from '../image-upstream-trace.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { SOURCE_CONSISTENCY_VERSION,SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
 import type { SourceClaimField, SourceConsistencyContext, SourceConsistencyIdentity } from '../../shared/source-image-consistency-contracts.ts';
@@ -25,13 +26,13 @@ export function validateConsistencyContext(raw:unknown):SourceConsistencyContext
   if(new Set(fields.map(f=>f.id)).size!==fields.length)throw new AiError('INVALID_INPUT');
   const projection=projectSourceClaims(fields);
   if(listingFingerprint(o.claims)!==listingFingerprint(projection.claims)||listingFingerprint(o.issues)!==listingFingerprint(projection.issues))throw new AiError('INVALID_INPUT');
-  const referenceAssets=o.referenceAssets.map(raw=>{const a=keys(raw,['source','assetId','sha256','byteSize','bindingEpoch','anchorId','imageId']);if(!['local-original','receipt-image'].includes(String(a.source))||(a.source==='local-original')!==(a.anchorId===null&&a.imageId===null)||a.source==='receipt-image'&&identity.kind==='local-original')throw new AiError('INVALID_INPUT');return{source:a.source as 'local-original'|'receipt-image',assetId:uuid(a.assetId),sha256:sha256(a.sha256),byteSize:integer(a.byteSize,1,20*1024*1024),bindingEpoch:sha256(a.bindingEpoch),anchorId:a.anchorId===null?null:uuid(a.anchorId),imageId:a.imageId===null?null:boundedText(a.imageId,100)};});
+  const referenceAssets=o.referenceAssets.map(raw=>{const a=keys(raw,['source','assetId','sha256','byteSize','bindingEpoch','anchorId','imageId'],['scope']);if(a.scope!==undefined&&a.scope!=='product')throw new AiError('INVALID_INPUT');if(!['local-original','receipt-image'].includes(String(a.source))||(a.source==='local-original')!==(a.anchorId===null&&a.imageId===null)||a.source==='receipt-image'&&identity.kind==='local-original')throw new AiError('INVALID_INPUT');return{...(a.scope==='product'?{scope:'product' as const}:{}),source:a.source as 'local-original'|'receipt-image',assetId:uuid(a.assetId),sha256:sha256(a.sha256),byteSize:integer(a.byteSize,1,20*1024*1024),bindingEpoch:sha256(a.bindingEpoch),anchorId:a.anchorId===null?null:uuid(a.anchorId),imageId:a.imageId===null?null:boundedText(a.imageId,100)};});
   if(new Set(referenceAssets.map(a=>a.assetId)).size!==referenceAssets.length)throw new AiError('INVALID_INPUT');
   return{version:o.version as SourceConsistencyContext['version'],productId:uuid(o.productId),productRevision:integer(o.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(o.variantId),identity,referenceAssets,...projection};
 }
 /** Send liability is image/spec based, independent of model, cosmetic revisions and new anchor timestamps. */
 export function consistencyScopeKey(context:SourceConsistencyContext):string {
-  return listingFingerprint({productId:context.productId,variantId:context.variantId,identity:context.identity,fields:context.fields,images:context.referenceAssets.map(a=>({sha256:a.sha256,byteSize:a.byteSize,imageId:a.imageId})).sort((a,b)=>a.sha256.localeCompare(b.sha256)||a.byteSize-b.byteSize||(a.imageId??'').localeCompare(b.imageId??''))});
+  return listingFingerprint({productId:context.productId,variantId:context.variantId,identity:context.identity,fields:context.fields,images:context.referenceAssets.map(a=>({sha256:a.sha256,byteSize:a.byteSize,imageId:a.imageId,...(a.scope?{scope:a.scope}:{})})).sort((a,b)=>a.sha256.localeCompare(b.sha256)||a.byteSize-b.byteSize||(a.imageId??'').localeCompare(b.imageId??''))});
 }
 /** Human authority also pins the live association epoch; broad revision is a command guard only. */
 export function consistencyDecisionKey(context:SourceConsistencyContext):string {
@@ -78,7 +79,7 @@ export function resolveConsistencyContext(db:DatabaseSync,store:Pick<WorkspaceSt
     const epoch=db.prepare("SELECT id FROM source_consistency_bindings WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.variantId')=? AND json_extract(record_json,'$.assetId')=? ORDER BY rowid DESC LIMIT 1").get(product.id,variant.id,asset.id);
     const binding=db.prepare('SELECT * FROM variant_assets WHERE asset_id=? AND variant_id=?').get(asset.id,variant.id);
     if(epoch&&!binding)throw new AiError('SOURCE_CHANGED');
-    return{source:anchorId?'receipt-image' as const:'local-original' as const,assetId:asset.id,sha256:asset.sha256,byteSize:asset.byteSize,anchorId,imageId,bindingEpoch:listingFingerprint({epoch:epoch?.id??null,binding:binding??null,role:ref.role})};
+    return{...(isProductReference(db,product.id,variant.id,asset.id)?{scope:'product' as const}:{}),source:anchorId?'receipt-image' as const:'local-original' as const,assetId:asset.id,sha256:asset.sha256,byteSize:asset.byteSize,anchorId,imageId,bindingEpoch:listingFingerprint({epoch:epoch?.id??null,binding:binding??null,role:ref.role})};
   });
   return validateConsistencyContext({version:SOURCE_OBSERVATION_VERSION,productId:product.id,productRevision:product.revision,variantId:variant.id,identity,referenceAssets:referenceAssets.some(a=>a.source==='receipt-image')?referenceAssets.filter(a=>a.source==='receipt-image'):referenceAssets,...projectSourceClaims(fields)});
 }

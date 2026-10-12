@@ -32,7 +32,7 @@ test('invalid output is charged once and limits/cancellation prevent automatic r
   f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:null,dailyTokenLimit:null});const controller=new AbortController();controller.abort();await assert.rejects(f.listing.suggest(f.reference,controller.signal));assert.equal(f.requests.length,1);
 });
 
-test('legacy v3 review with omitted words becomes actionable NEEDS_CHANGES and cannot be adopted', async t => {
+test('legacy v3 review with omitted words fails without fabricated product findings', async t => {
   const f = await legacyFixture(t);
   f.respond(payload => {
     if (!payload.candidate) return chat(candidateFor(payload));
@@ -42,13 +42,8 @@ test('legacy v3 review with omitted words becomes actionable NEEDS_CHANGES and c
     return chat(review);
   });
   const suggestion = await f.listing.suggest(f.reference);
-  const review = await f.listing.review({ ...f.reference, suggestionResultId: suggestion.id });
-  assert.equal(review.output.kind, 'amazon-fields-review');
-  if (review.output.kind !== 'amazon-fields-review') throw Error('Unexpected review');
-  assert.equal(review.output.verdict, 'NEEDS_CHANGES');
-  assert.ok(review.output.issues.some(i => i.field === 'product_description' && /复核.*遗漏/.test(i.message)));
-  assert.deepEqual(validateAiResult(review), review);
-  await assert.rejects(f.listing.adopt({ ...f.reference, suggestionResultId: suggestion.id, reviewResultId: review.id, fields: ['product_description'] }), /复核发现问题/);
+  await assert.rejects(f.listing.review({ ...f.reference, suggestionResultId: suggestion.id }),(e:any)=>e.code==='OUTPUT_INVALID');
+  assert.equal(f.ai.listResults(f.product.id).length,1,'Only candidate is saved; no invented negative review');
   assert.equal(f.requests.length, 2, 'Incomplete review must not silently send another paid request');
   assert.deepEqual(f.amazon.getDraft(f.draft.id), f.draft);
 });

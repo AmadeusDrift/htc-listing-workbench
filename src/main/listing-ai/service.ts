@@ -423,15 +423,19 @@ export class ListingAiService {
       const context=round.context,reference={draftId:draft.id,draftRevision:context.draftRevision};
       await this.fresh(reference,context);signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
-        let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;
-        if(entry.sent){
-          if(!journal.unknown(operation.id)){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
-          journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
+        for(;;){
+          let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;
+          if(entry.sent){
+            if(!journal.unknown(operation.id)&&!(kind==='review'&&journal.reviewCoverageOmission(operation.id))){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
+            journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
+          }
+          const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
+          assertBrandDispatch();journal.assertSendBudget(operation.id,kind);
+          let result:AiResult;
+          try{result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});}
+          catch(error){if(kind!=='review'||!journal.reviewCoverageOmission(operation.id))throw error;aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);continue;}
+          aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
         }
-        const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
-        assertBrandDispatch();journal.assertSendBudget(operation.id,kind);
-        const result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});
-        aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
       };
       const suggestion=await request('candidate');
       if(isFullSchema(context)&&suggestion.output.kind==='amazon-fields'){

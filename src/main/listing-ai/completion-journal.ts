@@ -1,3 +1,4 @@
+import { isReviewCoverageOmission } from './review-omission.ts';
 import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners,legacyStepDebt} from './legacy-completion.ts';
 import type {LegacyCompletionHistory} from './legacy-completion.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
@@ -130,10 +131,19 @@ export class CompletionJournal {
     const owner=call.presentationContext;
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
-    if(this.received(entry,round))unknownCompletion();
+    if(this.received(entry,round)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if((entry.previous?.length??0)+legacyStepDebt(op,round,kind)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
     const {previous,...old}=entry;
     round[kind]={id:randomUUID(),sent:false,resultId:null,previous:[...(previous??[]),old]};this.save(op);
+  }
+  /** A failed review may be repeated only when its retained raw output proves coverage omission. */
+  reviewCoverageOmission(id:string):boolean {
+    const op=this.get(id),round=op.rounds.at(-1),entry=round?.review;
+    if(op.state!=='ACTIVE'||!round||round.resolved||!entry?.sent||entry.resultId||!this.directory)return false;
+    const call=this.received(entry,round),candidate=this.result(round.candidate,round);
+    if(!call||candidate?.output.kind!=='amazon-fields')return false;
+    const output=candidate.output;
+    return readInvalidAiOutputs(this.directory,call,'amazon-fields-review').some(raw=>isReviewCoverageOmission(raw,output,round.context));
   }
   private received(entry:CompletionCall,round:CompletionRound):AiCall|undefined {
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
@@ -155,7 +165,7 @@ export class CompletionJournal {
         if(rows.length>1)invalid();
         if(rows.length){entry.resultId=String(rows[0].id);this.result(entry,round);this.save(op);}
       }
-      if(entry.sent&&!entry.resultId&&this.received(entry,round))this.recover({operationId:op.id,callId:entry.id,contextHash:round.contextHash});
+      if(entry.sent&&!entry.resultId&&this.received(entry,round)&&!(entry===round.review&&this.reviewCoverageOmission(op.id)))this.recover({operationId:op.id,callId:entry.id,contextHash:round.contextHash});
       }
     }
   }

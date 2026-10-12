@@ -1,3 +1,5 @@
+import {validateListingContext} from '../listing-ai/validation.ts';
+import {replayReferenceCandidates,sameRecoverySource} from '../listing-ai/candidate-recovery.ts';
 import { parseImagePlanResponse } from './image-validation.ts';
 import { parseFunctionSettings } from './validation.ts';
 import { resultHasOwner } from './result-owner.ts';
@@ -285,6 +287,18 @@ export class AiService {
   private readPresentationResult=(raw:unknown):AiResult=>{const result=validateStoredAiResult(raw);assertPresentationResultOwner(result,this.getCall(result.callId),this.db);return result;};
   listResults(rawProductId: string): AiResult[] { this.ensureOpen(); return this.records.list('ai_results', { productId: uuid(rawProductId) }, this.readPresentationResult); }
   getCall(id: string): AiCall | undefined { this.ensureOpen(); return this.records.get('ai_calls', id, validateAiCall); }
+  /** Main-only local derivative of an already paid, retained field response. */
+  recoverFieldCandidates(sourceId:string,rawContext:ListingAiContext):AiResult|undefined {
+    const context=validateListingContext(rawContext),original=this.getResult(sourceId),call=original&&this.getCall(original.callId);
+    if(!original||original.fieldCandidateRecovery||original.localRecovery||original.output.kind!=='amazon-fields'||!original.listingContext||call?.status!=='SUCCEEDED'||!resultHasOwner(original,call)||!sameRecoverySource(original.listingContext,context))return;
+    const originalOutput=original.output,output=replayReferenceCandidates(originalOutput,context);
+    if(!output.candidates.some(c=>!originalOutput.candidates.some(old=>old.field===c.field)))return;
+    const sourceSha256=listingFingerprint(context),originalSha256=listingFingerprint(original);
+    const prior=this.listResults(original.productId).find(r=>r.fieldCandidateRecovery?.originalSha256===originalSha256&&r.sourceSha256===sourceSha256);if(prior)return prior;
+    const {fieldRejections:_r,...base}=original;
+    const result=validateStoredAiResult({...base,id:randomUUID(),sourceResultIds:[original.id],output,listingContext:context,sourceSha256,fieldCandidateRecovery:{parserVersion:'field-reference-recovery/v1',originalResult:original,originalSha256,recoveredAt:new Date().toISOString()}});
+    this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));return result;
+  }
   getResult(id: string): AiResult | undefined { this.ensureOpen(); return this.records.get('ai_results', id, this.readPresentationResult); }
   queryCalls(raw: unknown) { this.ensureOpen(); return this.records.query('ai_calls', raw, validateAiCall); }
   queryResults(raw: unknown) { this.ensureOpen(); return this.records.query('ai_results', raw, this.readPresentationResult); }

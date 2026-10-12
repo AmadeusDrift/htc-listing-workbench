@@ -4,7 +4,7 @@ import { haulUnsupportedField, haulCleanupReason } from '../amazon/listing-progr
 import { currentPolicyRemaining, needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
-import { completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
+import { CompletionJournal, completionDraftStamp, completionSafetyScope, completionSafetyIdentity, unknownCompletion } from './completion-journal.ts';
 import type { CompletionOperation, CompletionRound } from './completion-journal.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -181,6 +181,42 @@ export class ListingAiService {
     const issues = isFullSchema(context)?[...fullCopyPolicyIssues(result.output),...nativeCandidateIssues(result.output,context)]:[...validatePolicyOutputs(draft.schema, values),...result.output.candidates.flatMap(c => validateFieldValues(draft.schema, draft.marketplaceId, c.field, c.items.map(i => i.value), draft.attributes))];
     if (issues.some(i => i.severity === 'ERROR')) throw new UserFacingError(`候选字段不符合规则：${issues.slice(0, 3).map(i => i.message).join('；')}`);
     return result.output;
+  }
+  hasRetainedFieldReferences(draft:AmazonDraft):boolean {
+    return !this.copyReviewEnabled()&&this.ai.listResults(draft.productId).some(r=>!r.fieldCandidateRecovery&&r.listingContext?.draftId===draft.id&&r.output.kind==='amazon-fields'&&r.output.missing.some(m=>m.reason.includes('[FIELD_REFERENCE]')&&draft.attributes[m.field]===undefined));
+  }
+  /** Explicit local preparation only: reuse newly valid references, never regenerate or infer new facts. */
+  recoverRetainedFieldCandidates(raw:unknown):{draft:AmazonDraft;recoveredFields:string[]} {
+    const initial=input(raw,'suggest');let draft=this.amazon.getDraft(initial.draftId);let reference:SuggestAmazonFieldsInput=initial;const recoveredFields:string[]=[];
+    const limit=this.ai.listResults(draft.productId).filter(r=>!r.fieldCandidateRecovery&&r.listingContext?.draftId===draft.id).reduce((total,r)=>total+(r.output.kind==='amazon-fields'?(r.output.rejectedCandidates?.length??0):0),0);
+    for(let index=0;index<limit;index++){
+      const result=this.recoverRetainedFieldCandidate(reference);draft=result.draft;
+      if(!result.recoveredFields.length)break;
+      recoveredFields.push(...result.recoveredFields);reference={draftId:draft.id,draftRevision:draft.revision};
+    }
+    return {draft,recoveredFields};
+  }
+  private recoverRetainedFieldCandidate(raw:unknown):{draft:AmazonDraft;recoveredFields:string[]} {
+    const reference=input(raw,'suggest'),{draft,context}=this.current(reference);
+    if(this.copyReviewEnabled()||draft.submittedAt||['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state))return {draft,recoveredFields:[]};
+    this.assertSourceConsistency(draft);
+    const originals=this.ai.listResults(draft.productId).filter(r=>!r.fieldCandidateRecovery&&r.output.kind==='amazon-fields'&&r.listingContext?.draftId===draft.id).reverse();
+    for(const original of originals){
+      if(original.output.kind!=='amazon-fields'||!original.output.rejectedCandidates?.some(c=>draft.attributes[c.field]===undefined))continue;
+      const recovered=this.ai.recoverFieldCandidates(original.id,context);if(!recovered)continue;
+      const candidate=this.candidates(recovered,draft,context),fields=candidate.candidates.filter(c=>draft.attributes[c.field]===undefined&&original.output.kind==='amazon-fields'&&!original.output.candidates.some(old=>old.field===c.field)).map(c=>c.field);
+      if(!fields.length)continue;
+      const attributes=structuredClone(draft.attributes),changes=fields.map(field=>{const c=candidate.candidates.find(c=>c.field===field)!,after=candidateNative(c,draft.schema,draft.marketplaceId);attributes[field]=after;return {field,before:null,after,evidence:context.evidence.filter(e=>c.items.some(item=>item.evidenceIds.includes(e.id)))};});
+      const adoption:ListingFieldAdoption={id:listingFingerprint({draftId:draft.id,revision:draft.revision,suggestion:recovered.id,review:null,fields:[...fields].sort(),reviewDisposition:'SKIPPED_DISABLED'}),at:new Date().toISOString(),suggestionResultId:recovered.id,reviewResultId:null,contextSha256:listingFingerprint(context),fromRevision:draft.revision,toRevision:draft.revision+1,fields:[...fields].sort(),changes,reviewDisposition:'SKIPPED_DISABLED'};
+      const updated=this.amazon.adoptFields({id:draft.id,revision:draft.revision},attributes,adoption,()=>{this.assertReviewSetting(false);this.assertSourceConsistency(draft);if(listingFingerprint(this.current(reference).context)!==listingFingerprint(context))throw new UserFacingError('本地恢复期间资料已变化');},true,(updated,db)=>{
+        const journal=new CompletionJournal(db),afterContext={...context,draftRevision:updated.revision,currentAttributes:updated.attributes};
+        for(const op of journal.list(draft.id))if(op.state==='DONE'&&op.draftRevision===draft.revision&&op.draftStamp===completionDraftStamp(draft)){
+          op.draftRevision=updated.revision;op.draftStamp=completionDraftStamp(updated);op.remaining=currentPolicyRemaining(updated,afterContext,id=>this.ai.getResult(id));journal.save(op);
+        }
+      });
+      return {draft:updated,recoveredFields:fields};
+    }
+    return {draft,recoveredFields:[]};
   }
   async suggest(raw: unknown, signal?: AbortSignal): Promise<AiResult> {
     await this.prepareSourceColors(raw,signal);
@@ -366,6 +402,8 @@ export class ListingAiService {
     const existingBrandIssues=manualBrandIssues(draft,[...draft.previewIssues,...draft.listingIssues]);
     if(operation.state==='ACTIVE'&&existingBrandIssues.length)return finish([...existingBrandIssues,...operation.remaining]);
     if(operation.state==='DONE'){
+      const recovered=this.recoverRetainedFieldCandidates({draftId:draft.id,draftRevision:draft.revision});
+      if(recovered.recoveredFields.length){draft=recovered.draft;operation=journal.get(operation.id);}
       const platformIssues=[...draft.previewIssues,...draft.listingIssues];
       if(needsBusinessAuthorityRefresh(draft,operation.remaining)||needsPlainColorRefresh(draft,this.store.getProduct(draft.productId))){
         const previousRemaining=[...operation.remaining];

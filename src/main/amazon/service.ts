@@ -671,21 +671,23 @@ export class AmazonService {
     }); } finally { this.busy.delete(record.draft.id); }
   }
   /** Only the trusted listing AI coordinator calls this; it has no renderer IPC. */
-  adoptFields(input: DraftReference, attributes: JsonObject, adoption: ListingFieldAdoption, assertFresh: () => void): AmazonDraft {
+  adoptFields(input: DraftReference, attributes: JsonObject, adoption: ListingFieldAdoption, assertFresh: () => void, preserveFeedback = false, checkpoint?: (draft:AmazonDraft,db:DatabaseSync)=>void): AmazonDraft {
     this.enter(input.id);
     try {
       return this.persistence.transaction(() => {
         const record = this.checked(input); this.mutable(record); this.currentProduct(record); assertFresh();
         if (adoption.fromRevision !== record.draft.revision || adoption.toRevision !== record.draft.revision + 1) throw new UserFacingError('采纳修订不匹配');
+        const feedback={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
+        if(preserveFeedback)this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
         const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
         if (JSON.stringify(this.vault.redact(supplied)) !== JSON.stringify(supplied)) throw new UserFacingError('属性不能包含授权配置');
         record.draft.attributes = normalized; record.draft.revision++;
         if(cleanup.removed.length)this.event(record,'save',haulCleanupReason(cleanup.removed));
         record.draft.fieldAdoptions = [...(record.draft.fieldAdoptions ?? []), clone(adoption)];
-        record.draft.state = 'DRAFT'; record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
+        record.draft.state = 'DRAFT'; record.draft.localIssues = []; record.draft.previewIssues = preserveFeedback?feedback.preview:[]; record.draft.listingIssues = preserveFeedback?feedback.listing:[];
         record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null; record.previewResponse = null; record.request = this.request(record);
         this.event(record, 'save', `已采纳${adoption.reviewResultId ? '经复核的' : '经本地校验的'} AI 字段：${adoption.fields.join('、')}；旧预览已失效`);
-        this.updateSourceMapping(record); this.validate(record); return clone(record.draft);
+        this.updateSourceMapping(record); this.validate(record); checkpoint?.(clone(record.draft),this.persistence.db); return clone(record.draft);
       });
     } finally { this.busy.delete(input.id); }
   }

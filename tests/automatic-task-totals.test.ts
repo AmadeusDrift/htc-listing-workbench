@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { automaticItemReason, summarizeAutomaticItems } from '../src/renderer/automatic-product-groups.ts';
+import type { AutomaticListingItem } from '../src/shared/automatic-listing-contracts.ts';
+const row=(patch:Partial<AutomaticListingItem>)=>({status:'PENDING',stage:'DRAFT',error:null,...patch} as AutomaticListingItem);
+test('every current sales SKU belongs to exactly one summary bucket across all states',()=>{
+ const rows=[row({status:'DONE',stage:'COMPLETE'}),row({status:'WAITING',stage:'READBACK'}),row({status:'RUNNING',stage:'LABELS'}),row({status:'RUNNING'}),row({status:'WAITING'}),row({}),...(['RULE_FILTERED','NEEDS_INPUT','SYSTEM_REPAIR','UNKNOWN','UNCLASSIFIED'] as const).map(kind=>row({status:kind==='RULE_FILTERED'?'SCREENED':'FAILED',outcome:{kind} as any}))];
+ const before=structuredClone(rows),counts=summarizeAutomaticItems(rows);
+ assert.equal(Object.values(counts).reduce((sum,n)=>sum+n,0),rows.length);
+ assert.deepEqual(Object.values(counts),Array(11).fill(1));assert.deepEqual(rows,before);
+});
+test('waiting and failure reasons identify the actual step without leaking raw errors',()=>{
+ for(const [patch,text] of [
+  [{status:'WAITING',stage:'READBACK'},'等待 Amazon 回读'],
+  [{status:'WAITING',stage:'LABELS'},'标签尚未完成'],
+  [{status:'WAITING',stage:'DRAFT'},'等待字段处理'],
+  [{status:'FAILED',outcome:{kind:'UNKNOWN',code:'FIELD_RESULT_UNKNOWN'}},'字段请求结果未知'],
+  [{status:'FAILED',outcome:{kind:'UNKNOWN',code:'IMAGE_RESULT_UNKNOWN'}},'图片请求结果未知'],
+  [{status:'FAILED',outcome:{kind:'UNKNOWN',code:'SUBMISSION_UNKNOWN'}},'禁止自动重发'],
+  [{status:'FAILED',outcome:{kind:'NEEDS_INPUT',code:'READBACK_BRAND_REQUIRES_MANUAL'}},'Generic'],
+  [{status:'SCREENED',outcome:{kind:'RULE_FILTERED',code:'SKU_SELECTION_FILTERED'}},'SKU 选择规则淘汰'],
+ ] as const){ const reason=automaticItemReason(row({...patch,error:patch.stage==='READBACK'?null:'secret raw service response'} as Partial<AutomaticListingItem>));assert.ok(reason.includes(text),reason);assert.ok(!reason.includes('secret')); }
+});
+
+test('readback preserves the explicit 24-hour expiry detail from saved followup',()=>{
+ const reason=automaticItemReason(row({status:'FAILED',stage:'READBACK',error:'原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交',outcome:{kind:'SYSTEM_REPAIR',code:'READBACK_FAILED'} as any}));
+ assert.match(reason,/24 小时/);assert.match(reason,/禁止重复提交/);
+});

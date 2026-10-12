@@ -217,7 +217,7 @@ test('a chemical concern does not erase an independently confirmed no-battery fa
   (schema.schema.properties as JsonObject).batteries_required={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}};
   const cleaner=run({schema,product:{...product,title:'固体马桶清洁剂',facts:[fact('是否需要电池','否')]}});
   assert.equal((cleaner.attributes.batteries_required as JsonObject[])?.[0]?.value,false);
-  assert.equal(cleaner.attributes.supplier_declared_dg_hz_regulation,undefined);
+  assert.equal((cleaner.attributes.supplier_declared_dg_hz_regulation as any)[0].value,'not_applicable');
   const powered=run({schema,product:{...product,title:'充电清洁刷'}});
   assert.equal(powered.attributes.batteries_required,undefined);
   const batteryConflict=run({schema,product:{...product,title:'清洁剂',facts:[fact('是否需要电池','是','conflicting')]}});
@@ -262,7 +262,7 @@ test('real figurine parent maps explicit declarations and passes complete schema
   const result = run({ schema, attributes, product: { ...product, title: '关节可动青蛙摆件',facts:[fact('是否需要电池','false'),fact('原产国','CN'),fact('危险品法规','not_applicable')] } });
   for (const [field, value] of Object.entries({ batteries_required: false, country_of_origin: 'CN', supplier_declared_dg_hz_regulation: 'not_applicable' })) {
     assert.deepEqual(result.attributes[field], [{ value, marketplace_id: market }], field);
-    assert.equal(result.report.fields[field],undefined, `${field} is explicit source evidence`);
+    if(field==='supplier_declared_dg_hz_regulation')assert.ok(result.report.fields[field].reason.includes('dangerous-goods-fixed/v1'));else assert.equal(result.report.fields[field],undefined, `${field} is explicit source evidence`);
   }
   assert.deepEqual(validateAttributes(schema.schema, result.attributes, schema.metaSchema), []);
   for (const field of ['purchasable_offer', 'list_price', 'condition_type', 'item_package_dimensions', 'item_package_weight', 'unit_count', 'number_of_items']) assert.equal(result.attributes[field], undefined, field);
@@ -277,11 +277,11 @@ test('parent declarations respect disabled defaults and explicit origin or batte
   const disabled = run({ schema }, rules);
   assert.equal((disabled.attributes.country_of_origin as any)[0].value,'CN');
   assert.equal(disabled.attributes.batteries_required, undefined);
-  assert.equal(disabled.attributes.supplier_declared_dg_hz_regulation, undefined);
+  assert.equal((disabled.attributes.supplier_declared_dg_hz_regulation as any)[0].value, 'not_applicable');
   const explicit = run({ schema, product: { ...product, facts: [fact('原产国', 'Japan'), fact('是否需要电池', 'true')] } });
   assert.deepEqual(explicit.attributes.country_of_origin, [{ value: 'JP', marketplace_id: target.marketplaceId }]);
   assert.notEqual((explicit.attributes.batteries_required as JsonObject[] | undefined)?.[0]?.value, false);
-  assert.equal(explicit.attributes.supplier_declared_dg_hz_regulation, undefined);
+  assert.equal((explicit.attributes.supplier_declared_dg_hz_regulation as any)[0].value, 'not_applicable');
   const manualBattery = [{ value: true, marketplace_id: target.marketplaceId }];
   assert.deepEqual(run({ schema, attributes: { batteries_required: manualBattery } }).attributes.batteries_required, manualBattery);
 });
@@ -348,12 +348,12 @@ test('confirmed origin and declaration facts cannot become contradictory ordinar
   const selected = { ...product, facts: [fact('原产国','Japan'),fact('supplier_declared_dg_hz_regulation','ghs'),fact('required_product_compliance_certificate','California Air Review Board (CARB)'),fact('GPSR安全声明','No')] };
   const result = run({ product: selected });
   assert.equal((result.attributes.country_of_origin as any)?.[0]?.value, 'JP');
-  assert.notEqual((result.attributes.supplier_declared_dg_hz_regulation as any)?.[0]?.value, 'not_applicable');
+  assert.equal((result.attributes.supplier_declared_dg_hz_regulation as any)?.[0]?.value, 'not_applicable');
   assert.notEqual((result.attributes.required_product_compliance_certificate as any)?.[0]?.value, 'Not Applicable');
   assert.notEqual((result.attributes.gpsr_safety_attestation as any)?.[0]?.value, true);
   const conflict = run({ product: { ...product, facts: [fact('supplier_declared_dg_hz_regulation','ghs'),fact('危险品法规','not_applicable')] } });
-  assert.equal(conflict.attributes.supplier_declared_dg_hz_regulation, undefined);
-  assert.ok(conflict.report.notices.some(value => /冲突/.test(value)));
+  assert.equal((conflict.attributes.supplier_declared_dg_hz_regulation as any)[0].value, 'not_applicable');
+  assert.ok(conflict.report.fields.supplier_declared_dg_hz_regulation.reason.includes('dangerous-goods-fixed/v1'));
 });
 
 test('existing counts suppress automatic rebundling even when pricing is unavailable', () => {
@@ -546,4 +546,16 @@ test('a legacy supplier pack with a derived unit_count does not become an automa
   const repriced=run({costCny:.28,attributes,previousBusinessReport:legacy});
   assert.equal(repriced.report.quote!.upfrontCny,first.report.quote!.upfrontCny);
   assert.equal(repriced.report.pricingBasis?.kind,'source_sale_unit');
+});
+
+
+test('confirmed dangerous-goods rule fills every product and records authority independently of ordinary declarations',()=>{
+ const rules=defaultListingRules();rules.product.ordinaryDeclarations=false;
+ const source={...product,title:'马桶清洁剂',facts:[fact('supplier_declared_dg_hz_regulation','ghs','conflicting')]};
+ const original=JSON.stringify(source);
+ const result=run({product:source,attributes:{supplier_declared_dg_hz_regulation:[{value:'ghs',marketplace_id:target.marketplaceId}]}},rules);
+ assert.equal((result.attributes.supplier_declared_dg_hz_regulation as any)[0].value,'not_applicable');
+ assert.deepEqual(result.report.fields.supplier_declared_dg_hz_regulation.value,result.attributes.supplier_declared_dg_hz_regulation);
+ assert.ok(result.report.fields.supplier_declared_dg_hz_regulation.reason.includes('dangerous-goods-fixed/v1'));
+ assert.equal(JSON.stringify(source),original);assert.equal(result.attributes.batteries_required,undefined);
 });

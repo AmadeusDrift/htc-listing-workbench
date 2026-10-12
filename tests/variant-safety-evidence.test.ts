@@ -23,6 +23,8 @@ import { openDatabase } from '../src/main/database.ts';
 import { sourceStamp } from '../src/main/automatic-listing/records.ts';
 
 const declarations = ['batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate'] as const;
+// The confirmed dangerous-goods field is fixed; these two retain source guards.
+const guardedDeclarations=[declarations[0],declarations[2]];
 const value = (type:string, extra:JsonObject={}):JsonObject => ({type:'array',items:{type:'object',properties:{value:{type,...extra},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}});
 const fact = (name:string,text:string,state:Fact['state']='source_confirmed'):Fact => ({id:randomUUID(),name,value:text,state,source:'manual',sourceRef:'Synthetic safety fixture'});
 function fixture(t:test.TestContext, specs=['电池供电']) {
@@ -74,7 +76,7 @@ test('SQLite Haul createDraft uses selected original safety text just as the ide
   const draft=await selected.create();
   const title=fixture(t,['']);title.store.saveProduct({...saveInput(title.product),title:'电池供电'});
   const titleDraft=await title.create();
-  for(const field of declarations){assert.equal(titleDraft.attributes[field],undefined);assert.equal(draft.attributes[field],undefined,`${field} must not default against selected raw evidence`);}
+  for(const field of guardedDeclarations){assert.equal(titleDraft.attributes[field],undefined);assert.equal(draft.attributes[field],undefined,`${field} must not default against selected raw evidence`);}
   assert.equal(JSON.stringify(selected.product),before);
 });
 
@@ -82,7 +84,7 @@ test('source, current original and normalized selected text remain independent s
   for(const mode of ['source','original','normalized'] as const){
     const f=fixture(t,[mode==='source'?'电池供电':'Plain']);
     f.store.saveProduct({...saveInput(f.product),variants:saveInput(f.product).variants.map(v=>({...v,originalSpec:mode==='original'?'电池供电':'Manual',normalizedSpec:mode==='normalized'?'电池供电':'Manual'}))});
-    const draft=await f.create();for(const field of declarations)assert.equal(draft.attributes[field],undefined,mode+': '+field);
+    const draft=await f.create();for(const field of guardedDeclarations)assert.equal(draft.attributes[field],undefined,mode+': '+field);
   }
 });
 
@@ -95,7 +97,7 @@ test('ordinary unknown and unselected sibling risk do not veto explicit negative
 });
 
 test('selected chemical and battery risk veto the same historical negatives with unchanged vocabulary',async t=>{
-  for(const [text,fields] of [['清洁剂',[declarations[1],declarations[2]]],['electric',[declarations[0]]],['rechargeable',[declarations[0]]],['batteries',[declarations[0]]]] as const){
+  for(const [text,fields] of [['清洁剂',[declarations[2]]],['electric',[declarations[0]]],['rechargeable',[declarations[0]]],['batteries',[declarations[0]]]] as const){
     const f=fixture(t,[text]),draft=legacyDraft(f,await f.create());
     assert.deepEqual(safetyIssues(await f.service.validateDraft(draft)).flatMap(i=>i.attributeNames).sort(),[...fields].sort(),text);
   }
@@ -110,9 +112,9 @@ test('every selected mixed recipe component contributes original text even when 
       const mixed=plans.find(p=>p.recipe.components.length===2)!;assert.ok(mixed);assert.ok(!mixed.recipe.specification.includes('电池'));
       const result=await f.service.prepareDrafts({...f.selection,listingProgram:'haul',items:[{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,attributes:{}}]},[mixed]);
       assert.equal(result.items[0].disposition,'CREATED',result.items[0].error??'');
-      for(const field of declarations)assert.equal(result.items[0].draft!.attributes[field],undefined,`${riskIndex}: ${field}`);
+      for(const field of guardedDeclarations)assert.equal(result.items[0].draft!.attributes[field],undefined,`${riskIndex}: ${field}`);
       const existing=legacyDraft(f,result.items[0].draft!);
-      assert.equal(safetyIssues(await f.service.validateDraft(existing)).length,3);
+      assert.equal(safetyIssues(await f.service.validateDraft(existing)).length,2);
       const plain=plans.find(p=>p.recipe.components.length===1&&p.recipe.components[0].variantId===product.variants[1-riskIndex].id)!;
       const other=await f.service.prepareDrafts({...f.selection,listingProgram:'haul',items:[{productId:product.id,productRevision:product.revision,variantId:plain.recipe.components[0].variantId,attributes:{}}]},[plain]);
       assert.equal(entry(other.items[0].draft!,'batteries_required'),false,'ordinary sibling uses configured no-battery rule');
@@ -124,7 +126,7 @@ test('every selected mixed recipe component contributes original text even when 
 
 test('parent declarations check selected scope before the parent early return',async t=>{
   const f=fixture(t);f.selection.parentageLevel='PARENT';const draft=await f.create();
-  for(const field of declarations)assert.equal(draft.attributes[field],undefined);assert.equal(draft.attributes.purchasable_offer,undefined);
+  for(const field of guardedDeclarations)assert.equal(draft.attributes[field],undefined);assert.equal(draft.attributes.purchasable_offer,undefined);
 });
 
 test('parent sales projection retains risk from its non-anchor recipe component',async t=>{
@@ -142,15 +144,15 @@ test('parent sales projection retains risk from its non-anchor recipe component'
     const plan={...mixed,parentage:'PARENT' as const,sku:mixed.baseSku,parentSku:null,namingChildKey:null,variationTheme:'COLOR',familyResolved:true};
     const before=JSON.stringify(product),result=await f.service.prepareDrafts({...f.selection,parentageLevel:'PARENT',listingProgram:'haul',items:[{productId:product.id,productRevision:product.revision,variantId:product.variants[0].id,attributes:{}}]},[plan]);
     assert.equal(result.items[0].disposition,'CREATED',result.items[0].error??'');const draft=result.items[0].draft!;
-    for(const field of declarations)assert.equal(draft.attributes[field],undefined);assert.equal(draft.attributes.purchasable_offer,undefined);
-    const checked=await f.service.validateDraft(legacyDraft(f,draft));assert.equal(safetyIssues(checked).length,3);assert.equal(checked.state,'BLOCKED');
+    for(const field of guardedDeclarations)assert.equal(draft.attributes[field],undefined);assert.equal(draft.attributes.purchasable_offer,undefined);
+    const checked=await f.service.validateDraft(legacyDraft(f,draft));assert.equal(safetyIssues(checked).length,2);assert.equal(checked.state,'BLOCKED');
     assert.equal(JSON.stringify(f.product),before);assert.deepEqual(checked.salesPlan,plan);
   }finally{naming.close();}
 });
 
 test('legacy business values survive but structured compliance errors block current authorization',async t=>{
   const f=fixture(t),draft=legacyDraft(f,await f.create()),before=JSON.stringify(draft.attributes),report=JSON.stringify(draft.businessRules);
-  const checked=await f.service.validateDraft(draft);assert.equal(checked.state,'BLOCKED');assert.equal(safetyIssues(checked).length,3);
+  const checked=await f.service.validateDraft(draft);assert.equal(checked.state,'BLOCKED');assert.equal(safetyIssues(checked).length,2);
   assert.ok(safetyIssues(checked).every(i=>i.category==='compliance'&&i.severity==='ERROR'&&!i.autoFixable));
   assert.equal(JSON.stringify(checked.attributes),before);assert.equal(JSON.stringify(checked.businessRules),report);
   const saved=f.service.saveDraft({...checked,attributes:checked.attributes});assert.deepEqual(saved.localIssues,[]);
@@ -176,8 +178,8 @@ test('REUSED prepares recompute structured errors instead of trusting saved issu
   const historical=legacyDraft(f,saved,true),report=JSON.stringify(historical.businessRules);
   const result=await f.service.prepareDrafts({...f.selection,listingProgram:'haul',items:[{productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,attributes:attrs}]});
   assert.equal(result.items[0].disposition,'REUSED',result.items[0].error??'');assert.equal(result.items[0].draft!.id,saved.id);
-  assert.equal(result.items[0].issues.filter(i=>i.code==='DECLARATION_SOURCE_CONFLICT').length,3);
-  assert.equal(result.items[0].draft!.state,'BLOCKED');assert.equal(safetyIssues(result.items[0].draft!).length,3);assert.equal(safetyIssues(f.service.getDraft(saved.id)).length,3);
+  assert.equal(result.items[0].issues.filter(i=>i.code==='DECLARATION_SOURCE_CONFLICT').length,2);
+  assert.equal(result.items[0].draft!.state,'BLOCKED');assert.equal(safetyIssues(result.items[0].draft!).length,2);assert.equal(safetyIssues(f.service.getDraft(saved.id)).length,2);
   assert.equal(persistence(f.service).record(saved.id).preview,null);assert.equal(result.items[0].draft!.previewedAt,null);assert.equal(JSON.stringify(result.items[0].draft!.businessRules),report);
 });
 
@@ -188,7 +190,7 @@ test('valid old preview plus unchanged refreshed defaults cannot reach write int
   await assert.rejects(f.service.submitDraft(draft,true),/本地校验/);
   assert.equal(writes,0);assert.equal(f.requests.length,0);assert.equal(p.db.prepare('SELECT * FROM amazon_write_locks').all().length,0);
   const saved=f.service.getDraft(draft.id);assert.notEqual(saved.state,'UNKNOWN');assert.equal(JSON.stringify(saved.attributes),attrs);assert.equal(JSON.stringify(saved.businessRules),report);
-  assert.equal(saved.state,'BLOCKED');assert.equal(safetyIssues(saved).length,3);assert.equal(saved.previewedAt,null);assert.equal(p.record(draft.id).preview,null);
+  assert.equal(saved.state,'BLOCKED');assert.equal(safetyIssues(saved).length,2);assert.equal(saved.previewedAt,null);assert.equal(p.record(draft.id).preview,null);
 });
 
 test('ordinary Haul positive control validates, previews and submits through the mock provider',async t=>{
@@ -202,7 +204,7 @@ test('missing-only preview cannot defer a declaration conflict to the provider',
   f.service.getSchema=async input=>{const snapshot=await schema(input);snapshot.schema.required=['required_product_compliance_certificate'];return snapshot;};
   let draft=legacyDraft(f,await f.create());const attributes={...draft.attributes};delete attributes.required_product_compliance_certificate;
   draft=f.service.saveDraft({...draft,attributes});await assert.rejects(f.service.previewDraft(draft),/本地校验/);
-  const current=f.service.getDraft(draft.id);assert.ok(current.localIssues.some(i=>i.code==='LOCAL_required'));assert.equal(safetyIssues(current).length,2);assert.equal(f.requests.length,0);
+  const current=f.service.getDraft(draft.id);assert.ok(current.localIssues.some(i=>i.code==='LOCAL_required'));assert.equal(safetyIssues(current).length,1);assert.equal(f.requests.length,0);
 });
 
 test('a confirmed no-battery declaration does not become its own contradictory risk cue',async t=>{
@@ -216,7 +218,7 @@ test('a confirmed no-battery declaration does not become its own contradictory r
 test('conflicting declaration evidence cannot downgrade current safety authorization',async t=>{
   const f=fixture(t,['Plain']);f.store.saveProduct({...saveInput(f.product),facts:[...f.product.facts,fact('是否需要电池','否','conflicting')]});
   const draft=legacyDraft(f,await f.create()),before=JSON.stringify(f.product),checked=await f.service.validateDraft(draft);
-  assert.equal(checked.state,'BLOCKED');assert.equal(safetyIssues(checked).length,3);assert.equal(JSON.stringify(f.product),before);assert.deepEqual(checked.attributes,draft.attributes);
+  assert.equal(checked.state,'BLOCKED');assert.equal(safetyIssues(checked).length,2);assert.equal(JSON.stringify(f.product),before);assert.deepEqual(checked.attributes,draft.attributes);
 });
 
 test('reopen and encrypted backup retain source bytes, old exchanges, paid mock records and adopted context hashes',async t=>{
@@ -244,7 +246,7 @@ test('reopen and encrypted backup retain source bytes, old exchanges, paid mock 
     const sourceBytes=JSON.stringify(f.product),stamp=sourceStamp(f.product),history=JSON.stringify(draft.fieldAdoptions),report=JSON.stringify(draft.businessRules),attrs=JSON.stringify(draft.attributes),exchanges=JSON.stringify(record.exchanges);
     const paidRows=(db:ReturnType<typeof openDatabase>)=>JSON.stringify(['ai_calls','ai_results','ai_usage_ledger'].map(table=>db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()));
     const paid=paidRows(p.db),contextHashes=draft.fieldAdoptions!.map(a=>a.contextSha256);
-    f.reopen();assert.equal(safetyIssues(f.service.getDraft(draft.id)).length,3);
+    f.reopen();assert.equal(safetyIssues(f.service.getDraft(draft.id)).length,2);
     const refreshed=await f.service.validateDraft(f.service.getDraft(draft.id));assert.equal(refreshed.state,'BLOCKED');assert.equal(JSON.stringify(refreshed.fieldAdoptions),history);
     const file=join(f.directory,'safety.htcbackup');await createWorkspaceBackup(f.directory,file,'synthetic safety backup passphrase');
     const restored=await prepareWorkspaceRestore(f.directory,file,'synthetic safety backup passphrase'),store=new WorkspaceStore(restored.stagingDirectory),amazon=new AmazonService(restored.stagingDirectory,id=>store.getProduct(id),mockStorage,{fetch:async()=>{throw new Error('Restored history must not send');}});
@@ -254,7 +256,7 @@ test('reopen and encrypted backup retain source bytes, old exchanges, paid mock 
       assert.equal(JSON.stringify(restoredDraft.fieldAdoptions),history);assert.deepEqual(restoredDraft.fieldAdoptions!.map(a=>a.contextSha256),contextHashes);assert.equal(JSON.stringify(restoredDraft.businessRules),report);assert.equal(JSON.stringify(restoredDraft.attributes),attrs);
       assert.equal(JSON.stringify(persistence(amazon).record(draft.id).exchanges),exchanges);
       const saved=amazon.saveDraft({...restoredDraft,attributes:restoredDraft.attributes});assert.equal(saved.localIssues.length,0);
-      const validated=await amazon.validateDraft(saved);assert.equal(validated.state,'BLOCKED');assert.equal(safetyIssues(validated).length,3);assert.equal(JSON.stringify(validated.fieldAdoptions),history);assert.equal(paidRows(db),paid);assert.equal(calls,2);
+      const validated=await amazon.validateDraft(saved);assert.equal(validated.state,'BLOCKED');assert.equal(safetyIssues(validated).length,2);assert.equal(JSON.stringify(validated.fieldAdoptions),history);assert.equal(paidRows(db),paid);assert.equal(calls,2);
     }finally{db.close();amazon.close();store.close();}
   }finally{await ai.close();await hosting.close();}
 });
@@ -273,4 +275,29 @@ test('Haul demo preview still reports INVALID for delegated enum errors',async t
   let draft=await f.create();draft=f.service.saveDraft({...draft,attributes:{...draft.attributes,novel_choice:[{value:'B'}]}});
   const preview=await f.service.previewDraft(draft);assert.equal(preview.state,'BLOCKED');assert.ok(preview.previewIssues.some(i=>i.code==='LOCAL_enum'&&i.source==='demo'));assert.equal(preview.submittedAt,null);
   await assert.rejects(f.service.submitDraft(preview,true),/预览/);assert.equal(f.requests.length,0);
+});
+
+
+test('confirmed dangerous-goods rule survives chemical text, legacy draft refresh and restart with no extra fact confirmation',async t=>{
+ const f=fixture(t,['清洁剂']),original=JSON.stringify(f.product),draft=await f.create();
+ assert.equal(entry(draft,'supplier_declared_dg_hz_regulation'),'not_applicable');
+ const checked=await f.service.validateDraft(draft);assert.ok(!checked.localIssues.some(i=>i.attributeNames.includes('supplier_declared_dg_hz_regulation')));
+ const p=persistence(f.service),r=p.record(draft.id);r.draft.attributes.supplier_declared_dg_hz_regulation=[{value:'ghs',marketplace_id:draft.marketplaceId}];r.draft.localIssues=[{code:'FACT_AUTHORITY_REQUIRED',source:'local',severity:'ERROR',category:'compliance',attributeNames:['supplier_declared_dg_hz_regulation'],message:'old missing authority',autoFixable:false}];p.putRecord(r);
+ const refreshed=f.service.applyBusinessDefaults({id:draft.id,revision:r.draft.revision});assert.equal(entry(refreshed,'supplier_declared_dg_hz_regulation'),'not_applicable');assert.ok(!refreshed.localIssues.some(i=>i.attributeNames.includes('supplier_declared_dg_hz_regulation')));
+ assert.ok(refreshed.businessRules!.fields.supplier_declared_dg_hz_regulation.reason.includes('dangerous-goods-fixed/v1'));f.reopen();assert.equal(entry(f.service.getDraft(draft.id),'supplier_declared_dg_hz_regulation'),'not_applicable');assert.equal(JSON.stringify(f.product),original);assert.equal(f.requests.length,0);
+});
+
+
+for(const oldValue of ['ghs','not_applicable'])test('fixed dangerous-goods rule blocks incompatible enum without requesting source confirmation: '+oldValue,async t=>{
+ const f=fixture(t,['Plain']);f.store.saveProduct({...saveInput(f.product),facts:[...f.product.facts,fact('supplier_declared_dg_hz_regulation',oldValue)]});
+ const original=f.service.getSchema.bind(f.service);f.service.getSchema=async input=>{const schema=await original(input);(schema.schema.properties as any).supplier_declared_dg_hz_regulation.items.properties.value={enum:['ghs']};schema.checksum=createHash('md5').update(JSON.stringify(schema.schema)).digest('base64');return schema;};
+ const draft=await f.create(),p=persistence(f.service),record=p.record(draft.id);record.draft.attributes.supplier_declared_dg_hz_regulation=[{value:oldValue,marketplace_id:draft.marketplaceId}];p.putRecord(record);
+ const checked=await f.service.validateDraft(record.draft);const issues=checked.localIssues.filter(i=>i.attributeNames.includes('supplier_declared_dg_hz_regulation'));
+ assert.ok(issues.some(i=>i.code==='FIXED_DECLARATION_SCHEMA'));assert.ok(!issues.some(i=>i.code==='FACT_AUTHORITY_REQUIRED'||i.code==='FACT_SOURCE_CONFLICT'));assert.equal(checked.state,'BLOCKED');assert.equal(entry(checked,'supplier_declared_dg_hz_regulation'),oldValue);assert.equal(f.requests.length,0);
+});
+
+
+test('missing fixed dangerous-goods value is a schema mapping error at validation',async t=>{
+ const f=fixture(t,['Plain']),original=f.service.getSchema.bind(f.service);f.service.getSchema=async input=>{const schema=await original(input);(schema.schema.properties as any).supplier_declared_dg_hz_regulation.items.properties.value={enum:['ghs']};schema.checksum=createHash('md5').update(JSON.stringify(schema.schema)).digest('base64');return schema;};
+ const draft=await f.create(),checked=await f.service.validateDraft(draft);assert.equal(draft.attributes.supplier_declared_dg_hz_regulation,undefined);assert.ok(checked.localIssues.some(i=>i.code==='FIXED_DECLARATION_SCHEMA'));assert.equal(checked.state,'BLOCKED');assert.equal(f.requests.length,0);
 });

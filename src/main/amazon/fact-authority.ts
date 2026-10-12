@@ -34,12 +34,15 @@ export function currentFactAuthority(product: ProductDetail, schema: AmazonSchem
   };
   const record = (field:string, result:FieldAuthority) => {
     // ruleValues must be freshly derived by the caller from current store/SKU configuration.
-    // Never accept a saved report alone as authority, and never mask explicit conflicts.
-    if (!result.conflicting && Object.hasOwn(ruleValues, field) && isDeepStrictEqual(ruleValues[field], attributes[field])) result.supported = true;
+    // Never accept a saved report alone as authority. The explicitly confirmed
+    // dangerous-goods rule takes precedence for that field only.
+    if(field==='supplier_declared_dg_hz_regulation'){
+      result.supported=Object.hasOwn(ruleValues,field)&&isDeepStrictEqual(ruleValues[field],attributes[field]);result.conflicting=false;result.sourceFactIds=[];
+    }else if (!result.conflicting && Object.hasOwn(ruleValues, field) && isDeepStrictEqual(ruleValues[field], attributes[field])) result.supported = true;
     result.sourceFactIds = [...new Set(result.sourceFactIds)]; fields.set(field,result);
     if(result.supported)return;
-    issues.push({code:result.conflicting?FACT_SOURCE_CONFLICT:FACT_AUTHORITY_REQUIRED,severity:'ERROR',category:/gpsr|batter|regulation|certificate/.test(field)?'compliance':'fact',
-      source:'local',autoFixable:false,attributeNames:[field],message:result.conflicting
+    issues.push({code:field==='supplier_declared_dg_hz_regulation'?(Object.hasOwn(ruleValues,field)?'FIXED_DECLARATION_MISMATCH':'FIXED_DECLARATION_SCHEMA'):result.conflicting?FACT_SOURCE_CONFLICT:FACT_AUTHORITY_REQUIRED,severity:'ERROR',category:/gpsr|batter|regulation|certificate/.test(field)?'compliance':'fact',
+      source:'local',autoFixable:false,attributeNames:[field],message:field==='supplier_declared_dg_hz_regulation'?(Object.hasOwn(ruleValues,field)?'supplier_declared_dg_hz_regulation 尚未匹配用户确认的 not_applicable 固定规则，请重新应用当前业务规则':'supplier_declared_dg_hz_regulation 的 not_applicable 固定规则未能按当前 Schema 生成，请核对字段结构或枚举；无需再次确认业务值'):result.conflicting
         ? `${field} 的当前来源事实存在冲突，须核对后再提交；已有属性与历史记录保留`
         : `${field}${result.unsupported.length?`（${result.unsupported.join('、')}）`:''} 缺少匹配当前销售规格的已确认事实或有效 SKU 回执；未匹配当前业务规则，直接保存的数值不构成事实确认`});
   };

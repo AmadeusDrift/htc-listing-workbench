@@ -1,3 +1,4 @@
+import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
@@ -69,7 +70,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
           if(ocr&&(ocr.output.kind!=='generated-image-ocr'||ocr.output.candidate.id!==attempt.candidateId||listingFingerprint(ocr.sourceResultIds)!==listingFingerprint(imageCopySourceIds(ocr.imageContext!))))invalid();
           if(ocr?.output.kind==='generated-image-ocr'){
             if(attempt.riskBypass){if(run.riskInterceptionEnabled!==false||listingFingerprint(attempt.riskBypass.candidate)!==listingFingerprint(ocr.output.candidate))invalid();}
-            else if(ip?.output.kind!=='image-ip-review'||ip.output.verdict!=='PASS'||listingFingerprint(ip.output.candidate)!==listingFingerprint(ocr.output.candidate))invalid();
+            else if(ip?.output.kind!=='image-ip-review'||(attempt.riskPolicy?evaluateImageRisk(ip.output,attempt.riskPolicy).verdict!=='PASS':ip.output.verdict!=='PASS')||listingFingerprint(ip.output.candidate)!==listingFingerprint(ocr.output.candidate))invalid();
           }
           const review=attempt.reviewResultId?owned(attempt.reviewResultId,'image-text-review'):undefined;
           if(review){
@@ -82,7 +83,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
         if(slot.status==='PASSED'){
           const last=slot.attempts.at(-1)!,bypassed=last.approvalPolicy==='risk-disabled-detail/v1',review=bypassed?undefined:successful(last.approvalPolicy?last.ipReviewResultId!:last.reviewResultId!),asset=db.prepare('SELECT product_id,sha256,width,height FROM assets WHERE id=?').get(slot.approvedAssetId!);
           if(bypassed&&(!last.riskBypass||run.riskInterceptionEnabled!==false||slot.index===1))invalid();
-          if(!bypassed&&(!review||review.output.kind!==(last.approvalPolicy?'image-ip-review':'image-text-review')||!('candidate' in review.output)||!('verdict' in review.output)||review.output.verdict!=='PASS'))invalid();
+          if(!bypassed&&(!review||review.output.kind!==(last.approvalPolicy?'image-ip-review':'image-text-review')||!('candidate' in review.output)||!('verdict' in review.output)||(review.output.kind==='image-ip-review'&&last.riskPolicy?evaluateImageRisk(review.output,last.riskPolicy).verdict!=='PASS':review.output.verdict!=='PASS')))invalid();
           const identity=bypassed?last.riskBypass!.candidate:review&&'candidate' in review.output?review.output.candidate:undefined;
           if(!identity||identity.id!==last.candidateId||identity.sha256!==slot.approvedSha256||!asset||asset.product_id!==run.productId||asset.sha256!==slot.approvedSha256||asset.width!==identity.width||asset.height!==identity.height||!db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(slot.approvedAssetId!,run.variantId)||prior&&(slot.approvedAssetId!==prior.slots![slot.index-1].approvedAssetId||slot.approvedSha256!==prior.slots![slot.index-1].approvedSha256))invalid();
         }
@@ -127,7 +128,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
       if(ocr.output.kind!=='generated-image-ocr'||ocr.output.candidate.id!==run.candidateIds[index]||listingFingerprint(ocr.sourceResultIds)!==listingFingerprint(imageCopySourceIds(ocr.imageContext!)))invalid();
       if(run.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION) {
         const ip=successful(run.ipReviewResultIds![index]);
-        if(ip.output.kind!=='image-ip-review'||ip.output.verdict!=='PASS'||ocr.output.kind!=='generated-image-ocr'||listingFingerprint(ip.output.candidate)!==listingFingerprint(ocr.output.candidate))invalid();
+        if(ip.output.kind!=='image-ip-review'||(run.riskPolicy?evaluateImageRisk(ip.output,run.riskPolicy).verdict!=='PASS':ip.output.verdict!=='PASS')||ocr.output.kind!=='generated-image-ocr'||listingFingerprint(ip.output.candidate)!==listingFingerprint(ocr.output.candidate))invalid();
       }
     }
     for(const [index,id] of run.reviewResultIds.entries()) {

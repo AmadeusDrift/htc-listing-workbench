@@ -1,3 +1,4 @@
+import { evaluateImageRisk, describeImageRisk } from '../../shared/image-risk-policy.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { isProductReference } from '../image-upstream-trace.ts';
 import { imageListingCopyMatches } from './context-compatibility.ts';
@@ -152,10 +153,16 @@ export class ImageWorkflowService {
   saveRiskSettings(raw:unknown){
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停当前自动图片流程，再切换风险拦截');
     const previous=this.getRiskSettings(),value=writeImageRiskSettings(this.db,raw);
-    if(previous.enabled!==value.enabled)this.store.recordWorkspaceEvent('image.risk-interception.changed',value.enabled?'已开启图片风险拦截':'已关闭图片风险拦截；跳过风险检测，保留首图无字检查',{enabled:value.enabled});
+    if(JSON.stringify(previous)!==JSON.stringify(value))this.store.recordWorkspaceEvent('image.risk-interception.changed',value.enabled?'已开启图片风险拦截':'已关闭图片风险拦截；跳过风险检测，保留首图无字检查',value);
     return value;
   }
-  isRiskPolicyCompatible(run:ImageWorkflowRun|null|undefined):boolean{return riskPolicyCompatible(run,this.getRiskSettings().enabled);}
+  isRiskPolicyCompatible(run:ImageWorkflowRun|null|undefined):boolean{return riskPolicyCompatible(run,this.getRiskSettings(),id=>{const result=this.ai.getResult(id);return result?.output.kind==='image-ip-review'?result.output:undefined;});}
+  private assertApprovedRiskPolicy(prior:ImageWorkflowRun|null|undefined):void {
+    if(!prior||!this.getRiskSettings().enabled||prior.riskInterceptionEnabled===false)return;
+    for(const slot of prior.slots??[]){if(slot.status!=='PASSED')continue;const id=slot.attempts.at(-1)?.ipReviewResultId,ip=id?this.ai.getResult(id):undefined;
+      if(ip?.output.kind==='image-ip-review'&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='PASS')throw new UserFacingError(describeImageRisk(ip.output,this.getRiskSettings(),prior.sku,slot.index).slice(0,2000));
+    }
+  }
   getCopyReviewSettings(){this.ensureOpen();return readCopyReviewSettings(this.db);}
   saveCopyReviewSettings(raw:unknown){
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停当前自动图片流程，再切换文案复核');
@@ -198,7 +205,10 @@ export class ImageWorkflowService {
       if(operation.draftId!==run.draftId||owner.productId!==run.productId||owner.productRevision!==run.productRevision||owner.variantId!==run.variantId||owner.sku!==run.sku)throw new UserFacingError('字段请求进度归属不一致，请核对已有记录');
       resultUnknown=journal.unknown(operation.id);
     }else if(run.contentPreparation?.state==='STARTED')resultUnknown=true;
-    return {...run,resultUnknown};
+    const riskEvidence=(run.slots??[]).flatMap(slot=>{const id=slot.attempts.at(-1)?.ipReviewResultId,ip=id?this.ai.getResult(id):undefined;return ip?.output.kind==='image-ip-review'?[{slot:slot.index,summary:describeImageRisk(ip.output,this.getRiskSettings(),run.sku,slot.index)}]:[];});
+    const sourceId=run.setPlanResultId??run.planResultIds.at(-1),source=sourceId?this.ai.getResult(sourceId):undefined;
+    const sourceRiskSummary=source?.output.kind==='image-plan'&&source.output.ipRisk?`来源 AI 初筛 · SKU ${run.sku} · 原结论 ${source.output.ipRisk.verdict}（非阿里云等级，无数值评分）：${source.output.ipRisk.findings.map(item=>`${item.name}：${item.evidence}`).join('；')||'未报告明确风险'}${run.riskInterceptionEnabled===false?'；当时风险拦截关闭，不计审核通过':''}`:undefined;
+    return {...run,resultUnknown,riskEvidence,...(sourceRiskSummary?{sourceRiskSummary}:{})};
   }
   /** Local, bounded proof. A workflow status alone is never a rule rejection. */
   async getRuleFilterEvidence(rawId:string):Promise<AutomaticRuleEvidence|null> {
@@ -246,12 +256,12 @@ export class ImageWorkflowService {
         if(slot.contextSha256!==listingFingerprint(context))continue;
         proof=planProof(attempt.planResultId??undefined,context);if(proof)break;
         const plan=attempt.planResultId?this.ai.getResult(attempt.planResultId):undefined,ip=attempt.ipReviewResultId?this.ai.getResult(attempt.ipReviewResultId):undefined;
-        if(!successful(plan,context)||plan?.output.kind!=='image-plan'||!successful(ip,context)||ip?.output.kind!=='image-ip-review'||ip.output.verdict!=='BLOCKED'
+        if(!successful(plan,context)||plan?.output.kind!=='image-plan'||!successful(ip,context)||ip?.output.kind!=='image-ip-review'||evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='BLOCKED'
           ||ip.output.planResultId!==plan.id||ip.output.candidate.id!==attempt.candidateId||!attempt.candidateId)continue;
         const local=await this.generation.readCandidate(attempt.candidateId),candidate=local.candidate;
         if(candidate.id!==attempt.candidateId||candidate.productId!==run.productId||candidate.productRevision!==run.productRevision||candidate.mode!=='edit'||listingFingerprint(candidate.sourceAssets)!==listingFingerprint(references)
           ||digest(local.bytes)!==candidate.sha256||listingFingerprint({id:candidate.id,sha256:candidate.sha256,width:candidate.width,height:candidate.height})!==listingFingerprint(ip.output.candidate))continue;
-        proof=resultProof(ip,context,plan.id,candidate.id,'生成图片触发已启用的 IP 风险规则：'+ip.output.labels.map(label=>label.description||label.label).join('；'));
+        proof=resultProof(ip,context,plan.id,candidate.id,'生成图阿里云检测触发当前 IP 风险规则：'+ip.output.labels.map(label=>label.description||label.label).join('；'));
       }
       if(!proof)return null;
       for(const ref of references){const asset=this.store.getAssetRecord(ref.id);if(!asset||asset.productId!==product.id||asset.sha256!==ref.sha256)return null;await readManagedImage(this.directory,asset,new AbortController().signal);}
@@ -293,6 +303,7 @@ export class ImageWorkflowService {
         if(!asset||!(allowUnbound&&!asset.variantIds.length||variants.some(id=>asset.variantIds.includes(id)&&this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(asset.id,id))))throw new AiError('SOURCE_CHANGED');
       }
     }
+    this.assertApprovedRiskPolicy(prior);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
     if(hasSevenApprovedImages(prior)&&draft.listingProgram==='haul'&&prior!.draftSha256!==imageWorkflowDraftStamp(draft)&&this.currentContextMatches(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
@@ -356,6 +367,7 @@ export class ImageWorkflowService {
     this.assertSourceConsistency(draftId);
     const runs=workflowRuns(this.db,draftId),requested=runs.find(run=>run.id===sourceId),prior=requested?.approvalReuse?runs.find(run=>run.id===requested.approvalReuse!.sourceRunId):requested;
     const draft=this.amazon.getDraft(draftId),base=prior?.imageContext;
+    this.assertApprovedRiskPolicy(prior);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(base&&prior)this.assertCurrentEvidence(draft,base,prior.setPlan,currentWorkflowPlanIds(prior));
     if(prior&&this.canRecheckImageContent(prior,draft))return undefined;
@@ -374,7 +386,7 @@ export class ImageWorkflowService {
         ||previous.draftSha256!==stamp||listingFingerprint(previous.referenceAssets)!==listingFingerprint(prior.referenceAssets)
         ||copy?.output.kind!=='listing-current-review'||copy.output.verdict!=='PASS'||this.ai.getCall(copy.callId)?.status!=='SUCCEEDED'
         ||previous.slots.some(slot=>slot.status==='BLOCKED'||slot.attempts.some(attempt=>attempt.state==='BLOCKED'||attempt.candidateId!==null&&attempt.candidateId!==prior.slots![slot.index-1].attempts.at(-1)!.candidateId))
-        ||previous.ipReviewResultIds?.some(id=>{const result=this.ai.getResult(id);return result?.output.kind!=='image-ip-review'||result.output.verdict!=='PASS';}))return undefined;
+        ||previous.ipReviewResultIds?.some(id=>{const result=this.ai.getResult(id);return result?.output.kind!=='image-ip-review'||evaluateImageRisk(result.output,this.getRiskSettings()).verdict!=='PASS';}))return undefined;
     }
     const compatible=()=>{
       const current=this.amazon.getDraft(draftId),latest=this.store.getProduct(draft.productId),scope=this.amazon.executionTargetScope(draft.targetId);
@@ -399,7 +411,7 @@ export class ImageWorkflowService {
       const plan=attempt.planResultId?this.ai.getResult(attempt.planResultId):undefined;
       if(!successful(plan)||plan?.output.kind!=='image-plan')return undefined;
       const bypass=prior.riskInterceptionEnabled===false&&!this.getRiskSettings().enabled?attempt.riskBypass:undefined;
-      if(!bypass&&(!successful(ip)||ip?.output.kind!=='image-ip-review'||ip.output.verdict!=='PASS'||ip.output.planResultId!==attempt.planResultId||ip.output.candidate.id!==attempt.candidateId||ip.output.candidate.sha256!==slot.approvedSha256))return undefined;
+      if(!bypass&&(!successful(ip)||ip?.output.kind!=='image-ip-review'||evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='PASS'||ip.output.planResultId!==attempt.planResultId||ip.output.candidate.id!==attempt.candidateId||ip.output.candidate.sha256!==slot.approvedSha256))return undefined;
       const identity=bypass?.candidate??(ip?.output.kind==='image-ip-review'?ip.output.candidate:undefined);
       if(!identity||identity.id!==attempt.candidateId||identity.sha256!==slot.approvedSha256)return undefined;
       if(slot.index===1){const review=attempt.reviewResultId?this.ai.getResult(attempt.reviewResultId):undefined;
@@ -428,6 +440,7 @@ export class ImageWorkflowService {
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId),revision=integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
     if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
     const runs=workflowRuns(this.db,draftId),prior=runs.find(value=>value.id===uuid(input.sourceWorkflowId)),draft=this.amazon.getDraft(draftId);
+    this.assertApprovedRiskPolicy(prior);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
     if(!prior||prior.status!=='COMPLETED'||prior.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||!prior.approvedAssetId||!prior.approvedSha256
@@ -618,8 +631,11 @@ export class ImageWorkflowService {
         const planned=this.ai.getResult(run.setPlanResultId);
         if(!planned||planned.output.kind!=='image-plan'||listingFingerprint(planned.output.setPlan)!==listingFingerprint(run.setPlan))throw new AiError('SOURCE_CHANGED');
         if(!planned.output.productUnderstanding?.sufficient)this.sourceRefusal(run,planned);
-        if(riskEnabled&&planned.output.ipRisk?.verdict!=='PASS')throw new UserFacingError('商品 IP 初筛未通过：'+(planned.output.ipRisk?.findings.map(item=>item.name+'：'+item.evidence).join('；')||'缺少初筛结论'));
+        if(riskEnabled&&planned.output.ipRisk?.verdict!=='PASS')throw new UserFacingError('来源 AI IP 初筛未通过（非阿里云评分）：'+(planned.output.ipRisk?.findings.map(item=>item.name+'：'+item.evidence).join('；')||'缺少初筛结论'));
         await fresh();
+      }
+      if(riskEnabled)for(const slot of run.slots!){const attempt=slot.attempts.at(-1),ip=attempt?.ipReviewResultId?this.ai.getResult(attempt.ipReviewResultId):undefined;
+        if(slot.status==='BLOCKED'&&attempt?.candidateId&&ip?.output.kind==='image-ip-review'&&ip.output.candidate.id===attempt.candidateId&&ip.output.planResultId===attempt.planResultId&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict==='PASS'){slot.status='PENDING';slot.error=null;attempt.state='GENERATED';attempt.error=null;this.save(run);}
       }
       if(riskEnabled&&run.slots!.some(slot=>slot.status==='BLOCKED'))throw new UserFacingError('此销售 SKU 的来源或生成图存在 IP 风险，保留已通过图片，不自动修改规避风险');
       for(const slot of run.slots!){
@@ -630,7 +646,7 @@ export class ImageWorkflowService {
         // An old detail-text rejection is no longer a reason to regenerate the same image.
         if(slot.index>1&&attempt?.state==='RETRYABLE_FAILURE'&&attempt.candidateId&&attempt.ipReviewResultId&&attempt.reviewResultId){
           const oldIp=this.ai.getResult(attempt.ipReviewResultId),oldReview=this.ai.getResult(attempt.reviewResultId);
-          if(oldIp?.output.kind==='image-ip-review'&&oldIp.output.verdict==='PASS'&&oldIp.output.planResultId===attempt.planResultId&&oldIp.output.candidate.id===attempt.candidateId&&oldReview?.output.kind==='image-text-review'&&oldReview.output.planResultId===attempt.planResultId&&listingFingerprint(oldReview.output.candidate)===listingFingerprint(oldIp.output.candidate)){attempt.state='GENERATED';attempt.error=null;this.save(run);}
+          if(oldIp?.output.kind==='image-ip-review'&&evaluateImageRisk(oldIp.output,this.getRiskSettings()).verdict==='PASS'&&oldIp.output.planResultId===attempt.planResultId&&oldIp.output.candidate.id===attempt.candidateId&&oldReview?.output.kind==='image-text-review'&&oldReview.output.planResultId===attempt.planResultId&&listingFingerprint(oldReview.output.candidate)===listingFingerprint(oldIp.output.candidate)){attempt.state='GENERATED';attempt.error=null;this.save(run);}
         }
         const reviewOnly=run.slotPolicy===IMAGE_SET_POLICY&&slot.attempts.length>=run.maxAttempts&&this.canRecheckTextPolicy(attempt);
         if(attempt?.state==='RETRYABLE_FAILURE'&&slot.attempts.length>=run.maxAttempts&&!reviewOnly){slot.status='FAILED';this.save(run);continue;}
@@ -649,7 +665,7 @@ export class ImageWorkflowService {
             if(plan.output.kind!=='image-plan')throw new AiError('OUTPUT_INVALID');assertImagePlan(plan.output,context);
             attempt.planResultId=plan.id;this.save(run);
             if(!plan.output.productUnderstanding?.sufficient)this.sourceRefusal(run,plan);
-            if(riskEnabled&&plan.output.ipRisk?.verdict!=='PASS'){slot.status='BLOCKED';attempt.state='BLOCKED';slot.error=attempt.error=`商品 IP 初筛未通过：${plan.output.ipRisk?.findings.map(item=>`${item.name}：${item.evidence}`).join('；')||'缺少初筛结论'}`;this.save(run);throw new UserFacingError(slot.error);}
+            if(riskEnabled&&plan.output.ipRisk?.verdict!=='PASS'){slot.status='BLOCKED';attempt.state='BLOCKED';slot.error=attempt.error=`来源 AI IP 初筛未通过（非阿里云评分）：${plan.output.ipRisk?.findings.map(item=>`${item.name}：${item.evidence}`).join('；')||'缺少初筛结论'}`;this.save(run);throw new UserFacingError(slot.error);}
             attempt.state='READY';this.save(run);
           }
           const plan=this.ai.getResult(attempt.planResultId!);if(!plan||plan.output.kind!=='image-plan')throw new AiError('SOURCE_CHANGED');
@@ -699,7 +715,9 @@ export class ImageWorkflowService {
           if(!attempt.ipReviewResultId)result.aiCalls++;
           if(ip?.output.kind!=='image-ip-review'||ip.output.planResultId!==plan.id||listingFingerprint(ip.output.candidate)!==listingFingerprint(identity))throw new AiError('OUTPUT_INVALID');
           attempt.ipReviewResultId=ip.id;this.save(run);await fresh();
-          if(ip.output.verdict!=='PASS'){attempt.state='BLOCKED';slot.status='BLOCKED';slot.error=attempt.error=`图片 ${slot.index} 被阿里云标记为${ip.output.riskLevel}级疑似侵权风险：${ip.output.labels.map(label=>`${label.description||label.label} (${label.label}${label.confidence===null?'':`，置信度 ${label.confidence}`})`).join('；')}；这是机器风险标签，尚非具体侵权结论，需核对该图；不自动改图规避检测`.slice(0,2000);this.save(run);throw new UserFacingError(slot.error);}
+          const risk=evaluateImageRisk(ip.output,this.getRiskSettings());
+          if(risk.verdict!=='PASS'){attempt.state=risk.verdict==='UNCERTAIN'?'RETRYABLE_FAILURE':'BLOCKED';slot.status=risk.verdict==='UNCERTAIN'?'FAILED':'BLOCKED';slot.error=attempt.error=describeImageRisk(ip.output,this.getRiskSettings(),run.sku,slot.index).slice(0,2000);this.save(run);throw new UserFacingError(slot.error);}
+          attempt.riskPolicy=this.getRiskSettings();this.save(run);
           }else{attempt.riskBypass??={at:new Date().toISOString(),candidate:identity};if(listingFingerprint(attempt.riskBypass.candidate)!==listingFingerprint(identity))throw new AiError('SOURCE_CHANGED');this.save(run);}
           if(slot.index>1){
             attempt.approvalPolicy=riskEnabled?'ip-only-detail/v1':'risk-disabled-detail/v1';this.save(run);
@@ -734,7 +752,7 @@ export class ImageWorkflowService {
   private canRecheckTextPolicy(attempt:ImageSlotAttempt|undefined):boolean {
     if(!needsImageTextPolicyReview(attempt))return false;
     const ip=this.ai.getResult(attempt!.ipReviewResultId!),ocr=this.ai.getResult(attempt!.ocrResultId!),review=this.ai.getResult(attempt!.reviewResultId!);
-    return ip?.output.kind==='image-ip-review'&&ip.output.verdict==='PASS'&&ip.output.planResultId===attempt!.planResultId
+    return ip?.output.kind==='image-ip-review'&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict==='PASS'&&ip.output.planResultId===attempt!.planResultId
       &&ocr?.output.kind==='generated-image-ocr'&&ocr.output.candidate?.id===attempt!.candidateId
       &&review?.output.kind==='image-text-review'&&review.output.verdict==='NEEDS_CHANGES'&&review.output.planResultId===attempt!.planResultId&&review.output.ocrResultId===ocr.id
       &&listingFingerprint(ip.output.candidate)===listingFingerprint(ocr.output.candidate)&&listingFingerprint(review.output.candidate)===listingFingerprint(ocr.output.candidate);
@@ -845,7 +863,8 @@ export class ImageWorkflowService {
         const ip=await this.paid(run.draftId,()=>this.ai.reviewGeneratedImageRisk(context,plan,identity,local.bytes,fresh,signal)); result.aiCalls++;
         if(ip.output.kind!=='image-ip-review'||ip.output.planResultId!==plan.id||listingFingerprint(ip.output.candidate)!==listingFingerprint(identity))throw new AiError('OUTPUT_INVALID');
         run.ipReviewResultIds!.push(ip.id);this.save(run);await fresh();
-        if(ip.output.verdict!=='PASS')throw new UserFacingError(`生成图片侵权风险检测${ip.output.verdict==='BLOCKED'?'发现风险':'待确认'}：${ip.output.labels.map(item=>`${item.description||item.label}${item.confidence===null?'':`（${item.confidence}）`}`).join('；')}。已停止，不自动改图重试。`.slice(0,2000));
+        if(evaluateImageRisk(ip.output,this.getRiskSettings()).verdict!=='PASS')throw new UserFacingError(describeImageRisk(ip.output,this.getRiskSettings(),run.sku,1).slice(0,2000));
+        run.riskPolicy=this.getRiskSettings();this.save(run);
         stage('ocr');
         if (local.bytes.length>10*1024*1024) throw new UserFacingError('生成的 PNG 超过 10 MB，已保留候选并停止 OCR；请调低全局尺寸后重新准备');
         const ocr=await this.paid(run.draftId,()=>this.ai.recognizeGeneratedImage(context,identity,local.bytes,fresh,signal)); result.aiCalls++;

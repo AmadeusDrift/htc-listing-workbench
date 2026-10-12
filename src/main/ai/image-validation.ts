@@ -1,3 +1,4 @@
+import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import { assertStoredImageEvidence, assertStoredListingReview } from '../listing-ai/stored-evidence.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -251,8 +252,7 @@ export function repairImagePlanCaptions(plan:ImagePlanOutput,context:ProductImag
   const checked=validateImagePlan(repaired);assertImagePlan(checked,context);return checked;
 }
 export function imageIpVerdict(riskLevel: ImageIpReviewOutput['riskLevel'],labels: ImageIpReviewOutput['labels']): ImageIpReviewOutput['verdict'] {
-  if (!labels.length || !['none','low','medium','high'].includes(riskLevel)) return 'UNCERTAIN';
-  return riskLevel === 'none' || riskLevel === 'low' ? 'PASS' : 'BLOCKED';
+  return evaluateImageRisk({riskLevel,labels}).verdict as ImageIpReviewOutput['verdict'];
 }
 export function validateImageIpReview(raw: unknown): ImageIpReviewOutput {
   const value=keys(raw,['kind','candidate','planResultId','service','verdict','riskLevel','labels']);
@@ -263,11 +263,11 @@ export function validateImageIpReview(raw: unknown): ImageIpReviewOutput {
     return {label:boundedText(item.label,200),confidence:item.confidence as number|null,description:boundedText(item.description,1000,true)};
   });
   if(!labels.length || new Set(labels.map(item=>item.label)).size!==labels.length)fail();
-  const riskLevel=value.riskLevel as ImageIpReviewOutput['riskLevel'], verdict=imageIpVerdict(riskLevel,labels);
-  // Earlier policy blocked low and kept unfamiliar none labels uncertain. Preserve
-  // those historical refusals when reading backups; never rewrite them as a pass.
-  const historicalRefusal = riskLevel === 'low' && value.verdict === 'BLOCKED' || riskLevel === 'none' && value.verdict === 'UNCERTAIN';
-  if(value.verdict!==verdict && !historicalRefusal)fail();
+  const riskLevel=value.riskLevel as ImageIpReviewOutput['riskLevel'];
+  // A stored verdict is historical evidence. Execution separately evaluates current policy.
+  const legacyVerdict=riskLevel==='none'||riskLevel==='low'?'PASS':'BLOCKED';
+  const historicalRefusal=riskLevel==='low'&&value.verdict==='BLOCKED'||riskLevel==='none'&&value.verdict==='UNCERTAIN';
+  if(value.verdict!==imageIpVerdict(riskLevel,labels)&&value.verdict!==legacyVerdict&&!historicalRefusal)fail();
   return {kind:'image-ip-review',candidate:validateCandidateImageIdentity(value.candidate),planResultId:uuid(value.planResultId),service:'aigcViolationDetection',verdict:value.verdict as ImageIpReviewOutput['verdict'],riskLevel,labels};
 }
 export function validateGeneratedImageOcr(raw: unknown): GeneratedImageOcrOutput {

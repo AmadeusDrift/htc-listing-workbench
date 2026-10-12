@@ -4,7 +4,7 @@ import type { FollowupReason, FollowupRecord, FollowupSummary, ListingObservatio
 import { UserFacingError } from '../../shared/errors.ts';
 import { identifier } from '../../shared/validation.ts';
 import { openDatabase } from '../database.ts';
-import { FOLLOWUP_OFFSETS, PLATFORM_REVIEW_OFFSETS, isPlatformReviewIssue, followupDraftFingerprint, validateFollowupRecord } from './records.ts';
+import { FOLLOWUP_OFFSETS, isPlatformReviewIssue, followupDraftFingerprint, validateFollowupRecord } from './records.ts';
 
 /** Deliberately excludes every Amazon mutation operation. */
 export interface FollowupAmazon {
@@ -55,8 +55,16 @@ export class FollowupService {
         const record = validateFollowupRecord(JSON.parse(String(row.record_json)));
         if (record.id !== row.id || this.records.has(record.draftId)) throw new UserFacingError('延迟回读记录身份不一致');
         this.records.set(record.draftId, record);
-        // The attempt was checkpointed before the request. An interrupted final attempt is never replayed.
-        if (record.status === 'PROCESSING' && record.nextDueAt === null) this.attention(record, 'EXPIRED', '最后一次回读曾中断，请人工核对或重新安排回读');
+        // Migrate legacy 48h schedules and premature attempt-based expiry using the immutable submission clock.
+        if (record.submittedAt && (pending(record) || record.status === 'PROCESSING' || record.reason === 'EXPIRED')) {
+          const deadline = Date.parse(record.submittedAt) + FOLLOWUP_OFFSETS.at(-1)!;
+          if (this.now() >= deadline) this.attention(record, 'EXPIRED', '原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交');
+          else if (record.reason === 'EXPIRED' || record.nextDueAt === null || Date.parse(record.nextDueAt) > deadline) {
+            record.status = record.attempts ? 'PROCESSING' : 'WAITING'; record.reason = null; record.error = null;
+            record.nextDueAt = timestamp(FOLLOWUP_OFFSETS.map(offset => Date.parse(record.submittedAt!) + offset).find(time => time > this.now())!);
+            this.save(record);
+          }
+        }
       }
     } catch (error) { this.db.close(); throw error; }
   }
@@ -113,7 +121,7 @@ export class FollowupService {
   reschedule(draftId: string): FollowupRecord {
     const record = this.find(draftId); if (this.activeDraftId === record.draftId) throw new UserFacingError('此回读正在处理，请等待完成');
     this.scope(record, true); record.targetGeneration = this.amazon.executionTargetScope(record.targetId).generation;
-    record.status = 'WAITING'; record.reason = null; record.error = null; record.attempts = 0; record.lastAttemptAt = null;
+    record.status = record.attempts ? 'PROCESSING' : 'WAITING'; record.reason = null; record.error = null;
     record.nextDueAt = timestamp(Math.max(this.now(), Date.parse(record.submittedAt!) + FOLLOWUP_OFFSETS[0]));
     this.save(record); this.arm(); return structuredClone(record);
   }
@@ -147,11 +155,10 @@ export class FollowupService {
     let draft: AmazonDraft;
     try { draft = this.scope(record); }
     catch (error) { if (!(error instanceof ScopeError)) throw error; this.attention(record, error.reason, error.message); return; }
-    if (record.attempts >= PLATFORM_REVIEW_OFFSETS.length) { this.attention(record, 'EXPIRED', '自动回读次数已用完，请人工核对 Amazon 状态'); return; }
-    const offsets = record.issues.some(isPlatformReviewIssue) ? PLATFORM_REVIEW_OFFSETS : FOLLOWUP_OFFSETS;
+    const offsets = FOLLOWUP_OFFSETS;
     const started = this.now(), next = offsets.map(offset => Date.parse(record.submittedAt!) + offset).find(time => time > started);
     record.status = 'PROCESSING'; record.attempts++; record.lastAttemptAt = timestamp(started); record.reason = null; record.error = null;
-    record.nextDueAt = record.attempts < offsets.length && next !== undefined ? timestamp(next) : null;
+    record.nextDueAt = next !== undefined ? timestamp(next) : null;
     this.save(record);
     try {
       const result = await this.amazon.readListing({ id: draft.id, revision: draft.revision }, () => {
@@ -175,7 +182,7 @@ export class FollowupService {
       if (result.salesPlan?.parentage === 'CHILD' && observation?.familyRelationship?.status === 'MISMATCHED') { this.attention(record, 'LISTING_ERRORS', 'Amazon 返回的父 SKU 或变体主题与计划不一致'); return; }
       // DISCOVERABLE/ASIN can coexist with this review hold. Preserve the original ERROR,
       // defer only its exact code, and never promote it to READY while the hold remains.
-      if (record.issues.some(isPlatformReviewIssue)) { this.continueLater(record, 'Amazon 正在审核此商品（100521），将在提交后最多 48 小时内继续回读；当前尚未确认完成', 'PLATFORM_REVIEW'); return; }
+      if (record.issues.some(isPlatformReviewIssue)) { this.continueLater(record, 'Amazon 正在审核此商品（100521），将在提交后最多 24 小时内继续回读；当前尚未确认完成', 'PLATFORM_REVIEW'); return; }
       if(result.salesPlan?.parentage==='CHILD'&&observation?.familyRelationship?.status!=='MATCHED'){
         this.continueLater(record,'等待 Amazon 确认父子体关联');
         return;
@@ -192,9 +199,9 @@ export class FollowupService {
     }
   }
   private continueLater(record: FollowupRecord, error: string | null, reason: 'READ_FAILED' | 'PLATFORM_REVIEW' = 'READ_FAILED'): void {
-    const offsets = record.issues.some(isPlatformReviewIssue) ? PLATFORM_REVIEW_OFFSETS : FOLLOWUP_OFFSETS;
+    const offsets = FOLLOWUP_OFFSETS;
     if (record.nextDueAt === null || Date.parse(record.nextDueAt) <= this.now()) {
-      const next = record.attempts < offsets.length ? offsets.map(offset => Date.parse(record.submittedAt!) + offset).find(time => time > this.now()) : undefined;
+      const next = offsets.map(offset => Date.parse(record.submittedAt!) + offset).find(time => time > this.now());
       record.nextDueAt = next !== undefined ? timestamp(next) : null;
     }
     if (record.nextDueAt === null) { this.attention(record, 'EXPIRED', '已到自动回读检查期限，仍未得到明确建档状态；请人工核对或重新安排回读'); return; }

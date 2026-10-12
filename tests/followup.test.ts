@@ -93,7 +93,7 @@ test('Amazon 100521 stays platform processing despite DISCOVERABLE and an ASIN, 
   const result = f.service.get(f.draft.id);
   assert.equal(result.status, 'PROCESSING'); assert.equal(result.reason, 'PLATFORM_REVIEW');
   assert.equal(result.listingState, 'DISCOVERABLE'); assert.deepEqual(result.statuses, ['DISCOVERABLE']); assert.equal(result.asin, 'B0ABC12345');
-  assert.deepEqual(result.issues, [platformReview]); assert.match(result.error!, /Amazon.*审核.*48/);
+  assert.deepEqual(result.issues, [platformReview]); assert.match(result.error!, /Amazon.*审核.*24/);
   assert.equal(result.nextDueAt, new Date(initial + offsets[1]).toISOString());
   await f.reopen(); assert.deepEqual(f.service.get(f.draft.id), result);
 });
@@ -107,18 +107,14 @@ test('only explicit Amazon 100521 is deferred; mixed errors, lookalike codes and
   }
 });
 
-test('a 100521 review gets one persisted 48-hour check then expires without more queries', async t => {
-  const f = fixture(t); f.review(); f.service.schedule(f.draft.id);
-  for (const offset of offsets) { f.at(offset); await f.service.runDue(); }
-  const pending = f.service.get(f.draft.id);
-  assert.equal(pending.status, 'PROCESSING'); assert.equal(pending.attempts, 5);
-  assert.equal(pending.nextDueAt, new Date(initial + 48 * 60 * minute).toISOString());
-  await f.reopen(); assert.deepEqual(f.service.get(f.draft.id), pending);
-  f.at(48 * 60 * minute); await f.service.runDue();
-  const result = f.service.get(f.draft.id);
-  assert.equal(result.status, 'NEEDS_ATTENTION'); assert.equal(result.reason, 'EXPIRED'); assert.equal(result.attempts, 6); assert.equal(result.nextDueAt, null);
-  assert.deepEqual(result.issues, [platformReview]);
-  f.at(72 * 60 * minute); await f.service.runDue(); await f.reopen(); await f.service.runDue(); assert.equal(f.reads, 6);
+test('100521 expires at 24h and explicit requery keeps original clock', async t => {
+ const f=fixture(t); f.review(); f.service.schedule(f.draft.id);
+ for(const offset of offsets){f.at(offset);await f.service.runDue();}
+ assert.equal(f.service.get(f.draft.id).reason,'EXPIRED');
+ await f.reopen();f.at(25*60*minute);f.service.reschedule(f.draft.id);await f.service.runDue();
+ assert.equal(f.service.get(f.draft.id).reason,'EXPIRED');
+ assert.equal(f.service.get(f.draft.id).submittedAt,new Date(initial).toISOString());
+ f.outcome('ready');f.service.reschedule(f.draft.id);await f.service.runDue();assert.equal(f.service.get(f.draft.id).status,'READY');
 });
 
 test('cleared platform review reaches ready only after a later fresh read with no blocking issue', async t => {
@@ -129,21 +125,17 @@ test('cleared platform review reaches ready only after a later fresh read with n
   assert.equal(result.status, 'READY'); assert.equal(result.reason, null); assert.equal(result.nextDueAt, null); assert.deepEqual(result.issues, []);
 });
 
-test('a review first observed at the ordinary final check extends to 48 hours and can clear there', async t => {
-  const f = fixture(t); f.service.schedule(f.draft.id);
-  for (const offset of offsets.slice(0, -1)) { f.at(offset); await f.service.runDue(); }
-  f.review(); f.at(offsets.at(-1)!); await f.service.runDue();
-  const review = f.service.get(f.draft.id);
-  assert.equal(review.status, 'PROCESSING'); assert.equal(review.attempts, 5);
-  assert.equal(review.nextDueAt, new Date(initial + 48 * 60 * minute).toISOString());
-  await f.reopen(); f.outcome('ready'); f.at(48 * 60 * minute); await f.service.runDue();
-  const ready = f.service.get(f.draft.id);
-  assert.equal(ready.status, 'READY'); assert.equal(ready.attempts, 6); assert.equal(ready.nextDueAt, null);
+test('requeries retain attempts without premature expiry', async t => {
+ const f=fixture(t);f.service.schedule(f.draft.id);f.at(offsets[0]);
+ for(let i=0;i<8;i++){f.service.reschedule(f.draft.id);await f.service.runDue();}
+ assert.equal(f.service.get(f.draft.id).status,'PROCESSING');assert.equal(f.service.get(f.draft.id).attempts,8);
+ await f.reopen();assert.equal(f.service.get(f.draft.id).status,'PROCESSING');
+ f.at(offsets.at(-1)!);await f.service.runDue();assert.equal(f.service.get(f.draft.id).reason,'EXPIRED');
 });
 
-test('a slow review response beyond 48 hours expires without scheduling another query', async t => {
+test('a slow review response beyond 24 hours expires without scheduling another query', async t => {
   const f = fixture(t); f.review(); f.service.schedule(f.draft.id); f.at(offsets[0]); const entered = f.holdRead();
-  const running = f.service.runDue(); await entered; f.at(49 * 60 * minute); f.release(); await running;
+  const running = f.service.runDue(); await entered; f.at(25 * 60 * minute); f.release(); await running;
   const result = f.service.get(f.draft.id);
   assert.equal(result.status, 'NEEDS_ATTENTION'); assert.equal(result.reason, 'EXPIRED'); assert.equal(result.nextDueAt, null);
   assert.deepEqual(result.issues, [platformReview]); await f.service.runDue(); assert.equal(f.reads, 1);
@@ -305,4 +297,15 @@ test('maintenance pause retains busy until the active read settles and does not 
   const running = f.service.runDue(); await entered; assert.equal(f.service.busy, true); f.service.pause(); assert.equal(f.service.busy, true);
   f.release(); await running; assert.equal(f.service.busy, false); assert.equal(f.reads, 1);
   assert.equal(f.service.get(second.id).status, 'WAITING'); assert.equal(f.service.get(second.id).attempts, 0);
+});
+
+for(const legacy of ['extended','premature'] as const)test(`legacy ${legacy} schedule migrates to original 24h deadline`,async t=>{
+ const f=fixture(t),record=f.service.schedule(f.draft.id);const db=openDatabase(f.directory);
+ db.prepare('UPDATE listing_followups SET record_json=? WHERE id=?').run(JSON.stringify({...record,status:legacy==='extended'?'PROCESSING':'NEEDS_ATTENTION',attempts:5,reason:legacy==='extended'?'PLATFORM_REVIEW':'EXPIRED',issues:[platformReview],nextDueAt:legacy==='extended'?new Date(initial+48*60*minute).toISOString():null}),record.id);db.close();
+ f.at(6*60*minute);await f.reopen();assert.equal(f.service.get(f.draft.id).status,'PROCESSING');assert.equal(f.service.get(f.draft.id).nextDueAt,new Date(initial+24*60*minute).toISOString());
+ f.at(24*60*minute);await f.reopen();assert.equal(f.service.get(f.draft.id).reason,'EXPIRED');
+});
+test('known creation without buyability never expires merely from elapsed time',async t=>{
+ const f=fixture(t);f.asin('B0ABC12345');f.service.schedule(f.draft.id);f.at(offsets[0]);await f.service.runDue();
+ f.at(48*60*minute);await f.reopen();assert.equal(f.service.get(f.draft.id).status,'READY');assert.deepEqual(f.service.get(f.draft.id).statuses,[]);
 });

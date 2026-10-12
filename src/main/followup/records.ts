@@ -5,8 +5,8 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { identifier, record } from '../../shared/validation.ts';
 
 export const FOLLOWUP_OFFSETS = [30 * 60_000, 60 * 60_000, 2 * 3_600_000, 6 * 3_600_000, 24 * 3_600_000] as const;
-/** Only an explicit Amazon 100521 review permits the additional 48-hour checkpoint. */
-export const PLATFORM_REVIEW_OFFSETS = [...FOLLOWUP_OFFSETS, 48 * 3_600_000] as const;
+/** All unresolved platform processing uses the original 24-hour deadline. */
+export const PLATFORM_REVIEW_OFFSETS = FOLLOWUP_OFFSETS;
 export const isPlatformReviewIssue = (issue: ListingIssue): boolean => issue.source === 'amazon' && issue.code === '100521';
 const states = ['DRAFT','LOCAL_VALIDATED','AMAZON_VALIDATED','SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','BLOCKED','UNKNOWN'];
 const reasons = ['UNKNOWN_WRITE','TARGET_CHANGED','TARGET_UNAVAILABLE','DRAFT_CHANGED','LISTING_ERRORS','READ_FAILED','PLATFORM_REVIEW','EXPIRED'];
@@ -36,7 +36,7 @@ export function validateFollowupRecord(value: unknown): FollowupRecord {
     || !['sku','targetName','sellerId','marketplaceId'].every(key => string(o[key], 500, true)) || o.mode !== 'live'
     || typeof o.draftFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(o.draftFingerprint)
     || !['WAITING','PROCESSING','READY','NEEDS_ATTENTION'].includes(String(o.status)) || !(o.reason === null || reasons.includes(String(o.reason)))
-    || !integer(o.attempts) || Number(o.attempts) > PLATFORM_REVIEW_OFFSETS.length || !states.includes(String(o.listingState))
+    || !integer(o.attempts) || !states.includes(String(o.listingState))
     || ![o.submittedAt,o.nextDueAt,o.lastAttemptAt,o.checkedAt].every(nullableDate) || ![o.createdAt,o.updatedAt].every(date)
     || !(o.submissionId === null || string(o.submissionId, 500, true)) || !(o.error === null || string(o.error, 500)) || !code(o.asin) || !code(o.fnsku)
     || !Array.isArray(o.statuses) || o.statuses.length > 30 || o.statuses.some(v => !string(v, 100, true)) || new Set(o.statuses).size !== o.statuses.length

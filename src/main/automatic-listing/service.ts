@@ -192,7 +192,8 @@ export class AutomaticListingService {
       // Confirmed submissions are already beyond source preparation, pricing and
       // image admission. Their readback/label failure must retain its actual cause.
       if(draft&&submitted(draft)&&!['UNKNOWN','SUBMITTING'].includes(draft.state)&&this.matching(task,row,draft)&&['READBACK','LABELS'].includes(row.stage)){
-        row.outcome={version:1,kind:'SYSTEM_REPAIR',code:row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
+        const brandError = row.stage === 'READBACK' && draft.listingProgram === 'haul' && Array.isArray(draft.attributes.brand) && draft.attributes.brand.some(value => value && typeof value === 'object' && 'value' in value && value.value === 'Generic') && draft.listingIssues.some(issue => issue.source === 'amazon' && issue.severity === 'ERROR' && ['5665','5882'].includes(issue.code));
+        row.outcome={version:1,kind:brandError?'NEEDS_INPUT':'SYSTEM_REPAIR',code:brandError?'READBACK_BRAND_REQUIRES_MANUAL':row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
         return;
       }
       const unknown=this.unknownCode(row,task);
@@ -798,11 +799,18 @@ export class AutomaticListingService {
           try {
             if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
             if (!row.batchId) {
-              if (!candidates.get(row.draftId)?.eligible) {
-                const followup = this.deps.followup.get(row.draftId);
-                if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
-                row.status = 'WAITING'; continue;
+              const followup = task.mode === 'live' ? this.deps.followup.get(row.draftId) : { status: 'READY', error: null };
+              if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
+              const candidate = candidates.get(row.draftId);
+              if (followup.status !== 'READY' || !candidate?.eligible) {
+                if (followup.status === 'READY' && candidate?.requiresAttention) throw new UserFacingError(candidate.reason);
+                row.status = 'WAITING';
+                row.error = followup.status === 'READY'
+                  ? `平台已建档；${candidate?.reason || '等待备货条件确认'}；可售状态单独以平台结果为准`
+                  : followup.error || '等待 Amazon 处理原提交并确认建档（原提交后 24 小时内回读）';
+                delete row.outcome; continue;
               }
+              row.error = null; delete row.outcome;
               const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
               const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
               if (!batch) throw new UserFacingError('回读已就绪，但备货批次未建立');

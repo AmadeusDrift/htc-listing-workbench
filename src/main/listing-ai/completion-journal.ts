@@ -110,7 +110,7 @@ export class CompletionJournal {
     }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
   /** One successor, never an ordinary budget increase. No paid request occurs here. */
-  beginLegacyThemeRepair(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,draft:AmazonDraft,current:ListingAiContext,row:AutomaticListingItem,workflow:ImageWorkflowRun):CompletionOperation|undefined {
+  beginLegacyThemeRepair(input:Pick<CompletionOperation,'draftId'|'scopeHash'|'safetyScopeHash'|'safetyIdentity'|'copyReviewEnabled'|'draftRevision'|'draftStamp'>,draft:AmazonDraft,current:ListingAiContext,row:AutomaticListingItem,workflow:ImageWorkflowRun,assertMutationSafe?:()=>void):CompletionOperation|undefined {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const results=this.db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.listingContext.draftId')=? ORDER BY json_extract(record_json,'$.createdAt'),id").all(draft.id).map(r=>validateStoredAiResult(JSON.parse(String(r.record_json))));
@@ -124,6 +124,7 @@ export class CompletionJournal {
         if(ledger.id!==call.id||ledger.startedAt!==call.startedAt||ledger.providerId!==call.providerId||this.directory&&hasInvalidAiResponse(this.directory,call,'amazon-fields')){this.db.exec('COMMIT');return;}
       }
       if(!calls.some(call=>call.id===source.callId)){this.db.exec('COMMIT');return;}
+      assertMutationSafe?.();
       const existing=this.saleOperations(input.safetyIdentity),scoped=existing.filter(op=>op.scopedRepair);
       if(scoped.length){
         const op=scoped[0];

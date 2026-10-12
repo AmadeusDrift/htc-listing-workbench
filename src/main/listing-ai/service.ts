@@ -372,7 +372,7 @@ export class ListingAiService {
     const draft=this.amazon.getDraft(draftId),reference={draftId,draftRevision:draft.revision};
     this.current(reference);this.assertSourceConsistency(draft);
     const context=this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation,true);
-    return this.ai.completionJournal.beginLegacyThemeRepair({draftId,scopeHash:this.completionScope(draft),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},draft,context,row,workflow);
+    return this.ai.completionJournal.beginLegacyThemeRepair({draftId,scopeHash:this.completionScope(draft),safetyScopeHash:completionSafetyScope(draft),safetyIdentity:completionSafetyIdentity(draft),copyReviewEnabled:this.copyReviewEnabled(),draftRevision:draft.revision,draftStamp:completionDraftStamp(draft)},draft,context,row,workflow,()=>this.amazon.assertThemeRepairSafe(draftId));
   }
   getCompletion(id:string):CompletionOperation{return this.ai.completionJournal.get(id);}
   completionUnknown(id:string):boolean{return this.ai.completionJournal.unknown(id);}

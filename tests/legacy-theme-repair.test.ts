@@ -41,8 +41,8 @@ for(const change of ['ordinary','similar','source','present','unknown','candidat
 
 
 
-async function automaticLegacy(t:any){
- const f=await completionOwnerFixture(t,'automatic',false,false,'Blue',true);
+async function automaticLegacy(t:any,haul=false){
+ const f=await completionOwnerFixture(t,'automatic',false,false,'Blue',true,haul?'haul':'standard');
  const context=f.listing.currentContext(f.draft,f.product,1,true);context.fields=context.fields.filter(x=>x.name==='theme');context.repairRequest={issues:[{field:'theme',code:'90220',message:'Missing theme'}],currentValues:{theme:null}};
  f.respond(()=>chat({kind:'amazon-fields',candidates:[],missing:[{field:'theme',reason}]}));await f.ai.listingFields(context,async()=>{},undefined);
  const service=f.ownerService() as any,task=[...service.tasks.values()][0] as any,row=task.items[0],at=new Date().toISOString();
@@ -92,4 +92,33 @@ test('scoped journal refuses a send without the persisted consumed owner grant',
  const f=await setup(t),op=f.begin()!,id=randomUUID();op.rounds.push({context:f.context,contextHash:listingFingerprint(f.context),candidate:{id,sent:false,resultId:null},review:{id:randomUUID(),sent:false,resultId:null},resolved:false,adoptionId:null});f.journal.save(op);
  const call={...f.ai.getCall(f.result.callId)!,id};
  assert.throws(()=>f.journal.markSent({operationId:op.id,callId:id,contextHash:listingFingerprint(f.context)},call),/额度尚未持久化/);assert.equal(f.journal.get(op.id).rounds[0].candidate.sent,false);
+});
+for(const dirty of ['color','unsupported'] as const)test(`eligible legacy ${dirty} normalization fails closed before preview or paid dispatch`,async t=>{
+ const f=await automaticLegacy(t,true),db=(f.ai as any).db,record=JSON.parse(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json);
+ if(dirty==='color')record.draft.attributes.color=[{value:'Cherry Blossom Pink',marketplace_id:f.draft.marketplaceId}];
+ else record.draft.attributes.fulfillment_availability=[{fulfillment_channel_code:'DEFAULT',quantity:20}];
+ record.request.attributes=structuredClone(record.draft.attributes);db.prepare('UPDATE listing_drafts SET record_json=? WHERE id=?').run(JSON.stringify(record),f.draft.id);
+ const service=f.ownerService() as any,task=[...service.tasks.values()][0] as any;task.items[0].repair.draftStamp=imageWorkflowDraftStamp(record.draft);service.save(task);
+ assert.deepEqual(f.amazon.getDraft(f.draft.id).attributes,record.draft.attributes);assert.equal(f.amazon.getDraft(f.draft.id).listingProgram,'haul');
+ const before=db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,calls=f.ai.listCalls().length;
+ assert.throws(()=>f.listing.beginLegacyThemeRepair(f.draft.id,task.items[0],service.deps.images.getProgress(f.draft.id)),/theme 定向修复不能规范化其他字段/);
+ assert.equal(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,before);assert.equal(f.ai.listCalls().length,calls);assert.equal(f.previews(),0);assert.equal((f.progress() as any).repairAttempts,4);
+});
+
+for(const boundary of ['preview','adoption'] as const)for(const dirty of ['color','unsupported'] as const)test(`scoped ${boundary} rejects ${dirty} normalization without an attribute or event write`,async t=>{
+ const f=await automaticLegacy(t,true),service=f.ownerService() as any,task=[...service.tasks.values()][0] as any;
+ const op=f.listing.beginLegacyThemeRepair(f.draft.id,task.items[0],service.deps.images.getProgress(f.draft.id))!;assert.ok(op);
+ const db=(f.ai as any).db,record=JSON.parse(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json);
+ if(dirty==='color')record.draft.attributes.color=[{value:'Cherry Blossom Pink',marketplace_id:f.draft.marketplaceId}];
+ else record.draft.attributes.fulfillment_availability=[{fulfillment_channel_code:'DEFAULT',quantity:20}];
+ record.request.attributes=structuredClone(record.draft.attributes);db.prepare('UPDATE listing_drafts SET record_json=? WHERE id=?').run(JSON.stringify(record),f.draft.id);
+ const source=f.ai.listResults(f.product.id).find(result=>result.output.kind==='amazon-fields')!;
+ op.draftStamp=completionDraftStamp(record.draft);op.rounds=[{context:source.listingContext!,contextHash:source.sourceSha256!,candidate:{id:source.callId,sent:true,resultId:source.id},review:null,resolved:false,adoptionId:null}];f.ai.completionJournal.save(op);
+ const before=db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,events=JSON.stringify(db.prepare('SELECT * FROM audit_events').all()),calls=f.ai.listCalls().length;
+ if(boundary==='preview')await assert.rejects(f.amazon.previewDraft({id:f.draft.id,revision:record.draft.revision},op.id),/theme 定向修复不能规范化其他字段/);
+ else {
+   const after={...record.draft.attributes,theme:[{value:'Nature'}]},adoption:any={id:'d'.repeat(64),at:new Date().toISOString(),suggestionResultId:source.id,reviewResultId:null,contextSha256:source.sourceSha256,fromRevision:record.draft.revision,toRevision:record.draft.revision+1,fields:['theme'],changes:[{field:'theme',before:null,after:after.theme,evidence:[]}],reviewDisposition:'SKIPPED_DISABLED'};
+   assert.throws(()=>f.amazon.adoptFields({id:f.draft.id,revision:record.draft.revision},after,adoption,()=>{}),/theme 定向修复不能规范化其他字段/);
+ }
+ assert.equal(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json,before);assert.equal(JSON.stringify(db.prepare('SELECT * FROM audit_events').all()),events);assert.equal(f.ai.listCalls().length,calls);assert.equal(f.previews(),0);
 });

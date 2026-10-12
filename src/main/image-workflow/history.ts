@@ -1,3 +1,4 @@
+import { assertPartialSourceReuse } from './adaptation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -12,7 +13,7 @@ import { referenceMeasurementEvidence } from './image-facts.ts';
 import { assertApprovalReuseSource } from './approval-reuse.ts';
 
 /** Validate historical evidence, not current draft revisions: source edits and retention may follow adoption. */
-export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string,AiResult>, calls: Map<string,AiCall>): void {
+export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string,AiResult>, calls: Map<string,AiCall>, draftId?:string): void {
   const invalid=():never=>{throw new UserFacingError('自动图片流程的生成、OCR 或复核记录关联不完整');};
   const successful=(id:string):AiResult=>{
     const result=results.get(id),call=result&&calls.get(result.callId);
@@ -27,10 +28,11 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
     if(copy.output.kind!=='listing-current-review'||copy.output.verdict!=='PASS'||!copy.listingContext||listingFingerprint(copy.listingContext)!==listingFingerprint(context.listing)||listingFingerprint(copy.output.currentListingCopy)!==listingFingerprint(context.currentListingCopy))return invalid();
     assertCurrentListingReview({...copy.output,kind:'amazon-fields-review'},context.currentListingCopy,context.listing,{storedVersion:copy.listingEvidenceContractVersion??null});
   };
-  const runs=workflowRuns(db), byId=new Map(runs.map(run=>[run.id,run]));
+  const runs=workflowRuns(db,draftId), byId=new Map(runs.map(run=>[run.id,run]));
   for(const run of runs) {
     if(run.approvalReuse){assertApprovalReuseSource(run,byId.get(run.approvalReuse.sourceRunId));continue;}
     if(run.slots){
+      const source=run.sourceReuse?byId.get(run.sourceReuse.sourceRunId):undefined;if(run.sourceReuse)assertPartialSourceReuse(run,source,db);
       const prior=run.recheckedFromRunId?byId.get(run.recheckedFromRunId):undefined;
       if(run.recheckedFromRunId){
         const seen=new Set([run.id]);let cursor=prior;while(cursor){if(seen.has(cursor.id))invalid();seen.add(cursor.id);cursor=cursor.recheckedFromRunId?byId.get(cursor.recheckedFromRunId):undefined;}
@@ -43,26 +45,28 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
       }
       if(run.setPlanResultId){
         const set=successful(run.setPlanResultId);
-        if(set.output.kind!=='image-plan'||!set.imageContext||set.imageContext.slot||set.productId!==run.productId||set.productRevision!==run.productRevision||set.variantId!==run.variantId||listingFingerprint(set.output.setPlan)!==listingFingerprint(run.setPlan)||listingFingerprint(set.sourceResultIds)!==listingFingerprint(imageCopySourceIds(set.imageContext)))invalid();
+        if(set.output.kind!=='image-plan'||!set.imageContext||set.imageContext.slot||set.productId!==run.productId||set.productRevision!==(source??run).productRevision||set.variantId!==run.variantId||listingFingerprint(set.output.setPlan)!==listingFingerprint(run.setPlan)||listingFingerprint(set.sourceResultIds)!==listingFingerprint(imageCopySourceIds(set.imageContext)))invalid();
         if(prior){if(run.setPlanResultId!==prior.setPlanResultId||listingFingerprint(run.setPlan)!==listingFingerprint(prior.setPlan))invalid();}
         else {
-          if(listingFingerprint(set.imageContext)!==listingFingerprint(run.imageContext))invalid();
+          if(listingFingerprint(set.imageContext)!==listingFingerprint((source??run).imageContext))invalid();
           assertCopySource(set.imageContext!,run.copyReviewEnabled,set.listingEvidenceContractVersion);
         }
         if(set.output.kind==='image-plan')assertImagePlan(set.output,set.imageContext!,{storedVersion:set.listingEvidenceContractVersion??null});
         if(run.slots.some(slot=>slot.attempts.length)&&(set.output.kind!=='image-plan'||!set.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&set.output.ipRisk?.verdict!=='PASS'))invalid();
       }
       for(const slot of run.slots){
+        let historical=false;
         const owned=(id:string,kind:AiResult['output']['kind'])=>{
           const result=successful(id),context=result.imageContext;
-          if(result.output.kind!==kind||!context||context.policyVersion!==run.imagePolicyVersion||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||result.sourceSha256!==slot.contextSha256||listingFingerprint(context)!==slot.contextSha256||context.listing.draftId!==run.draftId||context.listing.sku!==run.sku||context.slot?.index!==slot.index||context.purpose!==slot.purpose||listingFingerprint(context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(run.referenceAssets))return invalid();
+          if(result.output.kind!==kind||!context||context.policyVersion!==run.imagePolicyVersion||result.productId!==run.productId||result.productRevision!==(historical?source!:run).productRevision||result.variantId!==run.variantId||result.sourceSha256!==(historical?source!.slots![slot.index-1].contextSha256:slot.contextSha256)||listingFingerprint(context)!==(historical?source!.slots![slot.index-1].contextSha256:slot.contextSha256)||context.listing.draftId!==run.draftId||context.listing.sku!==run.sku||context.slot?.index!==slot.index||context.purpose!==slot.purpose||listingFingerprint(context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(run.referenceAssets))return invalid();
           assertCopySource(context,run.copyReviewEnabled,result.listingEvidenceContractVersion);return result;
         };
         for(const [index,attempt] of slot.attempts.entries()){
+          historical=!!source&&index<run.sourceReuse!.slotAttempts[slot.index-1];
           const plan=attempt.planResultId?owned(attempt.planResultId,'image-plan'):undefined;
           if(plan){
             if(plan.output.kind!=='image-plan')invalid();else assertImagePlan(plan.output,plan.imageContext!,{storedVersion:plan.listingEvidenceContractVersion??null});
-            const previous=slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
+            const previous=source&&index===run.sourceReuse!.slotAttempts[slot.index-1]?undefined:slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
             if(listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
           }
           const ip=attempt.ipReviewResultId?owned(attempt.ipReviewResultId,'image-ip-review'):undefined;

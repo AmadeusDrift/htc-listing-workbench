@@ -82,5 +82,5 @@ export interface AutomaticListingApi {
   cancelAutomaticListingTask(id: string): Promise<AutomaticListingTask>;
 }
 
-export interface AutomaticAdaptationChange { key:string; productId:string; sku:string|null; kind:'SOURCE'|'RULES'|'SELECTED'|'NOT_SELECTED'|'NEW'|'DRAFT'|'PRESERVED'|'BLOCKED'; steps:string[]; fields:string[]; message:string }
+export interface AutomaticAdaptationChange { key:string; productId:string; sku:string|null; kind:'SOURCE'|'RULES'|'SELECTED'|'NOT_SELECTED'|'NEW'|'DRAFT'|'RISK_RECHECK'|'PRESERVED'|'BLOCKED'; steps:string[]; fields:string[]; message:string }
 export interface AutomaticAdaptationPreview { taskId:string; taskRevision:number; token:string; canApply:boolean; blockers:string[]; changes:AutomaticAdaptationChange[]; sources:import('./contracts.ts').ProductDetail[] }

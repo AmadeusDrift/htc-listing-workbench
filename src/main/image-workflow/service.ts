@@ -1,3 +1,5 @@
+import { assertImageWorkflowHistory } from './history.ts';
+import { currentImageAdaptation,partialSourceBlocker,partialRiskModeBlocker,workflowHash } from './adaptation.ts';
 import {missingWorkflowBudget} from './legacy-missing.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import {productReferenceImages} from './reference-purpose.ts';
@@ -204,6 +206,24 @@ export class ImageWorkflowService {
     this.db.exec('BEGIN IMMEDIATE');try{this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.unknown-retry-authorized',`${run.sku} 图片 ${index} ${recovered?'找回本地候选，不重新生成':'用户确认重新生成未知结果'}`,JSON.stringify({workflowId:run.id,slot:index,requestId,recoveredCandidateId:recovered?.id??null}),new Date().toISOString());this.db.exec('COMMIT');}catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     return structuredClone(run);
   }
+  private derivePartialSource(prior:ImageWorkflowRun,draft:AmazonDraft):ImageWorkflowRun{
+    if(hasSevenApprovedImages(prior))return prior;
+    const riskModeBlock=partialRiskModeBlocker(prior,this.getRiskSettings().enabled);if(riskModeBlock)throw new UserFacingError(riskModeBlock);
+    const product=this.store.getProduct(draft.productId);
+    if(!currentImageAdaptation(this.db,prior,draft,product))throw new UserFacingError('来源已变化，请先显式适配；已完成图位和原请求保持不变');
+    const blocked=partialSourceBlocker(prior);if(blocked)throw new UserFacingError(blocked);
+    if(this.getCopyReviewSettings().enabled)throw new UserFacingError('文案复核设置已变化，保留原图待对应内容复核');
+    const snapshot=currentImageListingSnapshot(draft,this.currentContext(draft,product,this.amazon.executionTargetScope(draft.targetId).generation));
+    const now=new Date().toISOString(),derivationRunId=randomUUID(),base=validateProductImageContext({...structuredClone(prior.imageContext!),listing:snapshot.context,currentListingCopy:snapshot.currentListingCopy,listingReviewResultId:null,copyReviewBypass:{policy:'copy-review-disabled/v1',at:now,contextSha256:listingFingerprint(snapshot.context),copySha256:listingFingerprint(snapshot.currentListingCopy)}});
+    const run:ImageWorkflowRun={...structuredClone(prior),id:derivationRunId,productRevision:product.revision,createdAt:now,updatedAt:now,status:'INTERRUPTED',error:prior.error,imageContext:base,contextSha256:listingFingerprint(base),draftSha256:imageWorkflowDraftStamp(draft),imageRecipeSha256:listingFingerprint(draft.salesPlan?.recipe??null),sourceReuse:{derivationRunId,sourceRunId:prior.id,sourceRunHash:workflowHash(prior),sourceProductRevision:prior.productRevision,sourceContext:structuredClone(prior.imageContext!),slotAttempts:prior.slots!.map(slot=>slot.attempts.length),slotContexts:prior.slots!.map(slot=>slot.contextSha256)}};
+    for(const slot of run.slots!)if(!slot.attempts.length)slot.contextSha256=null;
+    delete run.rejection;delete run.policyReevaluation;
+    this.db.exec('BEGIN IMMEDIATE');try{
+      if(workflowHash(this.getProgress(draft.id)!)!==workflowHash(prior)||!currentImageAdaptation(this.db,prior,this.amazon.getDraft(draft.id),this.store.getProduct(draft.productId)))throw new UserFacingError('图片派生期间来源或检查点发生变化');
+      this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),product.id,'image.workflow.partial-source-derived','成本变化后接续未完成图位；原上下文、已通过图片及尝试前缀保留',JSON.stringify({sourceRunId:prior.id,workflowId:run.id,sourceRunHash:workflowHash(prior),productRevision:product.revision,contextSha256:run.contextSha256}),now);this.db.exec('COMMIT');
+    }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
+    return run;
+  }
   getProgress(rawId: unknown): ImageWorkflowRun | null { this.ensureOpen(); return workflowRuns(this.db, uuid(rawId))[0] ?? null; }
   getProgressPresentation(rawId:unknown):ImageWorkflowProgress|null {
     const run=this.getProgress(rawId);if(!run)return null;
@@ -303,7 +323,7 @@ export class ImageWorkflowService {
     this.assertSourceConsistency(draftId);
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
-    const prior = this.getProgress(draftId);
+    let prior = this.getProgress(draftId);
     if(!prior&&options.legacyImageAttempts!==undefined)options={...options,maxImageAttempts:missingWorkflowBudget(this.db,this.directory,draft,options.legacyImageAttempts)};
     if(prior?.referenceAssets.length){
       const product=this.store.getProduct(draft.productId),allowUnbound=allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants=draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId];
@@ -311,7 +331,10 @@ export class ImageWorkflowService {
         if(!asset||!(allowUnbound&&!asset.variantIds.length||variants.some(id=>asset.variantIds.includes(id)&&this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(asset.id,id))))throw new AiError('SOURCE_CHANGED');
       }
     }
+    if(prior?.sourceReuse){const riskModeBlock=partialRiskModeBlocker(prior,this.getRiskSettings().enabled);if(riskModeBlock)throw new UserFacingError(riskModeBlock);}
+    if(prior&&(prior.sourceReuse||prior.productRevision!==draft.productRevision)){const results=this.ai.listResults(prior.productId);assertImageWorkflowHistory(this.db,new Map(results.map(result=>[result.id,result])),new Map(results.flatMap(result=>{const call=this.ai.getCall(result.callId);return call?[[call.id,call] as const]:[];})),draft.id);}
     this.assertApprovedRiskPolicy(prior);
+    if(prior&&prior.productRevision!==draft.productRevision)prior=this.derivePartialSource(prior,draft);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
     if(hasSevenApprovedImages(prior)&&draft.listingProgram==='haul'&&prior!.draftSha256!==imageWorkflowDraftStamp(draft)&&this.currentContextMatches(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
@@ -467,7 +490,7 @@ export class ImageWorkflowService {
     if(reusable&&latest.riskInterceptionEnabled===false&&this.getRiskSettings().enabled)throw new UserFacingError('这套未完成图片是在关闭风险拦截时开始的。请先关闭开关并完成该套图片，再开启并复核已有图片；历史记录和图片均已保留');
     const now=new Date().toISOString(),run:ImageWorkflowRun=reusable?structuredClone(latest):{...prior,id:randomUUID(),status:'RUNNING',stage:'content',attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,
       referenceAssets:[],planResultIds:[],candidateIds:[],ipReviewResultIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:null,recheckedFromRunId:prior.id};
-    if(prior.slots&&!reusable){run.slots=newSlots();delete run.imageContext;delete run.activeSlot;delete run.copyRepairAttempts;delete run.approvalReuse;delete run.contentPreparation;delete run.copyReviewResultId;delete run.categoryFieldRepair;run.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;}
+    if(prior.slots&&!reusable){run.slots=newSlots();delete run.imageContext;delete run.sourceReuse;delete run.activeSlot;delete run.copyRepairAttempts;delete run.approvalReuse;delete run.contentPreparation;delete run.copyReviewResultId;delete run.categoryFieldRepair;run.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;}
     if(prior.slots&&!this.getRiskSettings().enabled)run.riskInterceptionEnabled=false;else delete run.riskInterceptionEnabled;
     if(prior.slots&&!this.getCopyReviewSettings().enabled)run.copyReviewEnabled=false;else delete run.copyReviewEnabled;
     if(!reusable||!run.imageContext)run.listingEvidenceContractVersion=imageEvidenceVersion(this.currentContext(draft,this.store.getProduct(draft.productId),this.amazon.executionTargetScope(draft.targetId).generation));
@@ -654,7 +677,7 @@ export class ImageWorkflowService {
       if(riskEnabled&&run.slots!.some(slot=>slot.status==='BLOCKED'))throw new UserFacingError('此销售 SKU 的来源或生成图存在 IP 风险，保留已通过图片，不自动修改规避风险');
       for(const slot of run.slots!){
         if(slot.status==='PASSED')continue;run.activeSlot=slot.index;
-        const context=validateProductImageContext({...base,...(run.setPlan?{setPlan:run.setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}});slot.contextSha256=listingFingerprint(context);
+        const context=validateProductImageContext({...base,...(run.setPlan?{setPlan:run.setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}});if(!run.sourceReuse||slot.attempts.length!==run.sourceReuse.slotAttempts[slot.index-1]||!slot.attempts.length)slot.contextSha256=listingFingerprint(context);
         let attempt=slot.attempts.at(-1);
         if(!riskEnabled&&attempt?.state==='BLOCKED'){attempt.state=attempt.candidateId?'GENERATED':'READY';attempt.error=null;slot.status='PENDING';slot.error=null;this.save(run);}
         // An old detail-text rejection is no longer a reason to regenerate the same image.
@@ -668,13 +691,14 @@ export class ImageWorkflowService {
           throwIfAborted(signal);await fresh();
           if(!attempt||attempt.state==='RETRYABLE_FAILURE'&&!reviewOnly){
             if(slot.attempts.length>=run.maxAttempts){slot.status='FAILED';this.save(run);break;}
-            attempt={number:slot.attempts.length+1,requestId:randomUUID(),state:'PLANNING',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:null};slot.attempts.push(attempt);
+            attempt={number:slot.attempts.length+1,requestId:randomUUID(),state:'PLANNING',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:null};slot.attempts.push(attempt);slot.contextSha256=listingFingerprint(context);
           }
           slot.status='RUNNING';slot.error=null;this.save(run);
           if(!attempt.planResultId){
             stage('planning');const previous=slot.attempts.at(-2),prior=previous?.reviewResultId?this.ai.getResult(previous.reviewResultId):undefined;
             const issues=prior?.output.kind==='image-text-review'?this.repairIssues(prior.output,previous?.ocrResultId?this.ai.getResult(previous.ocrResultId):undefined,context):previous?.error?[previous.error]:undefined;
-            const repair=previous?.planResultId&&issues?.length?{previousPlanId:previous.planResultId,issues}:undefined;
+            const inheritedPrevious=!!run.sourceReuse&&slot.attempts.length-2<run.sourceReuse.slotAttempts[slot.index-1];
+            const repair=!inheritedPrevious&&previous?.planResultId&&issues?.length?{previousPlanId:previous.planResultId,issues}:undefined;
             const plan=await this.paid(run.draftId,()=>this.ai.imagePlan(context,fresh,repair,signal,run.id,()=>result.aiCalls++));
             if(plan.output.kind!=='image-plan')throw new AiError('OUTPUT_INVALID');assertImagePlan(plan.output,context);
             attempt.planResultId=plan.id;this.save(run);

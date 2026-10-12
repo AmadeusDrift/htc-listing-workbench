@@ -1392,3 +1392,60 @@ test('W2 finite-schema approved seven images survive proven cost-only adaptation
   const bad={...after,schema:{...after.schema,version:'different-semantic-version'}};assert.throws(()=>approvedWorkflowAssets(db,bad,current));
  }finally{db.close();}
 });
+
+for(const exhausted of [false,true])test('W2 partial cost adaptation preserves paid slots, rollback and restart; exhausted='+exhausted,async t=>{
+ const {inspectImageAdaptation,saveImageAdaptation}=await import('../src/main/image-workflow/adaptation.ts');
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);workflow.saveCopyReviewSettings({enabled:false});
+ (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ const save=(workflow as any).save.bind(workflow);let paused=false;
+ (workflow as any).save=(run:any)=>{save(run);if(!paused&&run.slots?.filter((s:any)=>s.status==='PASSED').length===2){paused=true;workflow.cancel(f.draft.id);}};
+ await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});(workflow as any).save=save;
+ let prior=workflow.getProgress(f.draft.id)!;assert.equal(prior.slots!.filter(s=>s.status==='PASSED').length,2);assert.equal(posts(),2);
+ const db=openDatabase(f.directory);try{
+  if(exhausted){const failed=structuredClone(prior),slot=failed.slots![2];slot.status='FAILED';slot.error='Historical planning request budget exhausted';slot.contextSha256=listingFingerprint(validateProductImageContext({...failed.imageContext!,setPlan:failed.setPlan,purpose:slot.purpose,slot:{index:3,total:7,provisional:true}}));slot.attempts=Array.from({length:3},(_,i)=>({number:i+1,requestId:randomUUID(),state:'RETRYABLE_FAILURE' as const,planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:'Historical definite failure'}));failed.attempt=5;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(failed),failed.id);prior=workflow.getProgress(f.draft.id)!;}
+  const before=f.amazon.getDraft(f.draft.id),input=saveInput(f.store.getProductSnapshot(f.product.id));input.variants[0].purchasePrice='2.5';f.store.saveProduct(input);await confirmSourceConsistencyFixture(f.directory,f.store,f.product.id);
+  const source=f.store.getProductSnapshot(f.product.id),preview=f.amazon.previewTaskAdaptation(before.id,source),check=inspectImageAdaptation(prior,before,preview,source,db);assert.equal(check.compatible,true,check.message);
+  const unknown=structuredClone(prior),waiting=unknown.slots![6];waiting.status='UNKNOWN';waiting.attempts=[{number:1,requestId:randomUUID(),state:'UNKNOWN',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:'Original request unresolved'}];const unknownBytes=JSON.stringify(unknown);assert.equal(inspectImageAdaptation(unknown,before,preview,source,db).compatible,false);assert.equal(JSON.stringify(unknown),unknownBytes,'unknown original request identity and budget untouched');
+  const frozen=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json),blueprints=f.requests.filter(r=>r.operation==='image-plan'&&r.payload.setPolicy&&!r.payload.slot).length;
+  db.exec('BEGIN IMMEDIATE');const after=f.amazon.applyTaskAdaptation(before.id,source,undefined,db);saveImageAdaptation(db,prior,before,after,source);db.exec('COMMIT');
+  const intactBeforeToggle=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json),runCount=Number(db.prepare('SELECT count(*) n FROM image_workflow_runs').get()!.n);
+  workflow.saveRiskSettings({enabled:false});await assert.rejects(async()=>workflow.complete({draftId:after.id,draftRevision:after.revision}),/风险开关/);assert.equal(workflow.getProgress(after.id)!.id,prior.id);assert.equal(Number(db.prepare('SELECT count(*) n FROM image_workflow_runs').get()!.n),runCount);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json),intactBeforeToggle);workflow.saveRiskSettings({enabled:true});
+  const checkpointSave=(workflow as any).save.bind(workflow);
+  (workflow as any).save=(run:any)=>{checkpointSave(run);if(run.sourceReuse)throw Error('derivation checkpoint failure');};
+  assert.throws(()=>workflow.complete({draftId:after.id,draftRevision:after.revision}),/derivation checkpoint failure/);assert.equal(workflow.getProgress(after.id)!.id,prior.id);assert.equal(posts(),2);
+  let interrupted=false;(workflow as any).save=(run:any)=>{checkpointSave(run);if(run.sourceReuse&&!interrupted&&run.slots.filter((slot:any)=>slot.status==='PASSED').length===3){interrupted=true;workflow.cancel(after.id);}};
+  const interruptedRun=await workflow.complete({draftId:after.id,draftRevision:after.revision});assert.equal(posts(),3);assert.equal(interruptedRun.workflow.slots!.filter(slot=>slot.status==='PASSED').length,3);
+  workflow.saveRiskSettings({enabled:false});const generation=(workflow as any).generation,listing=(workflow as any).listing;await workflow.close();
+  const reopened=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});f.cleanup(()=>reopened.close());
+  const stableDerivative=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(interruptedRun.workflow.id)!.record_json);await assert.rejects(async()=>reopened.complete({draftId:after.id,draftRevision:after.revision}),/风险开关/);assert.equal(reopened.getProgress(after.id)!.id,interruptedRun.workflow.id);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(interruptedRun.workflow.id)!.record_json),stableDerivative);reopened.saveRiskSettings({enabled:true});
+  const resumed=await reopened.complete({draftId:after.id,draftRevision:after.revision});assert.equal(resumed.workflow.id,interruptedRun.workflow.id);assert.equal(resumed.workflow.status,exhausted?'BLOCKED':'COMPLETED',resumed.workflow.error??'');assert.equal(posts(),exhausted?6:7);
+  assert.deepEqual(resumed.workflow.slots!.slice(0,2),prior.slots!.slice(0,2));assert.equal(resumed.workflow.attempt,exhausted?9:7);assert.equal(resumed.workflow.maxAttempts,prior.maxAttempts);assert.notEqual(resumed.workflow.id,prior.id);
+  assert.equal(f.requests.filter(r=>r.operation==='image-plan'&&r.payload.setPolicy&&!r.payload.slot).length,blueprints);assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(prior.id)!.record_json),frozen);
+  for(const slot of resumed.workflow.slots!.slice(2)){if(exhausted&&slot.index===3){assert.deepEqual(slot.attempts,prior.slots![2].attempts);continue;}const plan=f.ai.getResult(slot.attempts[0].planResultId!)!;assert.equal(plan.productRevision,source.revision);const local=await generation.readCandidate(slot.attempts.at(-1)!.candidateId!);assert.equal(local.candidate.productRevision,source.revision);}
+  if(exhausted)assert.throws(()=>approvedWorkflowAssets(db,resumed.draft,f.store.getProductSnapshot(source.id)));else assert.equal(approvedWorkflowAssets(db,resumed.draft,f.store.getProductSnapshot(source.id))?.length,7);
+  assertImageWorkflowHistory(db,new Map(f.ai.listResults(source.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c])));
+  const stored=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(resumed.workflow.id)!.record_json),forged=JSON.parse(stored);forged.sourceReuse.slotAttempts[0]=0;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(forged),resumed.workflow.id);assert.throws(()=>workflowRuns(db,after.id));db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(stored,resumed.workflow.id);
+ }finally{db.close();}
+});
+
+
+test('W2 risk threshold adaptation rechecks the exact blocked candidate without regenerating it',async t=>{
+ const {AutomaticListingService}=await import('../src/main/automatic-listing/service.ts'),{defaultListingRules}=await import('../src/shared/listing-rules.ts'),{outcomeScope}=await import('../src/main/automatic-listing/outcomes.ts');
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);workflow.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'medium'});
+ (workflow as any).listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='ImageModeration'?new Response(JSON.stringify({Code:200,RequestId:'moderation-fixture',Data:{DataId:payload.dataId,RiskLevel:'medium',Result:[{Label:'cartoon_ip',Description:'Fixture IP score',Confidence:50}]}})):undefined);
+ const profile={id:'alpha',name:'Alpha',enabled:true,configured:true,generation:1};
+ const automatic=new AutomaticListingService(f.directory,{store:f.store,amazon:f.amazon,images:workflow,rules:()=>defaultListingRules(),hosting:{getProfile:()=>profile},execution:{list:()=>[],create:()=>{throw Error('Fixture stopped before platform execution');}},followup:{},procurement:{candidates:()=>[]},labels:{list:()=>[]}} as any);f.cleanup(()=>automatic.close());
+ const task=await automatic.create({productIds:[f.product.id],targetId:f.draft.targetId,profileId:'alpha',productType:f.draft.schema.productType});
+ const blocked=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(blocked.workflow.status,'BLOCKED',blocked.workflow.error??'');assert.equal(posts(),1);
+ const evidence=await workflow.getRuleFilterEvidence(f.draft.id);assert.ok(evidence,'original typed blocked proof');
+ const saved=(automatic as any).tasks.get(task.id),row=saved.items[0];Object.assign(row,{draftId:f.draft.id,sourcesPrepared:true,imageStarted:true,imageAttempts:blocked.workflow.attempt,stage:'IMAGES',status:'SCREENED'});row.outcome={version:1,kind:'RULE_FILTERED',code:'IP_IMAGE_BLOCKED',message:evidence.message,classifiedAt:new Date().toISOString(),scope:outcomeScope(saved,row),draftId:f.draft.id,draftRevision:f.draft.revision,image:evidence};(automatic as any).save(saved);
+ workflow.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});
+ const preview=automatic.previewAdaptation(task.id);assert.ok(preview.changes.some(c=>c.kind==='RISK_RECHECK'),JSON.stringify(preview.changes));const beforeCalls=f.requests.length;
+ const riskDb=openDatabase(f.directory);try{const raw=String(riskDb.prepare('SELECT record_json FROM ai_results WHERE id=?').get(evidence.resultId)!.record_json);
+  for(const mutation of ['missing-score','wrong-candidate','wrong-context']){const bad=JSON.parse(raw);if(mutation==='missing-score')bad.output.labels[0].confidence=null;if(mutation==='wrong-candidate')bad.output.candidate.id=randomUUID();if(mutation==='wrong-context')bad.sourceSha256='f'.repeat(64);riskDb.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(bad),evidence.resultId);assert.equal(automatic.previewAdaptation(task.id).changes.some(c=>c.kind==='RISK_RECHECK'),false,mutation);riskDb.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(raw,evidence.resultId);}
+ }finally{riskDb.close();}
+ const applied=automatic.applyAdaptation({taskId:task.id,token:preview.token});assert.equal(applied.status,'PAUSED');assert.equal(applied.items[0].status,'PENDING');assert.equal(posts(),1);assert.equal(f.requests.length,beforeCalls);
+ const candidate=blocked.workflow.slots![0].attempts[0].candidateId,oldIp=f.ai.getResult(evidence.resultId)!;
+ automatic.startAuthorized(automatic.prepareStart(task.id));await automatic.waitForIdle();const completed=workflow.getProgress(f.draft.id)!;assert.equal(completed.status,'COMPLETED',automatic.get(task.id).items[0].error??completed.error??'');assert.equal(posts(),7);assert.equal(completed.slots![0].attempts[0].candidateId,candidate);assert.deepEqual(f.ai.getResult(evidence.resultId),oldIp);assert.equal(row.outcome.kind,'RULE_FILTERED','original exclusion object retained for audit');
+});

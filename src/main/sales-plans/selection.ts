@@ -1,3 +1,4 @@
+import {supplierInstructionOption} from './source-meaning.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import { analyzeMiaoshouMeasurements } from '../../shared/miaoshou-measurements.ts';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
@@ -12,7 +13,7 @@ export function informationalVariant(variant: Variant): boolean {
       return {name:colon<0?'':axis.slice(0,colon).trim(),value:(colon<0?axis:axis.slice(colon+1)).trim().replace(/[~～!！。\s]+$/u,'')};
     });
     const note=(name:string)=>/^(?:备注|说明|note|remarks?)$/iu.test(name);
-    const option=(value:string)=>/^(?:春夏秋冬\s*[-—·]?\s*)?可备注颜色$/u.test(value)||/^(?:更低价格|低价|优惠价格)?请咨询客服$/u.test(value);
+    const option=(value:string)=>supplierInstructionOption(value)||/^(?:春夏秋冬\s*[-—·]?\s*)?可备注颜色$/u.test(value)||/^(?:更低价格|低价|优惠价格)?请咨询客服$/u.test(value);
     const hasConfiguration=axes.some(axis=>!note(axis.name)&&!!axis.value&&!option(axis.value));
     return axes.some(axis=>{
       if(!option(axis.value))return false;

@@ -14,6 +14,7 @@ export interface SourceConsistencyOutput {
   version?:typeof SOURCE_OBSERVATION_VERSION;
   assets:{assetId:string;quality:'clear'|'low-detail';visibility:'complete'|'occluded';lighting:'neutral'|'uncertain';presentation:'single-product'|'alternatives'|'unknown';colors:string[];appearance:string[];
     claims:{claimId:string;value:string|null;visibility:'visible'|'unknown'}[];
+    contentPurpose?:'product'|'instructions-only'|'unknown';
     observations?:{name:string;values:string[];visibility:'visible'|'unknown'}[]}[];
 }
 export interface SourceConsistencyConclusion { decision:'MATCH'|'MISMATCH'|'UNCERTAIN'; reasons:string[] }

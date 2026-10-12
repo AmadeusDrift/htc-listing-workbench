@@ -8,7 +8,7 @@ import type { SourceConsistencyContext } from '../../shared/source-image-consist
 import { validateConsistencyContext,resolveConsistencyContext,consistencyScopeKey } from '../source-image-consistency/scope.ts';
 import { reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
-import { readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
+import { assertConsistencyView,readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
@@ -513,6 +513,7 @@ export class AiService {
   decideSourceConsistency(raw:unknown){return saveConsistencyDecision(this.db,this.store,this.directory,raw);}
   async prepareSourceConsistency(raw:unknown,signal?:AbortSignal,assertFresh:()=>void=()=>{}){
     const view=this.getSourceConsistency(raw);
+    if(view.reasons.includes('EXPLICIT_RANDOM_FULFILLMENT'))assertConsistencyView(view);
     if(!['MATCH','MANUAL'].includes(view.status))await this.observeSourceConsistency(view.context,assertFresh,signal);
     assertFresh();return this.getSourceConsistency(raw);
   }

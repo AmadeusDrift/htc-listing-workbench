@@ -380,7 +380,7 @@ test('reenabling risk never rewrites the provenance of an interrupted disabled w
 
 test('unknown generation automatically retries missing step with three durable attempts',async t=>{
   const options={generationError:true},f=await fixture(t,options),first=await f.run(),attempt=first.workflow.slots![0].attempts[0];
-  assert.ok(attempt,first.workflow.error??JSON.stringify(first));assert.equal(attempt.state,'UNKNOWN');await f.run();await f.run();await f.run();
+  assert.ok(attempt,first.workflow.error??JSON.stringify(first));assert.equal(attempt.state,'UNKNOWN');assert.match(attempt.error!,/RESULT_UNKNOWN/);await f.run();await f.run();await f.run();
   const stopped=f.service.getProgress(f.draft.id)!;
   assert.equal(f.calls.filter(c=>c==='generate').length,3);assert.equal(stopped.slots![0].attempts.length,3);
   assert.equal(stopped.slots![0].attempts[0].requestId,attempt.requestId);
@@ -725,7 +725,7 @@ test('a paid 502 response checks recovery before a bounded retry after restart',
 test('a proven unsent generation failure preserves its ready attempt and resumes with the same request identity',async t=>{
   const f=await fixture(t),generate=f.generation.generateForWorkflow;let stop=true;
   f.generation.generateForWorkflow=async(...args)=>{if(stop){stop=false;throw Object.assign(new AiError('BUSY'),{notSent:true});}return generate(...args);};
-  const first=await f.run(),attempt=first.workflow.slots![0].attempts[0];assert.equal(attempt.state,'READY');assert.equal(first.workflow.slots![0].status,'FAILED');assert.equal(f.calls.filter(call=>call==='generate').length,0);
+  const first=await f.run(),attempt=first.workflow.slots![0].attempts[0];assert.equal(attempt.state,'READY');assert.match(attempt.error!,/NOT_SENT/);assert.equal(first.workflow.slots![0].status,'FAILED');assert.equal(f.calls.filter(call=>call==='generate').length,0);
   await f.service.close();const restarted=f.reopen();
   try{const resumed=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(resumed.workflow.id,first.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED');assert.equal(resumed.workflow.slots![0].attempts.length,1);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,attempt.requestId);assert.equal(f.calls.filter(call=>call==='generate').length,7);}finally{await restarted.close();}
 });

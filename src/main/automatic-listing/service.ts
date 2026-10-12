@@ -29,6 +29,7 @@ import { openDatabase } from '../database.ts';
 import { identifier, record, text } from '../../shared/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { publicError } from '../security.ts';
+import { recordErrorEvidence } from '../error-evidence.ts';
 import { fingerprint } from '../execution/records.ts';
 import { sourceStamp, validateAutomaticListingTask } from './records.ts';
 import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
@@ -533,8 +534,9 @@ export class AutomaticListingService {
             if (task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)) continue;
             try { await this.prepareItem(task, row); }
             catch (error) {
+              recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
-              row.status = 'FAILED'; row.error = errorMessage(error);
+              row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
               const classified=structuredClone(row);await this.classifyFailure(task,classified);
               if(!this.running(task))break;
               Object.assign(row,classified);this.save(task);
@@ -959,7 +961,8 @@ export class AutomaticListingService {
             else if (relevant.some(label => label.status === 'FAILED')) throw new UserFacingError(relevant.find(label => label.status === 'FAILED')?.message || '商品标签获取失败');
             else { row.status = 'WAITING'; row.error = null; }
           } catch (error) {
-            row.status = 'FAILED'; row.error = errorMessage(error);
+            recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+            row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
             const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
             if(!canObserve()||task.revision!==revision){interrupted=true;break;}
             Object.assign(row,classified);

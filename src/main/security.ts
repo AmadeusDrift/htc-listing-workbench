@@ -29,5 +29,5 @@ export function publicError(error: unknown): string {
   if (['EACCES', 'EPERM'].includes(code)) return '没有访问所选文件或数据目录的权限，请选择可访问的位置';
   if (code === 'ENOENT') return '所选文件已移动或不存在，请重新选择';
   if (code === 'ENOSPC') return '磁盘空间不足，本次操作未完成';
-  return '本地操作未完成，请检查文件格式、磁盘空间后重试';
+  return '本地操作未完成，具体原因尚未确定，请核对失败阶段与诊断记录';
 }

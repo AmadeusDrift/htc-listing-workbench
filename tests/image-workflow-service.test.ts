@@ -1195,3 +1195,31 @@ test('W11 completed legacy single-image risk is checked before complete or reche
  }
  Object.assign(ip,original);
 });
+
+for(const change of ['display','enum','required','description','meta','version'] as const)test(`image workflow schema ${change} compatibility preserves frozen evidence`,async t=>{
+  const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id);
+  (r.draft.schema.schema.properties as JsonObject).item_type_keyword={type:'array',items:{type:'object',properties:{value:{anyOf:[{type:'string'},{type:'string',enum:['barbecue-skewers'],enumNames:['Patio > Barbecue Skewers']}]}}}};
+  p.putRecord(r);
+  const frozen=f.amazon.getDraft(f.draft.id),schema=structuredClone(frozen.schema),value=(schema.schema.properties as any).item_type_keyword.items.properties.value.anyOf[1];
+  schema.checksum='changed-checksum';
+  if(change==='display')value.enumNames=['Home & Kitchen > Barbecue Skewers'];
+  if(change==='enum')value.enum=['different'];
+  if(change==='required')schema.schema.required=['item_type_keyword'];
+  if(change==='description')value.description='Changed guidance';
+  if(change==='meta')schema.metaSchema.description='Changed meta-schema';
+  if(change==='version')schema.version='changed-version';
+  f.amazon.getSchema=async()=>schema;
+  const result=await f.run();
+  if(change==='display'){
+    assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');
+    assert.equal(f.calls.filter(call=>call==='generate').length,7);
+    assert.deepEqual(result.workflow.imageContext!.listing.fullSchema,{schema:frozen.schema.schema,metaSchema:frozen.schema.metaSchema});
+    assert.equal(result.workflow.imageContext!.listing.schemaChecksum,frozen.schema.checksum);
+    assert.equal(result.workflow.contextSha256,listingFingerprint(result.workflow.imageContext));
+  }else{
+    assert.equal(result.workflow.status,'BLOCKED');
+    assert.match(result.workflow.error!,/Amazon 字段规则已更新/);
+    assert.ok(!f.calls.includes('generate'));assert.ok(!f.calls.includes('set-plan'));
+  }
+  assert.deepEqual(f.amazon.getDraft(f.draft.id).schema,frozen.schema);
+});

@@ -458,7 +458,11 @@ export class AutomaticListingService {
     transaction(this.db,()=>{for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);});
     this.tasks.set(task.id, task); return structuredClone(task);
   }
-  batchSummary(id:string){const task=this.task(id);return {mode:task.executionMode??'immediate' as const,plan:task.batchPlan??null,batches:this.deps.batch?.batches(task.id)??[]};}
+  batchSummary(id:string){
+    const task=this.task(id),batches=this.deps.batch?.batches(task.id)??[];
+    const details=batches.map(batch=>{const summary=this.deps.batch!.summary(batch.id);return {...summary,items:summary.items.map(({productId,draftId,variantId,...item})=>({...item,skus:task.items.filter(row=>row.productId===productId&&(draftId?row.draftId===draftId:variantId?row.variantId===variantId:row.batchWait?.operationId===item.operationId)).map(row=>row.sku)}))};});
+    return {mode:task.executionMode??'immediate' as const,plan:task.batchPlan??null,batches,details};
+  }
   setExecutionMode(raw:unknown):AutomaticListingTask{
     const value=record(raw,'任务执行模式',['taskId','mode']),task=this.task(identifier(value.taskId));
     if(!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)||!['immediate','deferred_batch'].includes(String(value.mode)))throw new UserFacingError('请先暂停任务后选择有效执行模式');

@@ -1,0 +1,4 @@
+PASS Cancelled import keeps unsaved credential text and selected vendor
+PASS Invalid import does not navigate, clear unsaved values or mutate providers
+PASS Successful cross-vendor import navigates after the global operation lock is released
+PASS Ordinary cross-vendor navigation still uses the unsaved-form guard

@@ -2,3 +2,5 @@
 .ai-purpose-copy .small-copy { grid-column: 1 / -1; margin: 0; }
 .ai-purpose-copy select { width: 100%; min-width: 0; }
 @media (max-width: 820px) { .ai-purpose-copy { grid-template-columns: minmax(0, 1fr); } .ai-purpose-copy > button { justify-self: start; } }
+/* Keep the selected model readable beside effort and upgrade at 125% scaling. */
+.ai-function-row[data-ai-purpose] .ai-function-controls > .field:first-child { flex: 2 1 250px; min-width: min(100%, 250px); }

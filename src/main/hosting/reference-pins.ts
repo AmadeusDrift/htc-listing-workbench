@@ -43,7 +43,7 @@ export class ReferencePinService{
  private now(){return this.deps.now?.()??new Date();}
  list(){return this.db.prepare('SELECT id,record_json FROM image_reference_pins').all().map(r=>{const p=validateReferencePin(JSON.parse(String(r.record_json)));if(p.id!==r.id)fail();return p;});}
  get(id:string){const p=this.list().find(p=>p.id===uuid(id));return p??fail();}
- private save(raw:ReferencePin){const p=validateReferencePin(raw),row=this.db.prepare('SELECT record_json FROM image_reference_pins WHERE id=?').get(p.id);if(row){const previous=validateReferencePin(JSON.parse(String(row.record_json)));if(Date.parse(previous.retainedUntil)>Date.parse(p.retainedUntil))p.retainedUntil=previous.retainedUntil;}this.db.prepare('INSERT INTO image_reference_pins(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(p.id,JSON.stringify(p));return p;}
+ private save(raw:ReferencePin){const p=validateReferencePin(raw),row=this.db.prepare('SELECT record_json FROM image_reference_pins WHERE id=?').get(p.id);if(row){const previous=validateReferencePin(JSON.parse(String(row.record_json)));if(Date.parse(previous.retainedUntil)>Date.parse(p.retainedUntil))p.retainedUntil=previous.retainedUntil;p.releasedAt=previous.releasedAt??p.releasedAt;}this.db.prepare('INSERT INTO image_reference_pins(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(p.id,JSON.stringify(p));return p;}
  reference(id:string):BatchReference{const p=this.get(id);if(p.state!=='READY'||!p.url)fail();return{pinId:p.id,assetId:p.assetId,sha256:p.sha256,url:p.url!,retainedUntil:p.retainedUntil};}
  validateReference(ref:BatchReference):boolean{try{const p=this.get(ref.pinId);return p.state==='READY'&&p.releasedAt===null&&p.assetId===ref.assetId&&p.sha256===ref.sha256&&p.url===ref.url&&Date.parse(p.retainedUntil)>=Date.parse(ref.retainedUntil)&&Date.parse(ref.retainedUntil)>=this.now().getTime()+48*3600_000;}catch{return false;}}
  protects(assetId:string,hash?:string){return this.list().some(p=>p.assetId===assetId&&(!hash||p.sha256===hash)&&referencePinProtects(p,this.now()));}
@@ -65,7 +65,7 @@ export class ReferencePinService{
  // Renew the same version's promise before upload/probe; never reset identity, creation time or attempts.
  const retainedUntil=new Date(Math.max(Date.parse(p.retainedUntil),this.now().getTime()+REFERENCE_RETENTION_MS)).toISOString();
  if(retainedUntil!==p.retainedUntil)p=this.save({...p,retainedUntil});
- if(p.state==='READY'){await this.deps.probe({url:p.url!,sha256:p.sha256,byteSize:p.byteSize,mimeType:p.mimeType},signal);return p;}
+ if(p.state==='READY'){await this.deps.probe({url:p.url!,sha256:p.sha256,byteSize:p.byteSize,mimeType:p.mimeType},signal);return this.get(p.id);}
  p=this.save({...p,state:'PENDING',attempts:p.attempts+1});
  try{const url=await this.deps.uploadVersion(version,bytes,signal);signal.throwIfAborted();const ready=validateReferencePin({...p,state:'READY',url});await this.deps.probe({url,sha256:p.sha256,byteSize:p.byteSize,mimeType:p.mimeType},signal);signal.throwIfAborted();return this.save(ready);}catch(error){this.save({...p,state:'FAILED',url:null});throw error;}
  }

@@ -1680,3 +1680,16 @@ for(const mode of ['pass','mismatch-once','uncertain'] as const)test(`W07 seven 
  if(mode==='pass'){const db=openDatabase(f.directory);try{assertImageWorkflowHistory(db,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c])));}finally{db.close();}await createWorkspaceBackup(f.directory,join(f.directory,'appearance.htcbackup'),'synthetic appearance history backup');}
  const before=reviews;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(reviews,before);
 });
+
+test('W07 default OpenRouter Luna to Sol appearance escalation uses real service validation and preserves all seven slots',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);
+ f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-openrouter-review-key'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ const configured=f.ai.getPurposeProfiles();assert.equal(configured.find(p=>p.purposeId==='appearance_review')!.model,'openai/gpt-6-luna');assert.equal(configured.find(p=>p.purposeId==='appearance_review_difficult')!.model,'openai/gpt-6.1-sol');
+ workflow.saveAppearanceReviewSettings({enabled:true});
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-appearance-review'?appearanceReply(payload,payload.previousReview?'PASS':'UNCERTAIN'):undefined);
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),7);
+ const requests=f.requests.filter(r=>r.operation==='image-appearance-review');assert.equal(requests.length,14);
+ for(const [index,request] of requests.entries()){assert.equal(request.body.model,index%2===0?'openai/gpt-6-luna':'openai/gpt-6.1-sol');assert.equal(request.body.messages[1].content.length,3);}
+ for(const slot of result.workflow.slots!){assert.equal(slot.attempts.length,1);const ids=slot.attempts[0].appearanceReview!.resultIds;assert.equal(ids.length,2);for(const [index,id] of ids.entries()){const review=f.ai.getResult(id)!;assert.equal(review.providerId,'openrouter-review');assert.deepEqual(validateAiResult(review),review);assert.equal(review.output.kind,'image-appearance-review');if(review.output.kind==='image-appearance-review'){assert.equal(review.output.verdict,index===0?'UNCERTAIN':'PASS');assert.equal(review.output.previousResultId,index===0?null:ids[0]);}assert.ok(f.ai.getCall(review.callId)!.providerReceiptId);}}
+ const before=requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(f.requests.filter(r=>r.operation==='image-appearance-review').length,before);
+});

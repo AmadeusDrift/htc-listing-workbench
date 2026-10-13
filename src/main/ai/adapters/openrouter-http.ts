@@ -24,7 +24,9 @@ export function safeResponse(text:string,key:string):boolean{
 /** One POST only. Capture the received response before domain parsing, including late responses. */
 export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<string,unknown>,credentials:{apiKey:string},signal:AbortSignal,context:AdapterContext):Promise<any>{
   if(!['/api/v1/chat/completions','/api/alpha/decisions','/api/v1/images','/api/v1/batches'].includes(endpoint)||typeof credentials.apiKey!=='string'||!/^[\x21-\x7e]{8,4096}$/.test(credentials.apiKey))throw new AiError('INVALID_CONFIG');
-  throwIfAborted(signal);const serialized=JSON.stringify(body);context.beforeSend?.(serialized);
+  throwIfAborted(signal);
+  if(context.deferOpenRouter){const deferred=await context.deferOpenRouter(endpoint,body);if(deferred){context.onMetadata?.(openRouterMetadata(deferred.body));return deferred.body;}}
+  const serialized=JSON.stringify(body);context.beforeSend?.(serialized);
   let response:Response;
   try{response=await context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal});}
   catch{throwIfAborted(signal);throw new AiError('NETWORK_ERROR');}

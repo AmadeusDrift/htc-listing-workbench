@@ -24,7 +24,8 @@ function exact(raw:unknown,fields:string[]):Record<string,any>{
 }
 const operationFields=['taskId','operationId','attempt','phase','inputFingerprint','schemaFingerprint','credentialScope','owner','purpose','body','references'];
 export function validateOperation(raw:unknown):BatchOperation{
-  const r=exact(raw,operationFields);
+  const r=exact(raw,[...operationFields,...(raw!==null&&typeof raw==='object'&&Object.hasOwn(raw,'aiCallId')?['aiCallId']:[])]);
+  if(r.aiCallId!==undefined&&!uuid(r.aiCallId))invalid();
   if(!uuid(r.taskId)||!uuid(r.operationId)||!Number.isSafeInteger(r.attempt)||r.attempt<1||r.attempt>1000||typeof r.phase!=='string'||!/^[-a-z_]{1,80}$/.test(r.phase)||![r.inputFingerprint,r.schemaFingerprint,r.credentialScope].every(sha)||!r.body||typeof r.body!=='object'||Array.isArray(r.body)||!Array.isArray(r.references)||r.references.length>16)invalid();
   validatePurposeSnapshot(r.purpose);
   exact(r.owner,['productId','productRevision','providerId','generation']);if(!uuid(r.owner.productId)||!Number.isSafeInteger(r.owner.productRevision)||r.owner.productRevision<1||!Number.isSafeInteger(r.owner.generation)||r.owner.generation<1||!['openrouter','openrouter-review'].includes(r.owner.providerId))invalid();
@@ -41,8 +42,8 @@ export function validateBatch(raw:unknown):BatchRecord{
   return structuredClone(r) as BatchRecord;
 }
 export function validateItem(raw:unknown):BatchItem{
-  const r=exact(raw,[...operationFields,'version','id','batchId','customId','state','receiptId','resultFingerprint','reportedCostUsd','adoption']);
-  validateOperation(Object.fromEntries(operationFields.map(k=>[k,r[k]])));
+  const r=exact(raw,[...operationFields,...(raw!==null&&typeof raw==='object'&&Object.hasOwn(raw,'aiCallId')?['aiCallId']:[]),'version','id','batchId','customId','state','receiptId','resultFingerprint','reportedCostUsd','adoption']);
+  validateOperation({...Object.fromEntries(operationFields.map(k=>[k,r[k]])),...(r.aiCallId?{aiCallId:r.aiCallId}:{})});
   if(r.version!==1||!uuid(r.id)||!uuid(r.batchId)||r.customId!==r.id||!['prepared','waiting','received','failed','missing'].includes(r.state)||r.receiptId!==null&&!sha(r.receiptId)||r.resultFingerprint!==null&&!sha(r.resultFingerprint)||!cost(r.reportedCostUsd))invalid();
   if(r.adoption!==null){exact(r.adoption,['id','at']);if(r.state!=='received'||typeof r.adoption.id!=='string'||!r.adoption.id.length||r.adoption.id.length>200||!timestamp(r.adoption.at))invalid();}
   if(['received','failed'].includes(r.state)&&(!r.receiptId||!r.resultFingerprint))invalid();
@@ -65,8 +66,8 @@ export function assertBatchHistory(db:DatabaseSync){
     const operations:BatchOperation[]=[];
     for(const id of batch.itemIds){
       const item=readItem(db,id);if(seen.has(id)||item.batchId!==batch.id||item.taskId!==batch.taskId||item.phase!==batch.phase||item.purpose.model!==batch.model||item.credentialScope!==batch.credentialScope||item.schemaFingerprint!==batch.schemaFingerprint||listingFingerprint(item.purpose)!==listingFingerprint(batch.purpose))invalid();seen.add(id);
-      operations.push(Object.fromEntries(operationFields.map(k=>[k,(item as any)[k]])) as unknown as BatchOperation);
-      if(batch.submittedAt){const row=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(id);if(!row)return invalid('Batch预算账本缺失');const ledger=validateAiUsageRecord(JSON.parse(String(row.record_json)));if(ledger.id!==id||ledger.providerId!==item.owner.providerId)invalid('Batch预算归属不一致');}
+      operations.push({...Object.fromEntries(operationFields.map(k=>[k,(item as any)[k]])),...(item.aiCallId?{aiCallId:item.aiCallId}:{})} as unknown as BatchOperation);
+      if(batch.submittedAt){const row=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(item.aiCallId??id);if(!row)return invalid('Batch预算账本缺失');const ledger=validateAiUsageRecord(JSON.parse(String(row.record_json)));if(ledger.id!==(item.aiCallId??id)||ledger.providerId!==item.owner.providerId)invalid('Batch预算归属不一致');}
       if(item.receiptId){const row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(item.receiptId);if(!row||JSON.parse(String(row.record_json)).callId!==id)invalid('Batch逐项收据归属缺失');}
     }
     if(listingFingerprint(operations)!==batch.fingerprint)invalid('Batch请求指纹不一致');

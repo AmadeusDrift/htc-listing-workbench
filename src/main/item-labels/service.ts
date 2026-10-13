@@ -27,7 +27,7 @@ export class ItemLabelService {
   private put(row:ItemLabelRecord){row.updatedAt=this.at();const valid=validateItemLabelRecord(row);this.db.prepare('INSERT INTO item_labels(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(row.id,JSON.stringify(valid));if(row.current)this.procurement.setLabelStatus(row.batchId,row.lineId,row.status);}
   list(input:{batchId?:string;jobId?:string}={}):ItemLabelRecord[]{const batchId=input.batchId===undefined?null:identifier(input.batchId),jobId=input.jobId===undefined?null:identifier(input.jobId);return this.db.prepare('SELECT id,record_json FROM item_labels ORDER BY rowid').all().map(row=>{const parsed=validateItemLabelRecord(JSON.parse(String(row.record_json)));if(parsed.id!==row.id)throw new UserFacingError('标签记录身份不一致');return parsed;}).filter(row=>(!batchId||row.batchId===batchId)&&(!jobId||row.jobId===jobId));}
   get(rawId:string):ItemLabelRecord{const id=identifier(rawId),row=this.db.prepare('SELECT record_json FROM item_labels WHERE id=?').get(id);if(!row)throw new UserFacingError('商品标签记录不存在');const parsed=validateItemLabelRecord(JSON.parse(String(row.record_json)));if(parsed.id!==id)throw new UserFacingError('标签记录身份不一致');return parsed;}
-  private base(batch:ProcurementBatch,line:ProcurementLine,jobId:string|null,format:ItemLabelFormat){let generation=0;try{generation=this.amazon.executionTargetScope(line.targetId).generation;}catch{/* Missing target is persisted as a context failure. */}return {jobId,batchId:batch.id,lineId:line.id,draftId:line.draftId,productId:line.productId,variantId:line.variantId,targetId:line.targetId,sellerId:line.sellerId,marketplaceId:line.marketplaceId,sku:line.sku,mode:batch.mode,targetGeneration:generation,quantity:line.stockQuantity,format};}
+  private base(batch:ProcurementBatch,line:ProcurementLine,jobId:string|null,format:ItemLabelFormat){let generation=0;try{generation=this.amazon.executionTargetScope(line.targetId).generation;}catch{/* Missing target is persisted as a context failure. */}return {jobId,batchRevision:batch.revision,batchId:batch.id,lineId:line.id,draftId:line.draftId,productId:line.productId,variantId:line.variantId,targetId:line.targetId,sellerId:line.sellerId,marketplaceId:line.marketplaceId,sku:line.sku,mode:batch.mode,targetGeneration:generation,quantity:line.stockQuantity,format};}
   private targetMatches(row:Pick<ItemLabelRecord,'targetId'|'sellerId'|'marketplaceId'|'mode'|'targetGeneration'>):boolean{try{const scope=this.amazon.executionTargetScope(row.targetId);return scope.target.sellerId===row.sellerId&&scope.target.marketplaceId===row.marketplaceId&&scope.target.mode===row.mode&&scope.generation===row.targetGeneration;}catch{return false;}}
   syncBatch(batchId:string,options:{jobId?:string;format?:ItemLabelFormat}={}):ItemLabelRecord[]{
     const batch=this.procurement.get(batchId),prior=this.list({batchId:batch.id}),eligible=new Map(this.procurement.candidates().map(row=>[row.draftId,row]));const result:ItemLabelRecord[]=[];
@@ -35,16 +35,28 @@ export class ItemLabelService {
       const previous=prior.findLast(row=>row.lineId===line.id&&row.current)??prior.findLast(row=>row.lineId===line.id),jobId=options.jobId?identifier(options.jobId):previous?.jobId??batch.automaticJobId??null,format=validateItemLabelFormat(options.format??previous?.format??DEFAULT_ITEM_LABEL_FORMAT);
       const base=this.base(batch,line,jobId,format),fingerprint=itemLabelFingerprint(base),contextMatches=this.targetMatches(base);
       if(previous?.current&&previous.fingerprint===fingerprint&&(contextMatches||previous.errorCode==='TARGET_CONTEXT_CHANGED')){result.push(previous);continue;}
-      const sameRequestAfterRotation=!!previous&&previous.targetGeneration!==base.targetGeneration&&itemLabelFingerprint({...base,targetGeneration:previous.targetGeneration})===previous.fingerprint;
+      const sameRequestAfterRotation=!!previous&&(previous.targetGeneration!==base.targetGeneration||previous.batchRevision===undefined)&&itemLabelFingerprint({...base,targetGeneration:previous.targetGeneration,...(previous.batchRevision===undefined?{batchRevision:undefined}:{})})===previous.fingerprint;
       const previousStatus=previous?.status;
       if(previous?.current){previous.current=false;previous.status='STALE';previous.nextDueAt=null;previous.message='数量、格式或绑定信息已变化，旧版本不再用于打印';this.put(previous);}
       const status=!contextMatches?'FAILED':batch.mode==='demo'?'FAILED':!base.quantity?'WAITING_QUANTITY':base.quantity>10000?'FAILED':eligible.get(line.draftId)?.eligible?'NOT_REQUESTED':'WAITING_SKU';
       const row:ItemLabelRecord={...base,id:randomUUID(),fingerprint,version:Math.max(0,...prior.filter(row=>row.lineId===line.id).map(row=>row.version))+1,current:true,status,paused:previous?.paused??false,attempts:0,nextDueAt:null,createdAt:this.at(),updatedAt:this.at(),requestId:null,errorCode:!contextMatches?'TARGET_CONTEXT_CHANGED':batch.mode==='demo'?'DEMO_LABEL_UNAVAILABLE':base.quantity&&base.quantity>10000?'QUANTITY_LIMIT':null,message:!contextMatches?'标签店铺身份已变化或连接已删除，请核对目标':status==='WAITING_QUANTITY'?'请填写需要打印的销售单位数量':status==='WAITING_SKU'?'等待平台建档确认':status==='FAILED'?(batch.mode==='demo'?'演示记录不会请求真实平台标签':'商品标签单次数量上限为 10000'):'需要备货或打印时，请准备本批次标签',files:[]};
-      if(sameRequestAfterRotation){row.status=previousStatus==='CANCELLED'?'CANCELLED':'FAILED';row.attempts=previous!.attempts;row.requestId=previous!.requestId;row.nextDueAt=null;row.errorCode=previous!.errorCode??'TARGET_CONTEXT_CHANGED';row.message=previousStatus==='CANCELLED'?'已取消后续标签请求':'授权配置已变化，原请求次数和结果已保留；请检查后人工重试';}
+      if(sameRequestAfterRotation){row.status=previousStatus==='CANCELLED'?'CANCELLED':'FAILED';row.attempts=previous!.attempts;row.requestId=previous!.requestId;row.nextDueAt=null;row.errorCode=previous!.errorCode??'TARGET_CONTEXT_CHANGED';row.message=previousStatus==='CANCELLED'?'已取消后续标签请求':'授权配置或标签版本绑定已变化，原请求次数和结果已保留；请检查后人工重试';}
       this.put(row);result.push(row);
     }
     return result;
   }
+  /** Public preparation boundary: READY is reusable only after local PDF verification. */
+  async prepareVerifiedBatch(batchId:string,options:{format?:ItemLabelFormat}={}):Promise<ItemLabelRecord[]>{
+    const rows=this.prepareBatch(batchId,options),result:ItemLabelRecord[]=[];
+    for(const row of rows){
+      if(row.status==='READY'){
+        try {await this.verifyFiles(row.id);} catch(error) {if(this.get(row.id).errorCode!=='FILE_INTEGRITY')throw error;}
+      }
+      result.push(this.get(row.id));
+    }
+    return result;
+  }
+  /** Queue-only primitive. Production entrypoints use prepareVerifiedBatch. */
   prepareBatch(batchId:string,options:{format?:ItemLabelFormat}={}):ItemLabelRecord[]{
     const rows=this.syncBatch(batchId,options);
     for(const row of rows){
@@ -89,7 +101,22 @@ export class ItemLabelService {
   resume():void{this.started=true;this.arm();}
   suspendScheduling():void{this.started=false;if(this.timer)clearTimeout(this.timer);this.timer=null;}
   hasActiveWork():boolean{return this.running!==null;}
-  retry(id:string):ItemLabelRecord{const row=this.get(id);if(!row.current||row.status!=='FAILED')throw new UserFacingError('只能重试当前失败的标签版本');if(!this.matches(row))throw new UserFacingError('备货绑定已变化，请刷新');if(row.attempts>=1000)throw new UserFacingError('标签累计重试次数已达上限');row.requestedAt=this.at();row.status='QUEUED';row.paused=false;row.nextDueAt=this.at();row.message='已安排人工确认重试';row.errorCode=null;this.put(row);this.arm();return row;}
+  retry(id:string):ItemLabelRecord{
+    let row=this.get(id);
+    if(!row.current||row.status!=='FAILED')throw new UserFacingError('只能重试当前失败的标签版本');
+    if(!this.matches(row))throw new UserFacingError('备货绑定已变化，请刷新');
+    if(row.attempts>=1000)throw new UserFacingError('标签累计重试次数已达上限');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if(row.files.length){
+        row.current=false;row.status='STALE';row.nextDueAt=null;this.put(row);
+        row={...row,id:randomUUID(),version:row.version+1,current:true,createdAt:this.at(),requestId:null,files:[]};
+      }
+      row.requestedAt=this.at();row.status='QUEUED';row.paused=false;row.nextDueAt=this.at();row.message='已安排人工确认重试';row.errorCode=null;
+      this.put(row);this.db.exec('COMMIT');
+    } catch(error){this.db.exec('ROLLBACK');throw error;}
+    this.arm();return row;
+  }
   pauseJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&!['READY','CANCELLED'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}
   resumeJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&row.paused&&row.requestedAt){row.paused=false;this.put(row);}this.arm();}
   cancelJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&!['READY','REQUESTING','DOWNLOADING'].includes(row.status)){row.status='CANCELLED';row.paused=true;row.nextDueAt=null;row.message='已取消后续标签请求';this.put(row);}else if(row.current&&['REQUESTING','DOWNLOADING'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}

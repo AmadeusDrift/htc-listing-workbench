@@ -9,6 +9,7 @@ export interface ItemLabelRecord {
   targetId: string; sellerId: string; marketplaceId: string; sku: string; mode: 'live' | 'demo'; targetGeneration: number;
   quantity: number | null; format: ItemLabelFormat; fingerprint: string; version: number; current: boolean;
   status: ItemLabelStatus; paused: boolean; attempts: number; nextDueAt: string | null; createdAt: string; updatedAt: string;
+  batchRevision?: number;
   requestedAt?: string;
   requestId: string | null; errorCode: string | null; message: string; files: ItemLabelFile[];
 }

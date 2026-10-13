@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { openDatabase } from '../src/main/database.ts';
@@ -8,6 +8,9 @@ import { ProcurementService } from '../src/main/procurement/service.ts';
 import type { AmazonDraft, AmazonTarget, JsonObject } from '../src/shared/amazon-contracts.ts';
 import type { ProductDetail } from '../src/shared/contracts.ts';
 import { AmazonTransportError } from '../src/main/amazon/transport.ts';
+import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';
+import { defaultListingRules } from '../src/shared/listing-rules.ts';
+import { salesPurchaseComponents } from '../src/shared/sales-purchase.ts';
 
 const implementation = await import('../src/main/item-labels/service.ts').catch(() => null);
 export function pdfBytes(): Buffer {
@@ -40,6 +43,53 @@ function changeQuantity(f:ReturnType<typeof fixture>,batchId:string,stockQuantit
   f.procurement.update({id:batch.id,revision:batch.revision,lines:batch.lines.map(({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed,stockQuantity})),shipmentConfirmationId:''});
   return f.service.syncBatch(batchId)[0];
 }
+
+test('verified prepare rejects damaged READY reuse and retains the old PDF on SKU retry',async t=>{
+  const f=fixture(t),batch=f.batch();const [queued]=f.service.prepareBatch(batch.id);await f.service.runDue();
+  const ready=f.service.get(queued.id);
+  assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].id,ready.id);
+  writeFileSync(join(f.dir,ready.files[0].relativePath),Buffer.from('corrupt'));
+  assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].status,'FAILED');
+  const retry=f.service.retry(ready.id);assert.notEqual(retry.id,ready.id);
+  assert.equal(f.service.get(ready.id).current,false);assert.deepEqual(f.service.get(ready.id).files,ready.files);
+  await f.service.runDue();assert.equal(f.service.get(retry.id).status,'READY');assert.equal(f.requests.length,2);
+});
+
+test('label lifecycle is projected from the label owner without revising manual procurement',async t=>{
+  const f=fixture(t),batch=f.batch();f.service.prepareBatch(batch.id);await f.service.runDue();
+  const current=f.procurement.get(batch.id);assert.equal(current.revision,batch.revision);assert.equal(current.lines[0].labelStatus,'READY');
+});
+
+test('A30 ten three-piece sales sets request ten labels and preserve source/recipe prices after manual revision',async t=>{
+  const f=fixture(t),recipe=buildSalesRecipes(f.product,null,defaultListingRules())[0];
+  recipe.components[0].quantity=3;recipe.totalPieces=3;recipe.totalCostCny=Math.round(recipe.components[0].quotedCostCny!*3/recipe.components[0].piecesPerQuote*1e8)/1e8;recipe.key=createHash('sha256').update(JSON.stringify(recipe.components.map(c=>[c.sourceKey,c.quantity]))).digest('hex');
+  f.draft.salesPlan={namingGroupId:randomUUID(),sourceGroupKey:'synthetic',collectedAt:'2026-10-08T01:00:00Z',collectionBasis:'first_import',sku:f.draft.sku,baseSku:f.draft.sku,recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'synthetic',familyResolved:true,namingChildKey:recipe.key};
+  const original=JSON.stringify(f.draft.salesPlan),[batch]=f.procurement.ensureAutomaticBatch(randomUUID(),[f.draft.id],{[f.draft.id]:10});
+  assert.equal(salesPurchaseComponents(batch.lines[0].salesRecipe!,10)[0].pieces,30);
+  await f.service.prepareVerifiedBatch(batch.id);await f.service.runDue();assert.equal((f.requests[0].mskuQuantities as {quantity:number}[])[0].quantity,10);
+  const current=f.procurement.get(batch.id),revised=f.procurement.update({id:current.id,revision:current.revision,lines:current.lines.map(({id,stockQuantity,purchaseUnit})=>({id,stockQuantity,purchaseUnit,purchaseQuantity:12,purchasePrice:'99.00',priceConfirmed:true})),shipmentConfirmationId:''});
+  assert.equal(revised.lines[0].priceConfirmed,false);assert.equal(revised.lines[0].stockQuantity,10);assert.equal(revised.lines[0].purchaseQuantity,12);
+  assert.equal(JSON.stringify(f.draft.salesPlan),original);assert.equal(f.product.variants[0].purchasePrice,'2.50');
+});
+
+test('label reuse matches saved batch revision and paper while opening never claims printed',async t=>{
+  const f=fixture(t),batch=f.batch();const [first]=f.service.prepareBatch(batch.id);await f.service.runDue();
+  const handlers=new Map<string,Function>();const {installItemLabelIpc}=await import('../src/main/item-labels-ipc.ts');
+  installItemLabelIpc(f.dir,{labels:f.service} as any,((name:string,_n:number,fn:Function)=>handlers.set(name,fn)) as any,{openPath:async()=>''} as any);
+  await handlers.get('red:item-labels:open')!({id:first.id,fileIndex:1});assert.equal(f.service.get(first.id).status,'READY');
+  const saved=f.procurement.get(batch.id);f.procurement.update({id:saved.id,revision:saved.revision,lines:saved.lines.map(({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})),shipmentConfirmationId:'FBA12345'});
+  const [revised]=await f.service.prepareVerifiedBatch(batch.id);assert.notEqual(revised.id,first.id);await f.service.runDue();
+  const [paper]=await f.service.prepareVerifiedBatch(batch.id,{format:{labelType:'STANDARD_FORMAT',pageType:'A4_24',localeCode:'en_US'}});assert.notEqual(paper.id,revised.id);
+});
+
+test('adding revision binding cannot replay an unknown legacy label request',async t=>{
+  const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);
+  const {itemLabelFingerprint}=await import('../src/main/item-labels/records.ts');
+  delete row.batchRevision;row.fingerprint=itemLabelFingerprint(row);row.status='FAILED';row.errorCode='REQUEST_UNKNOWN';row.attempts=3;row.nextDueAt=null;
+  const db=openDatabase(f.dir);db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();
+  const [current]=await f.service.prepareVerifiedBatch(batch.id);await f.service.runDue();
+  assert.equal(current.status,'FAILED');assert.equal(current.errorCode,'REQUEST_UNKNOWN');assert.equal(current.attempts,3);assert.equal(f.requests.length,0);
+});
 test('automatic procurement is incremental and idempotent and preserves sales units', t=>{
   const f=fixture(t),job=randomUUID(); const [first]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});
   const [again]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});

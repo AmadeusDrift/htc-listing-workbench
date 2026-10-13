@@ -1,4 +1,6 @@
 export interface ProcurementCandidate {
+  /** Immutable input references captured when the procurement line is created. */
+  basis?: { productRevision: number; sourceHash: string; recipeHash: string | null; observationHash: string | null };
   salesRecipe?: import('./sales-plan-contracts.ts').SalesRecipe;
   draftId: string; productId: string; variantId: string; title: string; spec: string; sku: string;
   targetId: string; targetName: string; sellerId: string; marketplaceId: string; mode: 'demo' | 'live';

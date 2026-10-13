@@ -992,13 +992,27 @@ test('a saved successful second copy repair survives a later source OCR failure 
   f.ai.recognize=recognize;await f.service.close();const restarted=f.reopen();
   try{const count=f.calls.length;const result=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(repairs,2);assert.equal(f.calls.slice(count).includes('content-review'),false);assert.equal(f.calls.slice(count).includes('content'),false);}finally{await restarted.close();}
 });
-test('concurrent approval of the same unknown request records authorization only once',async t=>{
+test('concurrent legacy approvals cannot reopen an unresolved request',async t=>{
   const f=await fixture(t,{generationError:true}),first=await f.run(),requestId=first.workflow.slots![0].attempts[0].requestId;
   const input={draftId:f.draft.id,slot:1,requestId},before=f.calls.length;
   const outcomes=await Promise.allSettled([f.service.approveUnknownRetry(input),f.service.approveUnknownRetry(input)]);
-  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,1);
+  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,0);
+  assert.equal(f.service.getProgress(f.draft.id)!.slots![0].attempts[0].state,'UNKNOWN');
   assert.equal(f.calls.length,before);assert.equal(f.service.getProgress(f.draft.id)!.slots![0].attempts.length,1);
-  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-retry-authorized'").get()?.n,1);}finally{db.close();}
+  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-retry-authorized'").get()?.n,0);}finally{db.close();}
+});
+test('legacy recovery command adopts the original local candidate once without a new generation',async t=>{
+  const f=await fixture(t,{lostResponse:true}),first=await f.run(),attempt=first.workflow.slots![0].attempts[0];
+  assert.equal(attempt.state,'UNKNOWN');const before=f.calls.length;
+  const input={draftId:f.draft.id,slot:1,requestId:attempt.requestId};
+  const outcomes=await Promise.allSettled([f.service.approveUnknownRetry(input),f.service.approveUnknownRetry(input)]);
+  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,1);
+  const recovered=f.service.getProgress(f.draft.id)!;
+  assert.equal(recovered.slots![0].attempts[0].state,'GENERATED');
+  assert.equal(recovered.slots![0].attempts[0].candidateId,attempt.requestId);
+  assert.equal(recovered.slots![0].attempts.length,1);assert.equal(f.calls.length,before);
+  assert.equal(recovered.status,'INTERRUPTED');
+  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-result-recovered'").get()?.n,1);}finally{db.close();}
 });
 test('unknown retry at the attempt limit preserves the unresolved record without a paid request',async t=>{
   const f=await fixture(t,{generationError:true});

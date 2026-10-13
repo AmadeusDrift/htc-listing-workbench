@@ -220,10 +220,10 @@ export class ImageWorkflowService {
     if(recovered){if(recovered.productId!==run.productId||recovered.productRevision!==run.productRevision)throw new AiError('SOURCE_CHANGED');attempt.candidateId=recovered.id;attempt.state='GENERATED';attempt.error=null;}
     else{
       if(slot.attempts.length>=run.maxAttempts)throw new UserFacingError('该图片已用完尝试次数，请先核对服务商生成记录或导入已有图片');
-      attempt.state='RETRYABLE_FAILURE';attempt.error='原生图结果未知；用户确认可能重复计费并允许重新生成，原请求记录保留';
+      throw new UserFacingError('原生图结果仍未知；保留原请求和次数，请核对原响应或导入已有图片，不会重新发送');
     }
     slot.status='PENDING';slot.error=null;run.status='INTERRUPTED';run.error='已核对未知结果，等待继续任务';
-    this.db.exec('BEGIN IMMEDIATE');try{this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.unknown-retry-authorized',`${run.sku} 图片 ${index} ${recovered?'找回本地候选，不重新生成':'用户确认重新生成未知结果'}`,JSON.stringify({workflowId:run.id,slot:index,requestId,recoveredCandidateId:recovered?.id??null}),new Date().toISOString());this.db.exec('COMMIT');}catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
+    this.db.exec('BEGIN IMMEDIATE');try{this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.unknown-result-recovered',`${run.sku} 图片 ${index} 找回本地候选，不重新生成`,JSON.stringify({workflowId:run.id,slot:index,requestId,recoveredCandidateId:recovered?.id??null}),new Date().toISOString());this.db.exec('COMMIT');}catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     return structuredClone(run);
   }
   private derivePartialSource(prior:ImageWorkflowRun,draft:AmazonDraft):ImageWorkflowRun{

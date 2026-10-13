@@ -37,7 +37,7 @@ export function ImageSlotProgress({draftId,revision,active,sku,color,defaultExpa
       <ImageSlotPreview key={`${draftId}:${slot.status==='PASSED'?slot.approvedAssetId:'candidate'}:${slot.attempts.findLast(attempt=>attempt.candidateId)?.candidateId??''}`} draftId={draftId} slot={slot} sku={sku||run.sku} title={title}/>
       {plan&&<small>{plan.focus}</small>}<span>{labels[slot.status]}</span><small>{slot.attempts.length} / {run.maxAttempts} 次</small>{slot.error&&<p>{presentRejection(run.rejection?.slot===slot.index?run.rejection.code:undefined,slot.status==='UNKNOWN'||slot.attempts.at(-1)?.state==='UNKNOWN')}</p>}
       {run.riskEvidence?.filter(item=>item.slot===slot.index).map(item=><p className="small-copy" key={item.slot}>{item.summary}</p>)}
-      {slot.attempts.at(-1)?.state==='UNKNOWN'&&<p>继续任务时先核对已有结果，无法恢复时在原次数上限内自动重试；可能重复计费，已完成图片保留。</p>}
+      {slot.attempts.at(-1)?.state==='UNKNOWN'&&<p>继续任务时核对原请求的已有结果；结果未确认前不重新发送。原次数、费用记录和已完成图片保留。</p>}
     </li>})}</ol>
     </>}
   </details>;

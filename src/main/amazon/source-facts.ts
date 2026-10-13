@@ -88,9 +88,10 @@ export function confirmedMeasurements(product: ProductDetail): ConfirmedMeasurem
 /** Merge SKU-bound receipt data with single-SKU facts; unresolved facts block default substitution. */
 export function effectiveSourceMeasurements(product: ProductDetail, receipt: ConfirmedMeasurements = {}): { measurements: ConfirmedMeasurements; blocked: Record<string,string> } {
   const measurements = structuredClone(receipt), blocked: Record<string,string> = {};
-  if (product.variants.length !== 1) return { measurements, blocked };
+
   const groups = new Map<string,Fact[]>();
   for (const fact of product.facts) {
+    if(fact.scope==='unknown'||product.variants.length!==1&&fact.scope===undefined)continue;
     const name = MEASUREMENT_ALIASES[fact.name.trim()];
     if (!name || !['source_confirmed','human_confirmed','conflicting'].includes(fact.state) && fact.source !== 'manual') continue;
     const entries = groups.get(name) ?? []; entries.push(fact); groups.set(name,entries);

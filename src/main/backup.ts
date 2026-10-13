@@ -1,6 +1,7 @@
 import {referencePinHistory,retainReferencePinHistory} from './hosting/reference-history.ts';
 import {referencePinArtifactPaths} from './hosting/reference-pins.ts';
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
+import { PRODUCT_FACT_MODEL_TABLES, assertProductFactModels } from './products/fact-models.ts';
 import { COPY_REVIEW_TABLES,assertCopyReviewHistory,retainCopyReviewHistory } from './ai/copy-review-upgrade.ts';
 import { RestorePathGuard, writeRestoreFile } from './restore-paths.ts';
 import { V2_MAGIC, hashBackupFile, writeStreamingBackup, readStreamingBackup, type BackupFile } from './backup-stream.ts';
@@ -184,6 +185,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 20) Object.assign(approved, CONSISTENCY_TABLES);
     if (version >= 21) {Object.assign(approved,CORRECTION_TABLES);approved.amazon_write_locks=[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id'];assertCorrectionHistory(database);}
     if(version>=22){Object.assign(approved,MIGRATION_TABLES);assertMigrationJournal(database);}
+    if(version>=30){Object.assign(approved,PRODUCT_FACT_MODEL_TABLES);assertProductFactModels(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
     if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
     if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}

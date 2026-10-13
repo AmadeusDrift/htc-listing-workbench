@@ -42,8 +42,9 @@ export function parseVariant(value: unknown): VariantInput {
     normalizedSpec: text(o.normalizedSpec, '整理后规格', 2000), purchasePrice: price, inventory: o.inventory as number | null };
 }
 export function parseFact(value: unknown): Fact {
-  const o = record(value, '商品事实', ['id', 'name', 'value', 'source', 'sourceRef', 'state']);
-  return { id: identifier(o.id), name: text(o.name, '事实名称', 100, true), value: text(o.value, '事实值', 4000),
+  const o = record(value, '商品事实', ['id', 'name', 'value', 'source', 'sourceRef', 'state', 'scope', 'variantId']);
+  if(o.variantId!==undefined&&o.scope!=='variant')throw new UserFacingError('只有逐规格事实可绑定 SKU');
+  return { ...(o.scope!==undefined?{scope:member(o.scope,['common','variant','unknown'] as const,'事实范围')} : {}), ...(o.variantId!==undefined?{variantId:identifier(o.variantId)}:{}), id: identifier(o.id), name: text(o.name, '事实名称', 100, true), value: text(o.value, '事实值', 4000),
     source: member(o.source, ['manual', '1688', 'import', 'ai'], '事实来源'), sourceRef: text(o.sourceRef, '来源位置', 2000),
     state: member(o.state, ['source_confirmed', 'human_confirmed', 'missing', 'ai_suggested', 'conflicting'], '事实状态') };
 }

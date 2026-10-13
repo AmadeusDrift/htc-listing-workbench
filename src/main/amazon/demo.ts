@@ -1,3 +1,4 @@
+import { factsForVariant } from '../../shared/fact-scopes.ts';
 import { sourceFieldName, sourceFactValue, selectedSkuCategoryEvidence, effectiveSourceMeasurements, confirmedMeasurements, MEASUREMENT_FIELDS, MEASUREMENT_ALIASES, SKU_DEPENDENT_SOURCE_FIELDS, parseMeasurement, selectedSkuCategoryAttributes } from './source-facts.ts';
 export { sourceFieldName, sourceFactValue, selectedSkuCategoryEvidence, selectedSkuCategoryAttributes, effectiveSourceMeasurements, measurementFactName, skuDependentSourceFact } from './source-facts.ts';
 import { categoryAttributeValues, categoryAttributeField, categoryAttributeSourceOptions, SCOPED_CATEGORY_FIELDS } from '../listing-ai/evidence-category-v2.ts';
@@ -50,6 +51,7 @@ export function demoSchema(target: AmazonTarget, selection: SchemaSelection, now
 
 /** Seed only known facts into fields whose current schema accepts their shape. */
 export function sourceAttributes(product: ProductDetail, variant: Variant, snapshot: AmazonSchema, target: AmazonTarget, program: ListingProgram = 'standard', skuMeasurements: ConfirmedMeasurements = {}): JsonObject {
+  product={...product,facts:factsForVariant(product,variant.id)};
   const schema = snapshot.schema; const fields = isObject(schema.properties) ? schema.properties : {}; const attributes: JsonObject = {};
   function add(name: string, value: JsonValue): void {
     const field = fields[name]; if (!isObject(field)) return;
@@ -82,7 +84,7 @@ export function sourceAttributes(product: ProductDetail, variant: Variant, snaps
     const name = categoryAttributeField(fact.name,fact.value) ?? sourceFieldName(fact.name, program);
     if (!knownNames.has(name)) continue;
     if(Object.hasOwn(selectedSources,name))continue;
-    if (program === 'haul' && product.variants.length > 1 && SKU_DEPENDENT_SOURCE_FIELDS.has(name)) continue;
+    if (program === 'haul' && product.variants.length > 1 && fact.scope===undefined && SKU_DEPENDENT_SOURCE_FIELDS.has(name)) continue;
     const values = confirmed.get(name) ?? new Set<string>(); values.add(fact.value.trim()); confirmed.set(name, values);
   }
   for (const [name, values] of confirmed) if (values.size === 1) {
@@ -109,6 +111,7 @@ export function sourceAttributes(product: ProductDetail, variant: Variant, snaps
 
 /** Explain current source mapping without promoting missing or uncertain facts. */
 export function sourceMappingReport(product: ProductDetail, variant: Variant, snapshot: AmazonSchema, target: AmazonTarget, program: ListingProgram = 'standard', attributes?: JsonObject, skuMeasurements: ConfirmedMeasurements = {}): SourceFieldMapping[] {
+  product={...product,facts:factsForVariant(product,variant.id)};
   const source = sourceAttributes(product, variant, snapshot, target, program, skuMeasurements); const current = attributes ?? source;
   const authority = program === 'haul' ? currentFactAuthority(product,snapshot,target,current,skuMeasurements) : undefined;
   const selected=selectedSkuCategoryAttributes(variant),selectedSources=selectedSkuCategoryEvidence(variant);
@@ -118,7 +121,7 @@ export function sourceMappingReport(product: ProductDetail, variant: Variant, sn
     add(facts,categoryAttributeField(fact.name,fact.value)??sourceFieldName(fact.name,program),fact);
     const measurement = MEASUREMENT_ALIASES[fact.name.trim()]; if (measurement) add(measurements,measurement,fact);
   }
-  const numeric = program === 'haul' && product.variants.length === 1 ? mapMeasurementFields(snapshot,target.marketplaceId,confirmedMeasurements(product)) : {attributes:{},needsInput:[] as string[]};
+  const numeric = program === 'haul' ? mapMeasurementFields(snapshot,target.marketplaceId,confirmedMeasurements(product)) : {attributes:{},needsInput:[] as string[]};
   return buildFieldCatalog(snapshot).map(card => {
     const field = card.name; const measurementNames = program === 'haul' ? MEASUREMENT_FIELDS[field] ?? [] : [];
     const groups = [facts.get(field) ?? [],...measurementNames.map(name => measurements.get(name) ?? [])];

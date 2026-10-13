@@ -1,3 +1,4 @@
+import { writeProductFactModel } from './fact-models.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
@@ -29,6 +30,7 @@ export function receiveSourceProduct(db:DatabaseSync,receipt:MiaoshouReceipt,exp
     db.prepare('DELETE FROM facts WHERE product_id=?').run(productId);
     db.prepare('DELETE FROM product_fact_scopes WHERE json_extract(record_json,\'$.productId\')=?').run(productId);
   }
+  writeProductFactModel(db,productId);
   snapshot.skus.forEach((sku,index)=>{
     const id=receipt.skuMappings[index].localVariantId,spec=specification(receipt,sku.key),price=receipt.mapping.priceField!=='none'&&receipt.mapping.currency==='CNY'?localPrice(sku[receipt.mapping.priceField]):'';
     if(oldSkus.has(id))db.prepare('UPDATE variants SET original_spec=?,source_spec=?,purchase_price=?,source_purchase_price=?,position=? WHERE id=? AND product_id=?').run(spec,spec,price,price,index,id,productId);

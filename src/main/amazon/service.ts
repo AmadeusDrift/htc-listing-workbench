@@ -486,7 +486,7 @@ export class AmazonService {
     const currency = confirmedPurchaseCurrency(product.facts, Boolean(validReceipt && (receipt.snapshot.sources.some(s=>s.source==='1688') || receipt.mapping.currency === 'CNY' && receipt.mapping.priceField !== 'none')));
     const costCny = currency.cny ? salesPlan ? salesPlan.recipe.totalCostCny : sourceQuotedCost(variant,validReceipt?receipt:null) : null;
     const matchingPackage=!salesPlan || salesPlan.recipe.components.length===1 && salesPlan.recipe.components[0].quantity===salesPlan.recipe.components[0].sourcePackPieces;
-    const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, now: new Date(this.now()),
+    const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, sourceQuantityProduct:sourceSnapshot??this.getProduct(product.id), now: new Date(this.now()),
       declarationScope:selectedDeclarationScope(salesPlan?(sourceSnapshot??this.getProduct(product.id)):product,variant.id,salesPlan?.recipe.components),
       ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
       measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));

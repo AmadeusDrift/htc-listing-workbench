@@ -30,7 +30,7 @@ async function fixture(t: test.TestContext) {
   amazon.getSchema = async () => ({ ...realAmazonSchema(), ...selection, key: schemaKey(target, selection) });
   return { store, miaoshou, amazon, product, selection, imported };
 }
-test('imported receipt keeps detail text and its matching SKU measurements fill new Haul drafts', async t => {
+test('imported receipt keeps detail text; only matching SKU measurements fill drafts while unbound prose uses approved defaults', async t => {
   const f = await fixture(t), receipt = f.miaoshou.getReceipt(f.product.id)!;
   assert.match(receipt.snapshot.detailText ?? '', /包装毛重：250/);
   for (const [key, length, mass] of [[';red;small;', 4.72, 0.26], [';red;large;', 7.87, 0.4]] as const) {
@@ -40,8 +40,8 @@ test('imported receipt keeps detail text and its matching SKU measurements fill 
     assert.equal(attributes.item_length_width?.[0].length.value, length);
     assert.equal(attributes.item_length_width?.[0].length.unit, 'inches');
     assert.equal(attributes.item_weight?.[0].value, mass);
-    assert.equal(attributes.item_package_dimensions?.[0].length.value, 9.84);
-    assert.equal(attributes.item_package_weight?.[0].value, 0.55);
+    assert.equal(attributes.item_package_dimensions?.[0].length.value, 1.97);
+    assert.equal(attributes.item_package_weight?.[0].value, 0.22);
     assert.equal(attributes.item_package_weight?.[0].unit, 'pounds');
     assert.ok(draft.sourceMapping?.find(row => row.field === 'item_length_width' && row.status === 'mapped'));
     const validation=await f.amazon.validateDraft(draft);
@@ -75,4 +75,17 @@ test('a conflicting manual packaging fact blocks receipt fallback for that field
   const saved = f.store.saveProduct(toSaveInput({ ...f.product, variants: f.product.variants.slice(0, 1), facts: [{ id: crypto.randomUUID(), name: '包装重量', value: '1 pounds', state: 'conflicting', source: 'manual', sourceRef: '待确认' }] }));
   const draft = await f.amazon.createDraft({ ...f.selection, productId: saved.id, variantId: saved.variants[0].id, listingProgram: 'haul' });
   assert.equal(draft.attributes.item_package_weight, undefined);
+});
+
+
+test('explicit common package facts replace defaults for each SKU without changing the original receipt',async t=>{
+  const f=await fixture(t),before=f.miaoshou.getReceipt(f.product.id);
+  const product=f.store.saveProduct({...toSaveInput(f.product),facts:[...f.product.facts,
+    ...[['包装长度','25 cm'],['包装宽度','15 cm'],['包装高度','8 cm'],['包装重量','250 g']].map(([name,value])=>({id:crypto.randomUUID(),name,value,source:'manual',sourceRef:'人工确认共用包装',state:'human_confirmed',scope:'common'}))]});
+  for(const variant of product.variants){
+    const draft=await f.amazon.createDraft({...f.selection,productId:product.id,variantId:variant.id,listingProgram:'haul'});
+    assert.equal((draft.attributes.item_package_dimensions as any)[0].length.value,9.84);
+    assert.equal((draft.attributes.item_package_weight as any)[0].value,.55);
+  }
+  assert.deepEqual(f.miaoshou.getReceipt(product.id),before);
 });

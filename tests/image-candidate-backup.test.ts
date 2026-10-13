@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID,createHash} from 'node:crypto';
+import {mkdirSync,mkdtempSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {join,resolve} from 'node:path';
+import {WorkspaceStore} from '../src/main/store.ts';
+import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
+import {readCandidateFiles} from '../src/main/image-generation/candidate.ts';
+const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP0cAAAAASUVORK5CYII=','base64');
+function fixture(t:test.TestContext){mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/candidate-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const source=join(root,'source'),target=join(root,'target');for(const path of [source,target]){const s=new WorkspaceStore(path);s.createProduct();s.close();}return{root,source,target,file:join(root,'copy.htcbackup'),pass:'candidate backup fixture passphrase'};}
+function candidate(root:string,id=randomUUID(),data=png){const folder=join(root,'image-generation/candidates',id);mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'image.png'),data);writeFileSync(join(folder,'preview.png'),png);writeFileSync(join(folder,'candidate.json'),JSON.stringify({id,provider:'openai',model:'gpt-image-2.5-sunburst',mode:'generate',productId:randomUUID(),productRevision:1,createdAt:new Date().toISOString(),requestId:null,sourceAssets:[],reviewState:'unreviewed',mimeType:'image/png',width:1,height:1,byteSize:data.length,sha256:createHash('sha256').update(data).digest('hex')}));return id;}
+test('backup preserves paid candidates and restoring an old copy retains newer local candidates',async t=>{
+ const f=fixture(t),old=candidate(f.source),newer=candidate(f.target);await createWorkspaceBackup(f.source,f.file,f.pass);
+ const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);await commitWorkspaceRestore(f.target,prepared);
+ for(const id of [old,newer])assert.deepEqual((await readCandidateFiles(f.target,id)).bytes,png);
+ assert.equal(existsSync(join(f.target,'.restore-journal.json')),false);
+});
+test('candidate identity conflicts refuse old restore instead of overwriting a paid image',async t=>{
+ const f=fixture(t),id=candidate(f.source);const changed=Buffer.concat([png,Buffer.from('different')]);candidate(f.target,id,changed);
+ await createWorkspaceBackup(f.source,f.file,f.pass);await assert.rejects(()=>prepareWorkspaceRestore(f.target,f.file,f.pass),/冲突/);
+ assert.deepEqual(readFileSync(join(f.target,'image-generation/candidates',id,'image.png')),changed);
+});
+test('candidate installation rollback preserves both old images and unrelated generation files',async t=>{
+ const f=fixture(t),incoming=candidate(f.source),prior=candidate(f.target);writeFileSync(join(f.target,'image-generation','private-sentinel'),'keep');await createWorkspaceBackup(f.source,f.file,f.pass);
+ const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);
+ await assert.rejects(()=>commitWorkspaceRestore(f.target,prepared,point=>{if(point==='assets-installed')throw new Error('crash fixture');}),/crash fixture/);
+ assert.deepEqual((await readCandidateFiles(f.target,prior)).bytes,png);assert.equal(existsSync(join(f.target,'image-generation/candidates',incoming)),false);assert.equal(readFileSync(join(f.target,'image-generation/private-sentinel'),'utf8'),'keep');
+});
+
+test('a candidate injected after preparation is not accepted as authenticated history',async t=>{
+ const f=fixture(t);candidate(f.source);await createWorkspaceBackup(f.source,f.file,f.pass);const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);candidate(prepared.stagingDirectory);
+ await assert.rejects(()=>commitWorkspaceRestore(f.target,prepared),/未认证/);
+});

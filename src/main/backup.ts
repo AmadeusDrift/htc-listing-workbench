@@ -1,3 +1,4 @@
+import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
 import { RestorePathGuard, writeRestoreFile } from './restore-paths.ts';
 import { V2_MAGIC, hashBackupFile, writeStreamingBackup, readStreamingBackup, type BackupFile } from './backup-stream.ts';
 import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, invalidateCorrectionAuthorizations } from './amazon/correction-history.ts';
@@ -72,7 +73,8 @@ const MAGIC = Buffer.from('HTC-BACKUP-1\n');
 const MAX_BYTES = 256 * 1024 * 1024;
 const MAX_CONTAINER = 400 * 1024 * 1024;
 const legacyManagedNames = ['red.sqlite', 'red.sqlite-wal', 'red.sqlite-shm', 'assets', 'documents'];
-const managedNames = [...legacyManagedNames,'ai-receipts'];
+const versionTwoManagedNames = [...legacyManagedNames,'ai-receipts'];
+const managedNames = [...versionTwoManagedNames,CANDIDATE_DIRECTORY];
 const activeDestinations = new Set<string>();
 const requiredTables: Record<string, string[]> = {
   products: ['id','title','source_url','description','status','origin','revision','created_at','updated_at'],
@@ -115,9 +117,10 @@ const versionSixteenTables: Record<string, string[]> = { automatic_listing_tasks
 interface AssetCopy { path: string; data: string; sha256: string }
 interface BackupManifest { format: 'htc-workspace-backup'; version: 1; source: { application: 'HTC'; kind: 'local-workspace'; databaseVersion: number }; retention: BackupRetention; createdAt: string; database: string; databaseSha256: string; assets: AssetCopy[] }
 export interface PreparedRestore { stagingDirectory: string; createdAt: string; productCount: number; assetCount: number; expiresAt: string | null; artifacts?: { path: string; sha256: string; byteSize: number }[] }
-interface RestoreJournal { version: 1|2; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
+interface RestoreJournal { version: 1|2|3; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
 function digest(data: Buffer): string { return createHash('sha256').update(data).digest('hex'); }
 function managedBackupFile(root: string, path: string): string {
+  if(candidateBackupPath(path))return resolve(root,path);
   if(/^ai-receipts\/[a-f0-9]{64}\.json$/.test(path))return resolve(root,path);
   if (/^documents\/(?:item-labels\/[a-f0-9-]{36}\/[1-9]\d{0,2}|shipments\/[a-f0-9-]{36})\.pdf$/.test(path)) return resolve(root, path);
   return managedAssetPath(root, path);
@@ -425,7 +428,7 @@ export async function createWorkspaceBackup(directory: string, destination: stri
   passphraseCheck(passphrase);
   const root = resolve(directory), staging = join(root, `.restore-staging-${randomUUID()}`);
   const target = resolve(destination), local = relative(root, target).replaceAll('\\', '/').toLowerCase();
-  if (extname(target).toLowerCase() !== '.htcbackup' || /^(assets|documents|ai-receipts|amazon-vault|hosting-vault|ai-vault|miaoshou-vault|browser|\.restore-[^/]+)(\/|$)/.test(local)) throw new UserFacingError('请选择独立的 .htcbackup 备份文件，不能覆盖工作区内部文件');
+  if (extname(target).toLowerCase() !== '.htcbackup' || /^(assets|documents|ai-receipts|image-generation|amazon-vault|hosting-vault|ai-vault|miaoshou-vault|browser|\.restore-[^/]+)(\/|$)/.test(local)) throw new UserFacingError('请选择独立的 .htcbackup 备份文件，不能覆盖工作区内部文件');
   if (existsSync(target)) throw new UserFacingError('备份文件已存在，请选择新文件名；原备份和清理登记保持不变');
   const destinationKey = target.toLowerCase();
   if (activeDestinations.has(destinationKey)) throw new UserFacingError('此备份文件正在写入，请完成后再试');
@@ -439,6 +442,7 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
     checkDatabase(snapshot); disconnectSnapshot(snapshot);
     const info = checkDatabase(snapshot);
+    for(const file of await candidateBackupFiles(root)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
     const files: BackupFile[] = [{ path: 'red.sqlite', ...await hashBackupFile(snapshot), role: 'workspace-database' }];
     for (const path of info.assetPaths) {
       const file = managedBackupFile(root, path), actual = await hashBackupFile(file), expected = info.artifactChecks.get(path);
@@ -511,8 +515,9 @@ export async function prepareWorkspaceRestore(directory: string, sourceFile: str
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
     guard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
+    await retainCandidateFiles(root,staging);
     guard.assertTree();
-    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: value.assets.map(asset => ({ path: asset.path, sha256: asset.sha256, byteSize: Buffer.byteLength(asset.data, 'base64') })) };
+    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: [...value.assets.map(asset => ({ path: asset.path, sha256: asset.sha256, byteSize: Buffer.byteLength(asset.data, 'base64') })),...await candidateBackupFiles(staging)] };
   } catch (error) { await removeStaging(root, staging, 'staging'); throw error; }
 }
 
@@ -525,6 +530,7 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
     guard.assertTree();
     if (value.source.databaseVersion > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
     const snapshot = join(staging, 'red.sqlite'), info = checkDatabase(snapshot), found = new Set<string>();
+    for(const file of await candidateBackupFiles(staging)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
     for (const file of value.files.slice(1)) {
       if (!info.assetPaths.has(file.path) || found.has(file.path)) throw new UserFacingError('备份素材清单不匹配或包含重复路径');
       const expected = info.artifactChecks.get(file.path);
@@ -539,8 +545,9 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
     guard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
+    await retainCandidateFiles(root,staging);
     guard.assertTree();
-    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: value.files.slice(1).map(({ path, sha256, byteSize }) => ({ path, sha256, byteSize })) };
+    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: [...value.files.slice(1).map(({ path, sha256, byteSize }) => ({ path, sha256, byteSize })),...await candidateBackupFiles(staging)] };
   } catch (error) { await removeStaging(root, staging, 'staging'); throw error; }
 }
 
@@ -551,15 +558,15 @@ export async function discardPreparedRestore(directory: string, prepared: Prepar
 async function recoverJournal(root: string, journal: RestoreJournal): Promise<void> {
   new RestorePathGuard(root);
   const staging = stagingPath(root, journal.stagingDirectory, 'staging'), rollback = stagingPath(root, journal.rollbackDirectory, 'rollback');
-  const names=journal.version===1?legacyManagedNames:managedNames;
-  if (![1,2].includes(journal.version) || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !names.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
+  const names=journal.version===1?legacyManagedNames:journal.version===2?versionTwoManagedNames:managedNames;
+  if (![1,2,3].includes(journal.version) || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !names.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
   for (const path of [staging, rollback]) if (existsSync(path) && (await lstat(path)).isSymbolicLink()) throw new UserFacingError('恢复暂存目录不能是链接');
   if (existsSync(rollback)) new RestorePathGuard(rollback).assertTree();
   if (journal.phase === 'installing') {
     for (const name of names) {
       const prior = join(rollback, name), current = join(root, name);
-      if (existsSync(prior)) { await rm(current, { recursive: ['assets','documents','ai-receipts'].includes(name), force: true }); await rename(prior, current); }
-      else if (!journal.priorNames.includes(name)) await rm(current, { recursive: ['assets','documents','ai-receipts'].includes(name), force: true });
+      if (existsSync(prior)) { await rm(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true }); await rename(prior, current); }
+      else if (!journal.priorNames.includes(name)) await rm(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true });
       else if (!existsSync(current)) throw new UserFacingError('恢复中断，原始工作区需要人工恢复；未建立空库以免覆盖资料');
     }
   }
@@ -581,10 +588,12 @@ export async function recoverInterruptedRestore(directory: string): Promise<'rol
 }
 
 async function verifyRestoreArtifacts(directory: string, info: ReturnType<typeof checkDatabase>, prepared: PreparedRestore, guard: RestorePathGuard, names?: readonly string[]): Promise<void> {
+  for(const file of await candidateBackupFiles(directory)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
   const authenticated = new Map(prepared.artifacts?.map(file => [file.path, file]));
   const verifyTree = () => { if (names) { for (const name of names) if (existsSync(join(directory, name))) guard.assertTree(join(directory, name)); } else guard.assertTree(); };
   verifyTree();
   for (const path of info.assetPaths) {
+    if(candidateBackupPath(path)&&!authenticated.has(path))throw new UserFacingError('恢复暂存区出现未认证的图片候选');
     const file = managedBackupFile(directory, path); guard.assertFile(file);
     const actual = await hashBackupFile(file); guard.assertFile(file);
     for (const expected of [info.artifactChecks.get(path), authenticated.get(path)]) {
@@ -605,7 +614,7 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
   for (const name of managedNames) if (existsSync(join(root, name))) rootGuard.assertTree(join(root, name));
   const rollback = join(root, `.restore-rollback-${randomUUID()}`); await mkdir(rollback);
   const rollbackGuard = new RestorePathGuard(rollback);
-  const journal: RestoreJournal = { version: 2, phase: 'installing', stagingDirectory: staging, rollbackDirectory: rollback, priorNames: managedNames.filter(name => existsSync(join(root, name))) };
+  const journal: RestoreJournal = { version: 3, phase: 'installing', stagingDirectory: staging, rollbackDirectory: rollback, priorNames: managedNames.filter(name => existsSync(join(root, name))) };
   const journalFile = join(root, '.restore-journal.json');
   await writeFileAtomically(journalFile, JSON.stringify(journal));
   try {
@@ -615,10 +624,14 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
     // Recheck after every asynchronous boundary before any file can be installed.
     stageGuard.assertTree(); rootGuard.assertDirectory(root); rollbackGuard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), join(staging, 'red.sqlite'));
+    const candidateArtifacts=new Map(prepared.artifacts?.map(file=>[file.path,file]));
+    for(const file of await candidateBackupFiles(root)){const prior=candidateArtifacts.get(file.path);if(prior&&(prior.sha256!==file.sha256||prior.byteSize!==file.byteSize))throw new UserFacingError('同一图片候选身份的内容冲突');candidateArtifacts.set(file.path,file);}
+    prepared={...prepared,artifacts:[...candidateArtifacts.values()]};
+    await retainCandidateFiles(root,staging);
     info = checkDatabase(join(staging, 'red.sqlite'));
     await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
     for (const name of journal.priorNames) {
-      rootGuard.assertTree(join(root, name)); rollbackGuard.assertDirectory(rollback);
+      rootGuard.assertTree(join(root, name)); rollbackGuard.assertDirectory(dirname(join(rollback,name)),true);
       renameSync(join(root, name), join(rollback, name));
     }
     if (checkpoint) await checkpoint('old-files-moved');
@@ -627,8 +640,8 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
     renameSync(join(staging, 'red.sqlite'), join(root, 'red.sqlite'));
     if (checkpoint) await checkpoint('database-installed');
     await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
-    for (const name of ['assets', 'documents', 'ai-receipts']) if (existsSync(join(staging, name))) {
-      stageGuard.assertTree(join(staging, name)); rootGuard.assertDirectory(root);
+    for (const name of ['assets', 'documents', 'ai-receipts',CANDIDATE_DIRECTORY]) if (existsSync(join(staging, name))) {
+      stageGuard.assertTree(join(staging, name)); rootGuard.assertDirectory(dirname(join(root,name)),true);
       renameSync(join(staging, name), join(root, name));
     }
     if (checkpoint) await checkpoint('assets-installed');

@@ -69,4 +69,3 @@ export async function decideListingEnums(c:ListingAiContext,credentials:{apiKey:
  }
  context.onUntrustedOutput?.(output);return {requestId:reply.requestId,usage:reply.usage,usageKnown:reply.usageKnown,output};
 }
-

@@ -8,13 +8,14 @@ import { transaction } from '../application/transaction.ts';
 import { randomUUID } from 'node:crypto';
 import { assertRecordTable } from '../storage/record-table.ts';
 
-export interface SourceAdoption {version:1;id:string;identity:string;adoptedSnapshotId:string;latestSnapshotId:string;productRevision:number;frozen:boolean}
+export interface SourceAdoption {version:1;id:string;identity:string;adoptedSnapshotId:string;latestSnapshotId:string;productRevision:number;frozen:boolean;scopeModelVersion?:1}
 export function readSourceAdoption(db:DatabaseSync,productId:string):SourceAdoption|null {
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<23)return null;
   const row=db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(productId);if(!row)return null;
   const value=JSON.parse(String(row.record_json)) as SourceAdoption;
   if(value.version!==1||value.id!==productId||!Number.isSafeInteger(value.productRevision)||value.productRevision<1||typeof value.frozen!=='boolean'
-    ||Object.keys(value).sort().join()!=='adoptedSnapshotId,frozen,id,identity,latestSnapshotId,productRevision,version')throw new UserFacingError('商品来源采用记录无效');
+    ||value.scopeModelVersion!==undefined&&value.scopeModelVersion!==1
+    ||Object.keys(value).filter(key=>key!=='scopeModelVersion').sort().join()!=='adoptedSnapshotId,frozen,id,identity,latestSnapshotId,productRevision,version')throw new UserFacingError('商品来源采用记录无效');
   for(const id of [value.adoptedSnapshotId,value.latestSnapshotId]){const source=readSourceSnapshot(db,id);if(!source||source.receipt.productId!==productId||source.identity!==value.identity)throw new UserFacingError('商品来源采用版本不匹配');}
   return value;
 }
@@ -25,13 +26,13 @@ export function adoptReceivedSource(db:DatabaseSync,source:SourceSnapshot,prior:
   const productId=source.receipt.productId,product=db.prepare('SELECT revision FROM products WHERE id=?').get(productId);
   if(!prior){
     const revision=product?1:receiveSourceProduct(db,source.receipt,null);
-    const state:SourceAdoption={version:1,id:productId,identity:source.identity,adoptedSnapshotId:source.id,latestSnapshotId:source.id,productRevision:revision,frozen:legacy&&hasStarted(db,productId)};
+    const state:SourceAdoption={version:1,id:productId,identity:source.identity,adoptedSnapshotId:source.id,latestSnapshotId:source.id,productRevision:revision,frozen:legacy&&hasStarted(db,productId),...(!product?{scopeModelVersion:1 as const}:{})};
     save(db,state);return state;
   }
   if(prior.identity!==source.identity||!product)throw new UserFacingError('来源归属或主档已变化');
   const state={...prior,latestSnapshotId:source.id,frozen:prior.frozen||hasStarted(db,productId)};
   if(!state.frozen&&Number(product.revision)===prior.productRevision&&source.id!==prior.adoptedSnapshotId){
-    state.productRevision=receiveSourceProduct(db,source.receipt,prior.productRevision,appliedAt);state.adoptedSnapshotId=source.id;
+    state.productRevision=receiveSourceProduct(db,source.receipt,prior.productRevision,appliedAt);state.adoptedSnapshotId=source.id;state.scopeModelVersion=1;
   }
   save(db,state);return state;
 }
@@ -72,7 +73,7 @@ export function adoptSource(db:DatabaseSync,input:{productId:string;expectedRevi
     if(!preview.pending)return state;
     const source=readSourceSnapshot(db,input.snapshotId)!;
     const before={product:db.prepare('SELECT * FROM products WHERE id=?').get(input.productId),variants:db.prepare('SELECT * FROM variants WHERE product_id=?').all(input.productId),facts:db.prepare('SELECT * FROM facts WHERE product_id=?').all(input.productId)};
-    const next={...state,adoptedSnapshotId:source.id,productRevision:receiveSourceProduct(db,source.receipt,input.expectedRevision,new Date().toISOString())};
+    const next={...state,scopeModelVersion:1 as const,adoptedSnapshotId:source.id,productRevision:receiveSourceProduct(db,source.receipt,input.expectedRevision,new Date().toISOString())};
     save(db,next);
     db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),input.productId,'product.source-adopted','明确采用来源版本；原人工资料保留于审计',JSON.stringify({before,snapshotId:source.id}),new Date().toISOString());
     return next;

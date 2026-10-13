@@ -141,3 +141,48 @@ test('portable product export preserves scope and remaps variant binding by stab
   const portable=exportProductData(product) as any;assert.equal(portable.version,2);
   const restored=parseImport(JSON.stringify(portable),'json')[0];assert.equal(restored.facts[0].variantId,restored.variants[0].id);assert.notEqual(restored.variants[0].id,a.id);assert.equal(restored.facts[1].scope,'unknown');
 });
+
+for(const freeze of ['explicit','draft'] as const)test(`legacy unscoped measurements survive ${freeze} freeze without changing facts or revision`,async t=>{
+  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/scope-legacy-freeze-'));
+  const store=new WorkspaceStore(dir),db=openDatabase(dir),amazon=new AmazonService(dir,id=>store.getProduct(id),mockStorage);
+  t.after(()=>{amazon.close();db.close();store.close();rmSync(dir,{recursive:true,force:true});});
+  const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[{name:'产品长度',value:'11 cm'}],description:''};
+  const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');
+  db.prepare('DELETE FROM product_source_adoptions WHERE id=?').run(receipt.productId);
+  db.prepare("DELETE FROM product_fact_scopes WHERE json_extract(record_json,'$.productId')=?").run(receipt.productId);
+  const p=store.getProduct(receipt.productId),variant=p.variants[0];
+  const before=miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo');assert.equal(before.item?.length?.value,4.33);
+  const imageBefore=currentSourceImageMeasurements(db,{productId:p.id,variantId:variant.id,mode:'demo'} as any);
+  if(freeze==='explicit')store.freezeSourceVersion(p.id,p.revision);
+  else {const target=amazon.enableDemo();await amazon.createDraft({productId:p.id,variantId:variant.id,targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});}
+  assert.ok(db.prepare('SELECT 1 FROM product_source_adoptions WHERE id=?').get(p.id));
+  assert.deepEqual(store.getProduct(p.id),p);assert.ok(p.facts.every(f=>f.scope===undefined));
+  assert.deepEqual(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo'),before);
+  assert.deepEqual(currentSourceImageMeasurements(db,{productId:p.id,variantId:variant.id,mode:'demo'} as any),imageBefore);
+  const scoped=store.saveProduct({...saveInput(p),facts:p.facts.map(f=>({...f,scope:'unknown'}))});
+  assert.equal(scoped.revision,p.revision+1);
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+  assert.ok(!currentSourceImageMeasurements(db,{productId:p.id,variantId:variant.id,mode:'demo'} as any).some(m=>m.value==='11 cm'));
+  store.saveProduct({...saveInput(scoped),facts:[]});
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined,'deleting the last scope cannot resurrect legacy prose');
+});
+
+test('new empty-attribute source records explicit scope model and never broadcasts description measurements',async t=>{
+  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/scope-empty-source-'));
+  const store=new WorkspaceStore(dir),db=openDatabase(dir),amazon=new AmazonService(dir,id=>store.getProduct(id),mockStorage);
+  t.after(()=>{amazon.close();db.close();store.close();rmSync(dir,{recursive:true,force:true});});
+  const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[],description:'产品长度：11 cm',detailText:'产品长度：11 cm'};
+  const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');const p=store.getProduct(receipt.productId),variant=p.variants[0];
+  assert.equal(p.facts.length,0);
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+  const target=amazon.enableDemo();await amazon.createDraft({productId:p.id,variantId:variant.id,targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+  assert.ok(!currentSourceImageMeasurements(db,{productId:p.id,variantId:variant.id,mode:'demo'} as any).some(m=>m.value==='11 cm'));
+  const state=JSON.parse(String(db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(p.id)!.record_json));
+  assert.equal(state.scopeModelVersion,1);assertSourceAdoptionHistory(db);
+  const backup=join(dir,'empty-scope.htcbackup'),restoredDir=join(dir,'restored');
+  await createWorkspaceBackup(dir,backup,'scope-passphrase');const prepared=await prepareWorkspaceRestore(restoredDir,backup,'scope-passphrase');await commitWorkspaceRestore(restoredDir,prepared);
+  const restored=openDatabase(restoredDir);try{assert.equal(miaoshouMeasurementsForVariant(restored,p.id,variant.id,'demo').item?.length,undefined);assertSourceAdoptionHistory(restored);}finally{restored.close();}
+  db.prepare('UPDATE product_source_adoptions SET record_json=? WHERE id=?').run(JSON.stringify({...state,scopeModelVersion:2}),p.id);
+  assert.throws(()=>assertSourceAdoptionHistory(db),/采用记录无效/);
+});

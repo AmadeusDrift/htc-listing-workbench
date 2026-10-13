@@ -23,21 +23,30 @@ try {
  await page.getByTestId('inbox-'+productId).getByRole('button',{name:'查看采集资料 人工确认的标题'}).click({force:true});
  await expect(page.getByRole('heading',{name:'来源版本差异'})).toBeVisible();
  await expect(page.getByRole('button',{name:'采用此来源版本',exact:true})).toBeDisabled();
- await page.evaluate(async id=>{const p=await window.red.getProduct(id);await window.red.saveProduct({id:p.id,revision:p.revision,title:'并发修改标题',sourceUrl:p.sourceUrl,description:p.description,status:p.status,variants:p.variants.map(({sourceSpec,sourcePurchasePrice,...v})=>v),facts:p.facts});},productId);
+ await page.evaluate(async id=>{const p=await window.red.getProduct(id);await window.red.saveProduct({id:p.id,revision:p.revision,title:'并发修改标题',sourceUrl:p.sourceUrl,description:p.description,status:p.status,variants:p.variants.map(({sourceSpec,sourcePurchasePrice,...v})=>({...v,purchasePrice:'777.77',originalSpec:'并发规格777'})),facts:p.facts.map(f=>({...f,value:'REVIEW_CONCURRENT_FACT_777'}))});},productId);
  await page.getByLabel('确认用此来源版本替换人工修改').check({force:true});
  await page.getByRole('button',{name:'采用此来源版本',exact:true}).click({force:true});
  await expect(page.getByRole('alert').filter({hasText:'商品或来源版本已变化'})).toBeVisible();
  assert.equal((await page.evaluate(id=>window.red.getProduct(id),productId)).title,'并发修改标题');
+ const concurrent=await page.evaluate(id=>window.red.getProduct(id),productId);
+ assert.equal(concurrent.facts[0].value,'REVIEW_CONCURRENT_FACT_777');assert.equal(concurrent.variants[0].purchasePrice,'777.77');
  await page.getByRole('button',{name:'重新读取来源差异',exact:true}).click({force:true});
+ const comparison=page.locator('.source-adoption-comparison');
+ await expect(comparison).toContainText('REVIEW_CONCURRENT_FACT_777');await expect(comparison).toContainText('777.77');await expect(comparison).toContainText('并发规格777');
+ await expect(page.getByLabel('确认用此来源版本替换人工修改')).not.toBeChecked();
+ await expect(page.getByRole('button',{name:'采用此来源版本',exact:true})).toBeDisabled();
+ assert.deepEqual(await page.evaluate(id=>window.red.getProduct(id),productId),concurrent);
+ await page.screenshot({path:'artifacts/w12/source-concurrent-review.png'});
  await page.getByLabel('确认用此来源版本替换人工修改').check({force:true});
  await page.getByRole('button',{name:'采用此来源版本',exact:true}).click({force:true});
  await expect(page.getByText('来源版本已采用；没有启动草稿或任务。',{exact:true})).toBeVisible();
  assert.equal((await page.evaluate(id=>window.red.getProduct(id),productId)).title,'来源更新标题');
+ const auditDb=openDatabase(dataRoot);try{const audit=String(auditDb.prepare("SELECT detail_json FROM audit_events WHERE product_id=? AND action='product.source-adopted' ORDER BY rowid DESC LIMIT 1").get(productId).detail_json);assert.ok(audit.includes('REVIEW_CONCURRENT_FACT_777'));assert.ok(audit.includes('777.77'));}finally{auditDb.close();}
  await page.getByRole('button',{name:'返回列表',exact:true}).click({force:true});
  await page.getByTestId('inbox-'+frozen.productId).getByRole('button',{name:'查看采集资料 已冻结商品'}).click({force:true});
  await expect(page.getByText('已有草稿、素材或任务，来源版本已冻结；只能查看，原处理成果保持不变。',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'采用此来源版本',exact:true})).toHaveCount(0);
  await page.screenshot({path:'artifacts/w12/source-adoption.png'});
  assert.deepEqual(await app.evaluate(()=>globalThis.__releaseGuard.attempts),[]);
- await writeFile('artifacts/w12/source-result.json',JSON.stringify({dataRoot,checks:['实际差异展示','人工确认保护','真实采用后读取主档更新','过期CAS拒绝与重读','冻结只读无采用动作','零外部调用']},null,2));
+ await writeFile('artifacts/w12/source-result.json',JSON.stringify({dataRoot,checks:['实际差异展示','人工确认保护','真实采用后读取主档更新','过期CAS拒绝与重读','并发事实与规格采购价同版本展示并重新确认','采用后审计保留被替换的并发值','冻结只读无采用动作','零外部调用']},null,2));
 }finally{await app.close();}

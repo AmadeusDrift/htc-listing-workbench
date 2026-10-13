@@ -1,4 +1,5 @@
 import { CONSISTENCY_SCHEMA, assertConsistencyHistory } from './source-image-consistency/history.ts';
+import { migrateModules, MODULE_SCHEMA_VERSION } from './storage/migrations.ts';
 import { assertSourceImageHistory } from './source-image-provenance.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,7 +13,7 @@ import { MIAOSHOU_INDEXES } from './miaoshou/indexes.ts';
 import { MIAOSHOU_SYNC_INDEXES } from './miaoshou/sync-records.ts';
 import { SKU_NAMING_SCHEMA } from './sku-naming/schema.ts';
 
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = MODULE_SCHEMA_VERSION;
 export function openDatabase(directory: string): DatabaseSync {
   mkdirSync(directory, { recursive: true });
   const db = new DatabaseSync(join(directory, 'red.sqlite'));
@@ -251,5 +252,6 @@ export function openDatabase(directory: string): DatabaseSync {
     id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES listing_drafts(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL, exchange_json TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS amazon_exchanges_draft ON amazon_exchanges(draft_id,created_at);`);
+  try { migrateModules(db); } catch(error) { db.close();throw error; }
   return db;
 }

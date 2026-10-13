@@ -3,7 +3,7 @@ import type { AmazonDraft, AmazonSchema } from '../../shared/amazon-contracts.ts
 import type { ListingAiContext, ListingFieldAdoption } from '../../shared/listing-ai-contracts.ts';
 import type { DraftRecord } from '../amazon/persistence.ts';
 import { isObject } from '../amazon/context.ts';
-import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/service.ts';
+import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/family-events.ts';
 import { relationshipAttributes } from '../sales-plans/families.ts';
 import { assertSalesPlanNamingIdentity } from '../sales-plans/history.ts';
 import { validateSalesPlan } from '../sales-plans/records.ts';

@@ -1,4 +1,5 @@
 import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
+import { transaction } from '../application/transaction.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonCallEvent, AmazonDataPolicy, AmazonDraft, AmazonSchema, AmazonTarget, CleanupResult, JsonObject } from '../../shared/amazon-contracts.ts';
 import { openDatabase } from '../database.ts';
@@ -20,8 +21,7 @@ export class AmazonPersistence {
   constructor(directory: string) { this.db = openDatabase(directory); }
   close(): void { this.db.close(); }
   transaction<T>(action: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try { const result = action(); this.db.exec('COMMIT'); return result; } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return transaction(this.db,action);
   }
   targets(): AmazonTarget[] { return this.db.prepare('SELECT target_json FROM amazon_targets WHERE target_json IS NOT NULL ORDER BY rowid').all().map(row => JSON.parse(String(row.target_json))); }
   target(id: string): AmazonTarget {

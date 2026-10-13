@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AmazonSchema, AmazonTarget, JsonObject, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { isObject } from './context.ts';
-import { effectiveSourceMeasurements, measurementFactName, sourceFactValue, sourceFieldName } from './demo.ts';
+import { effectiveSourceMeasurements, measurementFactName, sourceFactValue, sourceFieldName } from './source-facts.ts';
 import { convertToUnit, DIMENSION_FIELDS } from './field-mapping.ts';
 import type { ConfirmedMeasurements, MeasurementSet } from './field-mapping.ts';
 import { fieldSchema, resolveSchemaNode } from './field-catalog.ts';

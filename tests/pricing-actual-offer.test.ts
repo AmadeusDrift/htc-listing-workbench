@@ -121,3 +121,14 @@ test('SKU pricing detail reports the actual manual price with the same fee calcu
   assert.equal(detail.offers[0].deliveryFee,.5); assert.ok(Math.abs(detail.offers[0].upfrontCny-3.7)<1e-10);
   assert.ok(detail.offers[0].roi>1); assert.equal(JSON.stringify(draft),before);
 });
+
+test('SKU pricing detail does not price invalid nested scope or malformed dates as USD',()=>{
+  for(const invalid of ['currency','date']){
+    const {draft,rules}=fixture(); Object.assign(draft.attributes,offer(3));
+    const group=(draft.attributes.purchasable_offer as any)[0].our_price[0];
+    if(invalid==='currency')group.currency='CNY';else group.schedule[0].start_at='not-a-date';
+    const detail=pricing.qualifyActualOffer(draft,rules,now);
+    assert.equal(detail.issue?.code,'ACTUAL_OFFER_INVALID');
+    assert.deepEqual(detail.offers,[]);
+  }
+});

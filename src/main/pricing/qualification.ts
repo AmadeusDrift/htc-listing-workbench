@@ -76,7 +76,8 @@ export function qualifyActualOffer(draft: AmazonDraft, rules: ListingRules, now 
   const issue=pricingQualificationIssue(draft,rules,now), exempt=pricingExempt(draft);
   const offers: { price:number; promotion:boolean; roi:number; commission:number; deliveryFee:number; upfrontCny:number; profitCny:number; billableWeightGrams:number }[]=[];
   const inputs=draft.businessRules?.pricingDecision?.inputs;
-  if (!exempt && pricingEvidenceCurrent(draft,rules) && inputs?.costCny!=null && inputs.dimensionsInches && inputs.weightPounds!=null) {
+  if (!exempt && issue?.code!=='ACTUAL_OFFER_INVALID' && issue?.code!=='ACTUAL_PRICE_INVALID'
+    && pricingEvidenceCurrent(draft,rules) && inputs?.costCny!=null && inputs.dimensionsInches && inputs.weightPounds!=null) {
     try {
       const calculation=listingPriceEvaluator({costCny:inputs.costCny,dimensionsInches:inputs.dimensionsInches,weightPounds:inputs.weightPounds},rules.pricing);
       for (const offer of Array.isArray(draft.attributes.purchasable_offer)?draft.attributes.purchasable_offer:[]) {

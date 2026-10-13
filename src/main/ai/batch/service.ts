@@ -97,7 +97,7 @@ export class BatchService {
         beforeSend:()=>transaction(this.db,()=>{
           batch=this.get(id);if(batch.state!=='prepared'||batch.locallyStopped)invalid('原批次已有发送意图或已暂停');this.credentials(batch);
           for(const item of this.items(id)){
-            new AiUsageLedger(this.db,()=>new Date(this.now())).reserveBatch({id:item.aiCallId??item.id,...item.owner,status:'RUNNING',errorCode:null,requestId:null,model:item.purpose.model,purposeSnapshot:item.purpose,startedAt:this.now(),finishedAt:null,usage:emptyUsage()},JSON.stringify(item.body));
+            new AiUsageLedger(this.db,()=>new Date(this.now())).reserveBatch({id:item.aiCallId??item.id,...item.owner,status:'RUNNING',errorCode:null,requestId:null,model:item.purpose.model,purposeSnapshot:item.purpose,startedAt:this.now(),finishedAt:null,usage:emptyUsage()},JSON.stringify(item.body),item.references);
             const reserved=this.deps.reserve?.(item,this.db) as unknown;if(reserved&&typeof (reserved as any).then==='function')invalid('Batch预算命令不能返回Promise');writeItem(this.db,{...item,state:'waiting'});
           }
           writeBatch(this.db,{...batch,state:'submitting',submittedAt:this.now(),updatedAt:this.now()});

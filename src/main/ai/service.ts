@@ -99,7 +99,7 @@ import { selectImageReferences } from "../assets/reference-selection.ts";
 export interface AiDependencies {
   /** M09 main-only pin adapter. No renderer URLs or inline images enter Batch directly. */
   batchReferences?:{
-    prepare(body:Record<string,unknown>,owner:{taskId:string;operationId:string;productId:string;productRevision:number}):Promise<{body:Record<string,unknown>;references:BatchReference[]}>;
+    prepare(body:Record<string,unknown>,owner:{taskId:string;operationId:string;productId:string;productRevision:number},signal?:AbortSignal):Promise<{body:Record<string,unknown>;references:BatchReference[]}>;
     validate(reference:BatchReference):boolean;
   };
   fetch?: typeof fetch; now?: () => Date; timeoutMs?: number; maxConcurrency?: number; maxResponseBytes?: number; nonce?: () => string;
@@ -933,10 +933,11 @@ export class AiService {
             if(model!==profile.model)throw new AiError('CONFIG_CHANGED');
             const existingBatch=this.batchTasks.find(batchOperationId)??this.batchTasks.pendingOperation(batchOperationId);
             if(existingBatch){requestBody=existingBatch.body;references=existingBatch.references;}
+            else if(!this.batchReferences&&JSON.stringify(ordinaryBody).includes('image_url'))return null;
             else if(taskScope.mode==='deferred_batch'&&this.batchReferences&&JSON.stringify(ordinaryBody).includes('image_url')){
-              const pinned=await this.batchReferences.prepare(ordinaryBody,{taskId:taskScope.taskId,operationId:batchOperationId,...input});requestBody=pinned.body;references=pinned.references;
+              const pinned=await this.batchReferences.prepare(ordinaryBody,{taskId:taskScope.taskId,operationId:batchOperationId,...input},activeSignal);requestBody=pinned.body;references=pinned.references;
             }
-            const replay=await this.batchTasks.request({operation:{aiCallId:batchOperationId,taskId:taskScope.taskId,operationId:batchOperationId,attempt:1,phase:taskScope.phase.toLowerCase(),inputFingerprint:key,schemaFingerprint:listingFingerprint(prepared.listingContext?.schemaSha256??{kind:profile.capability}),credentialScope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation}),owner:{...input,providerId:profile.id as 'openrouter'|'openrouter-review',generation:profile.generation},purpose:profile.routing,body:requestBody,references},authorize:taskScope.authorize,reserve:()=>{id=batchOperationId;reservingBatch=true;try{adapterContext.beforeSend?.(JSON.stringify(body));}finally{reservingBatch=false;}}});
+            const replay=await this.batchTasks.request({operation:{aiCallId:batchOperationId,taskId:taskScope.taskId,operationId:batchOperationId,attempt:1,phase:taskScope.phase.toLowerCase(),inputFingerprint:key,schemaFingerprint:listingFingerprint(prepared.listingContext?.schemaSha256??{kind:profile.capability}),credentialScope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation}),owner:{productId:input.productId,productRevision:input.productRevision,providerId:profile.id as 'openrouter'|'openrouter-review',generation:profile.generation},purpose:profile.routing,body:requestBody,references},authorize:taskScope.authorize,reserve:()=>{id=batchOperationId;reservingBatch=true;try{adapterContext.beforeSend?.(JSON.stringify(body));}finally{reservingBatch=false;}}});
             if(!replay)return null;
             id=batchOperationId;batchItem=replay.item;call=this.getCall(id)??undefined;if(!call)throw new AiError('INVALID_CONFIG');
             requestBytes=Buffer.byteLength(JSON.stringify(body));return {body:replay.body};

@@ -1,0 +1,14 @@
+PASS queue completion, readback, stale-rule reassessment and original-task guidance preserve typed producer messages
+PASS selected target drives recipe counts, partial filters retain healthy recipes, all filtered products leave pending and remain in the reason tab
+PASS single start passes the selected source-order scope; cancelled native confirmation creates no task; submission and label stages remain distinct
+PASS navigation stops only polling; saved tasks return and explicit pause, resume and cancel use the task API
+PASS completed sales rows retain failure audit without displaying an old fault as the current result
+PASS background task revisions refresh the queue while a completed task is selected; unchanged polls do not reread evidence
+PASS 12 source cards preserve source/sales counts, actual parent families and excluded variants; search and manual folding survive polling, pricing/source/workflow outcomes and submission/completion remain distinct
+PASS label count uses sales units and file opening preserves the actual backend file index
+PASS A4 and thermal paper settings persist through the format API and reject invalid dimensions
+PASS file-opening errors remain visible while background status polling continues
+PASS failed labels show server messages and require retry before printing or batch export
+PASS manual shipment attachments remain bound to their shipment number and are clearly distinguished from platform-verified records
+PASS hosting supports native config import, safe template export and enable toggles; disabled profiles cannot start automatic publishing
+{"ok":true,"checks":13,"root":"C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-integration\\.test-data\\automatic-listing-ui-hENRQX"}

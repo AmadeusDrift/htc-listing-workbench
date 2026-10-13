@@ -182,7 +182,7 @@ export function AmazonPanel(props: Props) {
   </section>;
 }
 function InfoIcon() { return <ShieldCheck size={17} />; }
-function IssueList({ title, issues, demo, empty, onLocate }: { onLocate: (path: string) => void; title: string; issues: ListingIssue[]; demo: boolean; empty: string }) {
+export function IssueList({ title, issues, demo, empty, onLocate }: { onLocate: (path: string) => void; title: string; issues: ListingIssue[]; demo: boolean; empty: string }) {
   if (!issues.length && !empty) return null;
-  return <section className="listing-issues"><h4>{demo ? '演示 · ' : ''}{title} <span className="quiet-count">{issues.length}</span></h4>{issues.length ? <ul>{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={issue.severity.toLowerCase()}><AlertCircle size={17} /><div><strong>{issue.message}</strong><p>{issue.code} · {issue.attributeNames.length ? issue.attributeNames.map(path => <button type="button" className="text-button" key={path} onClick={() => onLocate(path)}>定位 {path}</button>) : '商品整体'} · {issue.autoFixable ? '可按字段修改' : '需要核对或人工补充'}</p></div><span>{issue.severity}</span></li>)}</ul> : <p className="small-copy">{empty}</p>}</section>;
+  return <section className="listing-issues"><h4>{demo ? '演示 · ' : ''}{title} <span className="quiet-count">{issues.length}</span></h4>{issues.length ? <ul>{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={issue.severity.toLowerCase()}><AlertCircle size={17} /><div><strong>{issue.message}</strong><p>{issue.code} · {issue.attributeNames.length ? (issue.attributePaths?.length ? issue.attributePaths : issue.attributeNames).map(path => <button type="button" className="text-button" key={path} onClick={() => onLocate(path)}>定位 {path}</button>) : '商品整体'} · {issue.autoFixable ? '可按字段修改' : '需要核对或人工补充'}</p></div><span>{issue.severity}</span></li>)}</ul> : <p className="small-copy">{empty}</p>}</section>;
 }

@@ -9,7 +9,7 @@ export function SchemaFields({ schema, attributes, disabled, onChange, locate, o
   useEffect(() => { if (locate) setFilter(''); }, [locate]);
   useEffect(() => {
     if (!locate || filter) return;
-    const target = [...(container.current?.querySelectorAll<HTMLElement>('[data-field-path]') ?? [])].find(element => element.dataset.fieldPath === locate.path);
+    const target = [...(container.current?.querySelectorAll<HTMLElement>('[data-field-path]') ?? [])].find(element => (locate.path.startsWith('/') ? element.dataset.fieldPointer : element.dataset.fieldPath) === locate.path);
     if (!target) { onLocateError?.('目标字段或数组行已不存在于当前 Schema/草稿，请核对属性 JSON；未跳到其他字段。'); return; }
     for (let parent = target.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
     target.scrollIntoView({ block: 'center' });
@@ -37,6 +37,7 @@ function SchemaField({ node, root, path, value, required, disabled, depth, onCha
   const id = useId();
   const shape = displaySchema(node, root);
   const code = fieldPath(path);
+  const pointer = '/' + path.map(part => String(part).replaceAll('~', '~0').replaceAll('/', '~1')).join('/');
   const title = typeof shape.title === 'string' ? shape.title : String(path[path.length - 1]);
   const description = typeof shape.description === 'string' ? shape.description : '';
   const type = typeof shape.type === 'string' ? shape.type : shape.properties ? 'object' : shape.items ? 'array' : 'string';
@@ -46,7 +47,7 @@ function SchemaField({ node, root, path, value, required, disabled, depth, onCha
     const values = Array.isArray(value) ? value : [];
     const item = objectValue(shape.items);
     const limit = typeof shape.maxItems === 'number' ? Math.min(shape.maxItems, 200) : 200;
-    return <fieldset data-field-path={code} tabIndex={-1} className="schema-group" disabled={disabled}>
+    return <fieldset data-field-path={code} data-field-pointer={pointer} tabIndex={-1} className="schema-group" disabled={disabled}>
       <legend>{label}</legend>{description && <p className="schema-description">{description}</p>}
       {values.map((entry, index) => <div className="schema-array-entry" key={index}><div className="schema-array-tools"><span>第 {index + 1} 项</span><button type="button" className="icon-button" aria-label={`移除字段 ${code}[${index}]`} onClick={() => onChange(path, values.filter((_, i) => i !== index))}><Trash2 size={15} /></button></div>
         <SchemaField node={item} root={root} path={[...path, index]} value={entry} disabled={disabled} depth={depth + 1} onChange={onChange} />
@@ -62,7 +63,7 @@ function SchemaField({ node, root, path, value, required, disabled, depth, onCha
     const properties = Object.entries(objectValue(shape.properties));
     const data = objectValue(value);
     const requiredChildren = new Set(Array.isArray(shape.required) ? shape.required : []);
-    return <fieldset data-field-path={code} tabIndex={-1} className={`schema-group schema-object ${depth > 0 ? 'nested' : ''}`} disabled={disabled}>
+    return <fieldset data-field-path={code} data-field-pointer={pointer} tabIndex={-1} className={`schema-group schema-object ${depth > 0 ? 'nested' : ''}`} disabled={disabled}>
       <legend>{label}</legend>{description && <p className="schema-description">{description}</p>}
       <div className="schema-object-grid">{properties.map(([key, child]) => <SchemaField key={key} node={objectValue(child)} root={root} path={[...path, key]} value={data[key]} required={requiredChildren.has(key)} disabled={disabled} depth={depth + 1} onChange={onChange} />)}</div>
       {!properties.length && <p className="small-copy">此对象的内容请在属性 JSON 中填写。</p>}
@@ -70,7 +71,7 @@ function SchemaField({ node, root, path, value, required, disabled, depth, onCha
   }
   const choices = Array.isArray(shape.enum) ? shape.enum : 'const' in shape ? [shape.const] : undefined;
   const captions = Array.isArray(shape.enumNames) ? shape.enumNames : [];
-  return <label data-field-path={code} tabIndex={-1} className="field schema-leaf" htmlFor={id}>{label}
+  return <label data-field-path={code} data-field-pointer={pointer} tabIndex={-1} className="field schema-leaf" htmlFor={id}>{label}
     {choices ? <select id={id} aria-label={`Amazon 字段 ${code}`} disabled={disabled} value={value === undefined ? '' : JSON.stringify(value)} onChange={event => onChange(path, event.target.value === '' ? undefined : JSON.parse(event.target.value))}>
       <option value="">请选择</option>{choices.map((choice, index) => <option key={JSON.stringify(choice)} value={JSON.stringify(choice)}>{String(captions[index] ?? choice)}</option>)}
     </select> : type === 'boolean' ? <select id={id} aria-label={`Amazon 字段 ${code}`} disabled={disabled} value={value === undefined || value === null ? '' : String(value)} onChange={event => onChange(path, event.target.value === '' ? undefined : event.target.value === 'true')}><option value="">未填写</option><option value="true">是</option><option value="false">否</option></select>

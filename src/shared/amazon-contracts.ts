@@ -55,6 +55,8 @@ export interface ListingIssue {
   message: string;
   severity: 'ERROR' | 'WARNING' | 'INFO';
   attributeNames: string[];
+  /** Exact RFC 6901 locations from local validation; ownership stays in attributeNames. */
+  attributePaths?: string[];
   category: 'field' | 'fact' | 'qualification' | 'compliance' | 'image' | 'network' | 'rate_limit';
   source: 'local' | 'amazon' | 'demo';
   autoFixable: boolean;

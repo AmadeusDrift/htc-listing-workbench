@@ -12,8 +12,8 @@ test('registered migrations are atomic, sequential and preserve old record bytes
   db.prepare('INSERT INTO old_receipts VALUES(?,?)').run('unknown','{ "response": null, "attempt": 3 }');
   const before=db.prepare('SELECT raw FROM old_receipts').get()!.raw;
   migrateModules(db);migrateModules(db);assertMigrationJournal(db);
-  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,26);
-  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,5);
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,27);
+  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,6);
   assert.equal(db.prepare('SELECT raw FROM old_receipts').get()!.raw,before);
   db.prepare('UPDATE module_migration_journal SET name=?').run('tampered');
   assert.throws(()=>assertMigrationJournal(db),/迁移/);

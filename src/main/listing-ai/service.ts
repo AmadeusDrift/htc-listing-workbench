@@ -1,4 +1,5 @@
 import { programRelationField } from '../amazon/program-relations.ts';
+import { listingProblems } from './problems.ts';
 import { selectedFirmnessCorrection } from './selected-firmness.ts';
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
@@ -22,7 +23,7 @@ import type { WorkspaceStore } from '../store.ts';
 import type { AiService } from '../ai/service.ts';
 import type { AmazonService } from '../amazon/service.ts';
 import { integer, keys, uuid } from "../ai/primitives.ts";
-import { candidateTextValues, validateFieldValues, validatePolicyOutputs, wrapCandidateValues } from '../amazon/field-mapping.ts';
+import { candidateTextValues, validateFieldValues, validatePolicyOutputs } from '../amazon/field-mapping.ts';
 import { buildListingContext } from './context.ts';
 import { assertListingEvidence, assertListingReview, selectedSkuCategoryConflicts, validateListingContext } from "./validation.ts";
 import { listingFingerprint } from "../json-fingerprint.ts";
@@ -352,7 +353,7 @@ export class ListingAiService {
     const suggestion = await this.ai.listingFields(context, async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); }, undefined, signal);
     this.assertReviewSetting(true);
     const candidate = this.candidates(suggestion, draft, context);
-    const fields = candidate.candidates.filter(field => !programRelationField(field.field)&&listingFingerprint(wrapCandidateValues(draft.schema,draft.marketplaceId,field.field,field.items.map(item => item.value),draft.attributes[field.field])) !== listingFingerprint(draft.attributes[field.field] ?? null)).map(field => field.field);
+    const fields = candidate.candidates.filter(field => !programRelationField(field.field)&&listingFingerprint(candidateNative(field,draft.schema,draft.marketplaceId,draft.attributes[field.field])) !== listingFingerprint(draft.attributes[field.field] ?? null)).map(field => field.field);
     if (!candidate.candidates.length) return { draft, aiCalls:1, remaining:[...remaining,...candidate.missing.map(item => `${item.field}：${item.reason}`)], blocked:true };
     const reviewed = await this.review({ ...reference, suggestionResultId:suggestion.id }, signal);
     if (reviewed.output.kind !== 'amazon-fields-review') throw new UserFacingError('文案审核结果无效');
@@ -398,7 +399,11 @@ export class ListingAiService {
     throw new UserFacingError('字段操作对应的草稿已修改，保留进度，未自动重发');
   }
   /** Validation previews never publish. Only reported copy/semantic fields enter this journal. */
-  async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[];rejections?:{resultId:string;callId:string;details:import('../../shared/rejection-presentation.ts').FieldRejections}[]}> {
+  async complete(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<Awaited<ReturnType<import('../../shared/listing-ai-contracts.ts').ListingAiApi['completeAmazonFields']>>>{
+    const result=await this.completeInternal(raw,signal,operationId),operation=this.ai.completionJournal.list(result.draft.id).at(-1);
+    return{...result,issues:listingProblems(result.draft,result.remaining,operation)};
+  }
+  private async completeInternal(raw:unknown,signal?:AbortSignal,operationId?:string):Promise<{draft:AmazonDraft;aiCalls:number;previewAttempts:number;remaining:string[];rejections?:{resultId:string;callId:string;details:import('../../shared/rejection-presentation.ts').FieldRejections}[]}> {
     signal?.throwIfAborted();const initial=input(raw,'suggest'),journal=this.ai.completionJournal;
     // Preserve the response under its original frozen context before evaluating
     // whether changed current data still permits adoption. Never runs on startup.
@@ -497,16 +502,17 @@ export class ListingAiService {
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
         for(;;){
           let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved)return saved;
-          if(entry.sent){
+          if(entry.sent&&!this.ai.hasListingFieldGroup?.(entry.id)){
             if(!journal.unknown(operation.id)&&!(kind==='review'&&journal.reviewCoverageOmission(operation.id))){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
             journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
           }
           const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};
           assertBrandDispatch();journal.assertSendBudget(operation.id,kind);
+          const callsBefore=this.ai.listCalls().length;
           let result:AiResult;
           try{result=await this.ai.listingFields(context,async()=>{this.assertReviewSetting(reviewEnabled);await this.fresh(reference,context);this.assertReviewSetting(reviewEnabled);assertBrandDispatch();},kind==='review'?{suggestionId:round!.candidate.resultId!,candidate:candidate!}:undefined,signal,{operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});}
-          catch(error){if(kind!=='review'||!journal.reviewCoverageOmission(operation.id))throw error;aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);continue;}
-          aiCalls++;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
+          catch(error){if(kind!=='review'||!journal.reviewCoverageOmission(operation.id))throw error;aiCalls+=this.ai.listCalls().length-callsBefore;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);continue;}
+          aiCalls+=this.ai.listCalls().length-callsBefore;operation=journal.get(operation.id);round=operation.rounds.at(-1)!;signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);return result;
         }
       };
       const suggestion=await request('candidate');

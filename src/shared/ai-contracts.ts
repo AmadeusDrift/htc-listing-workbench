@@ -37,6 +37,7 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  purposeAssignments?:import('./ai-purpose-contracts.ts').FieldPurposeAssignment[];
   providerReceiptId?:string;
   purposeSnapshot?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;
   /** Fixed safety state survives backup without retaining provider response text. */
@@ -88,6 +89,8 @@ export interface TextReviewOutput {
 }
 export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
+  fieldGroupPart?:{operationId:string;fields:string[]};
+  fieldGroupAssembly?:{version:1;operationId:string;sources:AiResult[];assembledAt:string};
   fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1';originalResult:unknown;originalSha256:string;recoveredAt:string};
   imagePlanRecovery?: { repair?:{previousPlanId:string;issues:string[]}; parserVersion:'image-plan-recovery/v1'|'image-plan-recovery/v2'; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   localRecovery?: { parserVersion:'full-schema-recovery/v1'|'full-schema-recovery/v2'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };

@@ -6,6 +6,7 @@ import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOpera
 import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
 import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles,indexProviderReceiptPointers } from './ai/receipts.ts';
 import { BATCH_TABLES,assertBatchHistory } from './ai/batch/records.ts';
+import { FIELD_GROUP_TABLES,assertFieldGroupHistory,retainFieldGroupHistory } from './ai/field-purpose-groups.ts';
 import { pauseBatchHistory,retainBatchHistory,retainProviderReceipts } from './ai/batch/recovery.ts';
 import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
 import { retainSchemaResponseCalls } from './ai/usage.ts';
@@ -176,6 +177,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
     if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
+    if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -402,6 +404,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainAiUsage(current, snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainBatchHistory(current,snapshot);
+    retainFieldGroupHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);

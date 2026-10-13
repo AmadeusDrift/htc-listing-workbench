@@ -4,6 +4,8 @@ import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair 
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { isReviewCoverageOmission } from './review-omission.ts';
+import { readFieldGroup } from '../ai/field-purpose-groups.ts';
+import { recordRecoveredAiResult } from '../ai/results.ts';
 import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners,legacyStepDebt} from './legacy-completion.ts';
 import type {LegacyCompletionHistory} from './legacy-completion.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
@@ -208,6 +210,12 @@ export class CompletionJournal {
     for(const round of op.rounds){
       for(const entry of [round.candidate,round.review]){
       if(!entry)continue;
+      const group=entry===round.candidate?readFieldGroup(this.db,entry.id):undefined;
+      if(group){
+        if(!entry.resultId&&group.resultId){entry.resultId=group.resultId;this.result(entry,round);this.save(op);}
+        // A paid child is never a complete multi-model response. Resume through its original group.
+        continue;
+      }
       if(entry.sent&&!entry.resultId){
         const rows=this.db.prepare("SELECT id FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(entry.id);
         if(rows.length>1)invalid();
@@ -234,7 +242,7 @@ export class CompletionJournal {
           const output=retainValidNativeCandidates(parseFullGeneration(rawOutput,round.context),round.context),recoveredAt=[new Date().toISOString(),call!.finishedAt!].sort()[1];
           result=validateStoredAiResult({id:randomUUID(),callId:call!.id,providerId:call!.providerId,productId:call!.productId,productRevision:call!.productRevision,variantId:round.context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call!.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:round.context,sourceSha256:round.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',localRecovery:{parserVersion:'full-schema-recovery/v2',operationId:op.id,contextSha256:round.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
         }catch{continue;}
-        this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));
+        recordRecoveredAiResult(this.db,result);
         this.recordResult(request,result);this.db.exec('COMMIT');return result;
       }
       return unavailable();

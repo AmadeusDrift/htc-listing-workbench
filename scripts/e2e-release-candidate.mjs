@@ -99,11 +99,28 @@ try {
   assert.equal(settings.after.find(p=>p.id==='deepseek').thinking,true);assert.equal(settings.after.find(p=>p.id==='deepseek-review').thinking,false);
   assert.ok(settings.after.filter(p=>p.id.startsWith('deepseek')).every(p=>p.configured&&!p.enabled));
   await openAiSettings(page);
-  const thinking=page.getByLabel('文案生成思考模式',{exact:true});await expect(thinking).toHaveValue('on');
-  await expect(page.getByLabel('文案复核思考模式',{exact:true})).toHaveValue('off');
-  await thinking.selectOption('off');await expect.poll(()=>page.evaluate(()=>window.red.listAiProviders().then(rows=>rows.find(p=>p.id==='deepseek').thinking))).toBe(false);
-  await thinking.selectOption('on');await expect.poll(()=>page.evaluate(()=>window.red.listAiProviders().then(rows=>rows.find(p=>p.id==='deepseek').thinking))).toBe(true);
-  checks.push('actual settings IPC/UI: independent thinking, model switch retains value and key, invalid input has no mutation or provider calls');
+  // API-R2 retains compatibility IPC above, but the UI edits independent purpose
+  // profiles. Connection-level model/thinking controls no longer exist.
+  const purposeBefore=await page.evaluate(()=>window.red.getAiPurposeProfiles());
+  const title=page.locator('[data-ai-purpose="listing_title"]'),review=page.locator('[data-ai-purpose="copy_review"]');
+  const titleModel=title.getByLabel('标题模型',{exact:true}),titleEffort=title.getByLabel('标题思考强度',{exact:true});
+  const reviewModel=review.getByLabel('常规文案复核模型',{exact:true}),reviewEffort=review.getByLabel('常规文案复核思考强度',{exact:true});
+  await expect(titleModel.locator('option[value="deepseek:deepseek-flash"]')).toHaveJSProperty('disabled',false);
+  await titleModel.selectOption('deepseek:deepseek-flash');await titleEffort.selectOption('low');
+  await title.getByRole('button',{name:'保存此用途',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.red.getAiPurposeProfiles().then(rows=>rows.find(p=>p.purposeId==='listing_title')))).toEqual({...purposeBefore.find(p=>p.purposeId==='listing_title'),model:'deepseek-flash',gateway:'deepseek',effort:'low',source:'user',revision:purposeBefore.find(p=>p.purposeId==='listing_title').revision+1});
+  assert.deepEqual((await page.evaluate(()=>window.red.getAiPurposeProfiles())).filter(p=>p.purposeId!=='listing_title'),purposeBefore.filter(p=>p.purposeId!=='listing_title'));
+  await reviewModel.selectOption('deepseek:deepseek-v4-pro');await reviewEffort.selectOption('high');
+  await review.getByRole('button',{name:'保存此用途',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.red.getAiPurposeProfiles().then(rows=>rows.find(p=>p.purposeId==='copy_review')))).toEqual({...purposeBefore.find(p=>p.purposeId==='copy_review'),model:'deepseek-v4-pro',gateway:'deepseek',effort:'high',source:'user',revision:purposeBefore.find(p=>p.purposeId==='copy_review').revision+1});
+  const savedPurposes=await page.evaluate(()=>window.red.getAiPurposeProfiles());
+  assert.deepEqual(savedPurposes.filter(p=>!['listing_title','copy_review'].includes(p.purposeId)),purposeBefore.filter(p=>!['listing_title','copy_review'].includes(p.purposeId)));
+  await expect(titleModel).toHaveValue('deepseek:deepseek-flash');await expect(titleEffort).toHaveValue('low');
+  await expect(page.locator('.ai-connection-column').getByLabel('API Key',{exact:true})).toHaveValue('');
+  assert.deepEqual(await page.evaluate(()=>window.red.listAiProviders()),settings.after);
+  assert.deepEqual(await page.evaluate(()=>window.red.listAiCalls()),[]);
+  report.purposeProfiles=savedPurposes;
+  checks.push('compatibility IPC retains independent thinking/key and rejects invalid input; real purpose UI independently saves model/effort without mutating other purposes, legacy settings or calling providers');
   report.guardProbes = await probeGuard(app); assert.equal(report.guardProbes.attempts.length, 8); assert.equal(report.guardProbes.total, 8, 'Only deliberate guard probes may attempt outbound');
   await app.close(); app = undefined;
   page = await launch();
@@ -116,11 +133,17 @@ try {
   }, { dataRoot, encrypted: runtime.encrypted });
   assert.equal(restored.value, 'synthetic'); assert.equal(restored.secret, 'synthetic-release-secret'); assert.deepEqual(restored.attempts, []); assert.deepEqual(restored.shown, []);
   await openAiSettings(page);
-  await expect(page.getByLabel('文案生成思考模式',{exact:true})).toHaveValue('on');
-  await expect(page.getByLabel('文案复核思考模式',{exact:true})).toHaveValue('off');
+  await expect(page.locator('[data-ai-purpose="listing_title"]').getByLabel('标题模型',{exact:true})).toHaveValue('deepseek:deepseek-flash');
+  await expect(page.locator('[data-ai-purpose="listing_title"]').getByLabel('标题思考强度',{exact:true})).toHaveValue('low');
+  await expect(page.locator('[data-ai-purpose="copy_review"]').getByLabel('常规文案复核模型',{exact:true})).toHaveValue('deepseek:deepseek-v4-pro');
+  await expect(page.locator('[data-ai-purpose="copy_review"]').getByLabel('常规文案复核思考强度',{exact:true})).toHaveValue('high');
+  assert.deepEqual(await page.evaluate(()=>window.red.getAiPurposeProfiles()),savedPurposes);
+  await expect(page.locator('.ai-connection-column').getByLabel('API Key',{exact:true})).toHaveValue('');
+  assert.equal((await page.evaluate(()=>window.red.listAiProviders())).find(p=>p.id==='deepseek').thinking,true);
+  assert.equal((await page.evaluate(()=>window.red.listAiProviders())).find(p=>p.id==='deepseek-review').thinking,false);
   assert.ok((await page.evaluate(()=>window.red.listAiProviders())).filter(p=>p.id.startsWith('deepseek')).every(p=>p.configured&&!p.enabled));
   assert.deepEqual(await page.evaluate(()=>window.red.listAiCalls()),[]);
-  checks.push('restarted actual EXE displays persisted thinking without re-entering synthetic keys');
+  checks.push('restarted actual EXE displays exact persisted purpose models/efforts/revisions and retains compatibility thinking without re-entering the shared synthetic key');
   checks.push('same candidate restart preserves SQLite, encrypted synthetic secret and product IDs; no outbound');
   assert.deepEqual(errors, []); report.passed = true;
 } catch (error) { report.passed = false; report.failure = String(error.stack || error); throw error; }

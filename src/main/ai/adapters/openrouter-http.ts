@@ -28,6 +28,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   let response:Response;
   try{response=await context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal});}
   catch{throwIfAborted(signal);throw new AiError('NETWORK_ERROR');}
+  const length=response.headers.get('content-length');if(length!==null&&(!/^\d+$/.test(length)||!Number.isSafeInteger(Number(length))||Number(length)>context.maxResponseBytes)){void response.body?.cancel().catch(()=>{});throw new AiError('OUTPUT_INVALID');}
   const reader=response.body?.getReader();if(!reader)throw new AiError('OUTPUT_INVALID');
   const captureSignal=AbortSignal.timeout(30_000),chunks:Uint8Array[]=[];let size=0;
   try{for(;;){const part=await abortable(reader.read(),captureSignal,()=>{void reader.cancel().catch(()=>{});});if(part.done)break;size+=part.value.length;if(size>context.maxResponseBytes)throw new AiError('OUTPUT_INVALID');chunks.push(part.value);}}

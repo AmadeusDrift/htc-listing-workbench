@@ -43,6 +43,8 @@ export class AmazonTransportError extends UserFacingError {
     super(message); this.status = status; this.requestId = requestId; this.unknownWrite = unknownWrite; this.response = response;
   }
 }
+/** POST completed with a response, but its result cannot safely be adopted or replayed. */
+export class AmazonLabelResponseError extends AmazonTransportError {}
 interface HttpResult { status: number; headers: Headers; bytes: Buffer; bodyUnavailable?: 'limit' | 'read' }
 export interface ApiResult { data: JsonObject; status: number; requestId: string | null }
 export type Operation = 'searchDefinitionsProductTypes' | 'getDefinitionsProductType' | 'previewListingsItem' | 'putListingsItem' | 'getListingsItem' | 'patchListingsItem' | 'previewPatchListingsItem';
@@ -306,17 +308,21 @@ export class AmazonTransport {
       if (wait > 0) await this.sleep(wait); guard(); attempts = 1; this.nextAllowed.set(key, this.now() + 500);
       let result: HttpResult;
       try { result = await this.http(ENDPOINTS[target.region] + '/inbound/fba/2024-03-20/items/labels', { method: 'POST', headers: { 'x-amz-access-token': token, 'content-type': 'application/json', 'user-agent': 'HTC Item Labels' }, body: JSON.stringify(body) }, 2 * 1024 * 1024, (code, value) => { status = code; headers = value; }, this.dataFetcher ?? this.fetcher); }
-      catch { throw new AmazonTransportError('标签请求连接中断，未获得可核验文件', null, null, true); }
-      guard(false); status = result.status; headers = result.headers;
+      catch { throw new AmazonTransportError('标签请求连接中断，未获得可核验文件', status, this.hooks.redact(metadata(headers).requestId), true); }
+      status = result.status; headers = result.headers;
       const { requestId, rateLimit } = this.hooks.redact(metadata(headers));
       if (rateLimit) this.nextAllowed.set(key, this.now() + 1000 / Number(rateLimit));
       if (status === 401) { this.clear(target.id); throw new AmazonTransportError('Amazon 标签授权失效，请检查连接', status, requestId); }
       if (status === 403) throw new AmazonTransportError('商品标签接口权限不足，请核对 Amazon Fulfillment 角色；上架结果仍保留', status, requestId, false, this.errorBody(result));
       if (status === 429 || status >= 500 || status === 408) { this.nextAllowed.set(key, this.now() + this.delay(headers, 0)); throw new AmazonTransportError('Amazon 商品标签服务暂时不可用', status, requestId); }
-      if (status !== 200) throw new AmazonTransportError('Amazon 商品标签请求未通过（HTTP ' + status + '）', status, requestId, false, this.errorBody(result));
-      const data = this.decode(result), documents = itemLabelDownloads(data, this.now());
-      this.restoreItemLabelDownloads(target,{targetId:target.id,targetGeneration:generation,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:target.mode},documents);
-      return { data, status, requestId };
+      if (status < 200 || status >= 300) throw new AmazonTransportError('Amazon 商品标签请求未通过（HTTP ' + status + '）', status, requestId, false, this.errorBody(result));
+      try{
+        guard(false);
+        if(status!==200)throw new UserFacingError('标签成功响应状态无法采用');
+        const data = this.decode(result), documents = itemLabelDownloads(data, this.now());
+        this.restoreItemLabelDownloads(target,{targetId:target.id,targetGeneration:generation,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:target.mode},documents);
+        return { data, status, requestId };
+      }catch{throw new AmazonLabelResponseError('标签响应已收到但无法安全采用，请核对原请求；禁止重新生成',status,requestId,false,this.errorBody(result));}
     } catch (error) { category = status === 401 || status === 403 ? 'authorization' : status === 429 ? 'rate_limit' : 'labels'; throw error instanceof UserFacingError ? error : new AmazonTransportError('Amazon 商品标签请求失败', status); }
     finally { this.log(target, 'createMarketplaceItemLabels', start, attempts, status, headers, category); }
   }

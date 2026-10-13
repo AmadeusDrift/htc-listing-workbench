@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
-import { AmazonTransportError } from '../amazon/transport.ts';
+import { AmazonLabelResponseError, AmazonTransportError } from '../amazon/transport.ts';
 import type { ProcurementService } from '../procurement/service.ts';
 import type { ProcurementBatch, ProcurementLine } from '../../shared/procurement-contracts.ts';
 import type { ItemLabelFormat, ItemLabelRecord } from '../../shared/item-label-contracts.ts';
@@ -55,7 +55,7 @@ export class ItemLabelService {
   syncBatch(batchId:string,options:{jobId?:string;format?:ItemLabelFormat}={}):ItemLabelRecord[]{
     const batch=this.procurement.get(batchId),prior=this.list({batchId:batch.id}),eligible=new Map(this.procurement.candidates().map(row=>[row.draftId,row]));const result:ItemLabelRecord[]=[];
     for(const line of batch.lines){
-      const unknown=prior.findLast(row=>row.lineId===line.id&&row.errorCode==='REQUEST_UNKNOWN');
+      const unknown=prior.findLast(row=>row.lineId===line.id&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(row.errorCode??''));
       // A procurement revision is not evidence that the prior request was not sent.
       if(unknown){result.push(unknown);continue;}
       const previous=prior.findLast(row=>row.lineId===line.id&&row.current)??prior.findLast(row=>row.lineId===line.id),jobId=options.jobId?identifier(options.jobId):previous?.jobId??batch.automaticJobId??null,format=validateItemLabelFormat(options.format??previous?.format??DEFAULT_ITEM_LABEL_FORMAT);
@@ -93,7 +93,7 @@ export class ItemLabelService {
     }
     this.arm();return rows;
   }
-  private matches(row:ItemLabelRecord):boolean{try{const current=this.get(row.id),batch=this.procurement.get(row.batchId),line=batch.lines.find(line=>line.id===row.lineId);return !this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&value.errorCode==='REQUEST_UNKNOWN')&&this.targetMatches(row)&&current.current&&current.status!=='CANCELLED'&&!!line&&itemLabelFingerprint(this.base(batch,line,row.jobId,row.format))===row.fingerprint;}catch{return false;}}
+  private matches(row:ItemLabelRecord):boolean{try{const current=this.get(row.id),batch=this.procurement.get(row.batchId),line=batch.lines.find(line=>line.id===row.lineId);return !this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(value.errorCode??''))&&this.targetMatches(row)&&current.current&&current.status!=='CANCELLED'&&!!line&&itemLabelFingerprint(this.base(batch,line,row.jobId,row.format))===row.fingerprint;}catch{return false;}}
   private stale(row:ItemLabelRecord){const latest=this.get(row.id);if(!latest.current)return;if(latest.status==='REQUESTING')latest.requestPending=true;latest.current=false;latest.status='STALE';latest.nextDueAt=null;latest.message='标签绑定已变化，请同步当前备货数量';this.put(latest);}
   private async run(row:ItemLabelRecord):Promise<void>{
     if(row.status!=='QUEUED'||row.paused||!row.requestedAt)return; if(!this.matches(row)){this.stale(row);return;}
@@ -125,6 +125,14 @@ export class ItemLabelService {
       const newest=this.get(row.id);if(!this.matches(row)){if(newest.current)this.stale(row);else{newest.files=files;this.put(newest);}return;}
       row.files=files;row.status='READY';row.message='全部 PDF 标签已保存并校验';row.errorCode=null;row.paused=newest.paused;this.put(row);
     }catch(error){
+      if(error instanceof AmazonLabelResponseError){
+        const latest=this.get(row.id);latest.status=latest.current?'FAILED':'STALE';latest.requestPending=false;latest.responseReceived=true;latest.requestId=error.requestId;latest.attempts=row.attempts;latest.nextDueAt=null;
+        latest.errorCode='RESPONSE_UNUSABLE';latest.message='原标签响应已收到但无法安全采用，请核对原请求；禁止重新生成';
+        this.db.exec('BEGIN IMMEDIATE');
+        try{this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run('item_label_response_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:error.requestId,status:error.status,receivedAt:this.at(),response:error.response}));this.put(latest);this.db.exec('COMMIT');}
+        catch(failure){this.db.exec('ROLLBACK');throw failure;}
+        return;
+      }
       if(!row.responseReceived&&error instanceof AmazonTransportError&&error.unknownWrite){
         // Even a superseded in-flight request remains unresolved: preserve its evidence.
         const latest=this.get(row.id);latest.status=latest.current?'FAILED':'STALE';latest.attempts=row.attempts;latest.nextDueAt=null;latest.requestPending=false;
@@ -147,7 +155,7 @@ export class ItemLabelService {
   hasActiveWork():boolean{return this.running!==null;}
   retry(id:string):ItemLabelRecord{
     let row=this.get(id);
-    if(this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&value.errorCode==='REQUEST_UNKNOWN'))throw new UserFacingError('标签请求结果未知，请先核对原请求；普通重试不能重新发送');
+    if(this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(value.errorCode??'')))throw new UserFacingError('标签原请求结果未知或响应无法采用，请先核对原请求；普通重试不能重新发送');
     if(!row.current||row.status!=='FAILED')throw new UserFacingError('只能重试当前失败的标签版本');
     if(!this.matches(row))throw new UserFacingError('备货绑定已变化，请刷新');
     if(row.attempts>=1000||(row.downloadAttempts??0)>=1000)throw new UserFacingError('标签累计重试次数已达上限');

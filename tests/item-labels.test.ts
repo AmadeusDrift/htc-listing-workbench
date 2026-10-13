@@ -39,12 +39,12 @@ function fixture(t: test.TestContext) {
     batch:()=>procurement.ensureAutomaticBatch(randomUUID(),[draftId],{[draftId]:5})[0]};
 }
 
-function realLabelTransport(f:ReturnType<typeof fixture>,status:()=>number){
+function realLabelTransport(f:ReturnType<typeof fixture>,status:()=>number,options:{generation?:()=>number;post?:()=>Response}={}){
   const calls:{url:string;init:RequestInit}[]=[],target=f.amazon.executionTargetScope().target;
   let transport:AmazonTransport;
-  const reset=()=>{transport=new AmazonTransport({active:()=>target,generation:()=>1,credentials:()=>({...target,name:'test',clientId:'client',clientSecret:'secret',refreshToken:'refresh'}),pause:()=>{},audit:()=>{},redact:value=>value,remember:()=>{}},{now:f.now,sleep:async()=>{},resolveAddresses:async()=>['52.1.2.3'],fetch:async()=>{throw Error('native transport expected');},dataFetch:async(url,init)=>{
+  const reset=()=>{transport=new AmazonTransport({active:()=>target,generation:options.generation??(()=>1),credentials:()=>({...target,name:'test',clientId:'client',clientSecret:'secret',refreshToken:'refresh'}),pause:()=>{},audit:()=>{},redact:value=>value,remember:()=>{}},{now:f.now,sleep:async()=>{},resolveAddresses:async()=>['52.1.2.3'],fetch:async()=>{throw Error('native transport expected');},dataFetch:async(url,init)=>{
     calls.push({url,init});if(url.includes('/auth/o2/token'))return Response.json({access_token:'token',token_type:'bearer',expires_in:3600});
-    if(url.includes('/items/labels'))return Response.json({documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/recovery.pdf?signature=synthetic-private'}]},{headers:{'x-amzn-requestid':'original-post'}});
+    if(url.includes('/items/labels'))return options.post?.()??Response.json({documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/recovery.pdf?signature=synthetic-private'}]},{headers:{'x-amzn-requestid':'original-post'}});
     return status()===200?new Response(new Uint8Array(pdfBytes()),{headers:{'content-type':'application/pdf'}}):new Response('unavailable',{status:status()});
   }});};reset();
   f.amazon.createMarketplaceItemLabels=async(_id,body,guard)=>transport.createMarketplaceItemLabels(target,body,guard);
@@ -52,6 +52,39 @@ function realLabelTransport(f:ReturnType<typeof fixture>,status:()=>number){
   f.amazon.restoreItemLabelDownloads=(scope,documents)=>transport.restoreItemLabelDownloads(target,scope,documents);
   return {calls,reset,posts:()=>calls.filter(call=>call.url.includes('/items/labels')).length,gets:()=>calls.filter(call=>call.init.method==='GET').length};
 }
+
+for(const kind of ['empty','invalid-json','rotation'] as const)test(`real transport preserves unusable post response without replay: ${kind}`,async t=>{
+  const f=fixture(t),batch=f.batch();let generation=1;
+  const target=f.amazon.executionTargetScope().target;f.amazon.executionTargetScope=()=>({target,generation});
+  const transport=realLabelTransport(f,()=>200,{generation:()=>generation,post:()=>{
+    if(kind==='rotation'){generation=2;f.service.syncBatch(batch.id);}
+    return kind==='invalid-json'?new Response('not-json',{headers:{'x-amzn-requestid':'post-response'}}):Response.json(kind==='rotation'?{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/original.pdf'}]}:{},{headers:{'x-amzn-requestid':'post-response'}});
+  }});
+  const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();const held=f.service.get(row.id);
+  assert.equal(held.responseReceived,true);assert.equal(held.requestId,'post-response');assert.equal(held.attempts,1);
+  assert.equal(held.status,kind==='rotation'?'STALE':'FAILED');
+  assert.throws(()=>f.service.retry(row.id),/响应|原请求|恢复/);
+  assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].id,row.id);await f.reopen();await f.service.runDue();assert.equal(transport.posts(),1);
+  const db=openDatabase(f.dir);try{
+    const evidence=JSON.parse(String(db.prepare('SELECT value_json FROM amazon_settings WHERE key=?').get('item_label_response_v1:'+row.id)!.value_json));
+    assert.equal(evidence.requestId,'post-response');assert.equal(evidence.status,200);assert.equal(evidence.labelId,row.id);
+    assert.deepEqual(evidence.response,kind==='empty'?{}:kind==='invalid-json'?{body:'not-json'}:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/original.pdf'}]});
+    assert.ok(!JSON.stringify(f.service.list()).includes('original.pdf'));
+  }finally{db.close();}
+});
+
+test('real transport explicit POST 401 remains a safe manual retry',async t=>{
+  const f=fixture(t),batch=f.batch(),transport=realLabelTransport(f,()=>200,{post:()=>Response.json({errors:[{code:'Unauthorized'}]},{status:401,headers:{'x-amzn-requestid':'rejected-post'}})});
+  const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.service.get(row.id).errorCode,'HTTP_401');
+  f.advance(1000);f.service.retry(row.id);await f.service.runDue();assert.equal(transport.posts(),2);assert.equal(f.service.get(row.id).responseReceived,undefined);
+});
+
+test('real transport beforeSend pause is NOT_SENT and does not consume a POST attempt',async t=>{
+  const f=fixture(t),batch=f.batch(),transport=realLabelTransport(f,()=>200),send=f.amazon.createMarketplaceItemLabels;
+  f.amazon.createMarketplaceItemLabels=async(...args)=>{f.service.pauseJob(batch.automaticJobId!);return send(...args);};
+  const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();const held=f.service.get(row.id);
+  assert.equal(transport.posts(),0);assert.equal(held.attempts,0);assert.equal(held.requestPending,false);assert.equal(held.errorCode,null);assert.equal(held.paused,true);assert.equal(held.status,'QUEUED');
+});
 
 test('real transport restores original GET capability after process restart and encrypted backup restore',async t=>{
   const f=fixture(t),batch=f.batch();let status=503;const transport=realLabelTransport(f,()=>status);

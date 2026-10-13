@@ -35,6 +35,7 @@ export function dataOwner(table:string,key?:string):DataOwner {
     if(!key)throw new UserFacingError('共享设置必须提供记录键 key');
     if(key.startsWith('accepted_sku_v1:'))return 'publish';
     if(key.startsWith('item_label_download_v1:'))return 'labels';
+    if(key.startsWith('item_label_response_v1:'))return 'labels';
     const owner=settingOwners[key];if(owner)return owner;
   }else{const owner=tableOwners.get(table);if(owner)return owner;}
   throw new UserFacingError(`数据所有者未登记：${table}${key?':'+key:''}`);

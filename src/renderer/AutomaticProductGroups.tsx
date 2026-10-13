@@ -33,7 +33,7 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping, memory
     {expanded && <div className="automatic-sale-body">
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
       {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision}/>}
-      {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
+      {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} onLocateSlot={imageSlot => onManual(item.productId, item.draftId!, { variantId: item.variantId, imageSlot })} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
     </div>}
@@ -47,7 +47,7 @@ function SourceVariants({ group, query, memoryKey }: { group: AutomaticProductGr
   return <details className="automatic-source-variants" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary>查看全部 {group.sourceVariantCount} 个来源规格 · {group.excludedCount} 个未纳入本次任务</summary>
     <p className="small-copy">来源规格完整保留，未纳入不等于失败；来源规格数与销售 SKU 数不能相减计算失败数。销售 SKU 可由组套规则组合；下表展示每个来源规格对应的本次销售 SKU。</p>
-    <ul>{group.sourceVariants.map(({ variant, items }) => <li key={variant.id} data-testid={`automatic-source-variant-${variant.id}`} data-selected={Boolean(items.length)} data-search-match={query ? [variant.sku, variant.originalSpec, variant.normalizedSpec, variant.sourceSpec].some(value => value?.toLocaleLowerCase().includes(query)) : undefined}>
+    <ul data-scroll-key={`source-variants:${group.productId}`}>{group.sourceVariants.map(({ variant, items }) => <li key={variant.id} data-testid={`automatic-source-variant-${variant.id}`} data-selected={Boolean(items.length)} data-search-match={query ? [variant.sku, variant.originalSpec, variant.normalizedSpec, variant.sourceSpec].some(value => value?.toLocaleLowerCase().includes(query)) : undefined}>
       <span><strong>{variant.normalizedSpec || variant.originalSpec || variant.sourceSpec || '未填写规格'}</strong><small>来源 SKU：{variant.sku}</small></span>
       <span>{items.length ? <><Badge tone="info">已纳入本次任务</Badge><small>销售 SKU：{items.map(item => item.sku).join('、')}</small></> : <Badge tone="neutral">未纳入本次任务</Badge>}</span>
     </li>)}</ul>

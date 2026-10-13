@@ -1,3 +1,4 @@
+import { usePageState } from './navigation-context';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Download, RefreshCw, Search, Square } from 'lucide-react';
 import type { AmazonTarget } from '../shared/amazon-contracts';
@@ -43,19 +44,19 @@ function Metric({ name, rows, read, source }: {
 const count = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString();
 export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettings }: Props) {
   const live = targets.filter(target => target.mode === 'live');
-  const [selection, setSelection] = useState('');
+  const [selection, setSelection] = usePageState('data:selection', '');
   const target = live.find(item => item.id === selection) ?? live.find(item => item.configured) ?? live[0];
   const targetId = target?.id ?? '';
   const [snapshot, setSnapshot] = useState<ProductDataSnapshot | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState('');
-  const [query, setQuery] = useState(''), [filter, setFilter] = useState<Filter>(''), [page, setPage] = useState(0);
+  const [query, setQuery] = usePageState('data:query', ''), [filter, setFilter] = usePageState<Filter>('data:filter', ''), [page, setPage] = usePageState('data:page', 0);
   const currentTarget = useRef(targetId), currentSnapshot = useRef(snapshot), requestId = useRef(0), mounted = useRef(false), acting = useRef(false);
   currentTarget.current = targetId; currentSnapshot.current = snapshot;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestId.current++; }; }, []);
   useEffect(() => {
     let active = true, reading = false;
     const scope = targetId;
-    requestId.current++; acting.current = false; setSnapshot(null); currentSnapshot.current = null; setError(''); setPage(0); setLoading(Boolean(scope));
+    requestId.current++; acting.current = false; setSnapshot(null); currentSnapshot.current = null; setError(''); setLoading(Boolean(scope));
     async function read(initial = false) {
       if (!scope || reading || acting.current) return;
       reading = true;
@@ -102,7 +103,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
   const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / 100) - 1));
   return <section className="operations-page product-data-page">
     <div className="ops-toolbar">
-      <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => setSelection(event.target.value)}>
+      <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => { setSelection(event.target.value); setPage(0); }}>
         {!live.length && <option value="">尚未连接正式店铺</option>}{live.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select></label>
       <Badge tone="info">仅本软件上传的商品</Badge>
@@ -140,7 +141,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
       </div>
       {!rows.length ? <div className="ops-empty"><strong>{loading ? '正在读取本机记录…' : query || filter ? '没有符合筛选条件的商品' : '等待第一件正式上传的商品'}</strong>
         <p>通过本软件正式提交后自动加入跟踪清单，再点“从 Amazon 同步数据”读取平台结果。</p></div>
-        : <><div className="ops-table-wrap"><table><thead><tr><th>商品 / SKU</th><th>上架情况</th><th>近 7 / 30 天销量</th><th>可售 / 待入库库存</th><th>补货参考</th><th>操作</th></tr></thead>
+        : <><div data-scroll-key="product-data-table" className="ops-table-wrap"><table><thead><tr><th>商品 / SKU</th><th>上架情况</th><th>近 7 / 30 天销量</th><th>可售 / 待入库库存</th><th>补货参考</th><th>操作</th></tr></thead>
           <tbody>{rows.slice(safePage * 100, (safePage + 1) * 100).map(row => {
             const state = rowStatus(row);
             return <tr key={row.sku}><td><div className="ops-product">{row.coverUrl && <img src={row.coverUrl} alt="商品图" />}<div><strong>{row.title}</strong><small>{row.sku}</small><small>{row.listing.value?.asin ?? 'ASIN 待确认'}</small><small>开始跟踪 {formatDate(row.salesSince, true)}</small></div></div></td>

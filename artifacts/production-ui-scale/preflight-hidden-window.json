@@ -1,0 +1,258 @@
+{
+  "recordedAt": "2026-10-13T18:00:06.987Z",
+  "schemaVersion": 30,
+  "dataset": {
+    "products": 2000,
+    "tasks": 5000,
+    "itemsPerTask": 1,
+    "assets": 2000,
+    "bytesPerImage": 68,
+    "imageDimensions": "1x1 synthetic PNG; independent owner/path, shared bytes",
+    "allTasks": "PAUSED",
+    "credentials": 0,
+    "grants": 0,
+    "fixtureCreationMs": 3490.8011
+  },
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26300",
+    "arch": "x64",
+    "cpu": "AMD Ryzen 5 9600X 6-Core Processor             ",
+    "logicalCpuCount": 12,
+    "totalMemoryBytes": 33396543488,
+    "node": "v24.21.0",
+    "electron": {
+      "node": "24.21.0",
+      "acorn": "8.18.0",
+      "ada": "4.0.0",
+      "amaro": "1.1.11",
+      "ares": "1.34.8",
+      "brotli": "1.2.0",
+      "cldr": "48.0",
+      "icu": "78.2",
+      "llhttp": "9.4.3",
+      "merve": "1.2.2",
+      "modules": "149",
+      "napi": "10",
+      "nbytes": "0.1.4",
+      "ncrypto": "0.0.1",
+      "nghttp2": "1.70.0",
+      "nghttp3": "",
+      "ngtcp2": "",
+      "openssl": "0.0.0",
+      "simdjson": "4.6.7",
+      "simdutf": "7.7.0",
+      "sqlite": "3.53.4",
+      "tz": "2025c",
+      "undici": "7.29.1",
+      "unicode": "17.0",
+      "uv": "1.52.1",
+      "uvwasi": "0.0.23",
+      "v8": "15.2.124.28-electron.0",
+      "zlib": "1.3.2.1-motley",
+      "zstd": "1.6.0",
+      "electron": "44.4.5",
+      "chrome": "152.0.7977.130"
+    }
+  },
+  "measurements": [
+    {
+      "name": "search 1999 / 2000 products",
+      "completionWallMs": 12.904600000000755,
+      "durationToPaintOpportunityMs": 1990.699999988079,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索采集箱",
+          "start": 357.60000002384186,
+          "eventToPaintOpportunityMs": 1981.699999988079
+        }
+      ]
+    },
+    {
+      "name": "clear search / restore page of 20",
+      "completionWallMs": 20.751100000000406,
+      "durationToPaintOpportunityMs": 2012.699999988079,
+      "longTasks": [
+        {
+          "start": 3345.699999988079,
+          "duration": 1007
+        }
+      ],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索采集箱",
+          "start": 2351.300000011921,
+          "eventToPaintOpportunityMs": 2001.8999999761581
+        }
+      ]
+    },
+    {
+      "name": "image pagination page 2 and local PNG decode",
+      "completionWallMs": 3956.0326999999997,
+      "durationToPaintOpportunityMs": 5018.800000011921,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "",
+          "start": 6369.800000011921,
+          "eventToPaintOpportunityMs": 1997.5
+        }
+      ]
+    },
+    {
+      "name": "navigate automatic and load 5000 task options",
+      "completionWallMs": 410.91120000000046,
+      "durationToPaintOpportunityMs": 2121.399999976158,
+      "longTasks": [
+        {
+          "start": 9573.199999988079,
+          "duration": 264
+        },
+        {
+          "start": 9894.300000011921,
+          "duration": 203
+        },
+        {
+          "start": 10098.300000011921,
+          "duration": 207
+        },
+        {
+          "start": 10553.899999976158,
+          "duration": 65
+        }
+      ],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "自动上架",
+          "start": 9462.800000011921,
+          "eventToPaintOpportunityMs": 36
+        }
+      ]
+    },
+    {
+      "name": "switch paused task and render local counts",
+      "completionWallMs": 1378.6409999999996,
+      "durationToPaintOpportunityMs": 3013.100000023842,
+      "longTasks": [
+        {
+          "start": 11663.199999988079,
+          "duration": 242
+        },
+        {
+          "start": 11907.699999988079,
+          "duration": 258
+        },
+        {
+          "start": 12165.800000011921,
+          "duration": 233
+        },
+        {
+          "start": 12722.100000023842,
+          "duration": 212
+        },
+        {
+          "start": 12941.899999976158,
+          "duration": 218
+        },
+        {
+          "start": 13160.5,
+          "duration": 216
+        }
+      ],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "选择自动上架任务",
+          "start": 11916.300000011921,
+          "eventToPaintOpportunityMs": 1659.8999999761581
+        },
+        {
+          "type": "change",
+          "label": "选择自动上架任务",
+          "start": 11916.399999976158,
+          "eventToPaintOpportunityMs": 1659.800000011921
+        }
+      ]
+    },
+    {
+      "name": "task search while polling 5000 saved records",
+      "completionWallMs": 1103.4941,
+      "durationToPaintOpportunityMs": 3018.300000011921,
+      "longTasks": [
+        {
+          "start": 14592.399999976158,
+          "duration": 994
+        },
+        {
+          "start": 15681.199999988079,
+          "duration": 211
+        }
+      ],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索任务商品或 SKU",
+          "start": 15582.100000023842,
+          "eventToPaintOpportunityMs": 1006.5
+        }
+      ]
+    },
+    {
+      "name": "navigate back to inbox from 5000 tasks",
+      "completionWallMs": 57.78359999999884,
+      "durationToPaintOpportunityMs": 2051,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "change",
+          "label": "搜索任务商品或 SKU",
+          "start": 17661.19999998808,
+          "eventToPaintOpportunityMs": 22.30000001192093
+        },
+        {
+          "type": "click",
+          "label": "采集箱",
+          "start": 17661.899999976158,
+          "eventToPaintOpportunityMs": 21.600000023841858
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "limitations": [
+    "Wall clock includes CPU, IPC, scheduling and local filesystem IO; no storage hardware attribution.",
+    "Synthetic small PNG covers pagination/decode/owner isolation, not real megapixel decode load.",
+    "Single run observations, not p95/SLA. 200ms refers to ordinary visible feedback target from acceptance line 114.",
+    "No configured target/credentials: task adaptation may report missing target; no remote statistics or migrations exercised."
+  ],
+  "startup": {
+    "guardedLaunchTo2000ProductsUiMs": 1240.0110999999997,
+    "renderer": {
+      "timeOrigin": 1791914411528.4,
+      "now": 191.80000001192093,
+      "dpr": 1.25,
+      "width": 1440,
+      "height": 1000,
+      "longTasks": []
+    }
+  },
+  "apiCounts": {
+    "products": 2000,
+    "tasks": 5000
+  },
+  "safety": {
+    "installedBeforeMain": true,
+    "blockedAttempts": []
+  },
+  "taskStates": {
+    "count": 5000,
+    "paused": 5000,
+    "imageAttempts": 0
+  },
+  "completed": true
+}

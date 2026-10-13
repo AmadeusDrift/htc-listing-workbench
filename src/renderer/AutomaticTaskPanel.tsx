@@ -11,6 +11,7 @@ import { errorText } from './utils';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
 import { AutomaticProductGroups, OutcomeCount } from './AutomaticProductGroups';
 import { buildAutomaticProductGroups, summarizeAutomaticItems } from './automatic-product-groups';
+import { formatAutomaticTaskDate } from './automatic-task-date';
 
 const statusLabels: Record<AutomaticListingStatus, string> = { CREATED:'已创建', QUEUED:'等待执行', RUNNING:'运行中', WAITING:'等待平台或服务返回', PAUSED:'已暂停', NEEDS_ATTENTION:'需要处理', COMPLETED:'任务完成', CANCELLED:'已取消' };
 function tone(status: AutomaticListingStatus): SettingsStatusTone { return status === 'COMPLETED' ? 'success' : status === 'NEEDS_ATTENTION' ? 'danger' : status === 'PAUSED' ? 'warning' : status === 'CANCELLED' ? 'neutral' : 'info'; }
@@ -110,14 +111,15 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
-  const taskRevisionSignature=JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt]));
+  const taskRevisionSignature=useMemo(()=>JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])),[tasks]);
+  const taskOptions=useMemo(()=>tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {formatAutomaticTaskDate(value.createdAt)}</option>),[tasks]);
   useEffect(()=>{window.dispatchEvent(new Event('automatic-listing-changed'));},[taskRevisionSignature]);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);
   return <section ref={panel} className="amazon-workflow automatic-task-panel" aria-label="自动上架任务">
-    <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} />刷新任务</button></div>
+    <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending) || loading} title={busy?'当前有操作进行中':pending?'正在处理任务操作':loading?'正在读取已保存任务':undefined} onClick={() => { setLoading(true); setRefresh(value => value + 1); }}><RefreshCw size={15} />{loading ? '正在读取任务…' : '刷新任务'}</button></div>
     {readError && <p className="workflow-notice" role="alert">任务读取未完成：{readError}</p>}
     {loading && <p className="small-copy" role="status">正在读取已保存任务…</p>}
-    {!!tasks.length && <label className="field"><span>选择自动上架任务</span><select aria-label="选择自动上架任务" value={task?.id ?? selectedId} disabled={Boolean(pending)} onChange={event => { setSelectedId(event.target.value); setTask(null); setBatchSummary(null); setLoading(true); }}>{tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {new Date(value.createdAt).toLocaleString('zh-CN', { hour12:false })}</option>)}</select></label>}
+    {!!tasks.length && <label className="field"><span>选择自动上架任务</span><select aria-label="选择自动上架任务" value={task?.id ?? selectedId} disabled={Boolean(pending)} onChange={event => { setSelectedId(event.target.value); setTask(null); setBatchSummary(null); setLoading(true); }}>{taskOptions}</select></label>}
     {!loading && !task && !tasks.length && <p className="small-copy">还没有任务。选好商品、目标和托管服务器后，从上方启动。</p>}
     {task && <div data-testid={`automatic-task-${task.id}`}>
       <div className="workflow-actions automatic-task-heading"><Badge tone={tone(task.status)}>{statusLabels[task.status]}</Badge><strong>{task.targetName} · {task.mode === 'demo' ? '本地演示' : '真实 Haul'} · {task.productType}</strong><span className="small-copy">规则版本 {task.ruleRevision}</span></div>

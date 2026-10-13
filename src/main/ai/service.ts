@@ -1,3 +1,5 @@
+import {reviewProductAppearance} from './appearance-adapter.ts';
+import {validatePurposeSnapshot as validateAppearancePurposeSnapshot} from './purpose-routing.ts';
 import { resolvePurpose,listPurposeProfiles,savePurposeProfile,inheritLegacyPurposeSettings } from './purpose-routing.ts';
 import { readAiUsageReport } from './usage-report.ts';
 import { TEXT_MODEL_CAPABILITIES } from './model-capabilities.ts';
@@ -741,6 +743,23 @@ export class AiService {
       return { variantId: context.listing.variantId, assetId: null, assetSha256: null, sourceResultIds: [...imageCopySourceIds(context), plan.id, ocr.id], sourceSha256: listingFingerprint(context), imageContext: context, assertFresh,
         invoke: (credentials, adapterContext) => reviewProductImageText(context, plan, ocr, candidate, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
     }, signal);
+  }
+  async reviewGeneratedImageAppearance(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,snapshot?:import('../../shared/ai-purpose-contracts.ts').AiPurposeSnapshot,previousResultId?:string|null):Promise<AiResult> {
+    this.ensureOpen(); const context=validateProductImageContext(rawContext),candidate=validateCandidateImageIdentity(rawCandidate),plan=this.imageResult(rawPlan,context,'image-plan');
+    const routing=validateAppearancePurposeSnapshot(snapshot??this.activePurpose('appearance_review',true,true).routing);
+    if(!routing.capability.vision||!routing.capability.json||!['appearance_review','appearance_review_difficult'].includes(routing.purposeId))throw new AiError('INVALID_CONFIG');
+    const id=routing.gateway==='openrouter'?'openrouter-review':'deepseek-review',connection=this.assertProfile(id),profile={...connection,model:routing.model,thinking:!['none','not_applicable'].includes(routing.effectiveEffort),routing};
+    const previous=previousResultId?this.getResult(uuid(previousResultId)):undefined;
+    if(previousResultId&&(!previous||previous.output.kind!=='image-appearance-review'||previous.output.verdict!=='UNCERTAIN'||previous.output.previousResultId!==null||previous.output.planResultId!==plan.id||listingFingerprint(previous.output.candidate)!==listingFingerprint(candidate)||previous.sourceSha256!==listingFingerprint(context)))throw new AiError('SOURCE_CHANGED');
+    const image=Buffer.from(bytes),raster=inspectRaster(image);if(createHash('sha256').update(image).digest('hex')!==candidate.sha256||raster.width!==candidate.width||raster.height!==candidate.height)throw new AiError('IMAGE_INVALID');
+    return this.start(profile,context.listing,{operation:'image-appearance-review',context,plan,candidate,previousResultId:previous?.id??null},async activeSignal=>{
+      const assertFresh=async()=>{await this.assertImageFresh(context,assertContextFresh,activeSignal);this.imageResult(plan,context,'image-plan');};await assertFresh();
+      const images:DeepSeekReferenceImage[]=[];
+      for(const asset of this.imageSources(context)){const data=await this.readSource({productId:context.listing.productId,productRevision:context.listing.productRevision,assetId:asset.id},asset,activeSignal);images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes:data});}
+      images.push({assetId:candidate.id,sha256:candidate.sha256,mimeType:raster.mimeType,width:candidate.width,height:candidate.height,bytes:image});await assertFresh();
+      return{variantId:context.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:[...imageCopySourceIds(context),plan.id,...(previous?[previous.id]:[])],sourceSha256:listingFingerprint(context),imageContext:context,assertFresh,
+        invoke:(credentials,adapterContext)=>reviewProductAppearance(context,plan,candidate,images,previous,profile.model as DeepSeekModel,credentials as DeepSeekCredentials,activeSignal,adapterContext)};
+    },signal);
   }
   async reviewGeneratedImageRisk(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal):Promise<AiResult> {
     this.ensureOpen(); const context=validateProductImageContext(rawContext),candidate=validateCandidateImageIdentity(rawCandidate),profile=this.assertProfile('aliyun-image-risk');

@@ -1,4 +1,3 @@
-import { pricingAttributeInputs } from '../src/main/amazon/pricing-inputs.ts';
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { SourceConsistencyError } from '../src/main/source-image-consistency/proof.ts';
 import { sceneSet } from './fixtures/image-set.ts';
@@ -134,6 +133,7 @@ async function fixture(t: test.TestContext, options: { riskScore?:number|null; r
   };
   await confirmSourceConsistencyFixture(root,store,product.id);
   const service = new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never});
+  service.saveAppearanceReviewSettings({enabled:false}); // These historical-policy fixtures have no visual review provider.
   t.after(async()=>{release(); await service.close(); amazon.close(); store.close(); await rm(root,{recursive:true,force:true});});
   return {root,store,amazon,product,draft,familyPlan,service,calls,listing,ai,generation,generationInputs,release,began,reopen:()=>new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never}),run:()=>service.complete({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision})};
 }
@@ -151,21 +151,21 @@ test('a paid image plan remains stored when pricing changes during its response 
   const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
-    const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot)rules.save(rules.get());return result;};
+    r.draft.listingProgram='haul';r.draft.businessRules=priced.report;r.draft.attributes={...r.draft.attributes,...priced.attributes};p.putRecord(r);f.amazon.assertPricingForPaid(r.draft.id);
+    const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot){const changed=rules.get();changed.pricing.inboundCost+=0.1;rules.save(changed);}return result;};
     const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/定价/);
     assert.ok(result.workflow.slots?.[0].attempts[0].planResultId);assert.equal(result.workflow.slots?.[0].attempts[0].state,'READY');assert.ok(!f.calls.includes('generate'));
   }finally{rules.close();}
 });
 
 
-test('stale v2 pricing permits local UNKNOWN reconciliation but never starts the next paid check',async t=>{
+test('stale current pricing permits local UNKNOWN reconciliation but never starts the next paid check',async t=>{
   const f=await fixture(t,{lostResponse:true}),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
+    r.draft.listingProgram='haul';r.draft.businessRules=priced.report;r.draft.attributes={...r.draft.attributes,...priced.attributes};p.putRecord(r);f.amazon.assertPricingForPaid(r.draft.id);
     const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'UNKNOWN');
-    const count=f.calls.length;rules.save(rules.get());const result=await f.run();
+    const count=f.calls.length,changed=rules.get();changed.pricing.inboundCost+=0.1;rules.save(changed);const result=await f.run();
     assert.equal(result.workflow.id,first.workflow.id);assert.equal(result.workflow.slots![0].attempts[0].state,'GENERATED');
     assert.equal(result.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].requestId);
     assert.match(result.workflow.error!,/定价/);assert.equal(f.calls.length,count);
@@ -677,7 +677,7 @@ test('old completed workflows remain readable but cannot be reused as a vision-r
   const f=await fixture(t), first=await f.run();
   const db=openDatabase(f.root);
   try {
-    const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+    const {appearanceReviewEnabled:_appearance,listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
     Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
     // Keep the other six paid assets identifiable as generated history when simulating a one-image legacy run.
     const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};
@@ -1175,7 +1175,7 @@ test('W11 completed legacy single-image risk is checked before complete or reche
  const f=await fixture(t,{riskScore:95,riskLevel:'low'});
  f.service.saveRiskSettings({enabled:true,scoreThreshold:99,levelThreshold:'high'});
  const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
- const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+ const {appearanceReviewEnabled:_appearance,listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
  Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ipReviewResultIds:first.workflow.ipReviewResultIds!.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
  const db=openDatabase(f.root);try{const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(retained.id,JSON.stringify(retained));db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(legacy.id);db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(legacy.id,JSON.stringify(legacy));}finally{db.close();}
  f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});

@@ -1,3 +1,5 @@
+import {openDatabase} from '../src/main/database.ts';
+import {referencePinHistory,referencePinRetentionOwner} from '../src/main/hosting/reference-history.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
@@ -30,4 +32,13 @@ test('candidate installation rollback preserves both old images and unrelated ge
 test('a candidate injected after preparation is not accepted as authenticated history',async t=>{
  const f=fixture(t);candidate(f.source);await createWorkspaceBackup(f.source,f.file,f.pass);const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);candidate(prepared.stagingDirectory);
  await assert.rejects(()=>commitWorkspaceRestore(f.target,prepared),/未认证/);
+});
+
+test('restoring an older backup retains newer candidate pins and never shortens their promise',async t=>{
+ const f=fixture(t);await createWorkspaceBackup(f.source,f.file,f.pass);const id=candidate(f.target),now=new Date(),pinId=randomUUID();
+ const pin={id:pinId,version:1,operationId:randomUUID(),purpose:'candidate-review',state:'READY',url:null as string|null,createdAt:now.toISOString(),retainedUntil:new Date(now.getTime()+96*3600_000).toISOString(),releasedAt:null,attempts:1,assetId:id,sha256:createHash('sha256').update(png).digest('hex'),sourceKind:'candidate',sourceVersion:`candidate:${id}`,originalPath:`image-generation/candidates/${id}/image.png`,byteSize:png.length,mimeType:'image/png'};pin.url=`https://images.example.test/references/${pin.sha256}.png`;
+ const db=openDatabase(f.target);db.prepare('INSERT INTO image_reference_pins VALUES(?,?)').run(pinId,JSON.stringify(pin));db.close();
+ const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);await commitWorkspaceRestore(f.target,prepared);
+ const restored=openDatabase(f.target);try{assert.deepEqual(referencePinHistory(restored),[pin]);assert.equal(referencePinRetentionOwner.protects(restored,pin.originalPath,new Date(now.getTime()+10*86400_000)),true);}finally{restored.close();}
+ assert.deepEqual((await readCandidateFiles(f.target,id)).bytes,png);
 });

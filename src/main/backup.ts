@@ -1,3 +1,5 @@
+import {referencePinHistory,retainReferencePinHistory} from './hosting/reference-history.ts';
+import {referencePinArtifactPaths} from './hosting/reference-pins.ts';
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
 import { COPY_REVIEW_TABLES,assertCopyReviewHistory,retainCopyReviewHistory } from './ai/copy-review-upgrade.ts';
 import { RestorePathGuard, writeRestoreFile } from './restore-paths.ts';
@@ -184,7 +186,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
-    if(version>=28)Object.assign(approved,{image_reference_pins:['id','record_json']});
+    if(version>=28){Object.assign(approved,{image_reference_pins:['id','record_json']});referencePinHistory(database);}
     if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
@@ -277,6 +279,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     }
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
+    if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
@@ -413,6 +416,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainAiUsage(current, snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainBatchHistory(current,snapshot);
+    retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);

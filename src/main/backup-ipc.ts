@@ -1,3 +1,4 @@
+import {referencePinRetentionOwner} from './hosting/reference-history.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { ReferenceRetention, type RetentionPlan } from './reference-retention.ts';
 import { clipboard, dialog } from 'electron';
@@ -28,7 +29,7 @@ export function installBackupIpc(window: BrowserWindow, directory: string, handl
     const input = record(raw, '清理预览', ['mode']);
     if (input.mode !== 'manual' && input.mode !== 'automatic') throw new UserFacingError('清理预览模式无效');
     const db = new DatabaseSync(join(directory, 'red.sqlite'), { readOnly: true });
-    try { return await new ReferenceRetention(db, directory, [], retentionPlans).preview({ mode: input.mode }); } finally { db.close(); }
+    try { return await new ReferenceRetention(db, directory, [referencePinRetentionOwner], retentionPlans).preview({ mode: input.mode }); } finally { db.close(); }
   });
   handle('red:backup:retention-apply', 1, async raw => {
     const input = record(raw, '执行清理', ['planId', 'revision']);
@@ -36,7 +37,7 @@ export function installBackupIpc(window: BrowserWindow, directory: string, handl
     const release = hooks.beginBackup(); let db: DatabaseSync | undefined;
     try {
       db = new DatabaseSync(join(directory, 'red.sqlite'));
-      const result = await new ReferenceRetention(db, directory, [], retentionPlans).apply({ planId: input.planId, revision: input.revision });
+      const result = await new ReferenceRetention(db, directory, [referencePinRetentionOwner], retentionPlans).apply({ planId: input.planId, revision: input.revision });
       hooks.audit('workspace.retention.applied', '执行引用感知素材清理', result); return result;
     } finally { db?.close(); release(); }
   });

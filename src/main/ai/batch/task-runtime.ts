@@ -42,16 +42,36 @@ export class TaskBatchRuntime {
   this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);
  }
  async flush(taskId:string):Promise<void>{
-  const pending=[...this.pending.values()].filter(p=>p.operation.taskId===taskId);
+  const pending=[...this.pending.values()].filter(p=>p.operation.taskId===taskId&&p.authorize());
   if(!pending.length)return;
-  if(pending.some(p=>!p.authorize()))return;
   const fresh=pending.filter(p=>!this.find(p.operation.operationId));
   const ids=new Set([...this.service.prepare(fresh.map(p=>p.operation)).map(b=>b.id),...pending.flatMap(p=>{const i=this.find(p.operation.operationId);return i?[i.batchId]:[];})]);
-  for(const id of ids){const batch=this.service.get(id);if(batch.state!=='prepared')continue;await this.service.submit(id);}
-  for(const p of pending)this.pending.delete(p.operation.operationId);
+  const failures:unknown[]=[];
+  for(const id of ids){
+   const batch=this.service.get(id),items=this.service.items(id);
+   if(batch.state!=='prepared')continue;
+   // A prior group's await may have paused the task or revoked just this row.
+   if(batch.locallyStopped||items.some(item=>!this.pending.get(item.operationId)?.authorize()))continue;
+   try{await this.service.submit(id);}catch(error){failures.push(error);}
+   finally{
+    // Keep unsent closures available for an explicitly authorized retry; an
+    // in-flight/unknown identity is recovered only by receipt or GET from now on.
+    if(this.service.get(id).state!=='prepared')for(const item of items)this.pending.delete(item.operationId);
+   }
+  }
+  if(failures.length)throw failures[0];
  }
  batches(taskId:string){return this.db.prepare("SELECT id FROM ai_batches WHERE json_extract(record_json,'$.taskId')=?").all(taskId).map(row=>this.service.get(String(row.id)));}
- async reconcile(taskId:string){for(const batch of this.batches(taskId))if(batch.remoteBatchId&&batch.state!=='reconciled')await this.service.reconcile(batch.id);}
+ async reconcile(taskId:string){
+  const failures:unknown[]=[];
+  for(const batch of this.batches(taskId)){
+   if(['prepared','reconciled'].includes(batch.state)||batch.state==='failed'&&!batch.remoteBatchId)continue;
+   // The underlying service recovers a missing remote ID from the original
+   // local receipt. It never POSTs from reconcile, including unknown creation.
+   try{await this.service.reconcile(batch.id);}catch(error){failures.push(error);}
+  }
+  if(failures.length)throw failures[0];
+ }
  failed(operationId:string){const item=this.find(operationId);return !!item&&(['failed','missing'].includes(item.state)||this.service.get(item.batchId).state==='failed');}
  ready(operationId:string){return this.find(operationId)?.state==='received';}
  stop(taskId:string){for(const batch of this.batches(taskId))this.service.stopLocally(batch.id);for(const [id,p] of this.pending)if(p.operation.taskId===taskId)this.pending.delete(id);}

@@ -116,3 +116,31 @@ test('ImageWorkflow preserves its content operation while Batch is waiting',asyn
  await assert.rejects(f.ai.batchTasks.run(scope,()=>f.run()),/Downstream image plan sentinel/);
  const resumed=f.progress() as any;assert.equal(resumed.id,waiting.id);assert.equal(resumed.contentPreparation.operationId,op);assert.equal(resumed.copyRepairAttempts??0,waiting.copyRepairAttempts??0);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);
 });
+
+import { TaskBatchRuntime } from '../src/main/ai/batch/task-runtime.ts';
+for(const pointerOnly of [false,true])test(`runtime recovers ${pointerOnly?'pointer-only':'saved'} create receipt without remote identity or another POST`,async t=>{
+ let posts=0,gets=0;
+ const fetcher:typeof fetch=async(_url,init)=>{if(init?.method==='POST')posts++;else gets++;return Response.json({id:'batch_saved_runtime',model:'openai/gpt-6-luna',endpoint:'/v1/chat/completions',status:'in_progress'});};
+ const f=fixture(t,fetcher),operation=f.operation(),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:operation.credentialScope})}),scope={taskId:operation.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,authorize:()=>true};
+ await assert.rejects(runtime.run(scope,()=>runtime.request({operation,authorize:scope.authorize,reserve:()=>{}})),{name:'BatchWaitingError'});await runtime.flush(scope.taskId);
+ const batch=runtime.batches(scope.taskId)[0];
+ if(pointerOnly)f.db.exec('DELETE FROM ai_provider_receipts');
+ f.db.prepare('UPDATE ai_batches SET record_json=? WHERE id=?').run(JSON.stringify({...batch,state:'submission_unknown',remoteBatchId:null,remoteStatus:null,...(pointerOnly?{receiptIds:[]}:{})}),batch.id);
+ await runtime.reconcile(scope.taskId);assert.equal(runtime.service.get(batch.id).remoteBatchId,'batch_saved_runtime');assert.equal(posts,1);assert.equal(gets,0);
+ await runtime.reconcile(scope.taskId);assert.equal(posts,1);assert.equal(gets,1);
+});
+
+for(const revoke of [false,true,'stop'] as const)test(`runtime isolates group submission failure and ${revoke==='stop'?'honors local stop before later groups':revoke?'rechecks revoked authorization before later groups':'continues later groups and GET recovery'}`,async t=>{
+ let posts=0,gets=0,authorized=true,secondBody:any;
+ const fetcher:typeof fetch=async(_url,init)=>{
+  if(init?.method==='POST'){posts++;if(posts===1){if(revoke)authorized=false;if(revoke==='stop')runtime.stop(first.taskId);throw Error('first group create identity unknown');}secondBody=JSON.parse(String(init.body));return Response.json({id:'batch_runtime_second',model:secondBody.model,endpoint:'/v1/chat/completions',status:'in_progress'});}
+  gets++;return Response.json({id:'batch_runtime_second',model:secondBody.model,endpoint:'/v1/chat/completions',status:'completed',results:secondBody.requests.map((r:any)=>({custom_id:r.custom_id,response:{status_code:200,body:{id:'result_second',usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2},choices:[{finish_reason:'stop',message:{content:'{}'}}]}}}))});
+ };
+ const f=fixture(t,fetcher),first=f.operation(),second={...f.operation(),phase:'review'},runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:first.credentialScope})}),scope={taskId:first.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,authorize:()=>authorized};
+ for(const operation of [first,second])await assert.rejects(runtime.run(scope,()=>runtime.request({operation,authorize:scope.authorize,reserve:()=>{}})),{name:'BatchWaitingError'});
+ await assert.rejects(runtime.flush(first.taskId));assert.equal(runtime.find(first.operationId)!.state,'waiting');
+ assert.equal(runtime.service.get(runtime.find(first.operationId)!.batchId).state,'submission_unknown');
+ if(revoke){assert.equal(posts,1);assert.equal(runtime.find(second.operationId)!.state,'prepared');authorized=true;runtime.resume(first.taskId);if(revoke==='stop')await assert.rejects(runtime.run(scope,()=>runtime.request({operation:second,authorize:scope.authorize,reserve:()=>{}})),{name:'BatchWaitingError'});await runtime.flush(first.taskId);}
+ assert.equal(posts,2);assert.equal(runtime.service.get(runtime.find(second.operationId)!.batchId).remoteBatchId,'batch_runtime_second');
+ await assert.rejects(runtime.reconcile(first.taskId),/未知/);assert.equal(runtime.ready(second.operationId),true);assert.equal(gets,1);assert.equal(posts,2);
+});

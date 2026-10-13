@@ -82,7 +82,7 @@ export function currentImageListingSnapshot(draft:AmazonDraft,context:ListingAiC
 /** Exclusions are not factual claims. Only a complete negative rendering clause is removed;
  * arbitrary adjacent prose remains on the strict measurement validation path. */
 export function withoutRenderExclusions(text:string):string {
-  const measurement=String.raw`\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)*\s*(?:kg|mg|g|cm|mm|inches|inch|in|lb|oz|克|千克|厘米|毫米)`;
+  const measurement=measurementPattern().source; // Same complete units and suffix boundary as positive claims.
   const exclusion=String.raw`(?:(?:do\s+not|never)\s+(?:render|draw|show|display|label|print)\s+(?:(?:product|package)\s+)?(?:weight|dimensions?|size|length|width|height)\s*[:：]?\s*|(?:不要|禁止|不)(?:绘制|画|显示|标注|呈现)(?:商品|产品|包装)?(?:重量|尺寸|长度|宽度|高度)\s*[:：]?\s*)`+measurement;
-  return text.replace(new RegExp(String.raw`(^|[;；。\n]|(?<!\d)\.(?!\d))\s*`+exclusion+String.raw`\s*(?=$|[;；。\n]|(?<!\d)\.(?!\d))`,'gi'),'$1 Excluded unverified measurement');
+  return text.replace(new RegExp(String.raw`(^|[,，;；。\n]|(?<!\d)\.(?!\d))\s*`+exclusion+String.raw`\s*(?=$|[,，;；。\n]|(?<!\d)\.(?!\d))`,'gi'),'$1 Excluded unverified measurement');
 }

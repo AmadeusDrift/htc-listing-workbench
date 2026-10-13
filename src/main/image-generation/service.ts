@@ -39,6 +39,7 @@ const fingerprint = (config: ImageGenerationConfig) => digest(JSON.stringify(con
 
 /** Provider credentials and candidate artifacts stay separate from product source images. */
 export class ImageGenerationService {
+  private pendingReceipts=new Set<Promise<unknown>>();
   private sharedConnection?:{read():string|null;save(key:string):unknown;disconnect():unknown};
   private directory: string; private store: WorkspaceStore; private vault: ImageGenerationVault; private adapter: OpenRouterImageAdapter; private db:DatabaseSync;
   private decodePreview: (bytes: Buffer) => Buffer; private timeoutMs: number; private closed = false;
@@ -212,7 +213,9 @@ export class ImageGenerationService {
       const requestId=attempt?.requestId??randomUUID();
       if(readImageRequestIntent(this.db,requestId)){const error=new AiError('INTERRUPTED');error.message='原生图请求已有发送意图；请回收原响应，未重发';throw error;}
       saveImageRequestIntent(this.db,{version:1,id:requestId,provider:'openrouter',model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit':'generate',sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})});
-      const result=await this.adapter.generate({...request,model:config.model},signal,{onProviderReceipt:receipt=>saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined).then(()=>{})});
+      const result=await this.adapter.generate({...request,model:config.model},signal,{onProviderReceipt:async receipt=>{
+        if(this.closed)return;const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
+      }});
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
       stage='revalidate';
@@ -249,5 +252,5 @@ export class ImageGenerationService {
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
   cancel(reason = new AiError('CANCELLED')): void { this.running?.controller.abort(reason); }
-  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {}); this.db.close(); }
+  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
 }

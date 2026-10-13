@@ -8,6 +8,9 @@ export function readAiUsageReport(db:DatabaseSync,raw:unknown):AiUsageReport{
   const day=(value:unknown)=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;
   if(!input||Object.keys(input).sort().join()!=='from,to'||!day(input.from)||!day(input.to)||input.from>input.to)throw new UserFacingError('用量日期范围无效');
   const calls=new Map<string,any>(db.prepare("SELECT record_json FROM ai_calls WHERE substr(json_extract(record_json,'$.startedAt'),1,10) BETWEEN ? AND ?").all(input.from,input.to).map(row=>{const r=JSON.parse(String(row.record_json));return[r.id,r];}));
+  if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_batch_items'").get())for(const row of db.prepare('SELECT record_json FROM ai_batch_items').iterate()){
+    const item=JSON.parse(String(row.record_json));if(!calls.has(item.id))calls.set(item.id,{model:item.purpose.model,purposeSnapshot:item.purpose});
+  }
   const costs=new Map<string,number>(),reportedTokens=new Map<string,number>();for(const row of db.prepare('SELECT record_json FROM ai_provider_receipts ORDER BY rowid').iterate()){
     const receipt=JSON.parse(String(row.record_json));if(Number.isSafeInteger(receipt.reportedTokens)&&receipt.reportedTokens>=0)reportedTokens.set(receipt.callId,receipt.reportedTokens);if(typeof receipt.costUsd==='number'&&Number.isFinite(receipt.costUsd)&&receipt.costUsd>=0)costs.set(receipt.callId,receipt.costUsd);
   }

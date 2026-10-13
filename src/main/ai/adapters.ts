@@ -1,4 +1,5 @@
 import { requestOpenRouterJson } from './adapters/openrouter-chat.ts';
+import { openRouterMetadata } from './adapters/openrouter-http.ts';
 import type { AiOutput, ContentSuggestionOutput, OcrOutput, SegmentationOutput } from '../../shared/ai-contracts.ts';
 import { signAcs3 } from './acs3.ts';
 import { AiError, httpError } from './errors.ts';
@@ -119,6 +120,7 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
   const captureSource=(text:string)=>{try{const safe=safeSourceResponseText(text,credentials);credentialEcho ||= safe==='[omitted: credential echo]';context.onUntrustedOutput?.(safe,'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
   const transport:AdapterContext={...context,...(diagnosticOperation?{onInvalidResponseText:captureSource}:{}),...(context.onProviderReceipt?{captureRawResponse:async(status:number,text:string)=>{
     const safe=safeSourceResponseText(text,credentials);let raw:any;try{raw=JSON.parse(safe);}catch{raw=safe;}
+    if(safe!=='[omitted: credential echo]')context.onMetadata?.(openRouterMetadata(raw));
     const requestId=typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)?raw.id:null;
     await context.onProviderReceipt!({gateway:'deepseek',endpoint:'/chat/completions',model,status,requestId,receivedAt:context.now().toISOString(),body:raw,costUsd:null});
   }}:{})};

@@ -1,3 +1,4 @@
+import { taskAiContext } from './batch/task-context.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { AI_PURPOSE_IDS } from '../../shared/ai-purpose-contracts.ts';
 import type { AiPurposeId,AiPurposeProfile,AiPurposeSnapshot,SaveAiPurposeInput,ReasoningEffort } from '../../shared/ai-purpose-contracts.ts';
@@ -46,6 +47,8 @@ export function savePurposeProfile(db:DatabaseSync,input:SaveAiPurposeInput):AiP
   });
 }
 export function resolvePurpose(db:DatabaseSync,id:AiPurposeId,needs:{vision?:boolean}={}):AiPurposeSnapshot{
+  const frozen=taskAiContext.getStore()?.purposes?.find(p=>p.purposeId===id);
+  if(frozen){if(needs.vision&&!frozen.capability.vision)throw new UserFacingError('任务用途快照不支持视觉，未替换模型');return structuredClone(frozen);}
   const profile=readPurposeProfile(db,id),capability=checkReasoning(profile.gateway,profile.model,profile.effort);
   if(needs.vision&&!capability.vision)throw new UserFacingError(`${capability.name} 不支持本用途需要的图片输入，未替换模型或省略图片`);
   const base={...profile,requestedEffort:profile.effort,effectiveEffort:profile.effort,capability};

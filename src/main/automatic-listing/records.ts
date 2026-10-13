@@ -1,3 +1,4 @@
+import { validatePurposeSnapshot } from '../ai/purpose-routing.ts';
 import { validateSchemaRetry } from '../catalog/schema-operations.ts';
 import { validateWorkflowRejection } from '../image-workflow/rejection.ts';
 import { SOURCE_CONSISTENCY_OUTCOMES } from '../../shared/source-image-consistency-contracts.ts';
@@ -32,7 +33,7 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
@@ -52,6 +53,7 @@ function item(raw: unknown): AutomaticListingItem {
     result.pricingRefresh={draftRevision:counter(refresh.draftRevision),draftStamp:hash(refresh.draftStamp),previousDraftRevision:counter(refresh.previousDraftRevision),previousDraftStamp:hash(refresh.previousDraftStamp),previousReason:optional(refresh.previousReason,2000)};
     if(!result.pricingRefresh.previousDraftRevision||result.pricingRefresh.draftRevision<result.pricingRefresh.previousDraftRevision)fail();
   }
+  if(value.batchWait!==undefined){const wait=record(value.batchWait,'Batch等待',['operationId']);result.batchWait={operationId:identifier(wait.operationId)};}
   if(value.rejection!==undefined){const r=record(value.rejection,'拒绝原因',['workflowId','detail']);if(Object.keys(r).length!==2||!result.draftId)fail();result.rejection={workflowId:identifier(r.workflowId),detail:validateWorkflowRejection(r.detail)};}
   if(value.repairPolicyVersion!==undefined){if(value.repairPolicyVersion!==FIELD_REPAIR_POLICY_VERSION)fail();result.repairPolicyVersion=FIELD_REPAIR_POLICY_VERSION;}
   if(value.repairPolicyMigration!==undefined){
@@ -170,8 +172,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];
 export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask {
-  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation']);
-  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
+  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan']);
+  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
     || !['demo','live'].includes(String(value.mode)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 5000) fail();
   const items = (value.items as unknown[]).map(item);
   const planned=items.filter(row=>row.stage!=='PLAN');
@@ -183,6 +185,14 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
     targetStamp: hash(value.targetStamp), profileId: text(value.profileId, '图床', 30, true), profileStamp: hash(value.profileStamp), rulesStamp: hash(value.rulesStamp),
     ruleRevision: counter(value.ruleRevision), productType: text(value.productType, '商品类型', 100, true), locale: text(value.locale, '语言', 30, true), items,
     labelFormat: validateItemLabelFormat(value.labelFormat), createdAt: date(value.createdAt), updatedAt: date(value.updatedAt), error: optional(value.error, 2000) };
+  if(value.executionMode!==undefined){if(!['immediate','deferred_batch'].includes(String(value.executionMode)))fail();result.executionMode=value.executionMode as AutomaticListingTask['executionMode'];}
+  if(value.batchPlan!==undefined){
+    const plan=record(value.batchPlan,'批次覆盖计划',['version','credentialScope','purposes','coverage']);if(plan.version!==1||!Array.isArray(plan.purposes)||!Array.isArray(plan.coverage)||plan.purposes.length>30||plan.coverage.length<plan.purposes.length||plan.coverage.length>plan.purposes.length+3)fail();
+    const purposes=(plan.purposes as unknown[]).map(validatePurposeSnapshot);
+    const coverage=(plan.coverage as unknown[]).map(raw=>{const row=record(raw,'用途覆盖',['purposeId','mode','reason']);if(!purposes.some(p=>p.purposeId===row.purposeId)&&!(['image_generation','aliyun_ocr','aliyun_image_risk'].includes(String(row.purposeId))&&row.mode==='immediate')||!['immediate','deferred_batch'].includes(String(row.mode)))fail();return {purposeId:String(row.purposeId),mode:row.mode as 'immediate'|'deferred_batch',reason:text(row.reason,'原因',1000,true)};});
+    if(purposes.some(p=>!coverage.some(c=>c.purposeId===p.purposeId))||new Set(purposes.map(p=>p.purposeId)).size!==purposes.length||new Set(coverage.map(p=>p.purposeId)).size!==coverage.length)fail();result.batchPlan={version:1,credentialScope:hash(plan.credentialScope),purposes,coverage};
+  }
+  if(result.executionMode==='deferred_batch'&&!result.batchPlan?.coverage.some(c=>c.mode==='deferred_batch'))fail();
   if(value.adaptation!==undefined){
     const a=record(value.adaptation,'适配检查点',['version','token','at','blockedKeys','previousRules']);
     if(a.version!==1||!Array.isArray(a.blockedKeys)||(a.blockedKeys as unknown[]).some(key=>typeof key!=='string'||!items.some(r=>r.key===key))||!Array.isArray(a.previousRules)||a.previousRules.length>1000)fail();

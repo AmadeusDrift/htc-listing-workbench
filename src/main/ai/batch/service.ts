@@ -97,7 +97,7 @@ export class BatchService {
         beforeSend:()=>transaction(this.db,()=>{
           batch=this.get(id);if(batch.state!=='prepared'||batch.locallyStopped)invalid('原批次已有发送意图或已暂停');this.credentials(batch);
           for(const item of this.items(id)){
-            new AiUsageLedger(this.db,()=>new Date(this.now())).reserveBatch({id:item.id,...item.owner,status:'RUNNING',errorCode:null,requestId:null,model:item.purpose.model,purposeSnapshot:item.purpose,startedAt:this.now(),finishedAt:null,usage:emptyUsage()},JSON.stringify(item.body));
+            new AiUsageLedger(this.db,()=>new Date(this.now())).reserveBatch({id:item.aiCallId??item.id,...item.owner,status:'RUNNING',errorCode:null,requestId:null,model:item.purpose.model,purposeSnapshot:item.purpose,startedAt:this.now(),finishedAt:null,usage:emptyUsage()},JSON.stringify(item.body));
             const reserved=this.deps.reserve?.(item,this.db) as unknown;if(reserved&&typeof (reserved as any).then==='function')invalid('Batch预算命令不能返回Promise');writeItem(this.db,{...item,state:'waiting'});
           }
           writeBatch(this.db,{...batch,state:'submitting',submittedAt:this.now(),updatedAt:this.now()});
@@ -114,7 +114,7 @@ export class BatchService {
       if(current.state==='submitting'){
         const known=!!error&&typeof error==='object'&&'definitive' in error&&error.definitive===true;
         writeBatch(this.db,{...current,state:known?'failed':'submission_unknown',updatedAt:this.now(),error:known?'创建被明确拒绝，原意图和收据保留':'创建结果未知，未重发；请核对原批次'});
-        const ledger=new AiUsageLedger(this.db,()=>new Date(this.now()));for(const item of this.items(id))ledger.settle(item.id,false,emptyUsage(),this.now());
+        const ledger=new AiUsageLedger(this.db,()=>new Date(this.now()));for(const item of this.items(id))ledger.settle(item.aiCallId??item.id,false,emptyUsage(),this.now());
       }
       throw error;
     }
@@ -169,8 +169,8 @@ export class BatchService {
       if(current.remoteBatchId!==raw.id||terminal(current.remoteStatus)&&raw.status!==current.remoteStatus)invalid('并发回收已有终态，较早状态未覆盖');
       if(terminal(current.remoteStatus)&&current.reportedCostUsd!==null&&cost(raw)!==null&&cost(raw)!==current.reportedCostUsd)invalid('终态Batch费用发生冲突，原账本保留');
       const ledger=new AiUsageLedger(this.db,()=>new Date(this.now()));
-      for(const item of received){const current=readItem(this.db,item.id);if(current.resultFingerprint&&current.resultFingerprint!==item.resultFingerprint)invalid('并发回收结果冲突');writeItem(this.db,{...item,adoption:current.adoption});const meta=metadata.get(item.id)!;ledger.settle(item.id,meta.usageKnown,meta.usage,this.now());}
-      if(terminal(raw.status))for(const item of this.items(id))if(item.state==='waiting'){writeItem(this.db,{...item,state:'missing'});ledger.settle(item.id,false,emptyUsage(),this.now());}
+      for(const item of received){const current=readItem(this.db,item.id);if(current.resultFingerprint&&current.resultFingerprint!==item.resultFingerprint)invalid('并发回收结果冲突');writeItem(this.db,{...item,adoption:current.adoption});const meta=metadata.get(item.id)!;ledger.settle(item.aiCallId??item.id,meta.usageKnown,meta.usage,this.now());}
+      if(terminal(raw.status))for(const item of this.items(id))if(item.state==='waiting'){writeItem(this.db,{...item,state:'missing'});ledger.settle(item.aiCallId??item.id,false,emptyUsage(),this.now());}
       writeBatch(this.db,{...current,remoteBatchId:raw.id,remoteStatus:raw.status,state:terminal(raw.status)?'reconciled':'waiting',reportedCostUsd:cost(raw)??current.reportedCostUsd,updatedAt:this.now(),error:raw.status==='completed'?null:terminal(raw.status)?'远端批次终止；缺失项目和费用保留待核对':null});
     });
   }

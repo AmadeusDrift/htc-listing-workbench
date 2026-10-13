@@ -125,6 +125,17 @@ export class AiUsageLedger {
   reserveBatch(rawCall:AiCall,body:string):void{
     const call=validateAiCall(rawCall);transaction(this.db,()=>this.reserveBudget(call,body));
   }
+  /** Consume the already reserved Batch call identity; never creates another ledger entry. */
+  attachBatch(rawCall:AiCall,body:string|Buffer,recordSend?:(call:AiCall)=>void):AiCall {
+    const call=validateAiCall(rawCall);
+    return transaction(this.db,()=>{
+      const ledger=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);
+      if(!ledger||!body.length)throw new AiError('INVALID_CONFIG');
+      const reserved=validateAiUsageRecord(JSON.parse(String(ledger.record_json)));if(reserved.providerId!==call.providerId)throw new AiError('INVALID_CONFIG');
+      call.startedAt=reserved.startedAt;
+      this.db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(call.id,JSON.stringify(call));recordSend?.(call);return call;
+    });
+  }
   private reserveBudget(call:AiCall,body:string|Buffer):void{
       if(this.db.prepare('SELECT 1 FROM ai_usage_ledger WHERE id=?').get(call.id))throw new AiError('INVALID_CONFIG');
       const reservation=requestTokenReservation(call.providerId,body);

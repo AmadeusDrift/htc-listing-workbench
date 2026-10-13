@@ -1,3 +1,6 @@
+import { BatchWaitingError } from '../ai/batch/task-context.ts';
+import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
+import type { TaskBatchPlan } from '../../shared/ai-batch-contracts.ts';
 import { isSchemaTransientError, type SchemaTransientError } from '../amazon/schema-retry.ts';
 import { canResumeRiskAdaptation } from './risk-adaptation.ts';
 import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
@@ -56,6 +59,7 @@ import { previewSalesRecipes } from '../sales-plans/planning.ts';
 import { selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
+  batch?:TaskBatchRuntime;batchPlan?:()=>TaskBatchPlan;
   store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'>>;
   rules(): ListingRules;
   amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
@@ -133,8 +137,8 @@ export class AutomaticListingService {
         assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
-        if (['QUEUED','RUNNING'].includes(task.status)||task.status==='WAITING'&&task.items.some(row=>row.stage==='PARENT'||row.schemaRetry&&['WAITING','IN_FLIGHT'].includes(row.schemaRetry.state))) {
-          task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
+        if (['QUEUED','RUNNING','WAITING'].includes(task.status)) {
+          this.deps.batch?.stop(task.id);task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
           for (const row of task.items) { if(row.schemaRetry?.state==='IN_FLIGHT')row.schemaRetry.state='WAITING'; if (row.status === 'RUNNING') row.status = 'PENDING'; }
           this.save(task);
         }
@@ -145,6 +149,8 @@ export class AutomaticListingService {
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
     transaction(db,()=>{
+    const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
+    if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
     for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
@@ -384,8 +390,12 @@ export class AutomaticListingService {
   }
   async create(raw: unknown): Promise<AutomaticListingTask> {
     this.ensureOpen();
-    const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId']);
+    const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId','executionMode']);
     if (!Array.isArray(input.productIds) || !input.productIds.length || input.productIds.length > 1000) throw new UserFacingError('请选择 1–1000 个商品');
+    const executionMode=input.executionMode??'immediate';
+    if(!['immediate','deferred_batch'].includes(String(executionMode)))throw new UserFacingError('执行模式无效');
+    const batchPlan=this.deps.batchPlan?.();
+    if(executionMode==='deferred_batch'&&(!this.deps.batch||!batchPlan?.coverage.some(c=>c.mode==='deferred_batch')))throw new UserFacingError('当前没有可用的 Batch 步骤，请使用即时执行并核对用途覆盖计划');
     const ids = input.productIds.map(identifier);
     if (new Set(ids).size !== ids.length) throw new UserFacingError('商品范围不能重复');
     const targetId = text(input.targetId, '店铺', 100, true), target = this.deps.amazon.executionTargetScope(targetId);
@@ -440,7 +450,7 @@ export class AutomaticListingService {
     // Active tasks conflict by the original SKU above; orphaned drafts need explicit recovery.
     if(regroupedSkus.size)throw new UserFacingError(`销售 SKU ${[...regroupedSkus].slice(0,5).join('、')} 已有旧分组草稿，请从原草稿或原自动任务继续；不能以新 SKU 建立重复任务`);
     const now = new Date().toISOString();
-    const task: AutomaticListingTask = { id: randomUUID(), revision: 0, status: 'CREATED', targetId, targetName: target.target.name, sellerId: target.target.sellerId,
+    const task: AutomaticListingTask = { executionMode:executionMode as 'immediate'|'deferred_batch',...(batchPlan?{batchPlan}:{}), id: randomUUID(), revision: 0, status: 'CREATED', targetId, targetName: target.target.name, sellerId: target.target.sellerId,
       marketplaceId: target.target.marketplaceId, mode: target.target.mode, targetStamp: fingerprint(target), profileId, profileStamp: fingerprint(profile),
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
@@ -448,6 +458,15 @@ export class AutomaticListingService {
     transaction(this.db,()=>{for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);});
     this.tasks.set(task.id, task); return structuredClone(task);
   }
+  batchSummary(id:string){const task=this.task(id);return {mode:task.executionMode??'immediate' as const,plan:task.batchPlan??null,batches:this.deps.batch?.batches(task.id)??[]};}
+  setExecutionMode(raw:unknown):AutomaticListingTask{
+    const value=record(raw,'任务执行模式',['taskId','mode']),task=this.task(identifier(value.taskId));
+    if(!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)||!['immediate','deferred_batch'].includes(String(value.mode)))throw new UserFacingError('请先暂停任务后选择有效执行模式');
+    const plan=task.batchPlan??this.getBatchPlan();
+    if(value.mode==='deferred_batch'&&(!this.deps.batch||!plan.coverage.some(c=>c.mode==='deferred_batch')))throw new UserFacingError('当前没有可Batch步骤');
+    task.batchPlan=plan;task.executionMode=value.mode as 'immediate'|'deferred_batch';this.save(task);return structuredClone(task);
+  }
+  getBatchPlan():TaskBatchPlan{if(!this.deps.batchPlan)throw new UserFacingError('Batch运行层未初始化');return structuredClone(this.deps.batchPlan());}
   prepareStart(id: string): AutomaticListingTask {
     const task = this.task(id);
     if (!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status) || this.activeId === id) throw new UserFacingError('此任务正在运行、等待平台或已经结束');
@@ -529,7 +548,7 @@ export class AutomaticListingService {
       this.tasks.set(task.id,restored);this.grants.delete(task.id);
       throw error;
     }
-    this.grants.add(task.id);this.pump();return structuredClone(task);
+    this.deps.batch?.resume(task.id);this.grants.add(task.id);this.pump();return structuredClone(task);
   }
   private reconcileSelection(task: AutomaticListingTask): void {
     for(const productId of new Set(task.items.map(row=>row.productId))){
@@ -578,8 +597,14 @@ export class AutomaticListingService {
             await yieldToEventLoop();
             if (!this.running(task)) break;
             if (task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)||row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state)) continue;
-            try { await this.prepareItem(task, row); }
+            try {
+              const execute=()=>this.prepareItem(task,row);
+              if(this.deps.batch)await this.deps.batch.run({taskId:task.id,rowKey:row.key,get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,authorize:()=>this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)},execute);else await execute();
+              delete row.batchWait;
+            }
             catch (error) {
+              if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.save(task);continue;}
+              if(row.batchWait&&this.deps.batch?.find(row.batchWait.operationId)?.adoption)delete row.batchWait;
               recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
               if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
@@ -590,8 +615,9 @@ export class AutomaticListingService {
               try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.save(task); break; }
             }
           }
+          if(this.running(task)&&this.deps.batch){try{await this.deps.batch.flush(task.id);}catch(error){for(const row of task.items.filter(r=>r.batchWait))row.error=errorMessage(error);}}
           if (this.running(task)) this.summarize(task);
-        } finally { if(!task.items.some(row=>row.status==='WAITING'&&(row.stage==='PARENT'||row.schemaRetry&&['WAITING','IN_FLIGHT'].includes(row.schemaRetry.state))))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
+        } finally { if(!task.items.some(row=>row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
       }
       await this.refreshWaiting();
     }).finally(() => { this.worker = null; if([...this.tasks.values()].some(task=>task.status==='QUEUED'&&this.grants.has(task.id)))this.pump(); });
@@ -640,6 +666,11 @@ export class AutomaticListingService {
       if(Date.now()>=Date.parse(retry.deadlineAt))throw new UserFacingError('Schema 重试超过 10 分钟，原进度和次数保留');
       retry.state='SUCCEEDED';row.stage=retry.originalStage;row.status='PENDING';row.error=null;this.save(task);return true;
     }catch(error){retry.state='EXHAUSTED';row.status='FAILED';row.error=errorMessage(error);this.save(task);return false;}
+  }
+  private batchAuthorized(task:AutomaticListingTask):boolean{
+    if(!this.running(task))return false;
+    const saved=this.db.prepare("SELECT json_extract(record_json,'$.revision') revision,json_extract(record_json,'$.status') status FROM automatic_listing_tasks WHERE id=?").get(task.id);
+    return saved?.status==='RUNNING'&&saved.revision===task.revision;
   }
   private running(task: AutomaticListingTask): boolean { return !this.closed && !this.closing && task.status === 'RUNNING' && this.grants.has(task.id); }
   private checkpoint(task: AutomaticListingTask, row: AutomaticListingItem): void {
@@ -1048,6 +1079,9 @@ export class AutomaticListingService {
     if (this.closed || this.closing || this.schedulingSuspended) return Promise.resolve();
     if (this.observing) return this.observing;
     this.observing = Promise.resolve().then(async () => {
+      if(this.deps.batch)for(const task of this.tasks.values())if(task.items.some(row=>row.batchWait)){
+        try{await this.deps.batch.reconcile(task.id);}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
+      }
       // Global scan failures must stay outside per-SKU error classification.
       // Only observable submitted work can need this expensive view.
       const needsCandidates = [...this.tasks.values()].some(task => !this.confirming.has(task.id)
@@ -1064,6 +1098,7 @@ export class AutomaticListingService {
           await yieldToEventLoop();
           if (task.revision !== beforeYield) { interrupted = true; break; }
           if(!canObserve())break;
+          if(row.batchWait){if(this.grants.has(task.id)&&this.deps.batch?.failed(row.batchWait.operationId)){row.status='FAILED';row.error='原Batch项目失败或缺失；身份、收据和费用保留，未自动重发';continue;}if(this.grants.has(task.id)&&this.deps.batch?.ready(row.batchWait.operationId)){row.status='PENDING';row.error=null;resumeParents=true;}continue;}
           if(row.schemaRetry?.state==='WAITING'){if(await this.retrySchema(task,row))resumeParents=true;continue;}
           if(row.stage==='PARENT'&&row.parentDraftId&&row.status==='WAITING'){
             const parent=this.deps.followup.get(row.parentDraftId);
@@ -1089,6 +1124,7 @@ export class AutomaticListingService {
                 delete row.outcome; continue;
               }
               row.error = null; delete row.outcome;
+              if(!this.grants.has(task.id)){row.status='WAITING';row.error='平台结果已保存，明确继续任务后再准备备货';continue;}
               const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
               const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
               if (!batch) throw new UserFacingError('回读已就绪，但备货批次未建立');
@@ -1112,11 +1148,11 @@ export class AutomaticListingService {
   }
   pause(id: string): AutomaticListingTask {
     const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
-    task.status = 'PAUSED'; this.grants.delete(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
+    task.status = 'PAUSED'; this.grants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
   }
   cancel(id: string): AutomaticListingTask {
     const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
-    task.status = 'CANCELLED'; this.grants.delete(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
+    task.status = 'CANCELLED'; this.grants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
   }
   private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
     if (this.activeId === task.id) this.controller?.abort();

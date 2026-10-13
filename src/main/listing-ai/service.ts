@@ -502,7 +502,7 @@ export class ListingAiService {
       const request=async(kind:'candidate'|'review',candidate?:ListingFieldsOutput):Promise<AiResult>=>{
         for(;;){
           let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved&&(kind!=='review'||saved.output.kind==='amazon-fields-review'&&saved.output.verdict==='PASS'))return saved;
-          if(!saved&&entry.sent&&!this.ai.hasListingFieldGroup?.(entry.id)){
+          if(!saved&&entry.sent&&!this.ai.hasListingFieldGroup?.(entry.id)&&!this.ai.batchTasks?.find(entry.id)){
             if(!journal.unknown(operation.id)&&!(kind==='review'&&journal.reviewCoverageOmission(operation.id))){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
             journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
           }

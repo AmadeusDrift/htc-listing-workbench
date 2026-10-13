@@ -1749,3 +1749,36 @@ for(const status of ['WAITING','PAUSED','CANCELLED'] as const)test(`legacy LABEL
  }else{assert.equal(f.service.get(task.id).status,status);assert.equal(row.error,'历史标签权限错误');}
  assert.deepEqual(labels,{pause:0,resume:0,cancel:0});
 });
+
+test('deferred task admission rejects missing Batch runtime without freezing sources',async t=>{
+ const f=fixture(t);
+ await assert.rejects(f.service.create({productIds:[f.product.id],targetId:f.target.id,profileId:'alpha',executionMode:'deferred_batch'}),/Batch/);
+ assert.equal(f.service.list().length,0);
+});
+
+import { TaskBatchRuntime } from '../src/main/ai/batch/task-runtime.ts';
+import { resolvePurpose } from '../src/main/ai/purpose-routing.ts';
+test('task mode and immutable purpose coverage survive create, immediate switch and IPC reads',async t=>{
+ const f=fixture(t),db=openDatabase(f.directory),credentialScope='a'.repeat(64);f.cleanups.push(async()=>db.close());
+ f.dependencies.batch=new TaskBatchRuntime(db,f.directory,{fetch:async()=>{throw Error('No requests allowed');},credential:()=>({apiKey:'plan-fixture-only-key',scope:credentialScope})});
+ const purpose=resolvePurpose(db,'listing_title'),plan={version:1 as const,credentialScope,purposes:[purpose],coverage:[{purposeId:'listing_title',mode:'deferred_batch' as const,reason:'Supported text'}]};
+ f.dependencies.batchPlan=()=>structuredClone(plan);
+ const task=await f.service.create({productIds:[f.product.id],targetId:f.target.id,profileId:'alpha',executionMode:'deferred_batch'});
+ assert.equal(task.executionMode,'deferred_batch');assert.deepEqual(task.batchPlan,plan);
+ plan.purposes[0].revision++;
+ const switched=f.service.setExecutionMode({taskId:task.id,mode:'immediate'});assert.equal(switched.batchPlan!.purposes[0].revision,task.batchPlan!.purposes[0].revision);
+ const handlers=new Map<string,(...args:any[])=>Promise<any>>();installAutomaticListingIpc(f.service,(channel,_count,handler)=>handlers.set(channel,async(...args)=>handler(...args)),{confirm:async()=>false,audit:()=>{}});
+ const summary=await handlers.get('red:automatic-listing:batch-summary')!(task.id);assert.equal(summary.mode,'immediate');assert.deepEqual(summary.batches,[]);
+ assert.equal((await handlers.get('red:automatic-listing:batch-plan')!()).coverage[0].reason,'Supported text');
+ const legacy=structuredClone(switched);delete legacy.executionMode;delete legacy.batchPlan;assert.equal(validateAutomaticListingTask(legacy).executionMode??'immediate','immediate');
+});
+
+test('readback observation without an execution grant cannot create a procurement step and restart revokes waiting authorization',async t=>{
+ const f=fixture(t),created=await f.create(),task=(f.service as any).tasks.get(created.id),row=task.items[0];
+ const prepared=await f.dependencies.amazon.prepareDrafts({targetId:f.target.id,productType:'BOX',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',items:[{productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,attributes:{}}]});
+ row.draftId=prepared.items[0].draft!.id;row.stage='READBACK';row.status='WAITING';task.status='WAITING';(f.service as any).save(task);
+ f.dependencies.procurement.candidates=()=>[{draftId:row.draftId,eligible:true}] as any;
+ await f.service.refreshWaiting();assert.equal(f.calls.batches,0,'GET/readback is not a new execution grant');
+ await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>restored.close());
+ assert.equal(restored.get(task.id).status,'PAUSED');await restored.refreshWaiting();assert.equal(f.calls.batches,0);
+});

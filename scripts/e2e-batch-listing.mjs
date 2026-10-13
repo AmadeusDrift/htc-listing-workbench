@@ -1,0 +1,34 @@
+import { _electron as electron } from 'playwright';
+import { expect } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
+import { mkdir,mkdtemp,writeFile } from 'node:fs/promises';
+import { resolve,join } from 'node:path';
+await mkdir('.test-data',{recursive:true});const root=await mkdtemp(resolve('.test-data/batch-app-')),harness=join(root,'main.cjs'),preload=join(root,'preload.cjs'),html=join(root,'index.html');
+await build({entryPoints:['tests/fixtures/batch-listing-electron.ts'],outfile:harness,bundle:true,platform:'node',format:'cjs',target:'node24',external:['electron']});
+await build({entryPoints:['src/main/preload.ts'],outfile:preload,bundle:true,platform:'node',format:'cjs',external:['electron']});
+await build({stdin:{contents:`import React from 'react';import {createRoot} from 'react-dom/client';import {AutomaticPage} from './src/renderer/AutomaticPage';import './src/renderer/styles.css';import './src/renderer/workspace.css';import './src/renderer/settings-modules.css';import './src/renderer/glass-theme.css';import './src/renderer/feedback.css';import './src/renderer/flat-theme.css';const [products,targets]=await Promise.all([window.red.listProducts(),window.red.listAmazonTargets()]);createRoot(document.getElementById('root')).render(<AutomaticPage products={products} targets={targets} busy={false} onExamples={()=>{}} onInbox={()=>{}} onSettings={()=>{}} onManual={()=>{}}/>);`,loader:'tsx',resolveDir:resolve('.')},outfile:join(root,'ui.js'),bundle:true,format:'esm',loader:{'.woff2':'dataurl'}});
+await writeFile(html,'<!doctype html><html><head><link rel="stylesheet" href="ui.css"></head><body><div id="root"></div><script type="module" src="ui.js"></script></body></html>');
+const env={...process.env,RED_DATA_DIR:root,RED_E2E_PRELOAD:preload,RED_E2E_HTML:html};delete env.ELECTRON_RUN_AS_NODE;
+let app;try{
+ app=await electron.launch({executablePath:createRequire(import.meta.url)('electron'),args:[harness],cwd:resolve('.'),env,timeout:35000});const page=await app.firstWindow();page.setDefaultTimeout(20000);page.on('pageerror',error=>console.log('PAGE ERROR',String(error)));
+ await app.evaluate(({dialog})=>{dialog.showMessageBox=async()=>({response:1});});
+ await app.evaluate(()=>globalThis.__batchHarness.setBatchAvailable(false));await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
+ await expect(page.getByLabel('上架执行模式',{exact:true}).locator('option[value=deferred_batch]')).toHaveJSProperty('disabled',true);await expect(page.getByText('延迟批量不可选：',{exact:false})).toBeVisible();
+ await app.evaluate(()=>globalThis.__batchHarness.setBatchAvailable(true));await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();await expect(page.getByLabel('上架执行模式',{exact:true}).locator('option[value=deferred_batch]')).toHaveJSProperty('disabled',false);
+ await page.getByLabel('目标店铺与站点').selectOption({index:1});await page.getByTestId('automatic-select-all').check();
+ await page.getByLabel('上架执行模式',{exact:true}).selectOption('deferred_batch');await expect(page.getByLabel('实际 Batch 覆盖').first()).toContainText('普通执行');
+ await page.getByRole('button',{name:'启动并自动发布',exact:true}).click();
+ await expect.poll(()=>app.evaluate(()=>globalThis.__batchHarness.snapshot().posts),{timeout:20000}).toBe(1);
+ await page.getByRole('button',{name:'刷新任务',exact:true}).click();await expect(page.getByLabel('Batch 执行状态')).toContainText('batch_app_1');
+ const initial=await app.evaluate(()=>globalThis.__batchHarness.snapshot());assert.equal(initial.confirmations[0].mode,'deferred_batch');assert.equal(initial.confirmations[0].skus.length,1);
+ await page.getByRole('button',{name:'暂停任务',exact:true}).click();await expect(page.getByLabel('后续未发送步骤的执行模式')).toBeEnabled();
+ await page.getByLabel('后续未发送步骤的执行模式').selectOption('immediate');await app.evaluate(()=>globalThis.__batchHarness.release());
+ await page.getByRole('button',{name:'刷新任务',exact:true}).click();await expect(page.getByLabel('Batch 执行状态')).toContainText('已回收未采用 1');await expect(page.getByLabel('Batch 执行状态')).toContainText('locallyStopped');await expect(page.getByLabel('Batch 执行状态')).toContainText('completed');
+ const paused=await app.evaluate(()=>globalThis.__batchHarness.snapshot());assert.equal(paused.results.length,0);assert.equal(paused.posts,1);assert.equal(paused.downstream,0);
+ await page.getByRole('button',{name:'继续任务',exact:true}).click();await expect.poll(()=>app.evaluate(()=>globalThis.__batchHarness.snapshot().downstream),{timeout:15000}).toBe(1);
+ const final=await app.evaluate(()=>globalThis.__batchHarness.snapshot());assert.equal(final.posts,1);assert.equal(final.results.length,1);assert.ok(final.gets>=1);
+ await page.getByRole('button',{name:'刷新任务',exact:true}).click();await page.getByText('查看请求与销售 SKU 对应关系',{exact:true}).click();await expect(page.getByLabel('Batch 执行状态')).toContainText('结果已采用');await expect(page.getByLabel('Batch 执行状态')).toContainText(initial.confirmations[0].skus[0]);
+ await page.screenshot({path:join(root,'batch-lifecycle.png'),fullPage:true});await writeFile(join(root,'report.json'),JSON.stringify({passed:true,initial,paused,final},null,2));console.log('PASS real renderer → preload → automatic IPC → isolated services → fake Batch POST/GET → pause/switch/reconcile/adopt; '+root);
+}catch(error){console.error(error);if(app){console.log(JSON.stringify(await app.evaluate(()=>globalThis.__batchHarness.snapshot()),null,2));const page=app.windows()[0];if(page)console.log(await page.locator('body').innerText());}throw error;}finally{if(app){await app.evaluate(()=>globalThis.__batchHarness.close());await app.evaluate(({app})=>app.exit(0));}}

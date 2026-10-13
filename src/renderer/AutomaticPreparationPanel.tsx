@@ -1,3 +1,5 @@
+import { BatchCoverage } from './AutomaticBatchStatus';
+import type { ListingExecutionMode, TaskBatchPlan } from '../shared/ai-batch-contracts';
 import type { ProblemContext } from './navigation-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Play, RefreshCw } from 'lucide-react';
@@ -29,6 +31,9 @@ const requiredCapabilities = [
 
 export function AutomaticPreparationPanel({ products, taskProducts, targets, targetId, onTargetChange, queue, queueLoading, queueError, onRefreshQueue, busy, onManual, onSettings, onExamples, onInbox, onShipping }: Props) {
   const api = window.red;
+  const [executionMode,setExecutionMode]=useState<ListingExecutionMode>('immediate');
+  const [batchPlan,setBatchPlan]=useState<TaskBatchPlan|null>(null),[batchError,setBatchError]=useState(''),[batchLoading,setBatchLoading]=useState(true);
+  const batchAvailable=!!batchPlan?.coverage.some(row=>row.mode==='deferred_batch');
   const [riskEnabled,setRiskEnabled]=useState(true);
   const [copyReviewEnabled,setCopyReviewEnabled]=useState(true);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -62,9 +67,13 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
   const supported = target?.marketplaceId === 'ATVPDKIKX0DER' && target.locale === 'en_US';
   const missingCapabilities = requiredCapabilities.filter(required => (riskEnabled||required.capability!=='image-risk')&&!capabilities.some(value => value.capability === required.capability && value.available));
   const connectionsReady = !loadingCapabilities && !capabilityError && !missingCapabilities.length;
-  const canStart = !disabled && !queueLoading && !queueError && queue?.targetId===targetId && !loadingProducts && !loadingRules && !readErrors.length && !rulesError && connectionsReady && !loadingHosting && !hostingError && Boolean(profile && salesRows.length && target?.configured && !target.paused && supported);
-  const startHint = disabled ? '当前有操作进行中，请等待完成。' : !targetId ? '请先选择目标店铺。' : queueLoading || loadingProducts || loadingRules || loadingHosting || loadingCapabilities ? '正在核对商品、规则与连接，请稍候。' : queueError ? '队列读取失败，请刷新资料后再启动。' : !target?.configured || target.paused || !supported ? '请选择已配置、未暂停的美国站英文目标。' : !connectionsReady ? '请先处理上方连接配置问题。' : hostingError || !profile ? '请配置并选择已启用的图片托管服务器。' : rulesError || readErrors.length ? '商品或规则读取失败，请查看上方原因并刷新。' : !salesRows.length ? '请勾选含有可启动销售 SKU 的商品。' : '';
+  const canStart = (executionMode==='immediate'||!batchLoading&&!batchError&&batchAvailable) && !disabled && !queueLoading && !queueError && queue?.targetId===targetId && !loadingProducts && !loadingRules && !readErrors.length && !rulesError && connectionsReady && !loadingHosting && !hostingError && Boolean(profile && salesRows.length && target?.configured && !target.paused && supported);
+  const startHint = executionMode==='deferred_batch'&&(batchLoading||batchError||!batchAvailable)?'延迟批量覆盖尚未确认或没有可 Batch 步骤，请刷新或选择即时上架。': disabled ? '当前有操作进行中，请等待完成。' : !targetId ? '请先选择目标店铺。' : queueLoading || loadingProducts || loadingRules || loadingHosting || loadingCapabilities ? '正在核对商品、规则与连接，请稍候。' : queueError ? '队列读取失败，请刷新资料后再启动。' : !target?.configured || target.paused || !supported ? '请选择已配置、未暂停的美国站英文目标。' : !connectionsReady ? '请先处理上方连接配置问题。' : hostingError || !profile ? '请配置并选择已启用的图片托管服务器。' : rulesError || readErrors.length ? '商品或规则读取失败，请查看上方原因并刷新。' : !salesRows.length ? '请勾选含有可启动销售 SKU 的商品。' : '';
 
+  useEffect(()=>{let active=true;setBatchLoading(true);setBatchError('');setBatchPlan(null);
+    void Promise.resolve().then(()=>api.getAutomaticBatchPlan()).then(value=>{if(active)setBatchPlan(value);},cause=>{if(active)setBatchError(errorText(cause));}).finally(()=>{if(active)setBatchLoading(false);});
+    return()=>{active=false;};
+  },[api,reload]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     let active = true; setLoadingRules(true); setRulesError('');
@@ -99,7 +108,7 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
     if (!canStart || startPending.current) return;
     startPending.current = true; setStarting(true); setError(''); setNotice('');
     try {
-      const task = await api.startAutomaticListing({ productIds: selected.map(value => value.id), targetId, profileId });
+      const task = await api.startAutomaticListing({ productIds: selected.map(value => value.id), targetId, profileId, executionMode });
       if (mounted.current) { if (task) setStartedTask(task); else setNotice('已取消启动，未创建自动上架任务。'); }
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { startPending.current = false; if (mounted.current) { setStarting(false); } }
@@ -138,6 +147,13 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
         {plan && !loadingProducts && <div className="workflow-notice"><strong>每个来源链接按配置、资料和代表性选择，最多 {Math.min(4,plan.variantLimit)} 个销售 SKU，不含说明性选项；每个销售 SKU 计划备货 {plan.stockSets} 套。</strong><p>{queue?`本次可启动 ${salesRows.length} 个销售 SKU。`:'选择目标店铺后计算销售配方。'}备货数量按销售单位计算，不直接写入 Haul 库存。</p>{queue?.products.filter(p=>selected.some(value=>value.id===p.productId)).map(product => <p key={product.productId}>{product.title || '未命名商品'}：可启动 {product.eligibleCount}，本次未选中 {product.notSelectedCount??0}，利润淘汰 {product.profitFilteredCount??0}，其他规则淘汰 {product.filteredCount-(product.profitFilteredCount??0)}</p>)}</div>}
         {queueLoading&&<p className="small-copy" role="status">正在核对销售配方和已保存结果…</p>}{queueError&&<p className="workflow-notice" role="alert">{queueError}</p>}
         {!!salesRows.length && <details className="listing-details"><summary>查看待处理销售配方</summary><ul className="listing-history">{salesRows.map(row => <li key={row.key}><strong>{row.specification}</strong><p>备货 {rules?.product.stockSets} 套；{row.reconsideration||'使用当前目标店铺规则'}</p></li>)}</ul></details>}
+      </fieldset>
+
+      <fieldset className="listing-setup" disabled={disabled}>
+        <legend>3. 执行模式</legend>
+        <label className="field"><span>上架执行模式</span><select aria-label="上架执行模式" value={executionMode} onChange={event=>setExecutionMode(event.target.value as ListingExecutionMode)}><option value="immediate">即时上架</option><option value="deferred_batch" disabled={batchLoading||!!batchError||!batchAvailable}>延迟批量（Batch）</option></select></label>
+        {batchLoading?<p role="status">正在读取实际 Batch 覆盖…</p>:batchError?<p role="alert">Batch 覆盖读取失败：{batchError}。可刷新资料与连接后重试。</p>:!batchAvailable&&<p className="small-copy">延迟批量不可选：当前配置没有可 Batch 步骤，具体原因见下方覆盖。</p>}
+        {batchPlan&&<details open={executionMode==='deferred_batch'}><summary>查看实际 Batch / 普通执行步骤</summary><BatchCoverage plan={batchPlan}/></details>}
       </fieldset>
 
       <div className="workflow-actions automatic-launch-actions"><strong>已选 {selected.length} 件商品 · 可启动 {salesRows.length} 个销售 SKU</strong><button type="button" className="button primary" disabled={!canStart} aria-describedby="automatic-start-hint" onClick={() => { void start(); }}><Play size={16} />{starting ? '正在创建任务…' : '启动并自动发布'}</button><span id="automatic-start-hint" className="small-copy">{canStart ? '任务保存在本机。启动后可切换页面；暂停或取消请使用下方任务操作。' : startHint}</span></div>

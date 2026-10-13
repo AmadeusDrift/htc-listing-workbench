@@ -68,6 +68,13 @@ export class TaskBatchRuntime {
   if(failures.length)throw failures[0];
  }
  batches(taskId:string){return this.db.prepare("SELECT id FROM ai_batches WHERE json_extract(record_json,'$.taskId')=?").all(taskId).map(row=>this.service.get(String(row.id)));}
+ summary(batchId:string){
+  const receipt=this.db.prepare("SELECT json_extract(record_json,'$.receivedAt') at FROM ai_provider_receipts WHERE json_extract(record_json,'$.callId')=? AND json_extract(record_json,'$.endpoint') LIKE '/api/v1/batches/%' ORDER BY rowid DESC LIMIT 1").get(batchId);
+  return {batchId,lastQueriedAt:receipt?String(receipt.at):null,items:this.service.items(batchId).map(item=>{
+   const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(item.aiCallId??item.id),call=row?JSON.parse(String(row.record_json)):null;
+   return {id:item.id,operationId:item.operationId,state:item.state,adopted:!!item.adoption,productId:item.owner.productId,draftId:call?.presentationContext?.draftId??null,variantId:call?.presentationContext?.variantId??call?.sourceColorContext?.variantId??call?.sourceConsistencyContext?.variantId??null};
+  })};
+ }
  async reconcile(taskId:string){
   const failures:unknown[]=[];
   for(const batch of this.batches(taskId)){

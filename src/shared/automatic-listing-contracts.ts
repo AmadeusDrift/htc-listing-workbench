@@ -88,7 +88,7 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
-  getAutomaticBatchSummary(id:string):Promise<{mode:import('./ai-batch-contracts.ts').ListingExecutionMode;plan:import('./ai-batch-contracts.ts').TaskBatchPlan|null;batches:import('./ai-batch-contracts.ts').BatchRecord[]}>;
+  getAutomaticBatchSummary(id:string):Promise<import('./ai-batch-contracts.ts').TaskBatchSummary>;
   setAutomaticExecutionMode(input:{taskId:string;mode:import('./ai-batch-contracts.ts').ListingExecutionMode}):Promise<AutomaticListingTask>;
   getAutomaticBatchPlan():Promise<import('./ai-batch-contracts.ts').TaskBatchPlan>;
   previewAutomaticListingAdaptation(id:string):Promise<AutomaticAdaptationPreview>;

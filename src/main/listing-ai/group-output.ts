@@ -13,8 +13,11 @@ export function assembleFieldOutputs(outputs:ListingFieldsOutput[],context?:List
   }
   if(context&&isFullSchema(context)){
     // A dependent sibling may have come from another configured model. Re-evaluate all retained
-    // native candidates together under the original complete Schema and evidence policy.
-    return retainValidNativeCandidates(parseFullGeneration({...result,candidates:[...result.candidates,...(result.rejectedCandidates??[])]},context),context);
+    // Schema-rejected candidates together. Citation/format/conflict rejection is not a Schema
+    // dependency: its rejected projection may already have removed invalid evidence IDs.
+    const schemaOnly=new Set(result.missing.filter(m=>/^\[LOCAL_[a-zA-Z_]+\]/.test(m.reason)&&result.missing.filter(other=>other.field===m.field).every(other=>/^\[LOCAL_[a-zA-Z_]+\]/.test(other.reason))).map(m=>m.field));
+    const eligible=(result.rejectedCandidates??[]).filter(c=>schemaOnly.has(c.field));
+    return retainValidNativeCandidates(parseFullGeneration({...result,candidates:[...result.candidates,...eligible]},context),context);
   }
   return result;
 }

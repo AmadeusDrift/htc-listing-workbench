@@ -90,3 +90,11 @@ for(const valid of [true,false])test(`cross-group dependentRequired jointly reva
   const result=await f.listing.suggest(f.reference);assert.equal(result.output.kind,'amazon-fields');const output=result.output as any;
   assert.equal(output.candidates.some((c:any)=>c.field==='item_name'),valid);assert.equal(output.candidates.some((c:any)=>c.field==='material'),valid);assert.equal(output.missing.some((m:any)=>m.field==='item_name'),!valid);assert.equal(f.requests.length,2);
 });
+for(const reference of ['invented-proof-id','00000000-0000-4000-a000-000000000001:spec'])test(`group composition cannot rehabilitate a rejected citation: ${reference}`,async t=>{
+  const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'citation-group-fixture-key'});f.ai.setEnabled({id:'openrouter',enabled:true});
+  const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='listing_title')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
+  f.respond(payload=>{const output=candidateFor(payload),material=output.candidates.find((c:any)=>c.field==='material');if(material)material.items[0].evidenceIds=[reference];return chat(output);});
+  const result=await f.listing.suggest(f.reference),output=result.output as any;
+  assert.equal(output.candidates.some((c:any)=>c.field==='material'),false);assert.ok(output.missing.some((m:any)=>m.field==='material'&&m.reason.includes('[FIELD_REFERENCE]')));
+  assert.ok(result.fieldGroupAssembly?.sources.some(s=>s.output.kind==='amazon-fields'&&s.output.rejectedCandidates?.some(c=>c.field==='material')));
+});

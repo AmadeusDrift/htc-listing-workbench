@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './fixtures/listing-ai.ts';
+import { fixture,chat,candidateFor } from './fixtures/listing-ai.ts';
 import { join } from 'node:path';
 import { createWorkspaceBackup,prepareWorkspaceRestore } from '../src/main/backup.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { assertFieldGroupHistory } from '../src/main/ai/field-purpose-groups.ts';
+import { createHash } from 'node:crypto';
 
 test('A43 different title and description configurations send distinct real calls and assemble attributed results',async t=>{
   const f=await fixture(t),requests:{model:string;effort:unknown;fields:string[]}[]=[],transport=(f.ai as any).context,fetcher=transport.fetch;
@@ -72,4 +73,20 @@ test('a grouped paid response interrupted by Schema validation is parsed locally
   const fresh=async()=>{if(fail&&f.requests.length)throw new SchemaTransientError('BODY_INCOMPLETE');};
   await assert.rejects(f.ai.listingFields(context,fresh));const original=f.ai.listCalls()[0];assert.equal(f.requests.length,1);assert.equal(original.schemaResponseRetained,true);fail=false;
   const result=await f.ai.listingFields(context,fresh);assert.equal(f.requests.length,2);assert.ok(result.fieldGroupAssembly?.sources[0].localRecovery);assert.deepEqual(f.ai.getCall(original.id),original);assert.equal(f.ai.getResult(result.id)?.id,result.id);
+});
+test('mixed completion keeps a missing title on its configured purpose while repairing an existing material',async t=>{
+  const {fieldPurposeGroups}=await import('../src/main/ai/field-purpose-groups.ts');
+  const f=await fixture(t),p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='listing_title')!;
+  f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
+  const context=f.listing.currentContext(f.draft,f.product,f.amazon.executionTargetScope(f.draft.targetId).generation);context.fields=context.fields.filter(v=>['item_name','material'].includes(v.name));context.repairRequest={issues:[{field:'item_name',code:'MISSING',message:'Missing title'},{field:'material',code:'INVALID',message:'Fix material'}],currentValues:{item_name:null,material:[{value:'Wrong material'}]}};
+  const db=openDatabase(f.directory);try{const assignments=fieldPurposeGroups(db,context,true).flatMap(g=>g.assignments);assert.equal(assignments.find(a=>a.field==='item_name')?.purpose.model,'openai/gpt-6-astra');assert.equal(assignments.find(a=>a.field==='material')?.purpose.purposeId,'listing_repair');}finally{db.close();}
+});
+for(const valid of [true,false])test(`cross-group dependentRequired jointly revalidates ${valid?'valid':'invalid'} siblings without an extra paid repair`,async t=>{
+  const f=await fixture(t),persistence=(f.amazon as any).persistence,record=persistence.record(f.draft.id);delete record.draft.attributes.item_name;delete record.draft.attributes.material;
+  record.draft.schema.schema.dependentRequired={item_name:['material']};record.draft.schema.checksum=createHash('md5').update(JSON.stringify(record.draft.schema.schema)).digest('base64');persistence.putRecord(record);f.amazon.getSchema=async()=>structuredClone(record.draft.schema);
+  f.ai.saveConnection({id:'openrouter',apiKey:'dependent-group-fixture-key'});f.ai.setEnabled({id:'openrouter',enabled:true});
+  const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='listing_title')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
+  if(!valid)f.respond(payload=>{const output=candidateFor(payload);const material=output.candidates.find((c:any)=>c.field==='material');if(material)(material as any).nativeValue=[{value:3}];return chat(output);});
+  const result=await f.listing.suggest(f.reference);assert.equal(result.output.kind,'amazon-fields');const output=result.output as any;
+  assert.equal(output.candidates.some((c:any)=>c.field==='item_name'),valid);assert.equal(output.candidates.some((c:any)=>c.field==='material'),valid);assert.equal(output.missing.some((m:any)=>m.field==='item_name'),!valid);assert.equal(f.requests.length,2);
 });

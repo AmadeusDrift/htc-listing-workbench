@@ -492,7 +492,7 @@ export class AiService {
       const current=readFieldGroup(this.db,initial.id)!;if(current.resultId)return this.getResult(current.resultId)!;
       const sources=current.members.map(m=>this.getResult(m.resultId!)!);if(sources.some(s=>!s||s.output.kind!=='amazon-fields'))throw new AiError('SOURCE_CHANGED');
       const {fieldGroupPart:_part,fieldRejections:_rejections,listingNormalization:_normalization,localRecovery:_recovery,...base}=sources[0];
-      const result=validateAiResult({...base,id:randomUUID(),output:assembleFieldOutputs(sources.map(s=>s.output as ListingFieldsOutput)),fieldGroupAssembly:{version:1,operationId:current.id,sources,assembledAt:this.timestamp()}});
+      const result=validateAiResult({...base,id:randomUUID(),output:assembleFieldOutputs(sources.map(s=>s.output as ListingFieldsOutput),context),fieldGroupAssembly:{version:1,operationId:current.id,sources,assembledAt:this.timestamp()}});
       this.db.prepare('INSERT INTO ai_results VALUES(?,?)').run(result.id,JSON.stringify(result));current.resultId=result.id;saveFieldGroup(this.db,current);
       if(completion)this.completionJournal.recordResult(completion,result);return result;
     });

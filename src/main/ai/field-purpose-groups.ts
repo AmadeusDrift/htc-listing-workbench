@@ -4,7 +4,7 @@ import type { AiPurposeId,AiPurposeSnapshot,FieldPurposeAssignment } from '../..
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { resolvePurpose,validatePurposeSnapshot } from './purpose-routing.ts';
 import { listingFingerprint } from '../json-fingerprint.ts';
-import { keys,uuid,sha256,integer } from './primitives.ts';
+import { keys,uuid,sha256,integer,boundedText } from './primitives.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { transaction } from '../application/transaction.ts';
 import { assertRecordTable } from '../storage/record-table.ts';
@@ -13,9 +13,12 @@ export type {FieldPurposeAssignment} from '../../shared/ai-purpose-contracts.ts'
 export interface FieldPurposeGroup{purpose:AiPurposeSnapshot;assignments:FieldPurposeAssignment[]}
 const copyPurpose:Record<string,AiPurposeId>={item_name:'listing_title',bullet_point:'listing_bullets',product_description:'listing_description',generic_keyword:'listing_search_terms'};
 export function fieldPurposeGroups(db:DatabaseSync,context:ListingAiContext,completion:boolean):FieldPurposeGroup[]{
-  const fallback:AiPurposeId=context.repairRequest&&Object.values(context.repairRequest.currentValues).some(v=>v!==null)?'listing_repair':completion?'listing_completion':'listing_generation';
+  const fallback:AiPurposeId=completion?'listing_completion':'listing_generation';
   const assignments:FieldPurposeAssignment[]=[{field:'*',purpose:resolvePurpose(db,fallback)}];
-  for(const [field,id] of Object.entries(copyPurpose))if(context.fields.some(f=>f.name===field))assignments.push({field,purpose:resolvePurpose(db,fallback==='listing_repair'?'listing_repair':id)});
+  for(const {name:field} of context.fields){
+    const existing=context.repairRequest?.currentValues[field],repair=existing!==undefined&&existing!==null;
+    if(repair||copyPurpose[field])assignments.push({field,purpose:resolvePurpose(db,repair?'listing_repair':copyPurpose[field])});
+  }
   const grouped=new Map<string,FieldPurposeGroup>();
   for(const assignment of assignments){const p=assignment.purpose,key=listingFingerprint({gateway:p.gateway,model:p.model,effort:p.effectiveEffort,capability:p.capability});const group=grouped.get(key)??{purpose:p,assignments:[]};group.assignments.push(assignment);grouped.set(key,group);}
   // A fallback covering no field must not generate an empty paid request.
@@ -24,13 +27,13 @@ export function fieldPurposeGroups(db:DatabaseSync,context:ListingAiContext,comp
 export const FIELD_GROUP_TABLES={ai_field_groups:['id','record_json']};
 export interface FieldGroupOperation{id:string;contextHash:string;scopeHash:string;revision:number;completion:boolean;members:(FieldPurposeGroup&{callId:string;sent:boolean;resultId:string|null})[];resultId:string|null}
 export function validateAssignments(raw:unknown):FieldPurposeAssignment[]{
-  if(!Array.isArray(raw)||!raw.length||raw.length>5)throw new UserFacingError('字段用途快照无效');
-  const values=raw.map(v=>{const o=keys(v,['field','purpose']);if(typeof o.field!=='string'||!['*',...Object.keys(copyPurpose)].includes(o.field))throw new UserFacingError('字段用途未登记');return{field:o.field,purpose:validatePurposeSnapshot(o.purpose)};});
+  if(!Array.isArray(raw)||!raw.length||raw.length>1001)throw new UserFacingError('字段用途快照无效');
+  const values=raw.map(v=>{const o=keys(v,['field','purpose']);return{field:boundedText(o.field,200),purpose:validatePurposeSnapshot(o.purpose)};});
   if(new Set(values.map(v=>v.field)).size!==values.length)throw new UserFacingError('字段用途重复');return values;
 }
 export function validateFieldGroup(raw:unknown):FieldGroupOperation{
   const o=keys(raw,['id','contextHash','scopeHash','revision','completion','members','resultId']);
-  if(typeof o.completion!=='boolean'||!Array.isArray(o.members)||o.members.length<2||o.members.length>5)throw new UserFacingError('字段分组操作无效');
+  if(typeof o.completion!=='boolean'||!Array.isArray(o.members)||o.members.length<2||o.members.length>6)throw new UserFacingError('字段分组操作无效');
   const members=o.members.map(v=>{const m=keys(v,['purpose','assignments','callId','sent','resultId']),purpose=validatePurposeSnapshot(m.purpose),assignments=validateAssignments(m.assignments);if(typeof m.sent!=='boolean'||m.resultId!==null&&!m.sent||assignments.some(a=>a.purpose.gateway!==purpose.gateway||a.purpose.model!==purpose.model||a.purpose.effectiveEffort!==purpose.effectiveEffort))throw new UserFacingError('字段分组模型与调用不一致');return{purpose,assignments,callId:uuid(m.callId),sent:m.sent,resultId:m.resultId===null?null:uuid(m.resultId)};});
   if(new Set(members.map(m=>m.callId)).size!==members.length||members[0].callId!==o.id||o.resultId!==null&&members.some(m=>!m.resultId))throw new UserFacingError('字段分组身份无效');
   const fields=members.flatMap(m=>m.assignments.map(a=>a.field));if(new Set(fields).size!==fields.length||o.scopeHash!==listingFingerprint({contextHash:o.contextHash,completionId:o.completion?o.id:null}))throw new UserFacingError('字段分组范围无效');

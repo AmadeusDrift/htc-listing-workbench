@@ -109,6 +109,7 @@ export interface ReviewedContentSource {
 
 /** Main-process provider boundary. It persists suggestions and calls, never source facts or listing drafts. */
 export class AiService {
+  private pendingReceipts=new Set<Promise<unknown>>();
   readonly completionJournal: CompletionJournal;
   private directory: string;
   private store: WorkspaceStore;
@@ -786,7 +787,12 @@ export class AiService {
         }
         const credentials = this.vault.read(profile.id, profile.generation);
         const reply = await abortable(prepared.invoke(credentials, { ...this.context, thinking:profile.thinking,gateway:profile.routing?.gateway,effectiveEffort:profile.routing?.effectiveEffort,purposeSnapshot:profile.routing,
-          onProviderReceipt:async receipt=>{if(!call)throw new AiError('INVALID_CONFIG');const saved=await saveProviderReceipt(this.db,this.directory,call.id,receipt,profile.routing);if(!finished){call={...call,providerReceiptId:saved.id};this.saveCall(call);}},
+          onProviderReceipt:async receipt=>{
+            if(this.closed)return;
+            if(!call)throw new AiError('INVALID_CONFIG');const callId=call.id;
+            const pending=(async()=>{const saved=await saveProviderReceipt(this.db,this.directory,callId,receipt,profile.routing);if(!finished){call={...call!,providerReceiptId:saved.id};this.saveCall(call);}})();
+            this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
+          },
           beforeSend: body => {
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
@@ -838,7 +844,7 @@ export class AiService {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
-    this.closing = (async () => { await this.requests.close(); this.db.close(); })();
+    this.closing = (async () => { await this.requests.close(); await Promise.allSettled([...this.pendingReceipts]);this.db.close(); })();
     return this.closing;
   }
 }

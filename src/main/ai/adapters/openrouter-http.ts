@@ -13,7 +13,7 @@ export function openRouterMetadata(raw:any):ProviderMetadata{
   if(usageKnown){usage.promptTokens=prompt;usage.completionTokens=completion;}
   return{requestId:typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)?raw.id:null,usage,usageKnown};
 }
-function safeResponse(text:string,key:string):boolean{
+export function safeResponse(text:string,key:string):boolean{
   let value=text;
   for(let i=0;i<8;i++){
     if(value.includes(key)||value.includes(encodeURIComponent(key)))return false;

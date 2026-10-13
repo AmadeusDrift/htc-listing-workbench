@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdir,readFile,lstat } from 'node:fs/promises';
+import { existsSync,lstatSync,readdirSync,readFileSync } from 'node:fs';
 import { resolve,join } from 'node:path';
 import { writeFileAtomically } from '../files.ts';
 import type { ProviderReceiptCapture } from './transport.ts';
@@ -42,11 +43,30 @@ export async function readProviderReceipt(db:DatabaseSync,directory:string,callI
   if(record.callId!==callId)throw new UserFacingError('AI原始收据归属不一致');const path=resolve(directory,record.relativePath),stat=await lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==record.byteSize)throw new UserFacingError('AI原始收据文件身份无效');const bytes=await readFile(path);
   if(bytes.length!==record.byteSize||hash(bytes)!==record.sha256)throw new UserFacingError('AI原始收据文件缺失或损坏');return JSON.parse(bytes.toString('utf8'));
 }
-export function providerReceiptFiles(db:DatabaseSync):ProviderReceipt[]{
+export function providerReceiptFiles(db:DatabaseSync,directory?:string):ProviderReceipt[]{
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<25)return[];
   assertRecordTable(db,'ai_provider_receipts');assertRecordTable(db,'ai_image_requests');
   for(const row of db.prepare('SELECT id,record_json FROM ai_image_requests').iterate()){const value=parseImageRequest(JSON.parse(String(row.record_json)));if(value.id!==row.id)throw new UserFacingError('生图请求身份不一致');}
-  return db.prepare('SELECT id,record_json FROM ai_provider_receipts').all().map(row=>{const value=parse(JSON.parse(String(row.record_json)));if(value.id!==row.id)throw new UserFacingError('AI收据身份不一致');return value;});
+  const records=db.prepare('SELECT id,record_json FROM ai_provider_receipts').all().map(row=>{const value=parse(JSON.parse(String(row.record_json)));if(value.id!==row.id)throw new UserFacingError('AI收据身份不一致');return value;});
+  if(directory&&existsSync(join(directory,'ai-receipts'))){
+    const folder=join(directory,'ai-receipts'),stat=lstatSync(folder);if(!stat.isDirectory()||stat.isSymbolicLink())throw new UserFacingError('AI收据目录无效');
+    const known=new Set<string>();for(const table of ['ai_calls','ai_image_requests','ai_batches','ai_batch_items'])if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))for(const row of db.prepare(`SELECT id FROM ${table}`).iterate())known.add(String(row.id));
+    const indexed=new Set(records.map(r=>r.id));
+    for(const name of readdirSync(folder)){
+      if(!/^[a-f0-9-]{36}\.receipt\.json$/.test(name)||!known.has(name.slice(0,36)))continue;
+      const pointer=join(folder,name),s=lstatSync(pointer);if(!s.isFile()||s.isSymbolicLink()||s.nlink!==1||s.size<1||s.size>8192)throw new UserFacingError('AI收据指针文件无效');
+      const record=parse(JSON.parse(readFileSync(pointer,'utf8')));if(record.callId!==name.slice(0,36))throw new UserFacingError('AI收据指针归属无效');
+      if(!indexed.has(record.id)){records.push(record);indexed.add(record.id);}
+    }
+  }
+  return records;
+}
+/** Index validated pointer-only responses in a staged database, never mutate the live backup source. */
+export function indexProviderReceiptPointers(db:DatabaseSync,directory:string):void{
+  for(const record of providerReceiptFiles(db,directory)){
+    const path=join(directory,record.relativePath),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==record.byteSize||hash(readFileSync(path))!==record.sha256)throw new UserFacingError('AI收据原文校验失败');
+    db.prepare('INSERT OR IGNORE INTO ai_provider_receipts VALUES(?,?)').run(record.id,JSON.stringify(record));
+  }
 }
 export interface ImageRequestIntent{version:1;id:string;provider:'openrouter';model:string;productId:string;productRevision:number;createdAt:string;mode:'generate'|'edit';sourceAssets:{id:string;sha256:string}[];editSource?:{id:string;sha256:string}}
 function parseImageRequest(raw:unknown):ImageRequestIntent{

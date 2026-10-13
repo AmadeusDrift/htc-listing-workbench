@@ -4,7 +4,9 @@ import { SOURCE_TABLES } from './miaoshou/source-snapshots.ts';
 import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
 import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOperations,revokeSchemaInFlight } from './catalog/schema-operations.ts';
 import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
-import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles } from './ai/receipts.ts';
+import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles,indexProviderReceiptPointers } from './ai/receipts.ts';
+import { BATCH_TABLES,assertBatchHistory } from './ai/batch/records.ts';
+import { pauseBatchHistory,retainBatchHistory,retainProviderReceipts } from './ai/batch/recovery.ts';
 import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
 import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
@@ -66,7 +68,8 @@ const compress = promisify(gzip), decompress = promisify(gunzip);
 const MAGIC = Buffer.from('HTC-BACKUP-1\n');
 const MAX_BYTES = 256 * 1024 * 1024;
 const MAX_CONTAINER = 400 * 1024 * 1024;
-const managedNames = ['red.sqlite', 'red.sqlite-wal', 'red.sqlite-shm', 'assets', 'documents'];
+const legacyManagedNames = ['red.sqlite', 'red.sqlite-wal', 'red.sqlite-shm', 'assets', 'documents'];
+const managedNames = [...legacyManagedNames,'ai-receipts'];
 const activeDestinations = new Set<string>();
 const requiredTables: Record<string, string[]> = {
   products: ['id','title','source_url','description','status','origin','revision','created_at','updated_at'],
@@ -109,7 +112,7 @@ const versionSixteenTables: Record<string, string[]> = { automatic_listing_tasks
 interface AssetCopy { path: string; data: string; sha256: string }
 interface BackupManifest { format: 'htc-workspace-backup'; version: 1; source: { application: 'HTC'; kind: 'local-workspace'; databaseVersion: number }; retention: BackupRetention; createdAt: string; database: string; databaseSha256: string; assets: AssetCopy[] }
 export interface PreparedRestore { stagingDirectory: string; createdAt: string; productCount: number; assetCount: number; expiresAt: string | null }
-interface RestoreJournal { version: 1; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
+interface RestoreJournal { version: 1|2; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
 function digest(data: Buffer): string { return createHash('sha256').update(data).digest('hex'); }
 function managedBackupFile(root: string, path: string): string {
   if(/^ai-receipts\/[a-f0-9]{64}\.json$/.test(path))return resolve(root,path);
@@ -172,6 +175,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
     if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
     if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}
+    if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -344,6 +348,7 @@ function disconnectSnapshot(path: string): void {
   const database = openDatabase(dirname(path));
   try {
     revokeSchemaInFlight(database);
+    pauseBatchHistory(database);
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE;');
     database.exec('UPDATE amazon_targets SET credential_ref=NULL;');
     invalidateCorrectionAuthorizations(database);
@@ -395,6 +400,8 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     }
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
+    retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
+    retainBatchHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
@@ -423,6 +430,7 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     source = new DatabaseSync(join(root, 'red.sqlite'), { readOnly: true });
     const snapshot = join(staging, 'red.sqlite');
     await backup(source, snapshot); source.close(); source = undefined;
+    const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
     checkDatabase(snapshot); disconnectSnapshot(snapshot);
     const info = checkDatabase(snapshot);
     let size = (await lstat(snapshot)).size;
@@ -514,13 +522,14 @@ export async function discardPreparedRestore(directory: string, prepared: Prepar
 
 async function recoverJournal(root: string, journal: RestoreJournal): Promise<void> {
   const staging = stagingPath(root, journal.stagingDirectory, 'staging'), rollback = stagingPath(root, journal.rollbackDirectory, 'rollback');
-  if (journal.version !== 1 || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !managedNames.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
+  const names=journal.version===1?legacyManagedNames:managedNames;
+  if (![1,2].includes(journal.version) || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !names.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
   for (const path of [staging, rollback]) if (existsSync(path) && (await lstat(path)).isSymbolicLink()) throw new UserFacingError('恢复暂存目录不能是链接');
   if (journal.phase === 'installing') {
-    for (const name of managedNames) {
+    for (const name of names) {
       const prior = join(rollback, name), current = join(root, name);
-      if (existsSync(prior)) { await rm(current, { recursive: name === 'assets' || name === 'documents', force: true }); await rename(prior, current); }
-      else if (!journal.priorNames.includes(name)) await rm(current, { recursive: name === 'assets' || name === 'documents', force: true });
+      if (existsSync(prior)) { await rm(current, { recursive: ['assets','documents','ai-receipts'].includes(name), force: true }); await rename(prior, current); }
+      else if (!journal.priorNames.includes(name)) await rm(current, { recursive: ['assets','documents','ai-receipts'].includes(name), force: true });
       else if (!existsSync(current)) throw new UserFacingError('恢复中断，原始工作区需要人工恢复；未建立空库以免覆盖资料');
     }
   }
@@ -549,7 +558,7 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
   checkDatabase(join(staging, 'red.sqlite'));
   for (const name of managedNames) if (existsSync(join(root, name)) && (await lstat(join(root, name))).isSymbolicLink()) throw new UserFacingError('工作区内部文件不能是链接，未更改资料');
   const rollback = join(root, `.restore-rollback-${randomUUID()}`); await mkdir(rollback);
-  const journal: RestoreJournal = { version: 1, phase: 'installing', stagingDirectory: staging, rollbackDirectory: rollback, priorNames: managedNames.filter(name => existsSync(join(root, name))) };
+  const journal: RestoreJournal = { version: 2, phase: 'installing', stagingDirectory: staging, rollbackDirectory: rollback, priorNames: managedNames.filter(name => existsSync(join(root, name))) };
   const journalFile = join(root, '.restore-journal.json');
   await writeFileAtomically(journalFile, JSON.stringify(journal));
   try {
@@ -565,6 +574,7 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
     if (checkpoint) await checkpoint('database-installed');
     await rename(join(staging, 'assets'), join(root, 'assets'));
     if (existsSync(join(staging, 'documents'))) await rename(join(staging, 'documents'), join(root, 'documents'));
+    if (existsSync(join(staging, 'ai-receipts'))) await rename(join(staging, 'ai-receipts'), join(root, 'ai-receipts'));
     if (checkpoint) await checkpoint('assets-installed');
     checkDatabase(join(root, 'red.sqlite'));
     journal.phase = 'complete'; await writeFileAtomically(journalFile, JSON.stringify(journal));

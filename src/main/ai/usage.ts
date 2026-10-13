@@ -5,6 +5,7 @@ import type { AiCall, AiProviderId, AiUsage, AiUsagePolicy, AiUsageSummary } fro
 import { AiError } from './errors.ts';
 import { date, integer, isChatProvider, keys, providerId, uuid, validateUsage } from "./primitives.ts";
 import { validateAiCall } from "./validation.ts";
+import { transaction } from '../application/transaction.ts';
 
 const zeroUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
 export interface AiUsageRecord {
@@ -114,15 +115,23 @@ export class AiUsageLedger {
   }
   /** Reservation and RUNNING call insertion share a SQLite write lock across service instances. */
   reserve(rawCall: AiCall, body: string | Buffer, recordSend?: (call:AiCall)=>void): AiCall {
-    const call = validateAiCall(rawCall), reservation = requestTokenReservation(call.providerId, body);
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
+    const call = validateAiCall(rawCall);
+    return transaction(this.db,()=>{
+      this.reserveBudget(call,body);
+      this.db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(call.id, JSON.stringify(call)); recordSend?.(call);return call;
+    });
+  }
+  /** Batch transport keeps its own request history until domain parsing creates a result. */
+  reserveBatch(rawCall:AiCall,body:string):void{
+    const call=validateAiCall(rawCall);transaction(this.db,()=>this.reserveBudget(call,body));
+  }
+  private reserveBudget(call:AiCall,body:string|Buffer):void{
+      if(this.db.prepare('SELECT 1 FROM ai_usage_ledger WHERE id=?').get(call.id))throw new AiError('INVALID_CONFIG');
+      const reservation=requestTokenReservation(call.providerId,body);
       const summary = this.summary(call.providerId, call.startedAt), policy = summary.policy;
       if ((policy.dailyCallLimit !== null && summary.attempts >= policy.dailyCallLimit)
         || (policy.dailyTokenLimit !== null && (summary.usedTokens === null || reservation===null || summary.usedTokens + reservation > policy.dailyTokenLimit))) throw new AiError('QUOTA_EXCEEDED');
       saveRecord(this.db, { id: call.id, providerId: call.providerId, day: call.startedAt.slice(0, 10), startedAt: call.startedAt, finishedAt: null, state: 'PENDING', reservedTokens: reservation, usage: zeroUsage() });
-      this.db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(call.id, JSON.stringify(call)); recordSend?.(call); this.db.exec('COMMIT'); return call;
-    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   /** Caller includes this update in its result/call transaction. */
   settle(callId: string, known: boolean, usage: AiUsage, finishedAt: string): void {

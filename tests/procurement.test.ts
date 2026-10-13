@@ -35,6 +35,19 @@ function fixture() {
   const amazon = { listDrafts: () => [draft], getDraft: () => draft, getTarget: () => target, getListingObservation: () => observation };
   return { dir, product, draft, target, observation, store, amazon };
 }
+
+test('manual price changes invalidate confirmation and retain the previous procurement revision', () => {
+  const f=fixture(),service=new ProcurementService(f.dir,f.store,f.amazon);
+  try {
+    const first=service.create({name:'revision',draftIds:[f.draft.id]});
+    const edit=(batch:typeof first,purchasePrice:string)=>service.update({id:batch.id,revision:batch.revision,lines:batch.lines.map(({id,purchaseQuantity,stockQuantity,purchaseUnit})=>({id,purchaseQuantity,stockQuantity,purchaseUnit,purchasePrice,priceConfirmed:true})),shipmentConfirmationId:''});
+    const confirmed=edit(first,'2.50'),changed=edit(confirmed,'3.00');
+    assert.equal(changed.lines[0].priceConfirmed,false);
+    assert.equal(f.product.variants[0].purchasePrice,'2.50');
+    const db=openDatabase(f.dir);
+    try { const rows=db.prepare("SELECT * FROM audit_events WHERE action='procurement.revised'").all();assert.equal(rows.length,2);assert.equal(JSON.parse(String(rows[1].detail_json)).previous.lines[0].purchasePrice,'2.50'); } finally {db.close();}
+  } finally {service.close();}
+});
 test('catalog-confirmed products can enter procurement before buyable; counts are never taken from supplier stock', () => {
   const f = fixture(), service = new ProcurementService(f.dir, f.store, f.amazon);
   const candidate = service.candidates()[0]; assert.equal(candidate.eligible, true);
@@ -42,6 +55,8 @@ test('catalog-confirmed products can enter procurement before buyable; counts ar
   assert.equal(batch.lines[0].sourceUrl, f.product.sourceUrl);
   assert.equal(batch.lines[0].stockQuantity, null); assert.equal(batch.lines[0].purchaseQuantity, null);
   assert.equal(batch.lines[0].labelStatus, 'NOT_REQUESTED'); assert.equal(batch.lines[0].asin, 'B012345678');
+  assert.equal(batch.lines[0].basis?.productRevision,1);
+  assert.match(batch.lines[0].basis?.observationHash ?? '',/^[a-f0-9]{64}$/);
   service.close();
   const reopened = new ProcurementService(f.dir, f.store, f.amazon); assert.deepEqual(reopened.get(batch.id), batch); reopened.close();
 });
@@ -61,6 +76,13 @@ test('mixed sales recipe expands into supplier pieces while stock and labels rem
     assert.match(procurementCsv(batch),/25 件/);assert.match(procurementHtml(batch,new Map()),/拆包／混装/);
     assert.deepEqual(service.ensureAutomaticBatch(jobId,[f.draft.id],{[f.draft.id]:5})[0],batch);
   }finally{service.close();}
+});
+
+test('three-piece sale sent as ten sets exposes thirty pieces and original packs separately',()=>{
+  const f=fixture(),recipe=buildSalesRecipes(f.product,null,defaultListingRules())[0];
+  recipe.components[0].quantity=3;recipe.components[0].sourcePackPieces=12;recipe.totalPieces=3;recipe.totalCostCny=7.5;
+  const [part]=salesPurchaseComponents(recipe,10);
+  assert.equal(part.pieces,30);assert.equal(part.originalPacks,2.5);assert.equal(part.needsSplit,true);
 });
 
 test('a child with an ASIN still waits for its actual parent relationship before procurement',()=>{

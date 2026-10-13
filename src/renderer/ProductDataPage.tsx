@@ -11,7 +11,7 @@ interface Props {
   targets: AmazonTarget[];
   busy: boolean;
   onOpen(productId: string): void;
-  onProcurement(): void;
+  onProcurement(context: { targetId: string; sku?: string }): void;
   onSettings(): void;
 }
 type Filter = '' | 'buyable' | 'attention';
@@ -133,7 +133,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
     </div>
     <div className="ops-panel">
       <div className="ops-actions"><div className="ops-grow"><h2>按商品规格查看</h2><p>颜色、尺寸按 SKU 分别列出；同一店铺、站点的同一 SKU 只统计一次。</p></div>
-        <button type="button" className="button secondary" disabled={busy} onClick={onProcurement}>去采购备货<ArrowUpRight size={15} /></button></div>
+        <button type="button" className="button secondary" disabled={busy} onClick={() => onProcurement({ targetId })}>去采购备货<ArrowUpRight size={15} /></button></div>
       <div className="ops-actions">
         <label className="workspace-search ops-grow"><Search size={16} /><input aria-label="搜索商品数据" value={query} maxLength={300} placeholder="搜索商品、SKU 或 ASIN" onChange={event => { setQuery(event.target.value); setPage(0); }} /></label>
         <label>显示范围<select value={filter} onChange={event => { setFilter(event.target.value as Filter); setPage(0); }}><option value="">全部情况</option><option value="buyable">可以销售</option><option value="attention">需要处理</option></select></label><span>{rows.length} 个规格</span>
@@ -152,7 +152,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
               <td>{row.trackingIssue ? '— / —' : count(row.inventory.value?.fulfillable) + ' / ' + count(row.inventory.value?.inbound)}<small>{observationNote(row.inventory)}</small>
                 {row.inventory.status === 'error' && row.inventory.fetchedAt && <small>上次成功 {formatDate(row.inventory.fetchedAt, true)}</small>}</td>
               <td>暂未启用<small>待确定补货周期与规则</small></td>
-              <td><button type="button" className="button secondary" disabled={busy} onClick={() => onOpen(row.productId)}>查看商品</button></td></tr>;
+              <td><button type="button" className="button secondary" disabled={busy} onClick={() => onOpen(row.productId)}>查看商品</button><button type="button" className="button secondary" disabled={busy} onClick={() => onProcurement({ targetId, sku: row.sku })}>采购此 SKU</button></td></tr>;
           })}</tbody></table></div>
           {rows.length > 100 && <div className="ops-pagination"><button type="button" className="button secondary" disabled={!safePage || busy} onClick={() => setPage(safePage - 1)}>上一页</button><span>{safePage + 1} / {Math.ceil(rows.length / 100)} 页</span><button type="button" className="button secondary" disabled={(safePage + 1) * 100 >= rows.length || busy} onClick={() => setPage(safePage + 1)}>下一页</button></div>}</>}
     </div>

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -13,6 +13,7 @@ import { localPrice, safeUrl } from '../miaoshou/validation.ts';
 import { validateProcurementBatch, price, quantity, shipmentId } from './records.ts';
 import type { ItemLabelStatus } from '../../shared/item-label-contracts.ts';
 import { projectSalesProduct } from '../sales-plans/records.ts';
+import { validateItemLabelRecord } from '../item-labels/records.ts';
 
 type ProcurementAmazon = Pick<AmazonService, 'listDrafts' | 'getDraft' | 'getTarget' | 'getListingObservation'>;
 interface Products { listProducts(): { id: string }[]; getProduct(id: string): ProductDetail }
@@ -35,6 +36,8 @@ export class ProcurementService {
     const sourceUrl = productUrl || receiptUrl, image = product.assets.find(item => item.variantIds.includes(draft.variantId)) ?? product.assets.find(item => item.role === 'main') ?? product.assets[0];
     const sourceImage = receipt?.snapshot.images.find(item => mapping?.imageIds.includes(item.id)) ?? receipt?.snapshot.images.find(item => item.role === 'main');
     const observation = this.amazon.getListingObservation(draft.id);
+    const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const basis={productRevision:product.revision,sourceHash:hash(receipt?.snapshot ?? product),recipeHash:draft.salesPlan?hash(draft.salesPlan.recipe):null,observationHash:observation?hash(observation):null};
     let reason = '', targetMatches = false, requiresAttention = false;
     try { const target = this.amazon.getTarget(draft.targetId); targetMatches = target.sellerId === draft.sellerId && target.marketplaceId === draft.marketplaceId && target.mode === draft.mode; } catch { /* retained result can outlive the connection */ }
     if (draft.schema.parentageLevel === 'PARENT') reason = '父体不参与实物备货';
@@ -51,7 +54,7 @@ export class ProcurementService {
       reason=requiresAttention?'父 SKU 或变体主题与计划不一致':'等待平台确认父子体关联';
     }
     return { ...(draft.salesPlan?{salesRecipe:structuredClone(draft.salesPlan.recipe)}:{}), draftId: draft.id, productId: product.id, variantId: draft.variantId, title: product.title, spec: draft.salesPlan?.recipe.specification || variant?.sourceSpec || variant?.originalSpec || '', sku: draft.sku,
-      targetId: draft.targetId, targetName: draft.targetName, sellerId: draft.sellerId, marketplaceId: draft.marketplaceId, mode: draft.mode,
+      basis, targetId: draft.targetId, targetName: draft.targetName, sellerId: draft.sellerId, marketplaceId: draft.marketplaceId, mode: draft.mode,
       sourceUrl, sourceItemId: source?.sourceItemId ?? '', sourceSkuKey: mapping?.sourceKey ?? '', sourceUrlBasis: productUrl ? 'product' : receiptUrl ? source?.sourceItemUrl ? 'miaoshou' : 'item-id' : 'missing',
       imageAssetId: image?.id ?? null, sourceImageUrl: safeUrl(sourceImage?.url ?? ''),
       sourcePurchasePrice: localPrice(variant?.purchasePrice ?? null) || localPrice(variant?.sourcePurchasePrice ?? null) || localPrice(sourceSku?.price ?? null),
@@ -76,7 +79,10 @@ export class ProcurementService {
   get(rawId: unknown): ProcurementBatch {
     const id = identifier(rawId), row = this.db.prepare('SELECT record_json FROM procurement_batches WHERE id=?').get(id);
     if (!row) throw new UserFacingError('备货批次不存在'); const result = validateProcurementBatch(JSON.parse(String(row.record_json)));
-    if (result.id !== id) throw new UserFacingError('备货批次身份不一致'); return result;
+    if (result.id !== id) throw new UserFacingError('备货批次身份不一致');
+    const labels=this.db.prepare("SELECT record_json FROM item_labels WHERE json_extract(record_json,'$.batchId')=? AND json_extract(record_json,'$.current')=1").all(id).map(row=>validateItemLabelRecord(JSON.parse(String(row.record_json))));
+    for(const line of result.lines){const label=labels.find(row=>row.lineId===line.id);line.labelStatus=label?((label.batchRevision===undefined||label.batchRevision===result.revision)&&label.quantity===line.stockQuantity?label.status:'STALE'):'NOT_REQUESTED';}
+    return result;
   }
   create(raw: unknown): ProcurementBatch {
     const input = record(raw, '创建备货批次', ['name','draftIds']), name = text(input.name, '批次名称', 100, true);
@@ -126,27 +132,34 @@ export class ProcurementService {
       this.db.exec('COMMIT'); return result;
     } catch(error) {this.db.exec('ROLLBACK');throw error;}
   }
-  setLabelStatus(batchId: string, lineId: string, status: ItemLabelStatus): void {
-    const batch=this.get(batchId),line=batch.lines.find(row=>row.id===lineId);
-    if (!line) throw new UserFacingError('标签备货行不存在'); if(line.labelStatus===status)return;
-    line.labelStatus=status; batch.revision++;batch.updatedAt=new Date().toISOString();
-    this.db.prepare('UPDATE procurement_batches SET record_json=? WHERE id=?').run(JSON.stringify(validateProcurementBatch(batch)),batch.id);
+  setLabelStatus(batchId: string, lineId: string, _status: ItemLabelStatus): void {
+    // Compatibility notification only; item_labels owns status, get() projects it.
+    if (!this.get(batchId).lines.some(row=>row.id===lineId)) throw new UserFacingError('标签备货行不存在');
   }
   update(raw: unknown): ProcurementBatch {
     const input = record(raw, '更新备货批次', ['id','revision','lines','shipmentConfirmationId']), batch = this.get(input.id);
     if (input.revision !== batch.revision) throw new UserFacingError('备货批次已更新，请刷新后再保存');
+    const previous = structuredClone(batch);
     if (!Array.isArray(input.lines) || input.lines.length !== batch.lines.length) throw new UserFacingError('备货行必须完整保存');
     const seen = new Set<string>();
     for (const value of input.lines) {
       const row = record(value, '备货行编辑', ['id','purchaseQuantity','stockQuantity','purchasePrice','purchaseUnit','priceConfirmed']), id = identifier(row.id), line = batch.lines.find(item => item.id === id);
       if (!line || seen.has(id) || typeof row.priceConfirmed !== 'boolean') throw new UserFacingError('备货行身份或状态无效'); seen.add(id);
-      Object.assign(line, { purchaseQuantity: quantity(row.purchaseQuantity), stockQuantity: quantity(row.stockQuantity), purchasePrice: price(row.purchasePrice), purchaseUnit: text(row.purchaseUnit, '采购单位', 40), priceConfirmed: row.priceConfirmed });
+      const purchasePrice=price(row.purchasePrice), purchaseUnit=text(row.purchaseUnit,'采购单位',40);
+      const priceConfirmed=row.priceConfirmed && purchasePrice===line.purchasePrice && purchaseUnit===line.purchaseUnit;
+      Object.assign(line, { purchaseQuantity: quantity(row.purchaseQuantity), stockQuantity: quantity(row.stockQuantity), purchasePrice, purchaseUnit, priceConfirmed });
     }
     const at = new Date().toISOString(), confirmationId = shipmentId(input.shipmentConfirmationId);
     batch.shipment = !confirmationId ? null : confirmationId === batch.shipment?.confirmationId ? batch.shipment : { confirmationId, status: 'LINKED_UNVERIFIED', linkedAt: at };
     batch.revision++; batch.updatedAt = at;
     const validated = validateProcurementBatch(batch);
-    const result = this.db.prepare("UPDATE procurement_batches SET record_json=? WHERE id=? AND json_extract(record_json,'$.revision')=?").run(JSON.stringify(validated), batch.id, input.revision as number);
-    if (result.changes !== 1) throw new UserFacingError('备货批次已更新，请刷新后再保存'); return validated;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.db.prepare("UPDATE procurement_batches SET record_json=? WHERE id=? AND json_extract(record_json,'$.revision')=?").run(JSON.stringify(validated), batch.id, input.revision as number);
+      if (result.changes !== 1) throw new UserFacingError('备货批次已更新，请刷新后再保存');
+      this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'procurement.revised','采购人工修订；原始来源与销售计划保持',JSON.stringify({previous,current:validated}),at);
+      this.db.exec('COMMIT');
+    } catch(error) {this.db.exec('ROLLBACK');throw error;}
+    return this.get(validated.id);
   }
 }

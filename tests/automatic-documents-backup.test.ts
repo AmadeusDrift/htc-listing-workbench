@@ -16,6 +16,19 @@ import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { simplePdf } from './fixtures/simple-pdf.ts';
 
+test('changing a manual shipment keeps old attachments historical and new imports tied to the current ID',async t=>{
+  const root=await mkdtemp(join(resolve('.test-data'),'shipment-history-')),id=randomUUID();
+  const batch={id,shipment:{confirmationId:'FBA12345',status:'LINKED_UNVERIFIED',linkedAt:new Date().toISOString()}};
+  const docs=new ShipmentDocumentService(root,{get:()=>structuredClone(batch)} as never);t.after(()=>docs.close());
+  const input=join(root,'carton.pdf');await writeFile(input,simplePdf());
+  const old=await docs.importDocument(id,input);batch.shipment.confirmationId='FBA67890';
+  const current=await docs.importDocument(id,input),all=docs.list(id);
+  assert.equal(all.find(row=>row.id===old.id)?.shipmentId,'FBA12345');
+  assert.equal(all.filter(row=>row.shipmentId===batch.shipment.confirmationId).length,1);
+  assert.equal(current.status,'LINKED_UNVERIFIED');assert.equal(old.status,'LINKED_UNVERIFIED');
+  assert.deepEqual(await readFile(await docs.file(old.id)),simplePdf());
+});
+
 test('v16 backup retains verified document bytes and pauses unfinished parent/label work', async t => {
   await mkdir(resolve('.test-data'),{recursive:true});const root=await mkdtemp(resolve('.test-data/automatic-documents-backup-')), source=join(root,'source'),destination=join(root,'restored');
   const store=new WorkspaceStore(source), product=store.createProduct(), target={id:'store-one',name:'Test',sellerId:'seller',marketplaceId:'ATVPDKIKX0DER',mode:'live',configured:true,paused:false,locale:'en_US'};

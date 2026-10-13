@@ -8,6 +8,8 @@ import { isObject, marketplace } from './context.ts';
 import type { Credentials } from './vault.ts';
 import { productDataRequest } from './read-data.ts';
 import type { ProductDataKind } from './read-data.ts';
+import type { ItemLabelRecord } from '../../shared/item-label-contracts.ts';
+export type LabelDownloadScope=Pick<ItemLabelRecord,'targetId'|'targetGeneration'|'sellerId'|'marketplaceId'|'mode'>;
 import { itemLabelDownloads, validateItemLabelRequest } from '../item-labels/adapter.ts';
 
 type SchemaFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -41,6 +43,8 @@ export class AmazonTransportError extends UserFacingError {
     super(message); this.status = status; this.requestId = requestId; this.unknownWrite = unknownWrite; this.response = response;
   }
 }
+/** POST completed with a response, but its result cannot safely be adopted or replayed. */
+export class AmazonLabelResponseError extends AmazonTransportError {}
 interface HttpResult { status: number; headers: Headers; bytes: Buffer; bodyUnavailable?: 'limit' | 'read' }
 export interface ApiResult { data: JsonObject; status: number; requestId: string | null }
 export type Operation = 'searchDefinitionsProductTypes' | 'getDefinitionsProductType' | 'previewListingsItem' | 'putListingsItem' | 'getListingsItem' | 'patchListingsItem' | 'previewPatchListingsItem';
@@ -86,7 +90,7 @@ export class AmazonTransport {
   private hooks: TransportHooks;
   private tokens = new Map<string, { value: string; expires: number; generation: number }>();
   private nextAllowed = new Map<string, number>();
-  private labelDownloads = new Map<string, number>();
+  private labelDownloads = new Map<string, LabelDownloadScope & { expiration:number }>();
   constructor(hooks: TransportHooks, dependencies: AmazonDependencies = {}) {
     this.hooks = hooks; this.fetcher = dependencies.fetch ?? fetch; this.sleep = dependencies.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
     this.schemaFetcher = dependencies.schemaFetch;
@@ -95,7 +99,7 @@ export class AmazonTransport {
     this.resolveAddresses = dependencies.resolveAddresses ?? (async host => (await lookup(host, { all: true })).map(result => result.address));
     this.timeout = Math.min(60_000, Math.max(10, dependencies.timeoutMs ?? 15_000)); this.maxSchemaBytes = Math.min(16 * 1024 * 1024, dependencies.maxSchemaBytes ?? 8 * 1024 * 1024);
   }
-  clear(id?: string): void { if (id) this.tokens.delete(id); else { this.tokens.clear(); this.labelDownloads.clear(); } }
+  clear(id?: string): void { if (id) {this.tokens.delete(id);for(const [uri,scope] of this.labelDownloads)if(scope.targetId===id)this.labelDownloads.delete(uri);} else { this.tokens.clear(); this.labelDownloads.clear(); } }
   private async bounded<T>(action: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -304,27 +308,42 @@ export class AmazonTransport {
       if (wait > 0) await this.sleep(wait); guard(); attempts = 1; this.nextAllowed.set(key, this.now() + 500);
       let result: HttpResult;
       try { result = await this.http(ENDPOINTS[target.region] + '/inbound/fba/2024-03-20/items/labels', { method: 'POST', headers: { 'x-amz-access-token': token, 'content-type': 'application/json', 'user-agent': 'HTC Item Labels' }, body: JSON.stringify(body) }, 2 * 1024 * 1024, (code, value) => { status = code; headers = value; }, this.dataFetcher ?? this.fetcher); }
-      catch { throw new AmazonTransportError('标签请求连接中断，未获得可核验文件', null, null, true); }
-      guard(false); status = result.status; headers = result.headers;
+      catch { throw new AmazonTransportError('标签请求连接中断，未获得可核验文件', status, this.hooks.redact(metadata(headers).requestId), true); }
+      status = result.status; headers = result.headers;
       const { requestId, rateLimit } = this.hooks.redact(metadata(headers));
       if (rateLimit) this.nextAllowed.set(key, this.now() + 1000 / Number(rateLimit));
       if (status === 401) { this.clear(target.id); throw new AmazonTransportError('Amazon 标签授权失效，请检查连接', status, requestId); }
       if (status === 403) throw new AmazonTransportError('商品标签接口权限不足，请核对 Amazon Fulfillment 角色；上架结果仍保留', status, requestId, false, this.errorBody(result));
       if (status === 429 || status >= 500 || status === 408) { this.nextAllowed.set(key, this.now() + this.delay(headers, 0)); throw new AmazonTransportError('Amazon 商品标签服务暂时不可用', status, requestId); }
-      if (status !== 200) throw new AmazonTransportError('Amazon 商品标签请求未通过（HTTP ' + status + '）', status, requestId, false, this.errorBody(result));
-      const data = this.decode(result), documents = itemLabelDownloads(data, this.now());
-      for (const [uri, expiration] of this.labelDownloads) if (expiration <= this.now()) this.labelDownloads.delete(uri);
-      for (const document of documents) this.labelDownloads.set(document.uri, document.expiration);
-      return { data, status, requestId };
+      if (status < 200 || status >= 300) throw new AmazonTransportError('Amazon 商品标签请求未通过（HTTP ' + status + '）', status, requestId, false, this.errorBody(result));
+      try{
+        guard(false);
+        if(status!==200)throw new UserFacingError('标签成功响应状态无法采用');
+        const data = this.decode(result), documents = itemLabelDownloads(data, this.now());
+        this.restoreItemLabelDownloads(target,{targetId:target.id,targetGeneration:generation,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:target.mode},documents);
+        return { data, status, requestId };
+      }catch{throw new AmazonLabelResponseError('标签响应已收到但无法安全采用，请核对原请求；禁止重新生成',status,requestId,false,this.errorBody(result));}
     } catch (error) { category = status === 401 || status === 403 ? 'authorization' : status === 429 ? 'rate_limit' : 'labels'; throw error instanceof UserFacingError ? error : new AmazonTransportError('Amazon 商品标签请求失败', status); }
     finally { this.log(target, 'createMarketplaceItemLabels', start, attempts, status, headers, category); }
+  }
+  /** Main-process only: caller must first validate persisted label/request/fingerprint ownership. */
+  restoreItemLabelDownloads(target:AmazonTarget,scope:LabelDownloadScope,documents:{uri:string;expiration:number}[]):void{
+    const active=this.hooks.active(target.id);
+    if(scope.mode!=='live'||active.mode!==scope.mode||target.id!==scope.targetId||active.id!==scope.targetId||active.sellerId!==scope.sellerId||active.marketplaceId!==scope.marketplaceId||this.hooks.generation(target.id)!==scope.targetGeneration)throw new UserFacingError('标签下载恢复的店铺或授权身份已变化');
+    const verified=itemLabelDownloads({documentDownloads:documents.map(doc=>({downloadType:'URL',uri:doc.uri,expiration:new Date(doc.expiration).toISOString()}))},this.now());
+    for(const [uri,entry] of this.labelDownloads)if(entry.expiration<=this.now())this.labelDownloads.delete(uri);
+    for(const document of verified)this.labelDownloads.set(document.uri,{...scope,expiration:document.expiration});
+  }
+  private labelDownloadAuthorized(uri:string):boolean{
+    const scope=this.labelDownloads.get(uri);if(!scope||scope.expiration<=this.now())return false;
+    try{const target=this.hooks.active(scope.targetId);return target.mode===scope.mode&&target.sellerId===scope.sellerId&&target.marketplaceId===scope.marketplaceId&&this.hooks.generation(scope.targetId)===scope.targetGeneration;}catch{return false;}
   }
   async downloadItemLabel(raw: string): Promise<Buffer> {
     // Only exact, unexpired URLs returned by this transport's authenticated label call.
     let url: URL; try { url = new URL(raw); } catch { throw new UserFacingError('标签下载来源无效'); }
-    if ((this.labelDownloads.get(url.href) ?? 0) <= this.now()) throw new UserFacingError('标签下载地址未经当前 Amazon 响应授权或已过期');
+    if (!this.labelDownloadAuthorized(url.href)) throw new UserFacingError('标签下载地址未经当前 Amazon 响应授权或已过期');
     let addresses: string[]; try { addresses = await this.bounded(() => this.resolveAddresses(url.hostname)); } catch { throw new UserFacingError('标签下载地址解析失败或超时'); }
-    if ((this.labelDownloads.get(url.href) ?? 0) <= this.now()) throw new UserFacingError('标签下载地址未经当前 Amazon 响应授权或已过期');
+    if (!this.labelDownloadAuthorized(url.href)) throw new UserFacingError('标签下载地址未经当前 Amazon 响应授权或已过期');
     // The exact URL is a short-lived capability from an authenticated Amazon
     // response. Native HTTPS keeps certificate verification and system proxy
     // routing; no other path, query, bucket or mixed DNS answer inherits trust.
@@ -332,6 +351,7 @@ export class AmazonTransport {
     if (!proxyLabel && (!addresses.length || addresses.some(address => !publicAddress(address)))) throw new UserFacingError('标签下载地址解析到非公开网络，已阻止');
     const result = await this.http(url.href, { method: 'GET', headers: { accept: 'application/pdf' }, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }, 32 * 1024 * 1024, undefined, this.dataFetcher ?? this.fetcher);
     if (result.status >= 300 && result.status < 400) throw new UserFacingError('标签下载包含重定向，已阻止');
+    if(result.status===408||result.status===429||result.status>=500)throw new AmazonTransportError('标签文件下载暂时不可用（HTTP '+result.status+'）',result.status,null,false);
     if (result.status !== 200 || result.bodyUnavailable) throw new UserFacingError('标签文件下载未完成');
     const contentType = (result.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
     if (contentType && !['application/pdf','application/octet-stream','binary/octet-stream'].includes(contentType)) throw new UserFacingError('标签响应不是 PDF 文件');

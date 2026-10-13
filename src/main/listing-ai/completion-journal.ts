@@ -1,3 +1,4 @@
+import { readCopyReview,copyReviewResult } from '../ai/copy-review-upgrade.ts';
 import { legacyCompletionAssets } from './legacy-generated-scope.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair } from './legacy-theme-repair.ts';
@@ -29,7 +30,7 @@ export interface CompletionCall { id:string; sent:boolean; resultId:string|null;
 const wasSent=(call:CompletionCall|null):boolean=>!!call&&(call.sent||!!call.previous?.some(previous=>previous.sent));
 export interface CompletionRound {
   context:ListingAiContext; contextHash:string; candidate:CompletionCall; review:CompletionCall|null;
-  resolved:boolean; adoptionId:string|null;
+  resolved:boolean; adoptionId:string|null; reviewFinalResultId?:string;
 }
 export interface CompletionOperation {
   id:string; revision:number; draftId:string; scopeHash:string; safetyScopeHash:string; safetyIdentity:ReturnType<typeof completionSafetyIdentity>; copyReviewEnabled:boolean; state:'ACTIVE'|'DONE'|'GUARD'|'RETIRED';
@@ -56,11 +57,11 @@ export function validateCompletionOperation(raw:unknown):CompletionOperation {
   const safetyIdentity={mode:identity.mode as AmazonDraft['mode'],productId:uuid(identity.productId),productRevision:integer(identity.productRevision,1,Number.MAX_SAFE_INTEGER),variantId:uuid(identity.variantId),sku:boundedText(identity.sku,100),sellerId:boundedText(identity.sellerId,100),marketplaceId:boundedText(identity.marketplaceId,100),listingProgram:identity.listingProgram as AmazonDraft['listingProgram'],recipeHash:sha256(identity.recipeHash)};
   if(!['demo','live'].includes(safetyIdentity.mode)||!['standard','haul'].includes(safetyIdentity.listingProgram)||listingFingerprint(safetyIdentity)!==o.safetyScopeHash)invalid();
   const rounds=(o.rounds as unknown[]).map(raw=>{
-    const r=keys(raw,['context','contextHash','candidate','review','resolved','adoptionId']),context=validateListingContext(r.context),contextHash=sha256(r.contextHash);
+    const r=keys(raw,['context','contextHash','candidate','review','resolved','adoptionId'],['reviewFinalResultId']),context=validateListingContext(r.context),contextHash=sha256(r.contextHash);
     if(contextHash!==listingFingerprint(context)||context.draftId!==o.draftId||context.productId!==safetyIdentity.productId||context.productRevision!==safetyIdentity.productRevision||context.variantId!==safetyIdentity.variantId||context.sku!==safetyIdentity.sku||context.marketplaceId!==safetyIdentity.marketplaceId||context.listingProgram!==safetyIdentity.listingProgram||typeof r.resolved!=='boolean')invalid();
     const candidate=parseCall(r.candidate),review=r.review===null?null:parseCall(r.review);
     if(!!review!==o.copyReviewEnabled||o.state!=='GUARD'&&review?.sent&&!candidate.resultId||r.adoptionId!==null&&(!candidate.resultId||review&&!review.resultId))invalid();
-    return {context,contextHash,candidate,review,resolved:r.resolved as boolean,adoptionId:r.adoptionId===null?null:sha256(r.adoptionId)};
+    return {...(r.reviewFinalResultId===undefined?{}:{reviewFinalResultId:uuid(r.reviewFinalResultId)}),context,contextHash,candidate,review,resolved:r.resolved as boolean,adoptionId:r.adoptionId===null?null:sha256(r.adoptionId)};
   });
   const ids=rounds.flatMap(r=>[r.candidate,r.review].flatMap(c=>c?[...(c.previous??[]),c].map(c=>c.id):[]));if(new Set(ids).size!==ids.length||rounds.slice(0,-1).some(r=>!r.resolved))invalid();
   if(o.state==='GUARD'&&!o.legacyRecovery&&!rounds.some(r=>wasSent(r.candidate)||wasSent(r.review))||o.state==='DONE'&&rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!call.resultId)))invalid();
@@ -144,6 +145,16 @@ export class CompletionJournal {
       const at=new Date().toISOString(),op=save(this.db,{...input,id:randomUUID(),revision:1,state:'ACTIVE',rounds:[],remaining:[],reviewIssues:[],createdAt:at,updatedAt:at,scopedRepair:{version:LEGACY_THEME_REPAIR_VERSION,fields:['theme'],sourceResultId:source.id,sourceCallId:source.callId,sourceContextHash:source.sourceSha256!,sourceWorkflowId:workflow.id,originalDraftStamp:input.draftStamp,previousAttempts:4}});
       this.db.exec('COMMIT');return op;
     }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
+  assertUpgradeBudget(request:CompletionRequest):void{
+    const op=this.get(request.operationId),round=op.rounds.find(r=>r.review?.id===request.callId);
+    if(op.state!=='ACTIVE'||!round||round.resolved||round.contextHash!==request.contextHash||!round.review?.resultId)invalid();
+    if(legacyStepDebt(op,round,'review')+(round.review.previous?.length??0)+1>=3)throw new UserFacingError('文案复核升级将超过原业务步骤三次请求上限；原调用与费用保留');
+  }
+  linkReviewUpgrade(request:CompletionRequest,result:AiResult):void{
+    const op=this.get(request.operationId),round=op.rounds.find(r=>r.review?.id===request.callId),receipt=readCopyReview(this.db,request.callId);
+    if(!round||round.contextHash!==request.contextHash||!receipt||listingFingerprint(receipt.completion)!==listingFingerprint(request)||receipt.first.resultId!==round.review?.resultId||copyReviewResult(this.db,receipt,true)?.id!==result.id)invalid();
+    round.reviewFinalResultId=result.id;this.save(op);
   }
   assertSendBudget(id:string,kind:'candidate'|'review'):void {
     const op=this.get(id),round=op.rounds.at(-1);
@@ -261,7 +272,7 @@ export class CompletionJournal {
 function committedAdoption(draft:AmazonDraft|undefined,round:CompletionRound):boolean {
   const adoption=round.adoptionId&&draft?.fieldAdoptions?.find(value=>value.id===round.adoptionId);
   if(!adoption)return false;
-  if(draft!.id!==round.context.draftId||adoption.contextSha256!==round.contextHash||adoption.suggestionResultId!==round.candidate.resultId||adoption.reviewResultId!==(round.review?.resultId??null)||adoption.fromRevision!==round.context.draftRevision||adoption.toRevision!==round.context.draftRevision+1||adoption.toRevision>draft!.revision)invalid();
+  if(draft!.id!==round.context.draftId||adoption.contextSha256!==round.contextHash||adoption.suggestionResultId!==round.candidate.resultId||adoption.reviewResultId!==(round.reviewFinalResultId??round.review?.resultId??null)||adoption.fromRevision!==round.context.draftRevision||adoption.toRevision!==round.context.draftRevision+1||adoption.toRevision>draft!.revision)invalid();
   return true;
 }
 
@@ -271,6 +282,7 @@ export function assertCompletionHistory(db:DatabaseSync):void {
     const draftRow=db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(op.draftId),draft=draftRow?JSON.parse(String(draftRow.record_json)).draft as AmazonDraft:undefined;
     if(!draft&&!['GUARD','RETIRED'].includes(op.state)||draft&&completionSafetyScope(draft)!==op.safetyScopeHash)invalid();
     for(const round of op.rounds){
+      if(round.reviewFinalResultId){const receipt=round.review&&readCopyReview(db,round.review.id);if(!receipt||receipt.completion?.operationId!==op.id||receipt.first.resultId!==round.review?.resultId||copyReviewResult(db,receipt,true)?.id!==round.reviewFinalResultId)invalid();}
       if(round.adoptionId&&!committedAdoption(draft,round)&&round.resolved)invalid();
       for(const [kind,entry] of [['candidate',round.candidate],['review',round.review]] as const)for(const call of entry?[...(entry.previous??[]),entry]:[]){
         if(ids.has(call.id))invalid();ids.add(call.id);
@@ -321,7 +333,9 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
       // A prepared GUARD has deliberately cleared its result references. Only
       // an intact snapshot round can prove adoption; mixed local refs cannot.
       const adopted=!!prior?.candidate.resultId&&(!prior.review||!!prior.review.resultId)&&committedAdoption(draft,prior);
-      const review=round.review?.resultId?snapshotJournal.result(round.review,round):undefined;
+      if(round.reviewFinalResultId&&!snapshot.prepare('SELECT 1 FROM ai_results WHERE id=?').get(round.reviewFinalResultId))missing=true;
+      const upgraded=round.review&&readCopyReview(snapshot,round.review.id);
+      const review=round.reviewFinalResultId&&upgraded?copyReviewResult(snapshot,upgraded,true):round.review?.resultId?snapshotJournal.result(round.review,round):undefined;
       const candidate=round.candidate.resultId?snapshotJournal.result(round.candidate,round):undefined;
       const candidateOutput=candidate?.output.kind==='amazon-fields'?candidate.output:undefined;
       const checked=candidateOutput?{...candidateOutput,candidates:[...candidateOutput.candidates,...candidateOutput.rejectedCandidates??[]]}:undefined;
@@ -333,7 +347,7 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
       if(round.resolved&&!adopted&&(round.adoptionId!==null||!rejected))missing=true;
       if(rejected&&!prior?.resolved&&index===retained.rounds.length-1)round.resolved=false;
     }
-    if(missing){retained.state='GUARD';for(const round of retained.rounds){round.candidate.resultId=null;if(round.review)round.review.resultId=null;round.adoptionId=null;}}
+    if(missing){retained.state='GUARD';for(const round of retained.rounds){round.candidate.resultId=null;if(round.review)round.review.resultId=null;round.adoptionId=null;delete round.reviewFinalResultId;}}
     else if(retained.state==='GUARD')retained.state='ACTIVE';
     retained.revision=previous?.revision??retained.revision;save(snapshot,retained);
   }
@@ -348,7 +362,7 @@ export function retireCompletionDrafts(db:DatabaseSync,cutoff:string,protectedId
     const draft=JSON.parse(String(row.record_json)).draft as AmazonDraft;
     for(const op of operations){
       op.state=op.legacyRecovery||op.rounds.some(round=>wasSent(round.candidate)||wasSent(round.review))?'GUARD':'RETIRED';
-      for(const round of op.rounds){round.resolved=committedAdoption(draft,round)||round.resolved;round.candidate.resultId=null;if(round.review)round.review.resultId=null;round.adoptionId=null;}
+      for(const round of op.rounds){round.resolved=committedAdoption(draft,round)||round.resolved;round.candidate.resultId=null;if(round.review)round.review.resultId=null;round.adoptionId=null;delete round.reviewFinalResultId;}
       save(db,op);
     }
   }

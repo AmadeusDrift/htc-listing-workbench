@@ -1,3 +1,4 @@
+import { assertFactScopeRecord } from './fact-scopes.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../../shared/errors.ts';
 import { readSourceSnapshot, saveSourceSnapshot } from '../miaoshou/source-snapshots.ts';
@@ -86,9 +87,6 @@ export function assertSourceAdoptionHistory(db:DatabaseSync):void{
     if(!db.prepare('SELECT 1 FROM products WHERE id=?').get(id))throw new UserFacingError('来源采用主档缺失');
   }
   for(const row of db.prepare('SELECT id,record_json FROM product_fact_scopes').iterate()){
-    const r=JSON.parse(String(row.record_json));
-    const fact=db.prepare('SELECT product_id FROM facts WHERE id=?').get(r.id);
-    if(Object.keys(r).sort().join()!=='id,productId,scope,source,sourceReceiptId,version'||r.version!==1||r.id!==row.id||r.source!=='source'||r.scope!=='unknown'
-      ||fact&&fact.product_id!==r.productId)throw new UserFacingError('来源属性范围记录无效');
+    assertFactScopeRecord(db,row);
   }
 }

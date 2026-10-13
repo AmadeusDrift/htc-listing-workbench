@@ -1,3 +1,4 @@
+import { factsForVariant } from '../../shared/fact-scopes.ts';
 import {imageRenderDomains,observationRenderingText} from '../image-workflow/render-domains.ts';
 import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import { assertStoredImageEvidence, assertStoredListingReview } from '../listing-ai/stored-evidence.ts';
@@ -50,7 +51,7 @@ function validateIpSource(raw:unknown):ImageRiskSourceSnapshot {
 }
 export function imageRiskSourceSnapshot(product:ProductDetail,variantId:string):ImageRiskSourceSnapshot {
   const variant=product.variants.find(variant=>variant.id===variantId); if(!variant)throw new AiError('SOURCE_CHANGED');
-  return validateIpSource({description:product.description,originalSpec:variant.originalSpec,sourceSpec:variant.sourceSpec,normalizedSpec:variant.normalizedSpec,facts:product.facts.map(({id,name,value,source,state})=>({id,name,value,source,state}))});
+  return validateIpSource({description:product.description,originalSpec:variant.originalSpec,sourceSpec:variant.sourceSpec,normalizedSpec:variant.normalizedSpec,facts:factsForVariant(product,variantId).map(({id,name,value,source,state})=>({id,name,value,source,state}))});
 }
 export function validateProductImageContext(raw: unknown,options:ImageEvidenceOptions={}): ProductImageContext {
   const value = keys(raw, ['listing','currentListingCopy','listingReviewResultId','referenceAssets','purpose','policyVersion'], ['ipSource','sourceVariantIds','slot','setPolicy','setPlan','referenceMeasurements','sourceMeasurements','copyReviewBypass']);

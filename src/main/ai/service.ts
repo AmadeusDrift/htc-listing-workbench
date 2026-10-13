@@ -1,3 +1,4 @@
+import { factsForVariant, productFactEvidence } from '../../shared/fact-scopes.ts';
 import { runCopyReview,readCopyReview,copyReviewReason,copyReviewResult } from './copy-review-upgrade.ts';
 import {reviewProductAppearance} from './appearance-adapter.ts';
 import {validatePurposeSnapshot as validateAppearancePurposeSnapshot} from './purpose-routing.ts';
@@ -392,7 +393,7 @@ export class AiService {
     });
     const payload: TextPayload = {
       productId: product.id, sourceTitle: boundedText(product.title, 500), variant: { id: variant.id, originalSpec: boundedText(variant.originalSpec, 2000, true), normalizedSpec: boundedText(variant.normalizedSpec, 2000, true) },
-      confirmedFacts: product.facts.filter(f => ['source_confirmed', 'human_confirmed'].includes(f.state) && f.value.trim() && !protectedAttribute(f.name)).map(f => ({ id: f.id, name: boundedText(f.name, 100), value: boundedText(f.value, 4000) })),
+      confirmedFacts: factsForVariant(product,variant.id).filter(f => ['source_confirmed', 'human_confirmed'].includes(f.state) && f.value.trim() && !protectedAttribute(f.name)).map(f => ({ id: f.id, name: boundedText(f.name, 100), value: boundedText(f.value, 4000) })),
       unverifiedOcr: sources.map(({ result, asset }) => ({ resultId: result.id, assetId: asset.id, assetSha256: asset.sha256, text: result.output.kind === 'ocr' ? result.output.text : '', verified: false })),
     };
     if (payload.unverifiedOcr.reduce((size, row) => size + row.text.length, 0) > MAX_OCR_TEXT) throw new AiError('INVALID_INPUT');
@@ -620,7 +621,7 @@ export class AiService {
     const references = product.assets.filter(asset => !generated.has(asset.id)).slice(0, 3);
     if (!references.length) throw new UserFacingError('商品分类需要至少一张可用来源图片');
     const payload = { phase:input.phase, candidates:input.candidates, keywords:input.keywords ?? [], title:product.title, description:product.description.slice(0, 12000),
-      facts:product.facts.filter(fact => ['source_confirmed','human_confirmed'].includes(fact.state)).map(({name,value})=>({name,value})), specifications:product.variants.map(item=>item.originalSpec).slice(0,200) };
+      ...productFactEvidence(product), specifications:product.variants.map(item=>item.originalSpec).slice(0,200) };
     const result = await this.start(profile, input, { operation:'category-decision', payload, references:references.map(asset=>asset.id) }, async activeSignal => {
       const assertFresh = async () => { assertContextFresh(); this.product(input.productId,input.productRevision); throwIfAborted(activeSignal); };
       await assertFresh();

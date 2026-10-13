@@ -57,8 +57,11 @@ function normalizeProduct(raw: unknown): ImportedProduct {
     return { id: randomUUID(), sku: v.sku, originalSpec: v.originalSpec ?? '', normalizedSpec: v.normalizedSpec ?? '', purchasePrice: v.purchasePrice ?? '', inventory: v.inventory ?? null };
   });
   const facts = ((p.facts as unknown[]) || []).map(rawFact => {
-    const f = record(rawFact, '导入事实', ['name', 'value', 'source', 'sourceRef', 'state']);
-    return { ...f, id: randomUUID(), source: f.source ?? 'import', sourceRef: f.sourceRef ?? '', state: f.state ?? 'source_confirmed' };
+    const f = record(rawFact, '导入事实', ['name', 'value', 'source', 'sourceRef', 'state', 'scope', 'variantSku']);
+    const {variantSku,...fact}=f;
+    const variant=f.scope==='variant'?variants.find(v=>v.sku===variantSku):undefined;
+    if(f.scope==='variant'&&!variant||f.scope!=='variant'&&variantSku!==undefined)throw new UserFacingError('导入事实的适用 SKU 无效');
+    return { ...fact, ...(variant?{variantId:variant.id}:{}), id: randomUUID(), source: f.source ?? 'import', sourceRef: f.sourceRef ?? '', state: f.state ?? 'source_confirmed' };
   });
   const { id: _id, revision: _revision, ...result } = parseSaveProduct({ id: randomUUID(), revision: 1, title: p.title, sourceUrl: p.sourceUrl ?? '', description: p.description ?? '',
     status: p.status ?? 'draft', variants, facts });
@@ -71,7 +74,7 @@ export function parseImport(contents: string, format: string): ImportedProduct[]
   else if (format === 'json') {
     let parsed: unknown; try { parsed = JSON.parse(clean); } catch { throw new UserFacingError('JSON 格式不正确，请检查文件'); }
     const document = record(parsed, 'JSON 导入文件', ['format', 'version', 'products']);
-    if (document.format !== 'red-product-data' || document.version !== 1 || !Array.isArray(document.products)) throw new UserFacingError('导入文件格式或版本不支持，请使用 HTC v1 商品资料格式');
+    if (document.format !== 'red-product-data' || (document.version !== 1 && document.version !== 2) || !Array.isArray(document.products)) throw new UserFacingError('导入文件格式或版本不支持，请使用 HTC 商品资料格式 v1 或 v2');
     raw = document.products;
   } else throw new UserFacingError('仅支持 JSON 或 CSV 商品资料文件');
   if (!raw.length || raw.length > 100) throw new UserFacingError('每次导入 1 至 100 件商品');
@@ -80,8 +83,8 @@ export function parseImport(contents: string, format: string): ImportedProduct[]
   return products;
 }
 export function exportProductData(product: ProductDetail): unknown {
-  return { format: 'red-product-data', version: 1, products: [{ title: product.title, sourceUrl: product.sourceUrl, description: product.description, status: product.status,
+  return { format: 'red-product-data', version: product.facts.some(f=>f.scope!==undefined)?2:1, products: [{ title: product.title, sourceUrl: product.sourceUrl, description: product.description, status: product.status,
     variants: product.variants.map(({ sku, originalSpec, normalizedSpec, purchasePrice, inventory }) => ({ sku, originalSpec, normalizedSpec, purchasePrice, inventory })),
-    facts: product.facts.map(({ name, value, source, sourceRef, state }) => ({ name, value, source, sourceRef, state })),
+    facts: product.facts.map(({ name, value, source, sourceRef, state, scope, variantId }) => ({ name, value, source, sourceRef, state, ...(scope?{scope}:{}), ...(scope==='variant'?{variantSku:product.variants.find(v=>v.id===variantId)?.sku}:{}) })),
   }] };
 }

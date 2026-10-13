@@ -25,7 +25,7 @@ export function currentFactAuthority(product: ProductDetail, schema: AmazonSchem
   const fields = new Map<string,FieldAuthority>(), issues: ListingIssue[] = [];
   const resolve = (raw:unknown):JsonObject => { try { return raw===undefined?{}:resolveSchemaNode(schema.schema,raw as JsonObject); } catch { return {}; } };
   const normalized = (field:string,value:string) => { try { return sourceFactValue(schema,field,value); } catch { return undefined; } };
-  const applicable = product.facts.filter(fact => ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
+  const applicable = product.facts.filter(fact => fact.scope!=='unknown' && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
   const scalar = (field:string) => {
     const facts = applicable.filter(fact => sourceFieldName(fact.name,'haul') === field);
     const values = new Set(facts.map(fact => JSON.stringify(normalized(field,fact.value.trim()))));
@@ -71,7 +71,7 @@ export function currentFactAuthority(product: ProductDetail, schema: AmazonSchem
       components++;
       const sourceAxis=axis==='depth'&&set.depth===undefined&&!blocked[`${scope}.depth`]?'length':axis;
       const role=`${scope}.${sourceAxis}`,input=set[sourceAxis];
-      const facts=product.variants.length===1?applicable.filter(fact=>measurementFactName(fact.name)===role):[];
+      const facts=applicable.filter(fact=>(product.variants.length===1||fact.scope!==undefined)&&measurementFactName(fact.name)===role);
       const conflicting=facts.some(fact=>fact.state==='conflicting')||new Set(facts.map(fact=>fact.value.trim())).size>1;
       result.conflicting ||= conflicting;
       const shape=resolve(rawSchema),properties=isObject(shape.properties)?shape.properties:{};

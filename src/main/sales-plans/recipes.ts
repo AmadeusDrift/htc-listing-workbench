@@ -62,10 +62,10 @@ function recipe(groupKey: string, components: SalesComponent[], color: string, s
     totalCostCny:sorted.every(c=>c.quotedCostCny!==null)?money(sorted.reduce((sum,c)=>sum+c.quotedCostCny!*c.quantity/c.piecesPerQuote,0)):null};
 }
 /** Linear number of sales SKUs: each selected source color plus at most one mixed recipe per same-spec group. */
-export function buildSalesRecipes(product: ProductDetail, receipt: MiaoshouReceipt | null, rules: ListingRules): SalesRecipe[] {
+export function buildSalesRecipes(product: ProductDetail, receipt: MiaoshouReceipt | null, rules: ListingRules, costAllowed:(variant:Variant)=>boolean=()=>true): SalesRecipe[] {
   const entries=product.variants.slice(0,rules.product.variantLimit).map(variant=>{
     const {sourceKey,color,groupKey}=identity(variant,receipt), spec=variant.normalizedSpec.trim()||variant.originalSpec;
-    const units=productSourceQuantity(product,variant,receipt?.snapshot.detailText), quotedCostCny=sourceQuotedCost(variant,receipt);
+    const units=productSourceQuantity(product,variant,receipt?.snapshot.detailText), quotedCostCny=costAllowed(variant)?sourceQuotedCost(variant,receipt):null;
     if (units.conflict) throw new UserFacingError(`规格「${spec}」中的件数或计价口径冲突`);
     const unitCost=quotedCostCny===null?null:quotedCostCny/units.piecesPerQuote;
     const eligible=rules.pricing.bundleEnabled && unitCost!==null && unitCost/rules.pricing.fx<rules.pricing.bundleThresholdUsd;

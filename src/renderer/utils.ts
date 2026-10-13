@@ -16,8 +16,8 @@ export function toSaveInput(product: ProductDetail): SaveProductInput {
     sourceUrl: product.sourceUrl, description: product.description, status: product.status,
     variants: product.variants.map(({ id, sku, originalSpec, normalizedSpec, purchasePrice, inventory }) =>
       ({ id, sku, originalSpec, normalizedSpec, purchasePrice, inventory })),
-    facts: product.facts.map(({ id, name, value, source, sourceRef, state }) =>
-      ({ id, name, value, source, sourceRef, state })),
+    facts: product.facts.map(({ id, name, value, source, sourceRef, state, scope, variantId }) =>
+      ({ id, name, value, source, sourceRef, state, ...(scope?{scope}:{}), ...(variantId?{variantId}:{}) })),
   };
 }
 

@@ -1,3 +1,4 @@
+import { readFactScope, saveFactScopes } from './products/public.ts';
 import { readNativeImageReceipt } from './source-images.ts';
 import { transaction } from './application/transaction.ts';
 import { freezeSourceForProduct } from './products/public.ts';
@@ -76,7 +77,7 @@ export class WorkspaceStore {
       sourceSpec: String(v.source_spec), sourcePurchasePrice: String(v.source_purchase_price),
     }));
     const facts: Fact[] = this.db.prepare('SELECT * FROM facts WHERE product_id=? ORDER BY position').all(id).map(f => ({
-      id: String(f.id), name: String(f.name), value: String(f.value), source: f.source as Fact['source'],
+      ...readFactScope(this.db,String(f.id)), id: String(f.id), name: String(f.name), value: String(f.value), source: f.source as Fact['source'],
       sourceRef: String(f.source_ref), state: f.state as Fact['state'],
     }));
     const assets: Asset[] = this.db.prepare('SELECT * FROM assets WHERE product_id=? ORDER BY created_at,rowid').all(id).map(a => ({
@@ -151,6 +152,7 @@ export class WorkspaceStore {
       upsert.run(v.id, input.id, v.sku, v.originalSpec, v.normalizedSpec, v.purchasePrice, v.inventory,
         old?.sourceSpec || v.originalSpec, old?.sourcePurchasePrice || v.purchasePrice, index);
     });
+    saveFactScopes(this.db,previous,input);
     this.db.prepare('DELETE FROM facts WHERE product_id=?').run(input.id);
     const insertFact = this.db.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)');
     input.facts.forEach((f, index) => insertFact.run(f.id, input.id, f.name, f.value, f.source, f.sourceRef, f.state, index));

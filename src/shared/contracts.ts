@@ -41,6 +41,9 @@ export interface Variant extends VariantInput {
   sourcePurchasePrice: string;
 }
 export interface Fact {
+  /** Absent only for historical unscoped records. */
+  scope?: 'common' | 'variant' | 'unknown';
+  variantId?: string;
   id: string;
   name: string;
   value: string;

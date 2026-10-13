@@ -11,7 +11,7 @@ export interface ManagedBackup { path: string; sha256: string; byteSize: number;
 
 interface Registry { version: 1; backups: ManagedBackup[] }
 const MAGIC = Buffer.from('HTC-BACKUP-1\n');
-const MAX_BACKUP_BYTES = 400 * 1024 * 1024;
+const V2_MAGIC = Buffer.from('HTC-BACKUP-2\n');
 const MAX_REGISTRY_BYTES = 4 * 1024 * 1024;
 const MAX_ENTRIES = 10_000;
 const DAY = 86_400_000;
@@ -31,7 +31,7 @@ function validDays(value: unknown): value is number { return Number.isInteger(va
 function validEntry(value: unknown): value is ManagedBackup {
   if (!record(value) || !hasKeys(value, ['path', 'sha256', 'byteSize', 'createdAt', 'retention'])) return false;
   if (typeof value.path !== 'string' || !isAbsolute(value.path) || value.path.includes('\0') || value.path.length > 32_768 || extname(value.path).toLowerCase() !== '.htcbackup') return false;
-  if (typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.byteSize) || Number(value.byteSize) < MAGIC.length + 44 || Number(value.byteSize) > MAX_BACKUP_BYTES || !validDate(value.createdAt)) return false;
+  if (typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.byteSize) || Number(value.byteSize) < MAGIC.length + 44 || !validDate(value.createdAt)) return false;
   const policy = value.retention;
   if (!record(policy) || !hasKeys(policy, ['amazonDays', 'logDays', 'dataOldestAt', 'expiresAt']) || !validDays(policy.amazonDays) || !Number.isSafeInteger(policy.logDays) || Number(policy.logDays) < 365) return false;
   if (policy.dataOldestAt !== null && !validDate(policy.dataOldestAt)) return false;
@@ -122,12 +122,12 @@ export async function registerManagedBackup(directory: string, entry: ManagedBac
 async function removeMatchingBackup(entry: ManagedBackup): Promise<boolean> {
   try {
     const before = await regularFile(entry.path);
-    if (before.size !== entry.byteSize || before.size > MAX_BACKUP_BYTES) return false;
+    if (before.size !== entry.byteSize) return false;
     const file = await open(entry.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
       if (!sameFile(before, await file.stat())) return false;
       const header = Buffer.alloc(MAGIC.length);
-      if ((await file.read(header, 0, header.length, 0)).bytesRead !== MAGIC.length || !header.equals(MAGIC)) return false;
+      if ((await file.read(header, 0, header.length, 0)).bytesRead !== MAGIC.length || (!header.equals(MAGIC) && !header.equals(V2_MAGIC))) return false;
       const hash = createHash('sha256'), chunk = Buffer.alloc(64 * 1024); let offset = 0;
       while (offset < entry.byteSize) {
         const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, entry.byteSize - offset), offset);

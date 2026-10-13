@@ -144,7 +144,7 @@ test('登记参数必须为绝对备份路径、有效摘要、大小和保留�
   const { root, directory, registry } = await fixture(t), valid = await backup(root, 'validation');
   const invalid: ManagedBackup[] = [
     { ...valid, path: 'relative.htcbackup' }, { ...valid, path: join(root, 'red.sqlite') },
-    { ...valid, sha256: 'not-a-digest' }, { ...valid, byteSize: 400 * 1024 * 1024 + 1 },
+    { ...valid, sha256: 'not-a-digest' }, { ...valid, byteSize: Number.MAX_SAFE_INTEGER + 1 },
     { ...valid, byteSize: -1 }, { ...valid, createdAt: 'yesterday' },
     { ...valid, retention: { ...valid.retention, amazonDays: 0 } },
     { ...valid, retention: { ...valid.retention, expiresAt: null } },

@@ -131,6 +131,14 @@ export class FollowupService {
   /** Maintenance can pause before replacing the workspace; an existing request may only settle. */
   pause(): void { this.ensureOpen(); this.paused = true; this.cancelTimer(); }
   resume(): void { this.start(); }
+  holdForMaintenance(): () => void {
+    this.ensureOpen(); const paused = this.paused; this.pause(); let released = false;
+    return () => {
+      if (released) return; released = true;
+      if (this.closed || this.closing) return;
+      this.paused = paused; this.arm();
+    };
+  }
   private cancelTimer(): void { if (this.timer !== undefined) { this.clearTimer(this.timer); this.timer = undefined; } }
   private arm(): void {
     this.cancelTimer(); if (!this.started || this.paused || this.closing || this.closed || this.worker) return;

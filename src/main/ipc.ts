@@ -219,7 +219,20 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
       return () => { restoring = false; resumeCollection?.(); if (!shuttingDownForRestore) { operations?.followup.resume(); automatic?.start(); labelServices?.labels.resume(); } };
     },
     performRestore: async prepared => { shuttingDownForRestore = true; await performRestore(prepared); },
-    beforeBackup: () => { amazon.cleanupData(); },
+    beginBackup: () => {
+      if (active > 1 || execution.busy || automatic?.busy || labelServices?.labels.hasActiveWork() || ai.busy || imageGeneration?.busy || imageWorkflow?.busy || images.busy || miaoshou?.busy || miaoshouImages?.busy || operations?.catalog.busy || operations?.followup.busy || operations?.productData?.busy) throw new UserFacingError('还有操作正在执行；请先暂停并等待当前步骤结束，再进行备份或清理');
+      const releases: (() => void)[] = [];
+      try {
+        const collectionLease = collection?.pauseForRestore(); if (collectionLease) releases.push(collectionLease);
+        if (automatic) releases.push(automatic.holdForMaintenance());
+        if (operations?.followup) releases.push(operations.followup.holdForMaintenance());
+        if (labelServices) releases.push(labelServices.labels.holdForMaintenance());
+      } catch (error) { for (const release of releases.reverse()) release(); throw error; }
+      restoring = true; let released = false;
+      // IPC is locked during the lease. Release restores only the prior timer switches,
+      // never task states or grants, and cannot start a previously paused task.
+      return () => { if (released) return; released = true; restoring = false; for (const release of releases.reverse()) release(); };
+    },
     audit: (action, summary, detail) => store.recordWorkspaceEvent(action, summary, detail),
   });
 }

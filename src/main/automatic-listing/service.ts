@@ -215,6 +215,20 @@ export class AutomaticListingService {
     this.schedulingSuspended = true;
     if (this.timer) clearInterval(this.timer); this.timer = null;
   }
+  /** Freeze only scheduler timers; the caller blocks mutations for the lease lifetime. */
+  holdForMaintenance(): () => void {
+    this.ensureOpen();
+    const suspended = this.schedulingSuspended, armed = this.timer !== null;
+    this.suspendScheduling(); let released = false;
+    return () => {
+      if (released) return; released = true;
+      if (this.closed || this.closing) return;
+      this.schedulingSuspended = suspended;
+      if (armed && !suspended && !this.timer) {
+        this.timer = setInterval(() => { void this.refreshWaiting().catch(() => {}); }, 5000); this.timer.unref();
+      }
+    };
+  }
   private assertConnections(task: AutomaticListingTask): void {
     const target = this.deps.amazon.executionTargetScope(task.targetId), profile = this.deps.hosting.getProfile(task.profileId);
     if (!target.target.configured || target.target.paused || fingerprint(target) !== task.targetStamp) throw new UserFacingError('目标店铺授权或范围发生变化，请重新建立任务');

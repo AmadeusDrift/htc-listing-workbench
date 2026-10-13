@@ -333,8 +333,9 @@ export function retainCompletionOperations(current:DatabaseSync,snapshot:Databas
 }
 
 /** Runs inside Amazon draft retention's transaction, before deleting expired drafts. */
-export function retireCompletionDrafts(db:DatabaseSync,cutoff:string):void {
+export function retireCompletionDrafts(db:DatabaseSync,cutoff:string,protectedIds:ReadonlySet<string>=new Set()):void {
   for(const row of db.prepare('SELECT id,record_json FROM listing_drafts WHERE created_at < ?').all(cutoff)){
+    if(protectedIds.has(String(row.id)))continue;
     const operations=completionOperations(db,String(row.id));if(!operations.length)continue;
     const draft=JSON.parse(String(row.record_json)).draft as AmazonDraft;
     for(const op of operations){

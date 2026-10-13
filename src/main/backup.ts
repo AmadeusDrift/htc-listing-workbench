@@ -1,3 +1,4 @@
+import { V2_MAGIC, hashBackupFile, writeStreamingBackup, readStreamingBackup, type BackupFile } from './backup-stream.ts';
 import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, invalidateCorrectionAuthorizations } from './amazon/correction-history.ts';
 import { MIGRATION_TABLES, assertMigrationJournal } from './storage/migrations.ts';
 import { SOURCE_TABLES } from './miaoshou/source-snapshots.ts';
@@ -12,12 +13,12 @@ import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
 import { assertSourceImageHistory, validateSourceImageProvenance } from './source-image-provenance.ts';
 import { assertCompletionHistory, retainCompletionOperations, validateCompletionOperation } from './listing-ai/completion-journal.ts';
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt } from 'node:crypto';
+import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { mkdir, readFile, writeFile, rename, rm, lstat, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, rm, lstat, open } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { gzip, gunzip } from 'node:zlib';
+import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { UserFacingError } from '../shared/errors.ts';
 import { parseListingRules } from '../shared/listing-rules.ts';
@@ -64,7 +65,7 @@ import { SKU_NAMING_TABLES } from './sku-naming/schema.ts';
 import { assertSkuNamingHistory, retainSkuNamingHistory } from './sku-naming/records.ts';
 import { assertSalesPlanHistory } from './sales-plans/history.ts';
 
-const compress = promisify(gzip), decompress = promisify(gunzip);
+const decompress = promisify(gunzip);
 const MAGIC = Buffer.from('HTC-BACKUP-1\n');
 const MAX_BYTES = 256 * 1024 * 1024;
 const MAX_CONTAINER = 400 * 1024 * 1024;
@@ -260,12 +261,13 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     }
     if (database.prepare('PRAGMA quick_check').get()!.quick_check !== 'ok' || database.prepare('PRAGMA foreign_key_check').all().length) throw new UserFacingError('备份数据库完整性检查未通过');
     const products = Number(database.prepare('SELECT COUNT(*) AS n FROM products').get()!.n);
-    const assets = database.prepare('SELECT original_path, preview_path FROM assets').all();
+    const assets = database.prepare('SELECT original_path, preview_path, sha256, byte_size FROM assets').all();
     const paths = new Set<string>();
     for (const asset of assets) for (const key of ['original_path', 'preview_path']) {
       const assetPath = String(asset[key]); managedAssetPath(dirname(path), assetPath); paths.add(assetPath);
     }
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
+    for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
@@ -373,7 +375,7 @@ function disconnectSnapshot(path: string): void {
     database.exec(`UPDATE miaoshou_sync_runs SET record_json=json_set(record_json,'$.status','paused','$.errorCode',NULL) WHERE json_extract(record_json,'$.status')='running'`);
     database.exec(`UPDATE image_workflow_runs SET record_json=json_set(record_json,'$.status','INTERRUPTED','$.error','已恢复备份，自动图片请求未重发，请重新配置接口后核对任务') WHERE json_extract(record_json,'$.status')='RUNNING'`);
     database.exec(`UPDATE automatic_listing_tasks SET record_json=json_set(record_json,'$.status','PAUSED','$.revision',json_extract(record_json,'$.revision')+1,'$.error','已恢复备份；请核对配置和任务范围后继续') WHERE json_extract(record_json,'$.status') NOT IN ('COMPLETED','CANCELLED');
-      UPDATE item_labels SET record_json=json_set(record_json,'$.paused',json('true'),'$.status','FAILED','$.errorCode','INTERRUPTED','$.message','已恢复备份，未自动重发中断的标签请求','$.nextDueAt',NULL) WHERE json_extract(record_json,'$.status') IN ('REQUESTING','DOWNLOADING');
+      UPDATE item_labels SET record_json=json_set(record_json,'$.paused',json('true'),'$.status','FAILED','$.errorCode',CASE WHEN json_extract(record_json,'$.status')='REQUESTING' THEN 'REQUEST_UNKNOWN' ELSE 'INTERRUPTED' END,'$.message','已恢复备份，未自动重发中断的标签请求','$.nextDueAt',NULL) WHERE json_extract(record_json,'$.status') IN ('REQUESTING','DOWNLOADING');
       UPDATE item_labels SET record_json=json_set(record_json,'$.paused',json('true')) WHERE json_extract(record_json,'$.status') NOT IN ('READY','STALE','CANCELLED');`);
     database.exec(`UPDATE listing_followups SET record_json=json_set(record_json,'$.status','NEEDS_ATTENTION','$.reason','TARGET_UNAVAILABLE',
       '$.nextDueAt',NULL,'$.revision',json_extract(record_json,'$.revision')+1,'$.error','工作区已恢复，请核对店铺授权后重新安排回读')`);
@@ -419,7 +421,7 @@ export async function createWorkspaceBackup(directory: string, destination: stri
   passphraseCheck(passphrase);
   const root = resolve(directory), staging = join(root, `.restore-staging-${randomUUID()}`);
   const target = resolve(destination), local = relative(root, target).replaceAll('\\', '/').toLowerCase();
-  if (extname(target).toLowerCase() !== '.htcbackup' || /^(assets|documents|amazon-vault|hosting-vault|ai-vault|miaoshou-vault|browser|\.restore-[^/]+)(\/|$)/.test(local)) throw new UserFacingError('请选择独立的 .htcbackup 备份文件，不能覆盖工作区内部文件');
+  if (extname(target).toLowerCase() !== '.htcbackup' || /^(assets|documents|ai-receipts|amazon-vault|hosting-vault|ai-vault|miaoshou-vault|browser|\.restore-[^/]+)(\/|$)/.test(local)) throw new UserFacingError('请选择独立的 .htcbackup 备份文件，不能覆盖工作区内部文件');
   if (existsSync(target)) throw new UserFacingError('备份文件已存在，请选择新文件名；原备份和清理登记保持不变');
   const destinationKey = target.toLowerCase();
   if (activeDestinations.has(destinationKey)) throw new UserFacingError('此备份文件正在写入，请完成后再试');
@@ -433,31 +435,17 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
     checkDatabase(snapshot); disconnectSnapshot(snapshot);
     const info = checkDatabase(snapshot);
-    let size = (await lstat(snapshot)).size;
+    const files: BackupFile[] = [{ path: 'red.sqlite', ...await hashBackupFile(snapshot), role: 'workspace-database' }];
     for (const path of info.assetPaths) {
-      const file = managedBackupFile(root, path), metadata = await lstat(file);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || (await realpath(file)).toLowerCase() !== resolve(file).toLowerCase()) throw new UserFacingError('素材路径异常，无法生成完整备份');
-      size += metadata.size;
-    }
-    if (size > MAX_BYTES) throw new UserFacingError('当前完整备份支持最多 256 MB 原始数据；请先整理素材后再备份');
-    const database = await readFile(snapshot), assets: AssetCopy[] = [];
-    for (const path of info.assetPaths) {
-      const data = await readFile(managedBackupFile(root, path)), expected = info.artifactChecks.get(path);
-      if (expected && (data.length !== expected.byteSize || digest(data) !== expected.sha256)) throw new UserFacingError('图片版本文件校验未通过，未创建备份');
-      if (path.startsWith('documents/')) await validateLabelPdf(data);
-      assets.push({ path, data: data.toString('base64'), sha256: digest(data) });
+      const file = managedBackupFile(root, path), actual = await hashBackupFile(file), expected = info.artifactChecks.get(path);
+      if (expected && (actual.byteSize !== expected.byteSize || actual.sha256 !== expected.sha256)) throw new UserFacingError('图片版本文件校验未通过，未创建备份');
+      if (path.startsWith('documents/')) { if (actual.byteSize > 32 * 1024 * 1024) throw new UserFacingError('PDF 标签文件超过允许大小'); await validateLabelPdf(await readFile(file)); }
+      files.push({ path, ...actual, role: path.startsWith('ai-receipts/') ? 'provider-receipt' : path.startsWith('documents/') ? 'referenced-document' : 'referenced-image' });
     }
     const createdAt = new Date().toISOString(), retention = snapshotRetention(snapshot);
-    const manifest: BackupManifest = { format: 'htc-workspace-backup', version: 1, source: { application: 'HTC', kind: 'local-workspace', databaseVersion: SCHEMA_VERSION }, retention, createdAt, database: database.toString('base64'), databaseSha256: digest(database), assets };
-    const salt = randomBytes(16), iv = randomBytes(12), header = Buffer.concat([MAGIC, salt, iv]);
-    const key = await deriveKey(passphrase, salt);
-    try {
-      const cipher = createCipheriv('aes-256-gcm', key, iv); cipher.setAAD(header);
-      const plain = await compress(Buffer.from(JSON.stringify(manifest)));
-      const encrypted = Buffer.concat([header, cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
-      await registerManagedBackup(root, { path: target, sha256: digest(encrypted), byteSize: encrypted.length, createdAt, retention });
-      await writeFileAtomically(destination, encrypted, false);
-    } finally { key.fill(0); }
+    await writeStreamingBackup(target, passphrase, { format: 'htc-workspace-backup', version: 2, source: { application: 'HTC', kind: 'local-workspace', databaseVersion: SCHEMA_VERSION }, retention, createdAt, files },
+      path => path === 'red.sqlite' ? snapshot : managedBackupFile(root, path),
+      encrypted => registerManagedBackup(root, { path: target, ...encrypted, createdAt, retention }));
     return { createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt };
   } finally {
     try { source?.close(); await removeStaging(root, staging, 'staging'); }
@@ -473,6 +461,10 @@ function decodeBase64(value: unknown): Buffer {
 }
 export async function prepareWorkspaceRestore(directory: string, sourceFile: string, passphrase: string): Promise<PreparedRestore> {
   passphraseCheck(passphrase);
+  const probe = await open(sourceFile, 'r');
+  const magic = Buffer.alloc(V2_MAGIC.length);
+  try { await probe.read(magic, 0, magic.length, 0); } finally { await probe.close(); }
+  if (magic.equals(V2_MAGIC)) return prepareStreamingRestore(directory, sourceFile, passphrase);
   if ((await lstat(sourceFile)).size > MAX_CONTAINER) throw new UserFacingError('备份文件超过 400 MB，无法恢复');
   const bytes = await readFile(sourceFile), offset = MAGIC.length;
   if (bytes.length < offset + 44 || !bytes.subarray(0, offset).equals(MAGIC)) throw new UserFacingError('不是受支持的 HTC 加密备份');
@@ -506,6 +498,29 @@ export async function prepareWorkspaceRestore(directory: string, sourceFile: str
       if (expected && (data.length !== expected.byteSize || digest(data) !== expected.sha256)) throw new UserFacingError('备份图片版本与记录不一致');
       if (asset.path.startsWith('documents/')) await validateLabelPdf(data);
       found.add(asset.path); await mkdir(dirname(path), { recursive: true }); await writeFile(path, data, { flag: 'wx' });
+    }
+    if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
+    disconnectSnapshot(snapshot);
+    const retention = snapshotRetention(snapshot);
+    if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
+    retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
+    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt };
+  } catch (error) { await removeStaging(root, staging, 'staging'); throw error; }
+}
+
+async function prepareStreamingRestore(directory: string, sourceFile: string, passphrase: string): Promise<PreparedRestore> {
+  const root = resolve(directory), staging = join(root, `.restore-staging-${randomUUID()}`);
+  await mkdir(join(staging, 'assets'), { recursive: true });
+  try {
+    const value = await readStreamingBackup(sourceFile, passphrase, staging, path => path === 'red.sqlite' ? join(staging, path) : managedBackupFile(staging, path));
+    if (value.source.databaseVersion > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
+    const snapshot = join(staging, 'red.sqlite'), info = checkDatabase(snapshot), found = new Set<string>();
+    for (const file of value.files.slice(1)) {
+      if (!info.assetPaths.has(file.path) || found.has(file.path)) throw new UserFacingError('备份素材清单不匹配或包含重复路径');
+      const expected = info.artifactChecks.get(file.path);
+      if (expected && (file.byteSize !== expected.byteSize || file.sha256 !== expected.sha256)) throw new UserFacingError('备份图片版本与记录不一致');
+      if (file.path.startsWith('documents/')) { if (file.byteSize > 32 * 1024 * 1024) throw new UserFacingError('PDF 标签文件超过允许大小'); await validateLabelPdf(await readFile(managedBackupFile(staging, file.path))); }
+      found.add(file.path);
     }
     if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
     disconnectSnapshot(snapshot);

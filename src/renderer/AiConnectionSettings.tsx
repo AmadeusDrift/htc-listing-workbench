@@ -63,6 +63,18 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
       setNotice(`${AI_FUNCTION_NAMES[profile.id]}设置已保存。`);
     });
   }
+  async function importConnection() {
+    let nextVendor: AiVendorId | undefined;
+    await action(async () => {
+      const value = await window.red.importAiConnectionConfig();
+      if (!value) return;
+      clearSecrets();
+      if (value.id !== vendor) nextVendor = value.id; else apply(value);
+      setNotice('共享配置已导入，可在功能设置中启用所需功能。');
+    });
+    // Guarded navigation is intentionally unavailable while run holds the app lock.
+    if (nextVendor) onVendorChange(nextVendor);
+  }
   useFormGuard({ dirty: () => !!(apiKey || accessKeyId || accessKeySecret || securityToken), save, discard: clearSecrets });
   return <form className="credential-form" aria-label="AI 连接配置" onSubmit={event => { event.preventDefault(); void save(); }}>
     <div className="credential-heading"><h4>{vendorName} 连接</h4><SettingsStatusBadge tone={loading ? 'info' : error ? 'danger' : issuePresentation?.tone ?? (connection ? connectionTones[connection.state] : 'neutral')}>{loading ? '正在读取…' : error ? '读取失败' : issuePresentation?.label ?? (connection ? connectionStates[connection.state] : '尚未配置')}</SettingsStatusBadge></div>
@@ -104,12 +116,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
       </div>; })}
     </section>
     <details className="credential-advanced"><summary>也可以导入配置文件</summary><p className="settings-help">导入的密钥会供本供应商各项功能共用。</p><div className="workflow-actions">
-      <button type="button" className="button secondary" disabled={disabled} onClick={() => void action(async () => {
-        const value = await window.red.importAiConnectionConfig();
-        if (!value) return; clearSecrets();
-        if (value.id !== vendor) onVendorChange(value.id); else apply(value);
-        setNotice('共享配置已导入，可在功能设置中启用所需功能。');
-      })}>导入 AI 连接配置</button>
+      <button type="button" className="button secondary" disabled={disabled} onClick={() => void importConnection()}>导入 AI 连接配置</button>
       <button type="button" className="button secondary" disabled={disabled} onClick={() => void action(async () => { const result = await window.red.exportAiConnectionTemplate(vendor); if (!result.cancelled) setNotice('空白连接模板已保存。'); })}>保存 AI 连接模板</button>
     </div></details>
     {error && <p className="workflow-warning" role="alert">{error}</p>}{notice && <p className="workflow-notice" role="status">{notice}</p>}

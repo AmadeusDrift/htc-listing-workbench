@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { expect } from '@playwright/test';
+import { launchGuarded } from './release-runtime.mjs';
+import { selectSettingsModule } from './e2e-settings.mjs';
+await mkdir('.test-data',{recursive:true});await mkdir('artifacts/core-e2e-logs',{recursive:true});
+const dataRoot=await mkdtemp(resolve('.test-data/ai-connection-import-'));
+const file=join(dataRoot,'import.json'),checks=[];
+const app=await launchGuarded({executable:createRequire(import.meta.url)('electron'),args:['.'],cwd:resolve('.'),dataRoot,guardPath:resolve('scripts/release-network-guard.cjs')});
+try {
+ const page=await app.firstWindow();await page.waitForFunction(()=>!!window.red);
+ await page.getByRole('button',{name:'设置',exact:true}).click();await selectSettingsModule(page,'ai');
+ const vendor=page.getByLabel('AI 连接供应商',{exact:true}),form=page.getByRole('form',{name:'AI 连接配置'});
+ await vendor.selectOption('aliyun');await expect(form.getByLabel('AccessKey ID',{exact:true})).toBeEnabled();
+ await form.getByLabel('AccessKey ID',{exact:true}).fill('unsaved-fixture-id');
+ await form.getByText('也可以导入配置文件',{exact:true}).click();
+ await app.evaluate(({dialog})=>{dialog.showOpenDialog=async()=>({canceled:true,filePaths:[]});});
+ await page.getByRole('button',{name:'导入 AI 连接配置',exact:true}).click();
+ await expect(form.getByLabel('AccessKey ID',{exact:true})).toHaveValue('unsaved-fixture-id');await expect(vendor).toHaveValue('aliyun');checks.push('Cancelled import keeps unsaved credential text and selected vendor');
+ await writeFile(file,JSON.stringify({id:'deepseek-review',model:'deepseek-v4-pro',apiKey:'bad'}));
+ await app.evaluate(({dialog},file)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[file]});},file);
+ await page.getByRole('button',{name:'导入 AI 连接配置',exact:true}).click();await expect(page.getByRole('alert').first()).toBeVisible();
+ await expect(form.getByLabel('AccessKey ID',{exact:true})).toHaveValue('unsaved-fixture-id');await expect(vendor).toHaveValue('aliyun');assert.ok((await page.evaluate(()=>window.red.listAiProviders())).every(p=>!p.configured));checks.push('Invalid import does not navigate, clear unsaved values or mutate providers');
+ await form.getByLabel('AccessKey ID',{exact:true}).fill('');
+ await writeFile(file,JSON.stringify({id:'deepseek-review',model:'deepseek-v4-pro',apiKey:'isolated-valid-import-key'}));
+ await page.getByRole('button',{name:'导入 AI 连接配置',exact:true}).click();
+ await expect(vendor).toHaveValue('deepseek');await expect(form).toContainText('已共用凭据');await expect(form.getByLabel('API Key',{exact:true})).toHaveValue('');checks.push('Successful cross-vendor import navigates after the global operation lock is released');
+ await form.getByLabel('API Key',{exact:true}).fill('unsaved-second-key');await vendor.selectOption('aliyun');
+ await expect(page.getByRole('button',{name:'继续编辑',exact:true})).toBeVisible();await page.getByRole('button',{name:'继续编辑',exact:true}).click();
+ await expect(vendor).toHaveValue('deepseek');await expect(form.getByLabel('API Key',{exact:true})).toHaveValue('unsaved-second-key');await form.getByLabel('API Key',{exact:true}).fill('');checks.push('Ordinary cross-vendor navigation still uses the unsaved-form guard');
+ const guard=await app.evaluate(()=>globalThis.__releaseGuard);assert.deepEqual(guard.attempts,[]);
+ await writeFile('artifacts/core-e2e-logs/ai-connection-import-report.json',JSON.stringify({passed:true,checks,dataRoot,guard,externalRequests:0},null,2));console.log(checks.map(c=>'PASS '+c).join('\n'));
+} finally {await app.close();}

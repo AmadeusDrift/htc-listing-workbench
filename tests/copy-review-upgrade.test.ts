@@ -9,7 +9,8 @@ test('A19 candidate review upgrades uncertainty once using frozen native target 
  const suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
  assert.equal(count,2);assert.equal(review.model,'deepseek-flash');assert.equal((review.output as any).verdict,'PASS');
  assert.equal(f.ai.listCalls().length,3);assert.equal(f.ai.listResults(f.product.id).filter(r=>r.output.kind==='amazon-fields-review').length,2);
- const again=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});assert.equal(again.id,review.id);assert.equal(count,2);
+ const again=await f.ai.listingFields(suggestion.listingContext!,async()=>{},{suggestionId:suggestion.id,candidate:suggestion.output as any});assert.equal(again.id,review.id);assert.equal(count,2);
+ const explicit=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});assert.notEqual(explicit.id,review.id);assert.equal(count,3);
 });
 import { readCopyReview,assertCopyReviewHistory,copyReviewResult } from '../src/main/ai/copy-review-upgrade.ts';
 import { openDatabase } from '../src/main/database.ts';

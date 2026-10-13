@@ -100,7 +100,7 @@ test('scoped journal refuses a send without the persisted consumed owner grant',
  assert.throws(()=>f.journal.markSent({operationId:op.id,callId:id,contextHash:listingFingerprint(f.context)},call),/额度尚未持久化/);assert.equal(f.journal.get(op.id).rounds[0].candidate.sent,false);
 });
 for(const dirty of ['color','unsupported'] as const)test(`eligible legacy ${dirty} normalization fails closed before preview or paid dispatch`,async t=>{
- const f=await automaticLegacy(t,true),db=(f.ai as any).db,record=JSON.parse(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json);
+ const f=await automaticLegacy(t,true,true),db=(f.ai as any).db,record=JSON.parse(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json);
  if(dirty==='color')record.draft.attributes.color=[{value:'Cherry Blossom Pink',marketplace_id:f.draft.marketplaceId}];
  else record.draft.attributes.fulfillment_availability=[{fulfillment_channel_code:'DEFAULT',quantity:20}];
  record.request.attributes=structuredClone(record.draft.attributes);db.prepare('UPDATE listing_drafts SET record_json=? WHERE id=?').run(JSON.stringify(record),f.draft.id);
@@ -112,7 +112,7 @@ for(const dirty of ['color','unsupported'] as const)test(`eligible legacy ${dirt
 });
 
 for(const boundary of ['preview','adoption'] as const)for(const dirty of ['color','unsupported'] as const)test(`scoped ${boundary} rejects ${dirty} normalization without an attribute or event write`,async t=>{
- const f=await automaticLegacy(t,true),service=f.ownerService() as any,task=[...service.tasks.values()][0] as any;
+ const f=await automaticLegacy(t,true,true),service=f.ownerService() as any,task=[...service.tasks.values()][0] as any;
  const op=f.listing.beginLegacyThemeRepair(f.draft.id,task.items[0],service.deps.images.getProgress(f.draft.id))!;assert.ok(op);
  const db=(f.ai as any).db,record=JSON.parse(db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(f.draft.id).record_json);
  if(dirty==='color')record.draft.attributes.color=[{value:'Cherry Blossom Pink',marketplace_id:f.draft.marketplaceId}];

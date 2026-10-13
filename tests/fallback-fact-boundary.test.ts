@@ -1,3 +1,4 @@
+import { seedAuthorityHaulPricing } from './helpers/authority-haul-pricing.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
@@ -10,7 +11,7 @@ import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { pricingEvidenceCurrent, pricingOutcome } from '../src/main/automatic-listing/outcomes.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
-import { saveInput, mockStorage, fixture as aiFixture } from './fixtures/listing-ai.ts';
+import { saveInput, mockStorage, fixture as aiFixture, legacyFixture as legacyAiFixture } from './fixtures/listing-ai.ts';
 import type { ProductDetail, Variant, Fact } from '../src/shared/contracts.ts';
 import type { AmazonDraft, AmazonTarget, JsonObject, SchemaSelection, ListingProgram } from '../src/shared/amazon-contracts.ts';
 import type { AmazonPersistence } from '../src/main/amazon/persistence.ts';
@@ -29,11 +30,13 @@ const rules=defaultListingRules();
 const fact=(name:string,value:string,state:Fact['state']='human_confirmed'):Fact=>({id:randomUUID(),name,value,state,source:'manual',sourceRef:'Synthetic confirmed fact'});
 const run=(extra:Partial<Parameters<typeof applyBusinessRules>[0]>={})=>applyBusinessRules({product,variant,target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date('2026-10-10T00:00:00Z'),...extra},rules);
 
+function legacyV2(){const result=run();const decision=result.report.pricingDecision as any;decision.version=2;delete decision.dependencies;return result;}
+
 test('Haul approved defaults fill attributes without becoming measured facts',()=>{
   const result=run();
   for(const field of ['brand','manufacturer','country_of_origin','import_designation','gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate','item_dimensions','item_package_dimensions','item_package_weight'])if (Object.hasOwn(realAmazonSchema().schema.properties as JsonObject,field)) assert.ok(result.attributes[field],field);
   assert.ok(result.report.quote);assert.deepEqual(result.report.pricingDecision?.inputs,{costCny:2.4,dimensionsInches:[1.97,1.97,1.97],weightPounds:.22});
-  assert.equal(result.report.pricingDecision?.version,2);
+  assert.equal(result.report.pricingDecision?.version,3);
   assert.deepEqual((result.report.pricingDecision as any).attributeInputs,Object.fromEntries(['item_package_dimensions','item_package_weight'].map(f=>[f,result.attributes[f]])));
 
 });
@@ -47,7 +50,7 @@ test('existing partial measurements preserve supplied axes and fill approved fal
 });
 
 test('v2 successful estimates retain a precise current attribute snapshot',()=>{
-  const result=run(),draft={attributes:result.attributes,businessRules:result.report,marketplaceId:target.marketplaceId,schema:realAmazonSchema()} as AmazonDraft;
+  const result=legacyV2(),draft={listingProgram:'haul',attributes:result.attributes,businessRules:result.report,marketplaceId:target.marketplaceId,schema:realAmazonSchema()} as AmazonDraft;
   assert.equal(pricingEvidenceCurrent(draft,rules),true);
   draft.attributes.item_package_dimensions=[{length:{value:1.970001,unit:'inches'}}];
   assert.equal(pricingEvidenceCurrent(draft,rules),false);
@@ -128,14 +131,14 @@ test('multiple SKUs need exact receipt measurements; product facts never stand i
 });
 
 test('v2 snapshots distinguish absent, null, partial, unit, precision and array ordering; v1 parser stays exact',()=>{
-  const result=run(),draft={listingProgram:'haul',attributes:result.attributes,businessRules:result.report,marketplaceId:target.marketplaceId,schema:realAmazonSchema()} as AmazonDraft;
+  const result=legacyV2(),draft={listingProgram:'haul',attributes:result.attributes,businessRules:result.report,marketplaceId:target.marketplaceId,schema:realAmazonSchema()} as AmazonDraft;
   assert.doesNotThrow(()=>assertPricingDecision(result.report,draft));
   for(const value of [null,[],[{length:{value:1.97001,unit:'inches'}}],[{length:{value:5,unit:'cm'}}]]){
     const changed=structuredClone(draft);changed.attributes.item_package_dimensions=value;assert.equal(pricingEvidenceCurrent(changed,rules),false);
   }
   for(const mutation of ['missing','extra','version','undefined','nonfinite'] as const){
     const report=structuredClone(result.report),d=report.pricingDecision as any;
-    if(mutation==='missing')delete d.attributeInputs;if(mutation==='extra')d.attributeInputs.brand=[];if(mutation==='version')d.version=3;if(mutation==='undefined')d.attributeInputs.item_package_weight=undefined;if(mutation==='nonfinite')d.attributeInputs.item_package_weight=NaN;
+    if(mutation==='missing')delete d.attributeInputs;if(mutation==='extra')d.attributeInputs.brand=[];if(mutation==='version')d.version=99;if(mutation==='undefined')d.attributeInputs.item_package_weight=undefined;if(mutation==='nonfinite')d.attributeInputs.item_package_weight=NaN;
     assert.throws(()=>assertPricingDecision(report,draft),mutation);
   }
   const legacy={revision:0,fields:{},notices:[],quote:null,bundleQuantity:1,pricingDecision:{version:1,status:'needs_input',code:'COST_CNY_UNCONFIRMED',quoteError:null,inputs:{costCny:null,dimensionsInches:null,weightPounds:null},evidence:{cost:'unconfirmed',dimensions:'missing',weight:'missing',packageScope:'unconfirmed',saleUnit:'confirmed',sourcePackage:{dimensionsInches:null,weightPounds:null}}}} as const;
@@ -239,8 +242,8 @@ test('missing-only preview cannot hide an unsupported present field beside an ab
 });
 
 test('adopting supported AI copy preserves unsupported legacy facts and cannot clear their authority gate',async t=>{
-  const f=await aiFixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id);
-  r.draft.listingProgram='haul';r.draft.attributes.brand=[{value:'Unconfigured brand',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
+  const f=await legacyAiFixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id);
+  r.draft.listingProgram='haul';await seedAuthorityHaulPricing(f,r.draft);r.draft.attributes.brand=[{value:'Unconfigured brand',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
   const suggestion=await f.listing.suggest(f.reference),review=await f.listing.review({...f.reference,suggestionResultId:suggestion.id});
   const adopted=await f.listing.adopt({...f.reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});
   assert.equal(adopted.state,'BLOCKED');assert.deepEqual(adopted.attributes.brand,r.draft.attributes.brand);

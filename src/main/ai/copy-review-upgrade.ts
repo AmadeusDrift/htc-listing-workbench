@@ -53,7 +53,7 @@ export function copyReviewResult(db:DatabaseSync,op:CopyReviewUpgrade,second=fal
  return result;
 }
 export interface ReviewHooks {id:string;sent:(call:AiCall)=>void;result:(result:AiResult)=>void}
-/** Unfinished executions resume their original calls; explicit current-copy rechecks may start only after a terminal result. */
+/** Unfinished executions resume their original calls; explicit user rechecks may start only after a terminal result. */
 export async function runCopyReview(db:DatabaseSync,input:{contextHash:string;scope:unknown;snapshot:()=>AiPurposeSnapshot;completion?:CompletionRequest;signal?:AbortSignal;fresh:()=>Promise<void>;invoke:(snapshot:AiPurposeSnapshot,hooks:ReviewHooks,completion?:CompletionRequest)=>Promise<AiResult>;freshCompleted?:boolean;canResume?:(callId:string)=>boolean;budget?:()=>void;link?:(result:AiResult)=>void}):Promise<AiResult>{
  await input.fresh();input.signal?.throwIfAborted();
  const scopeHash=listingFingerprint({contextHash:input.contextHash,scope:input.scope,completion:input.completion??null});

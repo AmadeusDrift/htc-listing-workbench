@@ -52,8 +52,9 @@ test('current whole-field review accepts ordinary display wording and connecting
 
 test('review omissions do not consume the two candidate repair rounds or erase a real rejection',async t=>{
  const f=await fixture(t);let reviews=0;
+ // Ordinary editorial rejection isolates omission and candidate budgets; factual uncertainty has its own A19 upgrade tests.
  f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return {...d,state:d.fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:d.fieldAdoptions?.length?[]:[issue]};};
- f.respond(p=>{if(!p.candidate)return chat(candidateFor(p));const r:any=reviewFor(p);reviews++;if(reviews===1||reviews===3)r.checks=[];if(reviews===2){r.verdict='NEEDS_CHANGES';r.checks[0].verdict='CONTRADICTED';r.checks[0].reason='Resin source conflicts with PLA material wording';r.issues=[{field:'product_description',message:r.checks[0].reason}];}return chat(r);});
+ f.respond(p=>{if(!p.candidate)return chat(candidateFor(p));const r:any=reviewFor(p);reviews++;if(reviews===1||reviews===3)r.checks=[];if(reviews===2){r.verdict='NEEDS_CHANGES';r.issues=[{field:'product_description',message:'Resin wording should be clarified for readability'}];}return chat(r);});
  const result=await f.listing.complete(f.reference),op=f.listing.completionOperations(f.draft.id)[0];
  assert.equal(result.aiCalls,6);assert.equal(op.rounds.length,2);assert.equal(result.draft.fieldAdoptions?.length,1);
  assert.ok(op.rounds.every(r=>r.review?.previous?.length===1));

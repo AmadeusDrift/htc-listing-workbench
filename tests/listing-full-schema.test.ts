@@ -1,3 +1,4 @@
+import { seedAuthorityHaulPricing } from './helpers/authority-haul-pricing.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, chat } from './fixtures/listing-ai.ts';
@@ -220,7 +221,7 @@ test('duplicate JSON values ignore object key order and conflicting malformed ci
 
 test('Haul adoption omits unsupported fields while retaining raw response, unrelated candidates and idempotency',async t=>{
   const f=await fixture(t,{novel_feature:{type:'array',items:{type:'object',properties:{value:{type:'string'}},required:['value']}},merchant_suggested_asin:{type:'array',items:{type:'object',properties:{value:{type:'string'}},required:['value']}}});
-  const p=(f.amazon as any).persistence,r=p.record(f.draft.id);r.draft.listingProgram='haul';r.draft.attributes.merchant_suggested_asin=[];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer=[{audience:'BZR',marketplace_id:r.draft.marketplaceId}];p.putRecord(r);
+  const p=(f.amazon as any).persistence,r=p.record(f.draft.id);r.draft.listingProgram='haul';r.draft.attributes.merchant_suggested_asin=[];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer=[{audience:'BZR',marketplace_id:r.draft.marketplaceId}];await seedAuthorityHaulPricing(f,r.draft);p.putRecord(r);
   f.ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:false});
   const {ListingAiService}=await import('../src/main/listing-ai/service.ts'),listing=new ListingAiService(f.store,f.amazon,f.ai,()=>false);
   f.respond(payload=>{assert.ok(payload.programRules.unsupportedFields.includes('merchant_suggested_asin'));assert.ok(payload.fullSchema.schema.properties.merchant_suggested_asin);return chat({kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'novel_feature',nativeValue:[{value:'Useful feature'}],evidenceIds:[]},{field:'merchant_suggested_asin',nativeValue:[{value:'B000FIXTURE'}],evidenceIds:[]}],missing:[]});});

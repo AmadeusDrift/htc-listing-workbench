@@ -1,3 +1,4 @@
+import { seedAuthorityHaulPricing } from './helpers/authority-haul-pricing.ts';
 import { saveInput } from './fixtures/listing-ai.ts';
 import { addSourceOriginalFixture,confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
@@ -274,7 +275,7 @@ test('an image confirmed for another SKU cannot satisfy an unconfirmed current-S
 test('Haul cleanup saved before execution checkpoint resumes without stale hash or regenerated assets',async t=>{
   const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
   r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';r.draft.attributes.merchant_suggested_asin=[];
-  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);
+  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};await seedAuthorityHaulPricing(f,r.draft);p.putRecord(r);
   f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
   const task=f.create(),assets=structuredClone(task.items[0].assets),save=f.amazon.saveDraft.bind(f.amazon);let once=true;
   f.amazon.saveDraft=input=>{const result=save(input);if(once){once=false;throw Error('synthetic crash after save');}return result;};
@@ -287,7 +288,7 @@ test('Haul field omission reaches preview after hosting and does not fail before
   const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
   r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];delete r.draft.attributes.color;
   r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';
-  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);
+  r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};await seedAuthorityHaulPricing(f,r.draft);p.putRecord(r);
   f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
   const task=f.create();f.start(task.id);await f.service.waitForIdle();const result=f.service.get(task.id);
   assert.equal(f.uploadCalls,1);assert.equal(result.items[0].steps.find(s=>s.name==='validate')!.status,'DONE');assert.equal(result.items[0].steps.find(s=>s.name==='preview')!.status,'FAILED');assert.equal(result.items[0].submitStarted,false);
@@ -345,7 +346,7 @@ test('color execution migration preserves platform brand error and raw receipt f
 test('combined Haul and color cleanup has one owned revision and keeps later execution in scope',async t=>{
  const {fixture:f,p}=await oldExecutionColor(t),r=p.record(f.draft.id);
  r.draft.listingProgram='haul';r.draft.attributes.item_name=[{value:'Plain storage bag',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:r.draft.marketplaceId}];r.draft.attributes.purchasable_offer[0].audience='BZR';r.draft.attributes.merchant_suggested_asin=[];
- r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+ r.draft.schema.schema.properties.is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};await seedAuthorityHaulPricing(f,r.draft);p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
  const task=f.create(),validate=f.amazon.validateDraft.bind(f.amazon);let first=true;
  f.amazon.validateDraft=async input=>{const result=await validate(input);if(first){first=false;assert.equal(result.revision,r.draft.revision+1);assert.equal(result.attributes.merchant_suggested_asin,undefined);assert.equal((result.attributes.color as any)[0].value,'Pink');}return result;};
  f.start(task.id);await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED',f.service.get(task.id).error??'');assert.equal(f.uploadCalls,1);

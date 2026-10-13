@@ -23,12 +23,13 @@ test('A22 copy repair compares native JSON without replacing native-only structu
   let reviewCalls=0;f.respond(payload=>{
     if(payload.operation==='listing-current-review'){
       for(const c of payload.candidate.candidates)for(const item of c.items)item.evidenceIds=payload.evidence.map((e:any)=>e.id);
-      const review=reviewFor(payload);if(reviewCalls++===0){review.verdict='NEEDS_CHANGES';review.issues=[{field:'item_name',message:'Please verify the title'}] as any;for(const check of review.checks){check.verdict='UNSUPPORTED';for(const claim of check.claims)claim.verdict='UNSUPPORTED';}}
+      const review=reviewFor(payload);if(reviewCalls++<2){review.verdict='NEEDS_CHANGES';review.issues=[{field:'item_name',message:'Please verify the title'}] as any;for(const check of review.checks){check.verdict='UNSUPPORTED';for(const claim of check.claims)claim.verdict='UNSUPPORTED';}}
       return chat(review);
     }
     return chat(payload.candidate?reviewFor(payload):{kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'item_name',nativeValue:value,evidenceIds:payload.evidence.map((e:any)=>e.id),transformation:'compose'}],missing:[]});
   });
   const current=await f.listing.reviewCurrentForImages(reference);
+  assert.equal(reviewCalls,2,'both ordinary and upgraded reviews genuinely reject before repair');assert.equal((current.review.output as any).verdict,'NEEDS_CHANGES');
   const repaired=await f.listing.repairCurrentForImages({...reference,reviewResultId:current.review.id});
   assert.deepEqual(repaired.draft.attributes.item_name,value);assert.equal(repaired.draft.revision,saved.revision);assert.equal(repaired.draft.fieldAdoptions?.length??0,0);
 });

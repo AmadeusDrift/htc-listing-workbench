@@ -12,6 +12,9 @@ import { productSourceQuantity, sourceQuantity } from '../../shared/source-quant
 import { pricingAttributeInputs } from './pricing-inputs.ts';
 import { currentFactAuthority } from './fact-authority.ts';
 import { declarationRisks } from './declaration-safety.ts';
+import { semanticJson } from './preparation.ts';
+import { pricingQuantityInputs, pricingRuleInputs, pricingSaleUnit } from '../pricing/dependencies.ts';
+import { actualOfferIssue } from '../pricing/offer.ts';
 import type { DeclarationScope } from './declaration-safety.ts';
 
 export interface BusinessRuleInput {
@@ -33,7 +36,7 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const report: BusinessRuleReport = { revision: rules.revision, fields: {}, notices: [], quote: null, bundleQuantity: 1 };
   // Reapplying rules must not turn an unchanged default into a measured value.
   for (const [field, entry] of Object.entries(input.previousBusinessReport?.fields ?? {})) {
-    if (JSON.stringify(entry.value) === JSON.stringify(attributes[field])) report.fields[field] = structuredClone(entry);
+    if (Object.hasOwn(attributes,field) && semanticJson(entry.value) === semanticJson(attributes[field])) report.fields[field] = structuredClone(entry);
   }
   const first = (name: string) => Array.isArray(attributes[name]) && isObject(attributes[name][0]) ? attributes[name][0] as JsonObject : null;
   const note = (message: string) => { if (!report.notices.includes(message)) report.notices.push(message); };
@@ -239,12 +242,15 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   };
   const costCny = input.costCny !== null && Number.isFinite(input.costCny) && input.costCny > 0 ? input.costCny : null;
   const decision: PricingDecision = {
-    version: 2, attributeInputs: pricingAttributeInputs(attributes), status: 'needs_input', code: 'COST_CNY_UNCONFIRMED', quoteError: null,
+    version: 3, attributeInputs: pricingAttributeInputs(attributes),
+    dependencies: { rules: '', saleUnit: pricingSaleUnit(input.saleUnit), quantityInputs: {}, costCny, bundleQuantity: report.bundleQuantity },
+    status: 'needs_input', code: 'COST_CNY_UNCONFIRMED', quoteError: null,
     inputs: { costCny, ...currentPackage },
     evidence: { cost: costCny !== null ? 'confirmed_cny' : 'unconfirmed', dimensions: packageBasis('dimensions'), weight: packageBasis('weight'),
       packageScope: 'unconfirmed', saleUnit: legacyConflict ? 'conflicting' : countChanged ? 'unconfirmed' : sourceUnits.conflict ? 'conflicting' : quantityUnconfirmed ? 'unconfirmed' : 'confirmed', sourcePackage },
   };
   report.pricingDecision = decision;
+  decision.dependencies.rules = pricingRuleInputs(rules,decision.evidence);
   const needInput = (code: PricingDecisionCode, message: string) => { decision.code = code; decision.status = 'needs_input'; note(message); };
   if (costCny === null) needInput('COST_CNY_UNCONFIRMED', '采购成本或人民币币种尚未确认，未计算销售报价');
   else if (target.marketplaceId !== 'ATVPDKIKX0DER') needInput('MARKETPLACE_UNSUPPORTED', '定价规则以美元计价，仅用于已确认的美国站');
@@ -268,11 +274,22 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
         decision.inputs.costCny = report.pricingBasis.saleUnitCostCny;
         report.quote = quoteListing({ costCny: report.pricingBasis.saleUnitCostCny, dimensionsInches: axes, weightPounds: pounds }, rules.pricing);
         decision.status = 'quoted'; decision.code = 'QUOTE_VALID';
-        const existing = first('purchasable_offer');
-        if (!existing?.our_price) {
-          if (attributes.purchasable_offer && (!Array.isArray(attributes.purchasable_offer) || attributes.purchasable_offer.length !== 1 || !existing)) {
-            throw new Error('已有报价结构需要人工核对，未用单条自动报价覆盖');
-          }
+        // Whole-offer ownership matters: a manual promotion makes the whole offer manual.
+        const previousDecision = previousReport?.pricingDecision;
+        const ownedOffer = !!report.fields.purchasable_offer;
+        const pricingChanged = previousDecision?.version !== 3
+          || previousDecision.dependencies.rules !== decision.dependencies.rules
+          || semanticJson(previousDecision.dependencies.saleUnit) !== semanticJson(decision.dependencies.saleUnit)
+          || semanticJson(previousDecision.attributeInputs) !== semanticJson(decision.attributeInputs)
+          || previousDecision.inputs.costCny !== decision.inputs.costCny
+          || previousReport?.bundleQuantity !== report.bundleQuantity;
+        const refreshOffer = ownedOffer && pricingChanged;
+        const existing = refreshOffer ? null : first('purchasable_offer');
+        // New Haul drafts start with the program's audience/marketplace skeleton.
+        const programSkeleton = Array.isArray(attributes.purchasable_offer) && attributes.purchasable_offer.length===1 && existing
+          && existing.audience==='BZR' && existing.marketplace_id===target.marketplaceId
+          && Object.keys(existing).every(key=>['audience','marketplace_id'].includes(key));
+        if (refreshOffer || programSkeleton || !Object.hasOwn(attributes,'purchasable_offer')) {
           const quote = report.quote, schedule = promotionSchedule(input.now, rules.pricing);
           const offer: JsonObject = { audience: 'BZR', currency: 'USD', ...existing, our_price: [{ schedule: [{ value_with_tax: quote.price }] }] };
           const offerItem = resolveSchemaNode(schema.schema, resolveSchemaNode(schema.schema, properties.purchasable_offer).items);
@@ -308,6 +325,13 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const unitCount = mapMeasurementFields(schema, target.marketplaceId, { unitCount: count }).attributes.unit_count;
   const canFillUnitCount = !sourceUnits.conflict && !blocked.unitCount && (!explicitFields.has('number_of_items') || existingCount !== null);
   if (unitCount && !attributes.unit_count && canFillUnitCount) { attributes.unit_count = unitCount; report.fields.unit_count = { value: structuredClone(unitCount), reason: '售卖单位数量规则；不等于备货套数' }; }
+  decision.dependencies.costCny = decision.inputs.costCny;
+  decision.dependencies.bundleQuantity = report.bundleQuantity;
+  decision.dependencies.quantityInputs = pricingQuantityInputs(attributes);
+  if (report.quote && decision.inputs.costCny !== null && currentPackage.dimensionsInches !== null && currentPackage.weightPounds !== null) {
+    const issue = actualOfferIssue(attributes,target.marketplaceId,{costCny:decision.inputs.costCny,dimensionsInches:currentPackage.dimensionsInches,weightPounds:currentPackage.weightPounds},rules.pricing,input.now.getTime());
+    if (issue) note(issue.message);
+  }
   return { attributes, report };
 }
 

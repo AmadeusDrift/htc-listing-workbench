@@ -129,7 +129,19 @@ export interface PricingDecisionV2 extends Omit<PricingDecisionV1, 'version'> {
   version: 2;
   attributeInputs: Partial<Record<'item_package_dimensions' | 'item_package_weight', JsonValue>>;
 }
-export type PricingDecision = PricingDecisionV1 | PricingDecisionV2;
+/** Prospective dependency evidence; v1/v2 keep their original exact shapes. */
+export interface PricingDecisionV3 extends Omit<PricingDecisionV2, 'version'> {
+  version: 3;
+  dependencies: {
+    rules: string;
+    saleUnit: JsonValue;
+    quantityInputs: JsonObjectInputs;
+    costCny: number | null;
+    bundleQuantity: number;
+  };
+}
+type JsonObjectInputs = Partial<Record<'number_of_items' | 'unit_count', JsonValue>>;
+export type PricingDecision = PricingDecisionV1 | PricingDecisionV2 | PricingDecisionV3;
 export interface ListingQuote { price: number; minimum: number; roi: number; deliveryFee: number; commission: number; upfrontCny: number; dimensionalWeightGrams: number; billableWeightGrams: number; promotionPrice: number | null; promotionRoi: number | null }
 export interface ListingPricingBasis {
   kind: 'source_sale_unit' | 'source_piece_quote' | 'auto_bundle';
@@ -141,7 +153,8 @@ export interface BusinessRuleReport {
   pricingBasis?: ListingPricingBasis;
   pricingDecision?: PricingDecision;
 }
-export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuote {
+/** One fee evaluator shared by suggested and actual prices. Preserve boundary tolerances. */
+export function listingPriceEvaluator(input: QuoteInput, rules: PricingRules) {
   const { costCny, dimensionsInches, weightPounds } = input;
   if (!Number.isFinite(costCny) || costCny <= 0 || !Number.isFinite(weightPounds) || weightPounds <= 0 || dimensionsInches.length !== 3 || dimensionsInches.some(value => !Number.isFinite(value) || value <= 0)) throw new ListingQuoteError('QUOTE_INVALID_INPUT', '定价需要有效采购成本、完整包装尺寸和包装重量');
   const dimensionalWeightGrams = dimensionsInches.reduce((a,b) => a*b, 1) / rules.dimensionalDivisor * 453.59237;
@@ -156,6 +169,25 @@ export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuo
     const roi = (rules.fx * (price * (1 - rules.reservePercent / 100) - commission - deliveryFee) - upfrontCny) / upfrontCny;
     return { price, roi, deliveryFee, commission };
   };
+  return { evaluate, dimensionalWeightGrams, billableWeightGrams, upfrontCny, oz };
+}
+export type ActualPriceFailureCode = 'ACTUAL_PRICE_INVALID' | 'ACTUAL_PRICE_CAP' | 'ACTUAL_PRICE_ROI' | 'ACTUAL_PRICE_MARGIN';
+export function actualListingPriceFailure(input: QuoteInput, rules: PricingRules, price: number, promotion = false): ActualPriceFailureCode | null {
+  if (!Number.isFinite(price) || price <= 0) return 'ACTUAL_PRICE_INVALID';
+  if (price > rules.maxPrice + 1e-10) return 'ACTUAL_PRICE_CAP';
+  const { evaluate } = listingPriceEvaluator(input, rules);
+  if (evaluate(price).roi <= rules.targetRoi + 1e-10) return 'ACTUAL_PRICE_ROI';
+  if (!promotion) {
+    const cap = Math.floor(rules.maxPrice * 100 + 1e-8);
+    let minimum: number | null = null;
+    for (let cents = 1; cents <= cap; cents++) if (evaluate(cents / 100).roi > rules.targetRoi + 1e-10) { minimum = cents / 100; break; }
+    if (minimum === null || price + 1e-10 < Math.ceil((minimum + rules.margin) * 100 - 1e-8) / 100) return 'ACTUAL_PRICE_MARGIN';
+  }
+  return null;
+}
+export function quoteListing(input: QuoteInput, rules: PricingRules): ListingQuote {
+  const { costCny } = input;
+  const { evaluate, dimensionalWeightGrams, billableWeightGrams, upfrontCny, oz } = listingPriceEvaluator(input, rules);
   // Diagnostic only: solve the same piecewise fees beyond the cap, never accept that price.
   const requiredPrice = (): number => {
     const tier = rules.deliveryTiers.find(tier => tier.upperOz === null || oz <= tier.upperOz + 1e-10)!;

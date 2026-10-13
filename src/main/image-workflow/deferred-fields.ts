@@ -1,6 +1,9 @@
 import { isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import type { AmazonDraft, ListingIssue } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
+import type { ListingRules } from '../../shared/listing-rules.ts';
+import { pricingQualificationIssue, pricingExempt } from '../pricing/qualification.ts';
+import { readPricingRuleInputs } from '../pricing/dependencies.ts';
 import { FIELD_REPAIR_MIGRATION_FIELDS, CATEGORY_FIELD_REPAIR_FIELDS } from '../../shared/automatic-listing-contracts.ts';
 import type { FieldRepairMigrationField, CategoryFieldRepairField } from '../../shared/automatic-listing-contracts.ts';
 
@@ -26,7 +29,16 @@ export function legacyContentRepairFields(checkpoint:{state:'STARTED'|'DONE';dra
 }
 
 /** Preserve the business rule's cause instead of presenting its missing price symptom. */
-export function pricingBlockingReason(draft: AmazonDraft): string | null {
+export function pricingBlockingReason(draft: AmazonDraft, rules?: ListingRules): string | null {
+  if(pricingExempt(draft))return null;
+  if(rules)return pricingQualificationIssue(draft,rules)?.message??null;
+  const snapshot=draft.businessRules?.pricingDecision;
+  if(snapshot?.version===3){
+    try{return pricingQualificationIssue(draft,readPricingRuleInputs(snapshot.dependencies.rules,snapshot.evidence))?.message??null;}
+    catch{return '定价依据格式无效，请重新核对后应用商品规则';}
+  }
+  const actualIssue=(draft.localIssues??[]).find(issue=>issue.severity==='ERROR'&&(issue.code.startsWith('ACTUAL_')||issue.code==='PRICING_EVIDENCE_STALE'));
+  if(actualIssue)return actualIssue.message;
   if(!draft.businessRules || draft.businessRules.quote!==null)return null;
   const decision = draft.businessRules.pricingDecision;
   if (decision) {

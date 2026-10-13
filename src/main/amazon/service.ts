@@ -43,6 +43,7 @@ import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
 import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
 import { assertStoredPricingForPaid } from './pricing-guard.ts';
+import { assertCurrentPricingForPaid, pricingQualificationIssue } from '../pricing/qualification.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
 import { canSendToPreview } from './preview-validation.ts';
@@ -661,12 +662,12 @@ export class AmazonService {
     }
     const product=projectSalesProduct(source,plan,draft.variantId),variant=product.variants.find(value=>value.id===draft.variantId);
     if(!variant)throw new UserFacingError('当前来源规格缺失，保留原利润淘汰记录待补资料');
-    const attributes=Object.fromEntries(['item_package_dimensions','item_package_weight','number_of_items','unit_count']
+    const attributes=Object.fromEntries(['item_package_dimensions','item_package_weight','number_of_items','unit_count','purchasable_offer']
       .filter(field=>Object.hasOwn(draft.attributes,field)).map(field=>[field,clone(draft.attributes[field])])) as JsonObject;
     // Refresh unchanged generated inputs from current source/default rules. Manual
     // edits stay visible, including contradictory or incomplete quantity values.
     for(const [field,entry] of Object.entries(draft.businessRules?.fields??{}))
-      if(Object.hasOwn(attributes,field)&&semanticJson(attributes[field])===semanticJson(entry.value)
+      if(field!=='purchasable_offer'&&Object.hasOwn(attributes,field)&&semanticJson(attributes[field])===semanticJson(entry.value)
         && !(draft.businessRules?.pricingBasis?.kind==='auto_bundle'&&['number_of_items','unit_count'].includes(field)))delete attributes[field];
     const resolved=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,'haul',draft.businessRules,plan,source);
     return {...draft,productRevision:source.revision,...(plan?{salesPlan:plan}:{}),attributes:resolved.attributes,businessRules:resolved.report};
@@ -684,7 +685,7 @@ export class AmazonService {
     if(cached&&Date.parse(cached.fetchedAt)>Date.parse(draft.schema.fetchedAt)&&cached.targetId===draft.targetId&&cached.productType===draft.schema.productType&&cached.parentageLevel===draft.schema.parentageLevel&&cached.locale===draft.schema.locale&&(cached.checksum!==draft.schema.checksum||cached.version!==draft.schema.version||!sameSchemaValidation(cached,draft.schema)))draft.schema=cached;
     let attributes=clone(draft.attributes);
     // Only unchanged rule-owned values can be refreshed. Manual and AI edits survive.
-    for(const [field,entry] of Object.entries(draft.businessRules?.fields??{}))if(semanticJson(attributes[field]??null)===semanticJson(entry.value))delete attributes[field];
+    for(const [field,entry] of Object.entries(draft.businessRules?.fields??{}))if(field!=='purchasable_offer'&&semanticJson(attributes[field]??null)===semanticJson(entry.value))delete attributes[field];
     const resolved=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,draft.listingProgram,draft.businessRules,draft.salesPlan,source);
     draft.productRevision=source.revision;draft.attributes=resolved.attributes;if(resolved.report)draft.businessRules=resolved.report;
     draft.localIssues=[...listingProgramIssues(draft.listingProgram,draft.schema,draft.attributes),...validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema),...imageIssues(draft.attributes),...copyPolicyIssues(draft),...this.declarationIssues(draft,source)];
@@ -788,7 +789,7 @@ export class AmazonService {
         record.draft.attributes = resolved.attributes; record.draft.revision++; record.draft.state = 'DRAFT';
         record.draft.localIssues = []; record.draft.previewIssues = []; record.draft.listingIssues = [];
         record.draft.previewedAt = null; record.draft.requestId = null; record.preview = null;
-        if(!revalidateLocal)record.previewResponse = null;
+        // Keep historical platform response evidence; the current preview token is invalidated above.
         record.request = this.request(record);
         this.event(record, 'save', '已按当前业务规则补全缺失字段，已有填写内容保留');
       }
@@ -874,6 +875,8 @@ export class AmazonService {
     const previousPreviewIssues=clone(record.draft.previewIssues),colorChanged=this.normalizeHaulRecord(record,completionId);
     record.draft.localIssues = [...packageGraphIssues(record.draft,this.persistence.records().map(r=>r.draft)), ...listingProgramIssues(record.draft.listingProgram, record.draft.schema, record.draft.attributes), ...validateAttributes(record.draft.schema.schema, record.draft.attributes, record.draft.schema.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft)];
     try { this.currentProduct(record); record.draft.localIssues.push(...this.declarationIssues(record.draft)); } catch { record.draft.localIssues.push(localIssue('SOURCE_CHANGED', '来源商品资料已变化，请建立新草稿', [], 'fact')); }
+    const pricingIssue=pricingQualificationIssue(record.draft,readListingRules(this.persistence.db),this.now());
+    if(pricingIssue)record.draft.localIssues.push(localIssue(pricingIssue.code,pricingIssue.message,['purchasable_offer']));
     const valid = !record.draft.localIssues.some(issue => issue.severity === 'ERROR');
     record.draft.state = valid ? 'LOCAL_VALIDATED' : 'BLOCKED'; record.preview = null; record.draft.previewedAt = null; record.draft.previewIssues = colorChanged?previousPreviewIssues:[];
     this.event(record, 'local_validation', valid ? '当前 Schema 的本地校验通过' : '本地校验未通过，请补全或核对问题字段'); this.persistence.putRecord(record); return valid;
@@ -892,11 +895,14 @@ export class AmazonService {
     try {
       this.mutable(record); const target = this.active(record.draft.targetId); const generation = this.persistence.generation(target.id);
       const locallyValid = this.persistence.transaction(()=>this.validate(record,completionId));
+      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
       const sendable = canSendToPreview(record.draft);
       if (!locallyValid && !sendable) throw new UserFacingError('本地校验未通过，请先处理字段问题');
       let result: ApiResult;
       if (target.mode === 'demo') { result = { data: { sku: record.draft.sku, status: locallyValid ? 'VALID' : 'INVALID', submissionId: `DEMO-PREVIEW-${randomUUID()}`, issues: locallyValid ? [] : record.draft.localIssues.map(issue => ({code:issue.code,message:issue.message,severity:issue.severity,attributeNames:issue.attributeNames})) }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'previewListingsItem'); }
-      else result = await this.transport.api(target, 'previewListingsItem', this.listingPath(record), { ...this.listingQuery(record), mode: 'VALIDATION_PREVIEW', includedData: 'issues' }, this.request(record), () => this.currentProduct(record));
+      else result = await this.transport.api(target, 'previewListingsItem', this.listingPath(record), { ...this.listingQuery(record), mode: 'VALIDATION_PREVIEW', includedData: 'issues' }, this.request(record), () => {
+        this.currentProduct(record); assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
+      });
       record.previewResponse = result.data; record.draft.requestId = result.requestId; this.exchange(record, 'preview', result); this.persistence.putRecord(record);
       this.active(target.id); this.currentProduct(record);
       if (generation !== this.persistence.generation(target.id)) throw new UserFacingError('授权配置已变化，请重新预览');
@@ -927,6 +933,7 @@ export class AmazonService {
     const hash = listingHash(record.draft, record.draft.sku);
     try {
       taskGuard?.(); this.mutable(record); assertListingProgram(record.draft.listingProgram, record.draft.schema, record.draft.attributes); const target = this.active(record.draft.targetId); this.currentProduct(record); this.requirePreview(record, target);
+      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
       const current = await this.getSchema({ ...record.draft.schema, forceRefresh: true });
       if (current.checksum !== record.draft.schema.checksum || current.version !== record.draft.schema.version || JSON.stringify(current.metaSchema) !== JSON.stringify(record.draft.schema.metaSchema)) {
         record.preview = null; record.draft.previewedAt = null; record.draft.state = 'BLOCKED'; record.draft.localIssues = [localIssue('SCHEMA_CHANGED', 'Amazon Schema 已变化，请建立新草稿并重新预览')]; this.persistence.putRecord(record);
@@ -944,6 +951,7 @@ export class AmazonService {
         try { taskGuard?.(); } catch { throw new TaskWriteNotSentError(); }
         this.currentProduct(record); this.active(target.id); this.requirePreview(this.persistence.record(record.draft.id), target, true);
         assertListingProgram(record.draft.listingProgram, current, record.draft.attributes);
+        assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
         const issues=this.declarationIssues(record.draft);
         if(issues.length){record.draft.localIssues.push(...issues);throw new UserFacingError('本地校验未通过，安全声明须核对后再提交');}
       };

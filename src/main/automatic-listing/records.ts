@@ -15,6 +15,7 @@ import { outcomeScope } from './outcomes.ts';
 import { assertBusinessRules } from '../listing-ai/history.ts';
 import { AUTOMATIC_SOURCE_ISSUES, type AutomaticSourceIssueCode } from '../../shared/image-workflow-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import { ACTUAL_OFFER_CODES } from '../pricing/offer.ts';
 import type { AutomaticListingOutcome } from '../../shared/automatic-listing-contracts.ts';
 import { DECLARATION_SOURCE_CONFLICT } from '../amazon/declaration-safety.ts';
 
@@ -146,8 +147,10 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
   if(result.draftId!==row.draftId||!result.draftId&&result.draftRevision!==null||result.kind==='RULE_FILTERED'&&!selection&&!result.draftRevision)fail();
   if(value.pricingReport!==undefined){
     const p=record(value.pricingReport,'定价证据',['revision','fields','notices','quote','bundleQuantity','pricingBasis','pricingDecision']);
-    if(p.revision!==scope.ruleRevision||p.quote!==null||JSON.stringify(p.fields)!=='{}'||JSON.stringify(p.notices)!=='[]'||!Number.isSafeInteger(p.bundleQuantity)||Number(p.bundleQuantity)<1||!p.pricingDecision||!result.draftId)fail();
+    if(p.quote!==null||JSON.stringify(p.fields)!=='{}'||JSON.stringify(p.notices)!=='[]'||!Number.isSafeInteger(p.bundleQuantity)||Number(p.bundleQuantity)<1||!p.pricingDecision||!result.draftId)fail();
     const report=p as unknown as NonNullable<AutomaticListingOutcome['pricingReport']>;
+    // v1/v2 were revision-bound. v3 carries its own exact pricing dependencies.
+    if(report.pricingDecision?.version===3?Number(p.revision)>Number(scope.ruleRevision):p.revision!==scope.ruleRevision)fail();
     assertBusinessRules({businessRules:report,marketplaceId:result.scope.marketplaceId,salesPlan:row.salesPlan,schema:{schema:{properties:{}}}} as unknown as AmazonDraft);
     if(report.pricingDecision!.code!==result.code||result.kind!==(report.pricingDecision!.status==='business_blocked'?'RULE_FILTERED':report.pricingDecision!.status==='system_error'?'SYSTEM_REPAIR':'NEEDS_INPUT'))fail();
     result.pricingReport=structuredClone(report);
@@ -169,7 +172,7 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     if(result.kind!=='NEEDS_INPUT'||row.stage!=='READBACK'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if(['LABELS_FAILED','READBACK_FAILED'].includes(result.code)){
     if(result.kind!=='SYSTEM_REPAIR'||row.stage!==(result.code==='LABELS_FAILED'?'LABELS':'READBACK')||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
-  }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT,'AMAZON_BRAND_MANUAL'].includes(result.code)){
+  }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT,'AMAZON_BRAND_MANUAL',...ACTUAL_OFFER_CODES].includes(result.code)){
     if(result.kind!=='NEEDS_INPUT'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if(!selection&&!result.pricingReport&&!result.image&&!['LEGACY_FAILURE','PRICING_EVIDENCE_STALE','SYSTEM_FAILURE','SOURCE_INPUT_REQUIRED','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','EVIDENCE_READ_FAILED'].includes(result.code))fail();
   return result;

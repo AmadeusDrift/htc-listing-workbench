@@ -103,7 +103,7 @@ export function applyAdaptationRows(task:AutomaticListingTask,deps:AutomaticList
     if(updated){
       if(draft&&pricingOutcome(updated,rules)?.kind!=='RULE_FILTERED')saveImageAdaptation(db,deps.images.getProgress(draft.id),draft,updated,p);
       if(draft&&row.repair&&row.repair.phase!=='FIELDS_STARTED'&&row.repair.draftRevision===draft.revision&&row.repair.draftStamp===imageWorkflowDraftStamp(draft)){
-        const oldPricing=pricingBlockingReason(draft),newPricing=pricingBlockingReason(updated);
+        const oldPricing=pricingBlockingReason(draft),newPricing=pricingBlockingReason(updated,rules);
         row.repair={...row.repair,draftRevision:updated.revision,draftStamp:imageWorkflowDraftStamp(updated),remaining:[...new Set([...(newPricing?[newPricing]:[]),...withoutDeferredImageRemaining(updated,(row.repair.remaining??[]).filter(m=>m!==oldPricing)),...nonDeferredImageIssues(updated).map(issue=>issue.attributeNames.join('、')+'：'+issue.message)])].slice(0,100)};
       }
       const pricing=pricingOutcome(updated,rules);

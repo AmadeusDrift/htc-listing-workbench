@@ -48,6 +48,9 @@ const reasons:Record<string,string>={
  ROI_MAX_PRICE:'已确认 ROI 规则未通过：所需价格超过上限。请核对已保存的定价规则与输入。',ROI_PROMOTION_OR_MARGIN:'已确认促销或利润规则未通过。请核对定价记录。',DIMENSIONAL_WEIGHT_LIMIT:'已确认包装抛重超过规则限制。请核对包装测量与规则。',IP_PLAN_BLOCKED:'来源图片触发 IP 风险规则。请核对已保存的风险记录。',IP_IMAGE_BLOCKED:'生成图片触发 IP 风险规则。请核对已保存的风险记录。',
  PRICING_EVIDENCE_STALE:'定价依据已变化。请重新核对实际输入与规则。',COST_CNY_UNCONFIRMED:'采购成本尚未确认。请补充当前销售单位的实际成本。',PACKAGE_MEASUREMENTS_MISSING:'缺少真实包装尺寸或重量。请补充实际测量资料。',PACKAGE_INPUT_UNCONFIRMED:'包装输入尚未确认。请核对实际包装资料。',PACKAGE_SCOPE_UNCONFIRMED:'包装资料范围尚未确认。请核对单件与销售组合。',SOURCE_QUANTITY_CONFLICT:'来源件数存在冲突。请核对销售组合的实际件数。',SOURCE_QUANTITY_UNCONFIRMED:'来源件数尚未确认。请核对实际售卖数量。',SYSTEM_FAILURE:'系统处理未完成，尚无更细的可信归因。请核对已有记录与配置。',EVIDENCE_READ_FAILED:'已保存的依据暂不可读。请检查本地记录，保留当前进度。',
  LEGACY_FAILURE:'历史记录未保存可信的结构化细因，当前无法归因。请核对已有记录。',
+ ACTUAL_OFFER_INVALID:'实际报价的币种、受众、站点或价格计划无效，请核对 purchasable_offer。',
+ ACTUAL_PRICE_INVALID:'实际售价无效，请填写有限正数。', ACTUAL_PRICE_CAP:'实际正常价或促销价超过售价上限，请核对实际报价。',
+ ACTUAL_PRICE_ROI:'实际正常价或促销价未满足目标 ROI，请核对实际报价与费用。', ACTUAL_PRICE_MARGIN:'实际正常售价未满足已设置加价额，请核对实际报价。',
 };
 export function presentRejection(code:unknown,unknownResult=false):string{
  if(unknownResult||['FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','SUBMISSION_UNKNOWN','SOURCE_CONSISTENCY_SENT_UNKNOWN'].includes(String(code)))return '上次请求或提交结果未知，已保留记录并阻止自动重发。请核对已有调用、图片或提交记录。';

@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { readListingRules } from '../listing-rules.ts';
-import { assertCurrentPricingForPaid } from '../automatic-listing/outcomes.ts';
+import { assertCurrentPricingForPaid } from '../pricing/qualification.ts';
 
 /** Synchronous final send guard. Never writes drafts or changes completed/unknown journals. */
 export function assertStoredPricingForPaid(db:DatabaseSync,draftId:string):void {

@@ -77,7 +77,7 @@ test('a failed call without recovery cannot own an ordinary successful-looking r
  }finally{db.close();}
 });
 test('historical exact diagnostic proves response receipt but FAILED or mismatched diagnostic alone cannot',async t=>{
- const f=await failed(t),db=openDatabase(f.directory),saved=structuredClone(f.call);delete saved.responseReceived;delete saved.rejection;
+ const f=await failed(t),db=openDatabase(f.directory),saved=structuredClone(f.call);delete saved.responseReceived;delete saved.rejection;delete saved.providerReceiptId;
  try{
  db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(saved),saved.id);
  assert.equal(f.listing.completionUnknown(f.op.id),false);

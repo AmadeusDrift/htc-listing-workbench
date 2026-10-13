@@ -45,3 +45,52 @@ test('dynamic schema set additions need both explicit review and a unique owner'
  assert.ok(errors.some(e=>e.includes('unreviewed dynamic table set')));
  assert.ok(errors.some(e=>e.includes('unowned dynamic table')));
 });
+test('SQLite-valid UPDATE variants cannot bypass the new-writer gate',t=>{
+ const db=new DatabaseSync(':memory:');t.after(()=>db.close());
+ db.exec("CREATE TABLE products(id TEXT PRIMARY KEY,title TEXT); CREATE INDEX product_title_idx ON products(title); INSERT INTO products VALUES('p1','old')");
+ const statements=[
+  'UPDATE products AS p SET title = ? WHERE p.id = ?',
+  'UPDATE OR IGNORE products AS p SET title = ? WHERE p.id = ?',
+  'UPDATE OR REPLACE main."products" AS "p" SET title = ? WHERE "p".id = ?',
+  'UPDATE [main].[products] AS [p] SET title = ? WHERE [p].id = ?',
+  'UPDATE `main`.`products` AS `p` SET title = ? WHERE `p`.id = ?',
+  "UPDATE 'products' AS p SET title = ? WHERE p.id = ?",
+  'UPDATE products INDEXED BY product_title_idx SET title = ? WHERE id = ?',
+  'WITH candidate(value) AS (SELECT ?) UPDATE products AS p SET title = (SELECT value FROM candidate) WHERE p.id = ?',
+  'WITH candidate(value) AS (SELECT ?) UPDATE OR IGNORE main.products AS p SET title = (SELECT value FROM candidate) WHERE p.id = ?',
+  'UPDATE /* target */ main /* schema */ . "products" AS p SET title = ? WHERE p.id = ?',
+  'UPDATE "products" AS "p--alias" SET title = ? WHERE "p--alias".id = ?',
+  'UPDATE "products" AS "p/*alias*/" SET title = ? WHERE "p/*alias*/".id = ?',
+ ];
+ for(const [index,sql] of statements.entries()){
+  const value='new-'+index;
+  assert.equal(db.prepare(sql).run(value,'p1').changes,1,sql+' must execute in SQLite');
+  assert.equal(db.prepare('SELECT title FROM products WHERE id=?').get('p1')!.title,value);
+  const inventory=scanSql('main/ai/new-writer.ts',`db.prepare(${JSON.stringify(sql)})`);
+  assert.ok(inventory.writes.some(e=>e.writes.some(w=>w.operation==='UPDATE'&&w.table==='products')),sql+' must identify its actual table');
+  assert.deepEqual(inventory.opaque,[],sql+' is supported SQL, including conflict algorithm tokens');
+  assert.ok(ownershipViolations(inventory,registry,dataOwner).some(e=>e.includes('unregistered')),sql+' must be rejected by gate');
+ }
+});
+test('unparsed literal write syntax is a gate error, never a zero-write success',()=>{
+ for(const sql of ['UPDATE @target SET title = ?', 'UPDATE products.', 'INSERT bogus syntax', 'DELETE products', 'REPLACE @target VALUES (?)'])for(const method of ['prepare','exec']){
+  const inventory=scanSql('main/ai/new-writer.ts',`db[${JSON.stringify(method)}](${JSON.stringify(sql)})`);
+  assert.ok(inventory.opaque.some(entry=>entry.expression.startsWith('unparsed SQL write:')),sql);
+  assert.ok(ownershipViolations(inventory,registry,dataOwner).some(error=>error.includes('unreviewed SQL expression')),sql);
+ }
+});
+test('SQLite UPSERT conflict UPDATE SET stays a single registered target',t=>{
+ const db=new DatabaseSync(':memory:');t.after(()=>db.close());
+ db.exec("CREATE TABLE products(id TEXT PRIMARY KEY,title TEXT); INSERT INTO products VALUES('p1','old')");
+ for(const sql of [
+  "INSERT INTO products VALUES(?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title",
+  "INSERT OR REPLACE INTO products VALUES(?,?)",
+ ]){
+  assert.equal(db.prepare(sql).run('p1','updated').changes,1);
+  assert.equal(db.prepare('SELECT title FROM products').get()!.title,'updated');
+  const inventory=scanSql('main/ai/new-writer.ts',`db.prepare(${JSON.stringify(sql)})`);
+  assert.deepEqual(inventory.writes.flatMap(entry=>entry.writes),[{operation:'INSERT',table:'products'}]);
+  assert.deepEqual(inventory.opaque,[]);
+  assert.ok(ownershipViolations(inventory,registry,dataOwner).some(error=>error.includes('unregistered')));
+ }
+});

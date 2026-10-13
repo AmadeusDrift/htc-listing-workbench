@@ -13,7 +13,7 @@ import { itemLabelDownloads, itemLabelRequest, validateItemLabelFormat } from '.
 import { itemLabelFingerprint, validateItemLabelRecord } from './records.ts';
 import { readVerifiedLabelPdf, saveLabelPdf } from './files.ts';
 
-type LabelsAmazon=Pick<AmazonService,'executionTargetScope'|'createMarketplaceItemLabels'|'downloadItemLabel'>;
+type LabelsAmazon=Pick<AmazonService,'executionTargetScope'|'createMarketplaceItemLabels'|'downloadItemLabel'|'restoreItemLabelDownloads'>;
 type LabelsProcurement=Pick<ProcurementService,'get'|'list'|'candidates'|'setLabelStatus'>;
 class LabelPausedBeforeSend extends UserFacingError {}
 export class ItemLabelService {
@@ -102,7 +102,7 @@ export class ItemLabelService {
     if(!row.responseReceived){row.status='REQUESTING';row.requestPending=true;row.attempts++;row.nextDueAt=null;row.message='正在请求 Amazon 商品标签';row.errorCode=null;this.put(row);}
     try{
       let documents:{uri:string;expiration:number}[];
-      if(row.responseReceived)documents=this.downloads(row);
+      if(row.responseReceived){documents=this.downloads(row);this.amazon.restoreItemLabelDownloads(row,documents);}
       else{
         const response=await this.amazon.createMarketplaceItemLabels(row.targetId,itemLabelRequest(row.marketplaceId,row.sku,row.quantity!,row.format),()=>{if(this.stopped||this.get(row.id).paused||!this.get(row.id).requestedAt)throw new LabelPausedBeforeSend('标签任务已暂停，尚未发出请求');if(!this.matches(row))throw new UserFacingError('标签绑定发生变化');});
         const received=this.get(row.id);received.requestPending=false;received.responseReceived=true;received.requestId=response.requestId;if(received.current)received.status='DOWNLOADING';

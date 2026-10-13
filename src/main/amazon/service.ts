@@ -24,7 +24,7 @@ import type { DraftRecord } from './persistence.ts';
 import { compileAttributesSchema, validateAttributes } from './schema.ts';
 import { nonDeferredImageIssues } from '../image-workflow/deferred-fields.ts';
 import { AmazonTransport, AmazonTransportError } from './transport.ts';
-import type { AmazonDependencies, ApiResult } from './transport.ts';
+import type { AmazonDependencies, ApiResult, LabelDownloadScope } from './transport.ts';
 import type { ProductDataKind } from './read-data.ts';
 import { CredentialVault, parseCredentials } from './vault.ts';
 import type { SecretStorage } from './vault.ts';
@@ -196,6 +196,9 @@ export class AmazonService {
     this.ensureOpen(); return this.transport.createMarketplaceItemLabels(this.active(targetId), body, beforeSend);
   }
   async downloadItemLabel(url: string): Promise<Buffer> { this.ensureOpen(); return this.transport.downloadItemLabel(url); }
+  restoreItemLabelDownloads(scope:LabelDownloadScope,documents:{uri:string;expiration:number}[]):void {
+    this.ensureOpen();this.transport.restoreItemLabelDownloads(this.active(scope.targetId),scope,documents);
+  }
   private active(id: string): AmazonTarget {
     const target = this.getTarget(id);
     if (!target.configured) throw new UserFacingError('店铺授权当前不可用，请在设置中检查凭据状态');

@@ -7,7 +7,7 @@ import { openDatabase } from '../src/main/database.ts';
 import { ProcurementService } from '../src/main/procurement/service.ts';
 import type { AmazonDraft, AmazonTarget, JsonObject } from '../src/shared/amazon-contracts.ts';
 import type { ProductDetail } from '../src/shared/contracts.ts';
-import { AmazonTransportError } from '../src/main/amazon/transport.ts';
+import { AmazonTransport, AmazonTransportError } from '../src/main/amazon/transport.ts';
 import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';
 import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import { salesPurchaseComponents } from '../src/shared/sales-purchase.ts';
@@ -32,12 +32,48 @@ function fixture(t: test.TestContext) {
   let now=Date.parse('2026-10-08T00:00:00.000Z'); const requests: JsonObject[]=[];
   let make: () => Promise<{data:JsonObject;status:number;requestId:string|null}> = async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf'},{downloadType:'URL',uri:'https://labels.amazon.com/two.pdf'}]},status:200,requestId:'request-1'});
   let download=async(_uri:string)=>pdfBytes();
-  const amazon={executionTargetScope:()=>({target,generation:1}),createMarketplaceItemLabels:async(_id:string,body:JsonObject,guard?:()=>void)=>{guard?.();requests.push(body);return make();},downloadItemLabel:async(uri:string)=>download(uri)};
+  const amazon={restoreItemLabelDownloads:(_scope:import('../src/main/amazon/transport.ts').LabelDownloadScope,_documents:{uri:string;expiration:number}[])=>{},executionTargetScope:()=>({target,generation:1}),createMarketplaceItemLabels:async(_id:string,body:JsonObject,guard?:()=>void)=>{guard?.();requests.push(body);return make();},downloadItemLabel:async(uri:string)=>download(uri)};
   let service=new implementation.ItemLabelService(dir,amazon,procurement,{now:()=>now,sleep:async()=>{}});
   t.after(async()=>{await service.close();procurement.close();});
-  return {dir,product,draft,procurement,requests,amazon,get service(){return service;},advance:(ms:number)=>now+=ms,setCreate:(fn:typeof make)=>make=fn,setDownload:(fn:typeof download)=>download=fn,reopen:async()=>{await service.close();service=new implementation!.ItemLabelService(dir,amazon,procurement,{now:()=>now,sleep:async()=>{}});},
+  return {dir,product,draft,procurement,requests,amazon,now:()=>now,get service(){return service;},advance:(ms:number)=>now+=ms,setCreate:(fn:typeof make)=>make=fn,setDownload:(fn:typeof download)=>download=fn,reopen:async()=>{await service.close();service=new implementation!.ItemLabelService(dir,amazon,procurement,{now:()=>now,sleep:async()=>{}});},
     batch:()=>procurement.ensureAutomaticBatch(randomUUID(),[draftId],{[draftId]:5})[0]};
 }
+
+function realLabelTransport(f:ReturnType<typeof fixture>,status:()=>number){
+  const calls:{url:string;init:RequestInit}[]=[],target=f.amazon.executionTargetScope().target;
+  let transport:AmazonTransport;
+  const reset=()=>{transport=new AmazonTransport({active:()=>target,generation:()=>1,credentials:()=>({...target,name:'test',clientId:'client',clientSecret:'secret',refreshToken:'refresh'}),pause:()=>{},audit:()=>{},redact:value=>value,remember:()=>{}},{now:f.now,sleep:async()=>{},resolveAddresses:async()=>['52.1.2.3'],fetch:async()=>{throw Error('native transport expected');},dataFetch:async(url,init)=>{
+    calls.push({url,init});if(url.includes('/auth/o2/token'))return Response.json({access_token:'token',token_type:'bearer',expires_in:3600});
+    if(url.includes('/items/labels'))return Response.json({documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/recovery.pdf?signature=synthetic-private'}]},{headers:{'x-amzn-requestid':'original-post'}});
+    return status()===200?new Response(new Uint8Array(pdfBytes()),{headers:{'content-type':'application/pdf'}}):new Response('unavailable',{status:status()});
+  }});};reset();
+  f.amazon.createMarketplaceItemLabels=async(_id,body,guard)=>transport.createMarketplaceItemLabels(target,body,guard);
+  f.amazon.downloadItemLabel=async uri=>transport.downloadItemLabel(uri);
+  f.amazon.restoreItemLabelDownloads=(scope,documents)=>transport.restoreItemLabelDownloads(target,scope,documents);
+  return {calls,reset,posts:()=>calls.filter(call=>call.url.includes('/items/labels')).length,gets:()=>calls.filter(call=>call.init.method==='GET').length};
+}
+
+test('real transport restores original GET capability after process restart and encrypted backup restore',async t=>{
+  const f=fixture(t),batch=f.batch();let status=503;const transport=realLabelTransport(f,()=>status);
+  const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(transport.posts(),1);assert.equal(transport.gets(),2);
+  const db=openDatabase(f.dir),snapshot={...f.service.get(row.id),status:'DOWNLOADING',nextDueAt:null};db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(snapshot),row.id);db.close();
+  const {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore}=await import('../src/main/backup.ts');
+  const archive=resolve('.test-data',randomUUID()+'.htcbackup'),destination=resolve('.test-data','real-label-restored-'+randomUUID());
+  await createWorkspaceBackup(f.dir,archive,'synthetic-real-transport');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'synthetic-real-transport'));
+  transport.reset();status=200;await f.reopen();f.service.retry(row.id);await f.service.runDue();assert.equal(f.service.get(row.id).status,'READY');assert.equal(transport.posts(),1);
+  transport.reset();const restored=new implementation!.ItemLabelService(destination,f.amazon,f.procurement,{now:f.now,sleep:async()=>{}});
+  try{restored.retry(row.id);await restored.runDue();assert.equal(restored.get(row.id).status,'READY');assert.equal(restored.get(row.id).requestId,'original-post');assert.equal(restored.get(row.id).attempts,1);}finally{await restored.close();}
+  assert.equal(transport.posts(),1);assert.equal(transport.gets(),4);
+  for(const call of transport.calls.filter(call=>call.init.method==='GET')){assert.equal(call.init.credentials,'omit');assert.equal(call.init.redirect,'manual');assert.equal(new Headers(call.init.headers).has('authorization'),false);assert.equal(new Headers(call.init.headers).has('x-amz-access-token'),false);}
+});
+
+test('real transport GET 503 exhausts three download rounds with one POST and actual backoff',async t=>{
+  const f=fixture(t),batch=f.batch(),transport=realLabelTransport(f,()=>503);const [row]=f.service.prepareBatch(batch.id);
+  await f.service.runDue();assert.equal(f.service.get(row.id).status,'QUEUED');const first=f.service.get(row.id);assert.ok(Date.parse(first.nextDueAt!)>f.now());
+  await f.service.runDue();assert.equal(transport.gets(),2);
+  for(let n=0;n<3;n++){f.advance(120000);await f.service.runDue();}
+  const failed=f.service.get(row.id);assert.equal(failed.status,'FAILED');assert.equal(failed.errorCode,'HTTP_503');assert.equal(failed.downloadAttempts,3);assert.equal(failed.attempts,1);assert.equal(failed.requestId,'original-post');assert.equal(transport.posts(),1);assert.equal(transport.gets(),6);
+});
 function changeQuantity(f:ReturnType<typeof fixture>,batchId:string,stockQuantity:number|null){
   const batch=f.procurement.get(batchId);
   f.procurement.update({id:batch.id,revision:batch.revision,lines:batch.lines.map(({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,purchasePrice,purchaseUnit,priceConfirmed,stockQuantity})),shipmentConfirmationId:''});

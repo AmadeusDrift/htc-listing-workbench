@@ -45,6 +45,31 @@ test('arbitrary S3 URLs and invalid quantities never reach network', async () =>
 
 const labelRequest = { marketplaceId: target.marketplaceId, mskuQuantities: [{ msku: 'SKU', quantity: 1 }], labelType: 'STANDARD_FORMAT', pageType: 'A4_21', localeCode: 'en_US' };
 
+test('persisted main-process capability restores exact unexpired download after transport restart',async()=>{
+  const f=fixture(),context={targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:'live' as const,targetGeneration:1};
+  f.transport.restoreItemLabelDownloads(target,context,[{uri,expiration:Date.now()+60000}]);
+  assert.deepEqual(await f.transport.downloadItemLabel(uri),pdf);assert.equal(f.calls.length,1);assert.equal(f.calls[0].init.method,'GET');
+  await assert.rejects(f.transport.downloadItemLabel(uri.replace('private-signature','other')),/授权|来源/);
+  f.transport.clear(target.id);await assert.rejects(f.transport.downloadItemLabel(uri),/授权|来源/);
+});
+
+test('real GET 503 is a safe transient transport error rather than an unknown POST',async()=>{
+  const f=fixture(200,{dataFetch:async(url)=>url.includes('/auth/o2/token')?Response.json({access_token:'private',token_type:'bearer',expires_in:3600}):url.includes('/items/labels')?Response.json({documentDownloads:[{uri,downloadType:'URL'}]}):new Response('unavailable',{status:503})});
+  await f.transport.createMarketplaceItemLabels(target,labelRequest);
+  await assert.rejects(f.transport.downloadItemLabel(uri),error=>error instanceof AmazonTransportError&&error.status===503&&!error.unknownWrite);
+});
+
+test('restored capabilities still reject changed scope, expiry, unrelated origins and private DNS',async()=>{
+  const context={targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:'live' as const,targetGeneration:1};
+  const f=fixture();
+  for(const scope of [{...context,targetGeneration:2},{...context,sellerId:'OTHER'},{...context,targetId:'OTHER'}])assert.throws(()=>f.transport.restoreItemLabelDownloads(target,scope,[{uri,expiration:Date.now()+60000}]),/身份|授权/);
+  assert.throws(()=>f.transport.restoreItemLabelDownloads(target,context,[{uri,expiration:Date.now()-1}]),/过期/);
+  assert.throws(()=>f.transport.restoreItemLabelDownloads(target,context,[{uri:'https://example.com/document.pdf',expiration:Date.now()+60000}]),/来源/);
+  assert.equal(f.calls.length,0);
+  const privateDns=fixture(200,{resolveAddresses:async()=>['127.0.0.1']});privateDns.transport.restoreItemLabelDownloads(target,context,[{uri,expiration:Date.now()+60000}]);
+  await assert.rejects(privateDns.transport.downloadItemLabel(uri),/非公开/);assert.equal(privateDns.calls.length,0);
+});
+
 test('only the exact Amazon-authorized label URL can use native Fake-IP download', async () => {
   let now = Date.now();
   const f = fixture(200, { now: () => now, resolveAddresses: async () => ['198.18.0.91', '198.19.255.254'] });

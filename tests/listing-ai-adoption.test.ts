@@ -35,6 +35,7 @@ test('a newer review requiring changes supersedes an earlier PASS', async t => {
   const f = await fixture(t), suggestion = await f.listing.suggest(f.reference), first = await f.listing.review({ ...f.reference, suggestionResultId: suggestion.id });
   f.respond(payload => chat({ ...reviewFor(payload), verdict: 'NEEDS_CHANGES', issues: [{ field: 'item_name', message: 'Confirm product identity before adoption.' }] }));
   const latest = await f.listing.review({ ...f.reference, suggestionResultId: suggestion.id });
+  assert.notEqual(latest.id,first.id);assert.notEqual(latest.callId,first.callId);assert.equal(f.requests.length,3);assert.equal((f.ai.getResult(first.id)!.output as any).verdict,'PASS');
   const input = { ...f.reference, suggestionResultId: suggestion.id, fields: ['material'] };
   await assert.rejects(f.listing.adopt({ ...input, reviewResultId: latest.id }), /复核|处理问题/);
   await assert.rejects(f.listing.adopt({ ...input, reviewResultId: first.id }), /更新的复核/);

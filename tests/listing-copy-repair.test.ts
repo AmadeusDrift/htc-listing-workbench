@@ -31,7 +31,7 @@ test('current-copy rejection rewrites only reported fields with verified evidenc
   assert.equal((result.review?.review.output as any).verdict, 'PASS');
   assert.equal((result.draft.attributes.item_name as any)[0].value, 'Blue Silicone Coaster');
   assert.ok(result.draft.fieldAdoptions?.[0].reviewResultId);
-  const payload = JSON.parse(f.requests[1].messages[1].content);
+  const payload = f.requests.map(request=>JSON.parse(request.messages[1].content)).find(payload=>payload.repairRequest);
   assert.deepEqual(payload.fields.map((field: any) => field.name), ['item_name']);
   assert.ok(payload.evidence.some((entry: any) => entry.value === '硅胶'));
   assert.equal(payload.repairRequest.issues[0].message, 'Remove the unsupported wording.');
@@ -84,5 +84,5 @@ test('an unchanged evidence-backed candidate still gets independent review witho
   const result=await f.listing.repairCurrentForImages({...reference,reviewResultId:rejected.review.id});
   assert.equal(result.aiCalls,3);assert.equal((result.review?.review.output as any).verdict,'PASS');
   assert.equal(result.draft.revision,draft.revision);assert.equal(result.draft.fieldAdoptions?.length??0,0);
-  assert.equal(f.requests.filter(request=>JSON.parse(request.messages[1].content).operation==='listing-current-review').length,2);
+  assert.equal(f.requests.filter(request=>JSON.parse(request.messages[1].content).operation==='listing-current-review').length,3);
 });

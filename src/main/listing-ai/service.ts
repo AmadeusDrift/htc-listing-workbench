@@ -241,7 +241,7 @@ export class ListingAiService {
     const { draft, context } = this.current(reference, scope); await this.fresh(reference, context);
     this.assertReviewSetting(true);
     const candidate = this.candidates(this.result(reference.suggestionResultId, context), draft, context);
-    return this.ai.listingFields(context, async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); this.candidates(this.result(reference.suggestionResultId, context), this.current(reference).draft, context); }, { suggestionId: reference.suggestionResultId, candidate }, signal);
+    return this.ai.listingFields(context, async () => { this.assertReviewSetting(true); await this.fresh(reference, context); this.assertReviewSetting(true); this.candidates(this.result(reference.suggestionResultId, context), this.current(reference).draft, context); }, { suggestionId: reference.suggestionResultId, candidate }, signal, undefined, true);
   }
   async adopt(raw: unknown, signal?:AbortSignal): Promise<AmazonDraft> {
     signal?.throwIfAborted();const reference = input(raw, 'adopt'), reviewEnabled = this.copyReviewEnabled();

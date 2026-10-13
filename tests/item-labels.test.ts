@@ -90,6 +90,33 @@ test('adding revision binding cannot replay an unknown legacy label request',asy
   const [current]=await f.service.prepareVerifiedBatch(batch.id);await f.service.runDue();
   assert.equal(current.status,'FAILED');assert.equal(current.errorCode,'REQUEST_UNKNOWN');assert.equal(current.attempts,3);assert.equal(f.requests.length,0);
 });
+
+test('UNKNOWN keeps its original identity through price/shipment revisions, prepare, retry and restart',async t=>{
+  const f=fixture(t),batch=f.batch();f.setCreate(async()=>{throw new AmazonTransportError('unknown',null,'original-request',true);});
+  const [initial]=await f.service.prepareVerifiedBatch(batch.id);await f.service.runDue();const original=f.service.get(initial.id);
+  for(const change of ['same','price','shipment'] as const){
+    if(change!=='same'){
+      const b=f.procurement.get(batch.id);f.procurement.update({id:b.id,revision:b.revision,lines:b.lines.map(({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,stockQuantity,purchasePrice:change==='price'?'9.99':purchasePrice,purchaseUnit,priceConfirmed})),shipmentConfirmationId:change==='shipment'?'FBA12345':''});
+    }
+    const [held]=await f.service.prepareVerifiedBatch(batch.id);assert.equal(held.id,original.id);assert.equal(held.attempts,1);assert.equal(held.requestId,'original-request');assert.equal(held.errorCode,'REQUEST_UNKNOWN');
+    assert.throws(()=>f.service.retry(held.id),/未知|核对/);await f.service.runDue();assert.equal(f.requests.length,1);
+    await f.reopen();assert.deepEqual(f.service.get(original.id),original);
+  }
+  const {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore}=await import('../src/main/backup.ts');
+  const archive=resolve('.test-data',randomUUID()+'.htcbackup'),destination=resolve('.test-data','unknown-restored-'+randomUUID());
+  await createWorkspaceBackup(f.dir,archive,'synthetic-unknown-test');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'synthetic-unknown-test'));
+  const restored=openDatabase(destination);try{assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels WHERE id=?').get(original.id)!.record_json)),original);}finally{restored.close();}
+});
+
+test('a late UNKNOWN response blocks an already queued newer revision of the same SKU',async t=>{
+  const f=fixture(t),batch=f.batch();let reject!:(error:unknown)=>void;
+  f.setCreate(()=>new Promise((_resolve,fail)=>{reject=fail;}));const [old]=f.service.prepareBatch(batch.id);const pending=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));
+  changeQuantity(f,batch.id,6);f.service.prepareBatch(batch.id);
+  reject(new AmazonTransportError('late unknown',null,'late-request',true));await pending;
+  f.setCreate(async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf'}]},status:200,requestId:'should-not-send'}));
+  await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(old.id).errorCode,'REQUEST_UNKNOWN');assert.equal(f.service.get(old.id).requestId,'late-request');
+  assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].id,old.id);await f.reopen();await f.service.runDue();assert.equal(f.requests.length,1);
+});
 test('automatic procurement is incremental and idempotent and preserves sales units', t=>{
   const f=fixture(t),job=randomUUID(); const [first]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});
   const [again]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});
@@ -142,11 +169,11 @@ test('changed target identity invalidates existing labels and creates an explici
   const f=fixture(t),batch=f.batch(),[old]=f.service.prepareBatch(batch.id);await f.service.runDue();f.amazon.executionTargetScope().target.sellerId='NEW_SELLER';
   const [current]=f.service.prepareBatch(batch.id);assert.equal(f.service.get(old.id).status,'STALE');assert.equal(current.status,'FAILED');assert.equal(current.errorCode,'TARGET_CONTEXT_CHANGED');await f.service.runDue();assert.equal(f.requests.length,1);
 });
-test('pause cannot turn an unknown sent request into an automatic replay, but explicit retry clears pause',async t=>{
+test('pause and ordinary retry cannot replay an unknown sent request',async t=>{
   const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});const [row]=f.service.prepareBatch(batch.id);
   let fail!:(error:unknown)=>void;f.setCreate(()=>new Promise((_resolve,reject)=>{fail=reject;}));const running=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));f.service.pauseJob(job);fail(new AmazonTransportError('unknown',null,null,true));await running;
   assert.equal(f.service.get(row.id).status,'FAILED');assert.equal(f.service.get(row.id).errorCode,'REQUEST_UNKNOWN');f.service.resumeJob(job);await f.service.runDue();assert.equal(f.requests.length,1);
-  f.service.pauseJob(job);const retried=f.service.retry(row.id);assert.equal(retried.paused,false);assert.equal(retried.attempts,1);
+  f.service.pauseJob(job);assert.throws(()=>f.service.retry(row.id),/未知/);assert.equal(f.service.get(row.id).attempts,1);
 });
 test('verification refuses a label superseded while its files are being read',async t=>{
   const f=fixture(t),batch=f.batch(),[old]=f.service.prepareBatch(batch.id);await f.service.runDue();
@@ -185,7 +212,7 @@ for(const failure of ['REQUEST_UNKNOWN','RETRY_EXHAUSTED'] as const)test(`creden
   f.amazon.executionTargetScope=()=>({target,generation:2});const [rotated]=f.service.prepareBatch(batch.id);await f.service.runDue();
   assert.equal(rotated.status,'FAILED');assert.equal(rotated.attempts,attempts);assert.equal(f.requests.length,count);
   await f.reopen();f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,count);
-  const explicit=f.service.retry(rotated.id);assert.equal(explicit.attempts,attempts);await f.service.runDue();assert.equal(f.requests.length,count+1);
+  if(failure==='REQUEST_UNKNOWN'){assert.equal(rotated.id,old.id);assert.throws(()=>f.service.retry(rotated.id),/未知/);await f.service.runDue();assert.equal(f.requests.length,count);}else{const explicit=f.service.retry(rotated.id);assert.equal(explicit.attempts,attempts);await f.service.runDue();assert.equal(f.requests.length,count+1);}
 });
 test('credential rotation does not bypass a cancelled job',async t=>{
   const f=fixture(t),job=randomUUID(),[batch]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});f.service.prepareBatch(batch.id);f.service.cancelJob(job);
@@ -232,7 +259,7 @@ test('legacy queued rows preserve evidence and cannot dispatch through startup o
 test('prepare never retries failed unknown or exhausted labels and strict intent leaves fingerprints compatible',async t=>{
  const f=fixture(t),batch=f.batch();f.setCreate(async()=>{throw new AmazonTransportError('unknown',null,'unknown-id',true);});const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
  const failed=f.service.get(row.id);f.service.prepareBatch(batch.id);await f.service.runDue();assert.deepEqual(f.service.get(row.id),failed);assert.equal(f.requests.length,1);
- f.service.retry(row.id);await f.service.runDue();assert.equal(f.requests.length,2);assert.equal(f.service.get(row.id).attempts,2);
+ assert.throws(()=>f.service.retry(row.id),/未知/);await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(row.id).attempts,1);
  const {validateItemLabelRecord}=await import('../src/main/item-labels/records.ts');for(const requestedAt of [null,123,'bad'])assert.throws(()=>validateItemLabelRecord({...failed,requestedAt}));
  const legacy={...failed};delete legacy.requestedAt;assert.equal(validateItemLabelRecord(legacy).fingerprint,failed.fingerprint);
 });

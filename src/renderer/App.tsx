@@ -1,3 +1,4 @@
+import { captureScroll, restoreScroll, type ScrollPosition } from './navigation-scroll';
 import { NavigationMemoryContext } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { AlertCircle, Box, CheckCircle2, ChevronRight, FileInput, FolderOpen, Inbox, LoaderCircle, Monitor, Plus, ShieldCheck, X } from 'lucide-react';
@@ -32,14 +33,20 @@ export default function App() {
   const api = window.red;
   const formGuards = useRef(createFormGuardRegistry()).current;
   const navigationMemory = useRef(new Map<string, unknown>()).current;
-  const [returnTo, setReturnTo] = useState<{ view: MainView; scroll: number; context?: ProblemContext } | null>(null);
+  const [returnTo, setReturnTo] = useState<{ view: MainView; scroll: ScrollPosition[]; context?: ProblemContext } | null>(null);
   const mainContent = useRef<HTMLElement>(null);
+  const pendingScroll = useRef<ScrollPosition[] | null>(null);
   const appearance = useAppearance();
   const [settingsRequest, setSettingsRequest] = useState<{ module: SettingsModule; token: number }>({ module: 'amazon', token: 0 });
   const [products, setProducts] = useState<ProductSummary[]>([]);
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [savedProduct, setSavedProduct] = useState<ProductDetail | null>(null);
   const [view, setView] = useState<MainView>('inbox');
+  useEffect(() => {
+    if (!pendingScroll.current || !mainContent.current) return;
+    const positions = pendingScroll.current; pendingScroll.current = null;
+    return restoreScroll(mainContent.current, positions);
+  }, [view]);
   const [placements, setPlacements] = useState<WorkspacePlacement[]>([]);
   const [resultDrafts, setResultDrafts] = useState<AmazonDraft[]>([]);
   const [shippingBatchId, setShippingBatchId] = useState<string>();
@@ -380,11 +387,13 @@ export default function App() {
   function openProduct(id: string, initialTab: EditorTab = 'info', draftId?: string, context?: ProblemContext) {
     guarded(() => perform('正在打开商品…', async () => {
       const detail = await api.getProduct(id);
-      if (draftId && !(await api.listAmazonDrafts(id)).some(row => row.id === draftId)) {
+      const requestedDraft = draftId ? (await api.listAmazonDrafts(id)).find(row => row.id === draftId) : undefined;
+      if (draftId && !requestedDraft) {
         setError('目标草稿已不存在，请返回来源页面刷新；未打开其他草稿。'); return;
       }
+      if (requestedDraft && context?.variantId && requestedDraft.variantId !== context.variantId) { setError('目标草稿与 SKU 不一致；未打开其他草稿。'); return; }
       if (context?.variantId && !detail.variants.some(item => item.id === context.variantId)) { setError('目标 SKU 已不存在，请返回来源页面刷新。'); return; }
-      setReturnTo({ view, scroll: mainContent.current?.scrollTop ?? 0, context });
+      setReturnTo({ view, scroll: mainContent.current ? captureScroll(mainContent.current) : [], context });
       commitProduct(detail); setTab(initialTab); setInitialDraftId(draftId); setWorkflowRequest(null); setView('manual');
     }));
   }
@@ -392,8 +401,7 @@ export default function App() {
   function returnToSource() {
     if (!returnTo) return;
     const destination = returnTo;
-    guarded(() => { setView(destination.view); setReturnTo(null);
-      requestAnimationFrame(() => { if (mainContent.current) mainContent.current.scrollTop = destination.scroll; });
+    guarded(() => { pendingScroll.current = destination.scroll; setView(destination.view); setReturnTo(null);
     });
   }
 
@@ -441,7 +449,7 @@ export default function App() {
 
           : view === 'manual' ? <div className="manual-workspace"><WorkflowRail mode="manual" tab={tab} step={workflowRequest?.step} busy={Boolean(busy)} onSelect={(next, step) => { if (product) guarded(() => { setTab(next); setWorkflowRequest({ step, token: Date.now() }); }); }} />
             {product || manualProducts.length > 0 ? <div className="workbench-layout"><ProductList products={manualProducts} selectedId={product?.id} busy={Boolean(busy)} onSelect={selectProduct} />
-              {product ? <ProductEditor focusVariantId={returnTo?.context?.variantId} product={product} tab={tab} initialDraftId={initialDraftId} workflowRequest={workflowRequest} dirty={dirty} busy={Boolean(busy)} readiness={readiness} onImageSettings={() => openSettings('images')} onTabChange={nextTab => { if (nextTab !== tab) guarded(() => { setTab(nextTab); setWorkflowRequest(null); }); }} onChange={changeProduct} onSave={() => { void saveDraft(); }} onExport={exportProduct} onImportImages={importImages} onUpdateAsset={updateAsset} onCheck={checkProduct} amazonTargets={amazonTargets} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onAmazonDirtyChange={setAmazonDirty} onTargetsChanged={refreshAmazonTargets} />
+              {product ? <ProductEditor problemContext={returnTo?.context} onReturnToSource={returnTo ? returnToSource : undefined} focusVariantId={returnTo?.context?.variantId} product={product} tab={tab} initialDraftId={initialDraftId} workflowRequest={workflowRequest} dirty={dirty} busy={Boolean(busy)} readiness={readiness} onImageSettings={() => openSettings('images')} onTabChange={nextTab => { if (nextTab !== tab) guarded(() => { setTab(nextTab); setWorkflowRequest(null); }); }} onChange={changeProduct} onSave={() => { void saveDraft(); }} onExport={exportProduct} onImportImages={importImages} onUpdateAsset={updateAsset} onCheck={checkProduct} amazonTargets={amazonTargets} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onAmazonDirtyChange={setAmazonDirty} onTargetsChanged={refreshAmazonTargets} />
                 : <div className="select-product-empty"><Box size={35} strokeWidth={1.2} /><h2>选择一件商品</h2><p>从左侧列表打开商品资料。</p></div>}
             </div> : <EmptyWorkspace onCreate={createProduct} onImport={importProducts} busy={Boolean(busy)} />}
           </div>

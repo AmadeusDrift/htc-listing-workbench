@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
-export interface ProblemContext { variantId?: string; taskId?: string }
+export interface ProblemContext { variantId?: string; taskId?: string; imageSlot?: number }
 export const NavigationMemoryContext = createContext<Map<string, unknown> | null>(null);
 /** Session-only browsing state. Never persisted as business data or registered dirty. */
 export function usePageState<T>(key: string, initial: T) {

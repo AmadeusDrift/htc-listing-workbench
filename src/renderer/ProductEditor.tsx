@@ -1,3 +1,4 @@
+import type { ProblemContext } from './navigation-context';
 import { useEffect } from 'react';
 import { AlertCircle, ArrowDownToLine, Check, CheckCircle2, ChevronDown, Circle, ClipboardCheck, FileText, ImageIcon, Info, Layers3, Link2, Plus, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import type { Fact, FactState, ListingReadiness, ProductDetail, ProductStatus, Variant } from '../shared/contracts';
@@ -13,6 +14,8 @@ interface Props {
   product: ProductDetail;
   tab: EditorTab;
   initialDraftId?: string;
+  problemContext?: ProblemContext;
+  onReturnToSource?: () => void;
   focusVariantId?: string;
   workflowRequest: { step: WorkflowStep; token: number } | null;
   dirty: boolean;
@@ -96,7 +99,7 @@ export function ProductEditor(props: Props) {
         {product.variants.length > 0 && <details className="source-snapshot"><summary><span><ShieldCheck size={17} />原始来源快照<span className="snapshot-readonly">只读</span></span><ChevronDown size={15} /></summary><p>来源规格和采购价分别保留首次非空保存时的值，后续修改不会覆盖。手工创建和导入的 SKU 都会留存；尚未填写的字段暂时没有快照。</p><div className="source-table-wrap"><table><thead><tr><th>当前 SKU</th><th>来源规格</th><th>来源采购价</th></tr></thead><tbody>{product.variants.map((variant) => <tr key={variant.id}><td className="mono">{variant.sku || '未命名 SKU'}</td><td>{variant.sourceSpec || <span className="muted">无来源快照</span>}</td><td className="numeric">{variant.sourcePurchasePrice || <span className="muted">无来源快照</span>}</td></tr>)}</tbody></table></div></details>}
       </fieldset>}
       {tab === 'assets' && <><div className="image-settings-entry"><p>管理本地素材与 SKU 归属</p><button type="button" className="button secondary" disabled={busy} onClick={props.onImageSettings}><ImageIcon size={16} />图片接口</button></div><AssetsPanel product={product} busy={busy} onImport={props.onImportImages} onUpdate={props.onUpdateAsset} /></>}
-      {tab === 'checks' && <><div data-workflow-step="hosting" tabIndex={-1} className="workflow-hosting-note"><Info size={19} /><div><strong>图片上传与公开地址</strong><p>自动图片上传尚未接入此工作流。当前可在上架属性中填写已有的公开 HTTPS 图片地址，并核对图片与 SKU 归属。</p></div></div><AmazonPanel key={product.id} initialDraftId={props.initialDraftId} workflowRequest={props.workflowRequest} product={product} targets={props.amazonTargets} busy={busy} run={props.run} guarded={props.guarded} registerGuard={props.registerGuard} onDirtyChange={props.onAmazonDirtyChange} onTargetsChanged={props.onTargetsChanged} /><details className="local-preflight" open><summary>本地商品资料完整性检查</summary><ChecksPanel readiness={props.readiness} busy={busy} onCheck={props.onCheck} /></details></>}
+      {tab === 'checks' && <><div data-workflow-step="hosting" tabIndex={-1} className="workflow-hosting-note"><Info size={19} /><div><strong>图片上传与公开地址</strong><p>自动图片上传尚未接入此工作流。当前可在上架属性中填写已有的公开 HTTPS 图片地址，并核对图片与 SKU 归属。</p></div></div><AmazonPanel problemContext={props.problemContext} onReturnToSource={props.onReturnToSource} key={product.id} initialDraftId={props.initialDraftId} workflowRequest={props.workflowRequest} product={product} targets={props.amazonTargets} busy={busy} run={props.run} guarded={props.guarded} registerGuard={props.registerGuard} onDirtyChange={props.onAmazonDirtyChange} onTargetsChanged={props.onTargetsChanged} /><details className="local-preflight" open><summary>本地商品资料完整性检查</summary><ChecksPanel readiness={props.readiness} busy={busy} onCheck={props.onCheck} /></details></>}
     </div>
     <footer className="editor-footer"><span><ShieldCheck size={13} />原始来源与编辑内容分别保留</span><span>修订 {product.revision}<span className="footer-divider">/</span>本地商品资料</span></footer>
   </section>;

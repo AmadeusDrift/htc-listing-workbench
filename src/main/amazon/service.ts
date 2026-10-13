@@ -58,7 +58,8 @@ import { getSalesParentIdentity, isSameSalesFamily } from '../sales-plans/family
 
 const PREVIEW_TTL = 15 * 60_000;
 const FINAL_STATES = new Set(['SUBMITTING', 'SUBMITTED', 'PROCESSING', 'BUYABLE', 'DISCOVERABLE', 'UNKNOWN']);
-export const FAMILY_REBIND_EVENT_SUMMARY = '已原地迁移未提交草稿的父子关系；原 SKU、销售配方、文案和图片保留，旧预览已失效';
+import { FAMILY_REBIND_EVENT_SUMMARY } from './family-events.ts';
+export { FAMILY_REBIND_EVENT_SUMMARY } from './family-events.ts';
 function reference(input: unknown): DraftReference {
   const value = object(input); const id = textField(value.id, '草稿 ID', 100);
   if (!Number.isInteger(value.revision) || Number(value.revision) < 1) throw new UserFacingError('草稿版本无效，请重新加载');

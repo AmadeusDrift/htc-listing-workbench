@@ -1,0 +1,32 @@
+import type { DatabaseSync } from 'node:sqlite';
+import { transaction } from '../application/transaction.ts';
+import { UserFacingError } from '../../shared/errors.ts';
+
+export const MODULE_SCHEMA_VERSION=22;
+export const MIGRATION_TABLES={module_migration_journal:['version','name','applied_at']};
+const migrations=[{version:22,name:'module-foundation',apply(db:DatabaseSync){
+  db.exec('CREATE TABLE module_migration_journal(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+}}];
+export function assertMigrationJournal(db:DatabaseSync):void {
+  const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
+  if(version<22)return;
+  const rows=db.prepare('SELECT version,name,applied_at FROM module_migration_journal ORDER BY version').all();
+  const expected=migrations.filter(m=>m.version<=version);
+  if(rows.length!==expected.length||rows.some((r,i)=>r.version!==expected[i].version||r.name!==expected[i].name||!Number.isFinite(Date.parse(String(r.applied_at)))))
+    throw new UserFacingError('模块迁移历史不完整或已变化');
+}
+/** Called only from explicit database initialization, never from ordinary queries. */
+export function migrateModules(db:DatabaseSync):void {
+  let version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
+  if(version<21||version>MODULE_SCHEMA_VERSION)throw new UserFacingError('模块迁移起始版本不受支持');
+  for(const migration of migrations)if(migration.version>version){
+    if(migration.version!==version+1)throw new UserFacingError('模块迁移版本不连续');
+    transaction(db,()=>{
+      migration.apply(db);
+      db.prepare('INSERT INTO module_migration_journal(version,name,applied_at) VALUES(?,?,?)').run(migration.version,migration.name,new Date().toISOString());
+      db.exec(`PRAGMA user_version=${migration.version}`);
+    });
+    version=migration.version;
+  }
+  assertMigrationJournal(db);
+}

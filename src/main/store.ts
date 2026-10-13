@@ -1,4 +1,5 @@
 import { readNativeImageReceipt } from './source-images.ts';
+import { transaction } from './application/transaction.ts';
 import { restoreWorkflowSourceBindings } from './image-upstream-trace.ts';
 import { recordConsistencyBinding,assertConsistencyHistory } from './source-image-consistency/history.ts';
 import { assertProductConsistency } from './source-image-consistency/proof.ts';
@@ -32,10 +33,8 @@ export class WorkspaceStore {
   assertSourceConsistency(productId:string,variantIds:string[]):void { assertProductConsistency(this.db,this.getProduct(productId),variantIds); }
 
   private transaction<T>(operation: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try { const result = operation(); this.db.exec('COMMIT'); return result; }
+    try { return transaction(this.db,operation); }
     catch (error) {
-      this.db.exec('ROLLBACK');
       if (error instanceof Error && error.message.includes('UNIQUE constraint failed: variants.sku')) throw new UserFacingError('SKU 已存在，请使用不同的 SKU；本次修改未保存');
       throw error;
     }

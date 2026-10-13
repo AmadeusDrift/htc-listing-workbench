@@ -5,7 +5,7 @@ export type DataOwner=ModuleId|'maintenance'|'settings'|'connections';
 /** Declares the target owner; legacy cross-owner writes remain migration work, not implicit permission. */
 export const MODULE_TABLES:Readonly<Partial<Record<DataOwner,readonly string[]>>>=Object.freeze({
   source:['collection_receipts','collection_captures','miaoshou_receipts','miaoshou_sync_runs','miaoshou_sync_items','source_snapshots'],
-  product:['products','variants','facts','variant_assets','product_workspaces','source_image_provenance','source_consistency_attempts','source_consistency_assessments','source_consistency_decisions','source_consistency_bindings','product_source_adoptions','product_fact_scopes'],
+  product:['products','variants','facts','variant_assets','product_workspaces','source_image_provenance','source_consistency_attempts','source_consistency_assessments','source_consistency_decisions','source_consistency_bindings','product_source_adoptions','product_fact_scopes','product_fact_models'],
   sales:['sku_naming_sequences','sku_naming_groups','sku_naming_identities'],
   catalog:['schema_cache','category_libraries','schema_fetch_operations'],
   listing:['listing_drafts','issues','content_versions','listing_completion_operations'],

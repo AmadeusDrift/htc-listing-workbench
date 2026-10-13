@@ -149,6 +149,7 @@ for(const freeze of ['explicit','draft'] as const)test(`legacy unscoped measurem
   const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[{name:'产品长度',value:'11 cm'}],description:''};
   const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');
   db.prepare('DELETE FROM product_source_adoptions WHERE id=?').run(receipt.productId);
+  db.prepare('DELETE FROM product_fact_models WHERE id=?').run(receipt.productId);
   db.prepare("DELETE FROM product_fact_scopes WHERE json_extract(record_json,'$.productId')=?").run(receipt.productId);
   const p=store.getProduct(receipt.productId),variant=p.variants[0];
   const before=miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo');assert.equal(before.item?.length?.value,4.33);
@@ -194,6 +195,7 @@ test('first legacy scope edit persists model before any freeze, including deleti
   const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[{name:'产品长度',value:'11 cm'}],description:''};
   const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');
   db.prepare('DELETE FROM product_source_adoptions WHERE id=?').run(receipt.productId);
+  db.prepare('DELETE FROM product_fact_models WHERE id=?').run(receipt.productId);
   db.prepare("DELETE FROM product_fact_scopes WHERE json_extract(record_json,'$.productId')=?").run(receipt.productId);
   const raw=String(db.prepare('SELECT record_json FROM miaoshou_receipts').get()!.record_json);
   let p=store.getProduct(receipt.productId);const variant=p.variants[0];
@@ -202,8 +204,8 @@ test('first legacy scope edit persists model before any freeze, including deleti
   assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
   p=store.saveProduct({...saveInput(p),facts:[]});
   assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined,'deletion before first freeze must not restore raw measurement');
-  const adoption=JSON.parse(String(db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(p.id)!.record_json));
-  assert.equal(adoption.scopeModelVersion,1);assert.equal(adoption.frozen,false);
+  assert.equal(db.prepare('SELECT 1 FROM product_source_adoptions WHERE id=?').get(p.id),undefined,'scope model does not invent source adoption');
+  const model=JSON.parse(String(db.prepare('SELECT record_json FROM product_fact_models WHERE id=?').get(p.id)!.record_json));assert.equal(model.scopeModelVersion,1);
   db.close();store.close();store=new WorkspaceStore(dir);db=openDatabase(dir);
   assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
   const file=join(dir,'edited-scope.htcbackup'),restoredDir=join(dir,'restored');
@@ -219,4 +221,27 @@ test('first legacy scope edit persists model before any freeze, including deleti
     assert.equal(restored.getProduct(p.id).revision,p.revision);assertSourceAdoptionHistory(restoredDb);
   }finally{amazon.close();restoredDb.close();restored.close();}
   store.freezeSourceVersion(p.id,p.revision);assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+});
+
+import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';
+for(const initialFacts of [true,false])test(`persistent empty fact model keeps quantity prose untrusted across deletion, portable import, restart and backup (initial facts: ${initialFacts})`,async t=>{
+  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/scope-quantity-model-'));
+  let store=new WorkspaceStore(dir),db=openDatabase(dir);t.after(()=>{db.close();store.close();rmSync(dir,{recursive:true,force:true});});
+  const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:initialFacts?[{name:'包装数量',value:'12'}]:[],description:'12 pcs per pack',detailText:'12 pcs per pack'};
+  const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');
+  let p=store.getProduct(receipt.productId);
+  const check=(product:typeof p)=>{
+    assert.equal(product.factScopeModelVersion,1);
+    assert.ok(product.variants.every(v=>productSourceQuantity(product,v).piecesPerPack===1));
+    assert.ok(buildSalesRecipes(product,null,defaultListingRules()).every(r=>r.components.every(c=>c.sourcePackPieces===1)));
+  };
+  check(p);p=store.saveProduct({...saveInput(p),facts:[]});check(p);
+  db.close();store.close();store=new WorkspaceStore(dir);db=openDatabase(dir);check(store.getProduct(p.id));
+  const portable=exportProductData(p) as any;assert.equal(portable.version,2);assert.equal(portable.products[0].factScopeModelVersion,1);assert.deepEqual(portable.products[0].facts,[]);
+  portable.products[0].variants.forEach((v:any,i:number)=>v.sku=`PORTABLE-${i}`);
+  const [importedId]=store.importProducts(parseImport(JSON.stringify(portable),'json'));const imported=store.getProduct(importedId);check(imported);
+  assert.equal(db.prepare('SELECT 1 FROM product_source_adoptions WHERE id=?').get(importedId),undefined,'portable marker must not invent source adoption');
+  const archive=join(dir,'model.htcbackup'),restoredDir=join(dir,'restored');await createWorkspaceBackup(dir,archive,'scope-passphrase');const prepared=await prepareWorkspaceRestore(restoredDir,archive,'scope-passphrase');await commitWorkspaceRestore(restoredDir,prepared);
+  const restored=new WorkspaceStore(restoredDir);try{check(restored.getProduct(p.id));check(restored.getProduct(importedId));}finally{restored.close();}
+  const legacy={...imported,factScopeModelVersion:undefined};assert.equal(productSourceQuantity(legacy,legacy.variants[0]).piecesPerPack,12);
 });

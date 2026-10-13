@@ -1,4 +1,4 @@
-import { factsForVariant } from './fact-scopes.ts';
+import { factsForVariant, hasFactScopeModel } from './fact-scopes.ts';
 import type { ProductDetail, Variant } from './contracts.ts';
 /** Supplier quote quantity is separate from the pieces in one sale package. */
 export interface SourceQuantity {
@@ -50,7 +50,7 @@ export function sourcePackCost(quotedCny: number, quantity: SourceQuantity): num
 }
 /** Selected SKU wording wins; unambiguous product packaging text is a fallback before 1 pc. */
 export function productSourceQuantity(product: ProductDetail, variant: Variant, detailText = ''): SourceQuantity {
-  const scoped=product.facts.some(f=>f.scope!==undefined);
+  const scoped=hasFactScopeModel(product);
   product={...product,facts:factsForVariant(product,variant.id),...(scoped?{title:'',description:''}:{})};
   if(scoped)detailText='';
   const spec=variant.normalizedSpec.trim()||variant.originalSpec;

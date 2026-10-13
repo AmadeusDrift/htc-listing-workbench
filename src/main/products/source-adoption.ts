@@ -1,3 +1,4 @@
+import { writeProductFactModel } from './fact-models.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../../shared/errors.ts';
 import { readSourceSnapshot, saveSourceSnapshot } from '../miaoshou/source-snapshots.ts';
@@ -55,7 +56,8 @@ export function freezeSourceForProduct(db:DatabaseSync,productId:string):void{
 }
 /** First scope edit may precede any draft/task freeze. Join the caller's product-save transaction. */
 export function enterFactScopeModel(db:DatabaseSync,productId:string):void{
-  const prior=ensureSourceAdoption(db,productId);
+  writeProductFactModel(db,productId);
+  const prior=readSourceAdoption(db,productId);
   if(prior&&prior.scopeModelVersion!==1)save(db,{...prior,scopeModelVersion:1});
 }
 

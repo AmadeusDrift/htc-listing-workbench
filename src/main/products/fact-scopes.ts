@@ -1,3 +1,5 @@
+import { hasFactScopeModel } from '../../shared/fact-scopes.ts';
+import { readProductFactModel } from './fact-models.ts';
 import { enterFactScopeModel } from './source-adoption.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -28,7 +30,7 @@ export function saveFactScopes(db:DatabaseSync,previous:ProductDetail,input:Save
     const record={version:2,id:fact.id,productId:input.id,scope:fact.scope,...(fact.scope==='variant'?{variantId:fact.variantId}:{}),source:'manual',productRevision:input.revision+1,confirmedAt:new Date().toISOString(),...(sourceReceiptId?{sourceReceiptId}:{})};
     db.prepare('INSERT INTO product_fact_scopes(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(fact.id,JSON.stringify(record));
   }
-  if([...previous.facts,...input.facts].some(f=>f.scope!==undefined))enterFactScopeModel(db,input.id);
+  if(hasFactScopeModel(previous)||hasFactScopeModel(input))enterFactScopeModel(db,input.id);
   for(const old of previous.facts)if(!input.facts.some(f=>f.id===old.id))db.prepare('DELETE FROM product_fact_scopes WHERE id=?').run(old.id);
   for(const fact of input.facts){const scope=readFactScope(db,fact.id);if(scope.scope==='variant'&&!ids.has(scope.variantId!))throw new UserFacingError('请先调整已移除 SKU 的事实范围');}
 }
@@ -40,9 +42,7 @@ export function sourceMeasurementSnapshot(db:DatabaseSync,receipt:MiaoshouReceip
   // Freezing a legacy source adds adoption metadata without changing its facts.
   // Only actual model entry or active scopes changes applicability; an empty new
   // source still has the model marker and cannot broadcast its unbound prose.
-  const adoption=db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(receipt.productId);
-  const explicitModel=adoption&&JSON.parse(String(adoption.record_json)).scopeModelVersion===1;
-  if(!explicitModel&&!db.prepare('SELECT 1 FROM facts f JOIN product_fact_scopes s ON s.id=f.id WHERE f.product_id=? LIMIT 1').get(receipt.productId))return receipt.snapshot;
+  if(readProductFactModel(db,receipt.productId)!==1)return receipt.snapshot;
   const attributes=db.prepare(`SELECT f.name,f.value,s.record_json FROM facts f JOIN product_fact_scopes s ON s.id=f.id
     WHERE f.product_id=? AND f.state IN ('source_confirmed','human_confirmed')`).all(receipt.productId).flatMap(row=>{
       const scope=JSON.parse(String(row.record_json));return scope.scope==='common'||scope.scope==='variant'&&scope.variantId===variantId?[{name:String(row.name),value:String(row.value)}]:[];

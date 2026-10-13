@@ -1,4 +1,4 @@
-import { readFactScope, saveFactScopes } from './products/public.ts';
+import { readFactScope, saveFactScopes, readProductFactModel, writeProductFactModel } from './products/public.ts';
 import { readNativeImageReceipt } from './source-images.ts';
 import { transaction } from './application/transaction.ts';
 import { freezeSourceForProduct } from './products/public.ts';
@@ -22,7 +22,7 @@ export interface NewAsset {
   originalPath: string; previewPath: string; sha256: string;
 }
 export interface StoredAsset extends NewAsset { productId: string }
-export type ImportedProduct = Omit<SaveProductInput, 'id' | 'revision'>;
+export type ImportedProduct = Omit<SaveProductInput, 'id' | 'revision'> & {factScopeModelVersion?:1};
 export type SampleLane = 'manual' | 'inbox' | 'automatic';
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
 const now = () => new Date().toISOString();
@@ -85,7 +85,8 @@ export class WorkspaceStore {
       width: Number(a.width), height: Number(a.height), byteSize: Number(a.byte_size), previewUrl: `red-asset://image/${a.id}`,
       createdAt: String(a.created_at), variantIds: this.db.prepare('SELECT variant_id FROM variant_assets WHERE asset_id=? ORDER BY rowid').all(a.id).map(r => String(r.variant_id)),
     }));
-    return { id, title: String(p.title), sourceUrl: String(p.source_url), description: String(p.description), status: p.status as ProductDetail['status'],
+    const factScopeModelVersion=readProductFactModel(this.db,id);
+    return { ...(factScopeModelVersion?{factScopeModelVersion}:{}), id, title: String(p.title), sourceUrl: String(p.source_url), description: String(p.description), status: p.status as ProductDetail['status'],
       origin: p.origin as ProductOrigin, revision: Number(p.revision), createdAt: String(p.created_at), updatedAt: String(p.updated_at), variants, facts, assets };
   }
   listProducts(): ProductSummary[] {
@@ -245,9 +246,14 @@ export class WorkspaceStore {
   }
   importProducts(products: ImportedProduct[], origin: ProductOrigin = 'import'): string[] {
     // Parse the entire batch before opening a write transaction.
-    const validated = products.map(p => parseSaveProduct({ ...p, id: randomUUID(), revision: 1 }));
+    const validated = products.map(p => {
+      const {factScopeModelVersion,...value}=p;
+      if(factScopeModelVersion!==undefined&&factScopeModelVersion!==1)throw new UserFacingError('事实模型版本无效');
+      return {...parseSaveProduct({ ...value, id: randomUUID(), revision: 1 }),...(factScopeModelVersion?{factScopeModelVersion}:{})};
+    });
     return this.transaction(() => validated.map(input => {
       const id = this.insertProduct(origin, input.title);
+      if(input.factScopeModelVersion)writeProductFactModel(this.db,id);
       this.saveInsideTransaction({ ...input, id });
       this.audit(id, 'product.imported', origin === 'sample' ? '载入示例商品' : '导入商品资料', { origin });
       return id;

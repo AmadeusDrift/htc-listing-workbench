@@ -2,3 +2,5 @@ export { previewSourceAdoption, adoptSource, adoptedSourceReceipt, freezeSourceF
 export type { SourceAdoption } from './source-adoption.ts';
 
 export { readFactScope, saveFactScopes, sourceMeasurementSnapshot } from './fact-scopes.ts';
+
+export { readProductFactModel, writeProductFactModel } from './fact-models.ts';

@@ -1,3 +1,4 @@
+import { hasFactScopeModel } from '../../shared/fact-scopes.ts';
 import { PROGRAM_RELATION_FIELDS } from '../amazon/program-relations.ts';
 import { HAUL_UNSUPPORTED_FIELDS } from '../amazon/listing-program.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
@@ -25,7 +26,7 @@ function meaning(name: string): ListingEvidence['meaning'] {
   return 'general';
 }
 export function buildListingContext(draft: AmazonDraft, product: ProductDetail, targetGeneration: number, legacy=false): ListingAiContext {
-  const originalProduct=product,hasScopedFacts=product.facts.some(f=>f.scope!==undefined);
+  const originalProduct=product,hasScopedFacts=hasFactScopeModel(product);
   product=projectSalesProduct(product,draft.salesPlan,draft.variantId);
   const variant = product.variants.find(v => v.id === draft.variantId);
   if (!variant || product.revision !== draft.productRevision || variant.sku !== draft.sku) throw new UserFacingError('来源商品或 SKU 已变化，请建立新草稿');

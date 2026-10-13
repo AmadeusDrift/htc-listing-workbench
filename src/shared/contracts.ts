@@ -75,6 +75,8 @@ export interface ProductSummary {
   updatedAt: string;
 }
 export interface ProductDetail {
+  /** Read-only durable scope model; absence retains legacy interpretation. */
+  readonly factScopeModelVersion?: 1;
   id: string;
   title: string;
   sourceUrl: string;

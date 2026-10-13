@@ -1,4 +1,4 @@
-import { factsForVariant } from '../../shared/fact-scopes.ts';
+import { factsForVariant, hasFactScopeModel } from '../../shared/fact-scopes.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonTarget } from '../../shared/amazon-contracts.ts';
 import type { ListingRules } from '../../shared/listing-rules.ts';
@@ -15,7 +15,7 @@ export const salesStoreScope=(target:Pick<AmazonTarget,'mode'|'sellerId'>)=>JSON
 export function previewSalesRecipes(product:ProductDetail,receipt:MiaoshouReceipt|null,rules:ListingRules){
   const receiptCny=!!receipt?.snapshot.sources.some(s=>s.source==='1688')||receipt?.mapping.currency==='CNY';
   const source={...product,variants:product.variants.filter(v=>!informationalVariant(v))};
-  const legacy=!product.facts.some(f=>f.scope!==undefined),legacyCurrency=confirmedPurchaseCurrency(product.facts,receiptCny);
+  const legacy=!hasFactScopeModel(product),legacyCurrency=confirmedPurchaseCurrency(product.facts,receiptCny);
   const legacySource=legacy&&!legacyCurrency.cny?{...source,variants:source.variants.map(v=>({...v,purchasePrice:''}))}:source;
   const recipes=buildSalesRecipes(legacySource,legacy&&!legacyCurrency.cny?null:receipt,{...rules,product:{...rules.product,variantLimit:source.variants.length}},variant=>confirmedPurchaseCurrency(factsForVariant(product,variant.id),receiptCny).cny);
   return selectSalesRecipes(product,recipes,rules,receipt);

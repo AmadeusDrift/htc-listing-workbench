@@ -1,3 +1,5 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
+import { appendAuditEvent } from '../storage/audit.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
@@ -24,7 +26,7 @@ export class ItemLabelService {
     for(const row of this.list()){
       if(row.current&&!row.requestedAt&&['QUEUED','WAITING_SKU','WAITING_QUANTITY'].includes(row.status)){row.paused=true;this.put(row);}
       else if(row.requestPending||row.status==='REQUESTING'||row.current&&row.status==='DOWNLOADING'){
-        if(!row.requestedAt)this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'item-labels.legacy-interrupted','保留旧标签中断状态与原请求证据',JSON.stringify(row),this.at());
+        if(!row.requestedAt)appendAuditEvent(this.db,randomUUID(),null,'item-labels.legacy-interrupted','保留旧标签中断状态与原请求证据',JSON.stringify(row),this.at());
         const unknown=row.requestPending||row.status==='REQUESTING';
         if(row.status==='DOWNLOADING')row.responseReceived=true;
         row.status=row.current?'FAILED':'STALE';row.paused=true;row.nextDueAt=null;row.requestPending=false;
@@ -36,7 +38,7 @@ export class ItemLabelService {
   private at(){return new Date(this.now()).toISOString();}
   /** Signed download capabilities stay in main-only storage, never ItemLabelRecord/IPC. */
   private saveDownloads(row:ItemLabelRecord,downloads:{uri:string;expiration:number}[]):void{
-    this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run('item_label_download_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:row.requestId,receivedAt:this.at(),downloads}));
+    writeOwnedSetting(this.db,'labels','item_label_download_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:row.requestId,receivedAt:this.at(),downloads}));
   }
   private downloads(row:ItemLabelRecord):{uri:string;expiration:number}[]{
     try{
@@ -129,7 +131,7 @@ export class ItemLabelService {
         const latest=this.get(row.id);latest.status=latest.current?'FAILED':'STALE';latest.requestPending=false;latest.responseReceived=true;latest.requestId=error.requestId;latest.attempts=row.attempts;latest.nextDueAt=null;
         latest.errorCode='RESPONSE_UNUSABLE';latest.message='原标签响应已收到但无法安全采用，请核对原请求；禁止重新生成';
         this.db.exec('BEGIN IMMEDIATE');
-        try{this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run('item_label_response_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:error.requestId,status:error.status,receivedAt:this.at(),response:error.response}));this.put(latest);this.db.exec('COMMIT');}
+        try{writeOwnedSetting(this.db,'labels','item_label_response_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:error.requestId,status:error.status,receivedAt:this.at(),response:error.response}));this.put(latest);this.db.exec('COMMIT');}
         catch(failure){this.db.exec('ROLLBACK');throw failure;}
         return;
       }

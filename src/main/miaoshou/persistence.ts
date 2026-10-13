@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { transaction } from '../application/transaction.ts';
 import { sourceIdentity, saveSourceSnapshot, readSourceSnapshot } from './source-snapshots.ts';
 import { readSourceAdoption, adoptReceivedSource, adoptedSourceReceipt } from '../products/source-adoption.ts';
@@ -80,7 +81,7 @@ export function persistImport(db:DatabaseSync,_store:WorkspaceStore,snapshot:Mia
     assertNewImport?.({facts,receipt});
     const source=saveSourceSnapshot(db,receipt),state=adoptReceivedSource(db,source,prior);
     if(!original)db.prepare('INSERT INTO miaoshou_receipts(id,record_json) VALUES(?,?)').run(receipt.id,json);
-    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),productId,'miaoshou.imported',original?'已接收来源新版本；人工和已处理资料受保护':'从妙手接收商品',JSON.stringify({receiptId:receipt.id,sourceSnapshotId:source.id,adopted:state.adoptedSnapshotId===source.id,mode,remoteId:snapshot.remoteId,skuCount:snapshot.skus.length}),receivedAt);
+    appendAuditEvent(db,randomUUID(),productId,'miaoshou.imported',original?'已接收来源新版本；人工和已处理资料受保护':'从妙手接收商品',JSON.stringify({receiptId:receipt.id,sourceSnapshotId:source.id,adopted:state.adoptedSnapshotId===source.id,mode,remoteId:snapshot.remoteId,skuCount:snapshot.skus.length}),receivedAt);
     const output=result(receipt,!!original);
     if(state.adoptedSnapshotId!==source.id)output.warnings.push('来源新版本已保存，人工修改或已处理商品保持原版本；请核对后明确采用。');
     return output;

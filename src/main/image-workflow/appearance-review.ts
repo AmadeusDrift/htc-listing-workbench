@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiResult} from '../../shared/ai-contracts.ts';
 import type {AiPurposeSnapshot} from '../../shared/ai-purpose-contracts.ts';
@@ -24,7 +25,7 @@ export function validateAppearanceCheckpoint(raw:unknown):AppearanceReviewCheckp
 }
 export function readAppearanceReviewSettings(db:DatabaseSync):{enabled:boolean}{const row=db.prepare('SELECT value_json FROM amazon_settings WHERE key=?').get('image_appearance_review_v1');return row?parseSettings(JSON.parse(String(row.value_json))):{enabled:true};}
 function parseSettings(raw:unknown){const v=keys(raw,['enabled']);if(typeof v.enabled!=='boolean')fail();return{enabled:v.enabled as boolean};}
-export function writeAppearanceReviewSettings(db:DatabaseSync,raw:unknown){const v=parseSettings(raw);db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run('image_appearance_review_v1',JSON.stringify(v));return v;}
+export function writeAppearanceReviewSettings(db:DatabaseSync,raw:unknown){const v=parseSettings(raw);writeOwnedSetting(db,'images','image_appearance_review_v1',JSON.stringify(v));return v;}
 /** This state machine owns review attempts only. It never draws an image or resets slot budgets. */
 export async function runAppearanceReview(input:{enabled:boolean;attempt:{appearanceReview?:AppearanceReviewCheckpoint};candidate:CandidateImageIdentity;planResultId:string;getSnapshot:()=>AiPurposeSnapshot;save:()=>void;beforeSend?:()=>void;findResult:(id:string)=>AiResult|undefined;recover?: (previousResultId:string|null)=>AiResult|undefined;send:(snapshot:AiPurposeSnapshot,previousResultId:string|null)=>Promise<AiResult>}):Promise<AppearanceReviewOutput['verdict']|'NOT_PERFORMED'>{
  let checkpoint=input.attempt.appearanceReview;

@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ItemLabelFormat } from '../../shared/item-label-contracts.ts';
 import { openDatabase } from '../database.ts';
@@ -12,7 +13,7 @@ export class ItemLabelSettings {
   }
   save(raw: unknown): ItemLabelFormat {
     const format = validateItemLabelFormat(raw);
-    this.db.prepare("INSERT INTO amazon_settings(key,value_json) VALUES('item_label_format_v1',?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json").run(JSON.stringify(format));
+    writeOwnedSetting(this.db,'labels','item_label_format_v1',JSON.stringify(format));
     return format;
   }
   close(): void { this.db.close(); }

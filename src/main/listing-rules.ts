@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from './storage/settings.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from './database.ts';
 import { defaultListingRules, parseListingRules } from '../shared/listing-rules.ts';
@@ -21,7 +22,7 @@ export class ListingRuleStore {
     try {
       if (this.get().revision !== value.revision) throw new UserFacingError('规则已更新，请重新读取后保存，避免覆盖其他修改');
       value.revision++;
-      this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run(LISTING_RULES_KEY, JSON.stringify(value));
+      writeOwnedSetting(this.db,'settings',LISTING_RULES_KEY, JSON.stringify(value));
       this.db.exec('COMMIT'); return value;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }

@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
 import { protectedDraftIds } from '../retention-references.ts';
 import { transaction } from '../application/transaction.ts';
@@ -103,7 +104,7 @@ export class AmazonPersistence {
     const row = previous ? { ...(previous.lastAcceptedAt > next.lastAcceptedAt ? previous : next),
       firstAcceptedAt: previous.firstAcceptedAt < next.firstAcceptedAt ? previous.firstAcceptedAt : next.firstAcceptedAt,
       lastAcceptedAt: previous.lastAcceptedAt > next.lastAcceptedAt ? previous.lastAcceptedAt : next.lastAcceptedAt } : next;
-    this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run(key, JSON.stringify(row));
+    writeOwnedSetting(this.db,'publish',key, JSON.stringify(row));
   }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] {
     const entries = this.db.prepare('SELECT key,value_json FROM amazon_settings WHERE key GLOB ? AND length(value_json)<=4096 LIMIT 20001').all(`${ACCEPTED_SKU_PREFIX}*`);
@@ -130,7 +131,7 @@ export class AmazonPersistence {
     const row = this.db.prepare("SELECT value_json FROM amazon_settings WHERE key='data_policy'").get();
     return row ? JSON.parse(String(row.value_json)) : { retentionDays: 180, logRetentionDays: 365, lastCleanupAt: null };
   }
-  savePolicy(policy: AmazonDataPolicy): void { this.db.prepare("INSERT INTO amazon_settings(key,value_json) VALUES('data_policy',?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json").run(JSON.stringify(policy)); }
+  savePolicy(policy: AmazonDataPolicy): void { writeOwnedSetting(this.db,'maintenance','data_policy',JSON.stringify(policy)); }
   cleanup(now: number): CleanupResult {
     const policy = this.policy(); const cutoff = new Date(now - policy.retentionDays * 86_400_000).toISOString();
     const logCutoff = new Date(now - Math.max(365, policy.logRetentionDays) * 86_400_000).toISOString();

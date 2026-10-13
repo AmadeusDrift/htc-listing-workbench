@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { BatchWaitingError } from '../ai/batch/task-context.ts';
 import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
 import type { TaskBatchPlan } from '../../shared/ai-batch-contracts.ts';
@@ -205,7 +206,7 @@ export class AutomaticListingService {
       if(current.preview.token!==token)throw new UserFacingError('应用前资料发生变化，请重新检查');
       next.adaptation={version:1,token,at:new Date().toISOString(),blockedKeys:state.preview.changes.filter(c=>c.kind==='BLOCKED').map(c=>c.key),previousRules:[...(before.adaptation?.previousRules??[]),{stamp:before.rulesStamp,revision:before.ruleRevision}].filter((r,i,a)=>a.findIndex(v=>v.stamp===r.stamp&&v.revision===r.revision)===i)};
       applyAdaptationRows(next,this.deps,state,this.db);
-      this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'automatic-listing.adapted','用户显式适配当前规则；等待用户继续',JSON.stringify({taskId:id,token,before,changes:state.preview.changes,afterRevision:before.revision+1}),new Date().toISOString());
+      appendAuditEvent(this.db,randomUUID(),null,'automatic-listing.adapted','用户显式适配当前规则；等待用户继续',JSON.stringify({taskId:id,token,before,changes:state.preview.changes,afterRevision:before.revision+1}),new Date().toISOString());
       this.save(next,this.db);this.db.exec('COMMIT');
     }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     this.tasks.set(id,next);return structuredClone(next);
@@ -609,7 +610,7 @@ export class AutomaticListingService {
             catch (error) {
               if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.save(task);continue;}
               if(row.batchWait&&this.deps.batch?.find(row.batchWait.operationId)?.adoption)delete row.batchWait;
-              recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+              recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
               if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
@@ -1112,7 +1113,7 @@ export class AutomaticListingService {
           }
           if (!row.draftId || ['DONE','SCREENED'].includes(row.status) || !['READBACK','LABELS'].includes(row.stage)) continue;
           try {
-            if(row.stage==='LABELS'&&(row.error||row.outcome))this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'automatic-listing.labels-detached','保留旧标签错误；标签改为按需独立处理',JSON.stringify({taskId:task.id,draftId:row.draftId,error:row.error,outcome:row.outcome??null}),new Date().toISOString());
+            if(row.stage==='LABELS'&&(row.error||row.outcome))appendAuditEvent(this.db,randomUUID(),row.productId,'automatic-listing.labels-detached','保留旧标签错误；标签改为按需独立处理',JSON.stringify({taskId:task.id,draftId:row.draftId,error:row.error,outcome:row.outcome??null}),new Date().toISOString());
             if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
             if(row.stage==='LABELS')row.stage='READBACK';
             {
@@ -1136,7 +1137,7 @@ export class AutomaticListingService {
             }
             row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; delete row.outcome;
           } catch (error) {
-            recordErrorEvidence(detail=>this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+            recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
             row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
             const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
             if(!canObserve()||task.revision!==revision){interrupted=true;break;}

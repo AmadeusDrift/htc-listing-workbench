@@ -1,3 +1,6 @@
+import { appendAuditEvent } from '../storage/audit.ts';
+import { registerGeneratedAsset } from '../assets/commands.ts';
+import { confirmAssetBinding } from '../products/asset-bindings.ts';
 import {imageSourceTrace} from './source-trace.ts';
 import {readAppearanceReviewSettings,writeAppearanceReviewSettings,runAppearanceReview} from './appearance-review.ts';
 import { BatchWaitingError } from '../ai/batch/task-context.ts';
@@ -224,7 +227,7 @@ export class ImageWorkflowService {
       throw new UserFacingError('原生图结果仍未知；保留原请求和次数，请核对原响应或导入已有图片，不会重新发送');
     }
     slot.status='PENDING';slot.error=null;run.status='INTERRUPTED';run.error='已核对未知结果，等待继续任务';
-    this.db.exec('BEGIN IMMEDIATE');try{this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.unknown-result-recovered',`${run.sku} 图片 ${index} 找回本地候选，不重新生成`,JSON.stringify({workflowId:run.id,slot:index,requestId,recoveredCandidateId:recovered?.id??null}),new Date().toISOString());this.db.exec('COMMIT');}catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
+    this.db.exec('BEGIN IMMEDIATE');try{this.save(run);appendAuditEvent(this.db,randomUUID(),run.productId,'image.workflow.unknown-result-recovered',`${run.sku} 图片 ${index} 找回本地候选，不重新生成`,JSON.stringify({workflowId:run.id,slot:index,requestId,recoveredCandidateId:recovered?.id??null}),new Date().toISOString());this.db.exec('COMMIT');}catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     return structuredClone(run);
   }
   private derivePartialSource(prior:ImageWorkflowRun,draft:AmazonDraft):ImageWorkflowRun{
@@ -241,7 +244,7 @@ export class ImageWorkflowService {
     delete run.rejection;delete run.policyReevaluation;
     this.db.exec('BEGIN IMMEDIATE');try{
       if(workflowHash(this.getProgress(draft.id)!)!==workflowHash(prior)||!currentImageAdaptation(this.db,prior,this.amazon.getDraft(draft.id),this.store.getProduct(draft.productId)))throw new UserFacingError('图片派生期间来源或检查点发生变化');
-      this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),product.id,'image.workflow.partial-source-derived','成本变化后接续未完成图位；原上下文、已通过图片及尝试前缀保留',JSON.stringify({sourceRunId:prior.id,workflowId:run.id,sourceRunHash:workflowHash(prior),productRevision:product.revision,contextSha256:run.contextSha256}),now);this.db.exec('COMMIT');
+      this.save(run);appendAuditEvent(this.db,randomUUID(),product.id,'image.workflow.partial-source-derived','成本变化后接续未完成图位；原上下文、已通过图片及尝试前缀保留',JSON.stringify({sourceRunId:prior.id,workflowId:run.id,sourceRunHash:workflowHash(prior),productRevision:product.revision,contextSha256:run.contextSha256}),now);this.db.exec('COMMIT');
     }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     return run;
   }
@@ -484,7 +487,7 @@ export class ImageWorkflowService {
     const run:ImageWorkflowRun={...structuredClone(prior),id:randomUUID(),createdAt:now,updatedAt:now,draftSha256:stamp,approvalReuse:{sourceRunId:prior.id,draftRevision:revision,draftSnapshot:imageApprovalDraftSnapshot(draft),recipeSnapshot:JSON.stringify(draft.salesPlan?.recipe??null)}};
     assertApprovalReuseSource(run,prior);
     this.db.exec('BEGIN IMMEDIATE');
-    try{assertCurrent();this.save(run);this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.approval-reused',`${run.sku} 原图和审核证据未变化，复用七图审核`,JSON.stringify({workflowId:run.id,sourceWorkflowId:prior.id,draftRevision:revision,draftSha256:stamp}),now);this.db.exec('COMMIT');}
+    try{assertCurrent();this.save(run);appendAuditEvent(this.db,randomUUID(),run.productId,'image.workflow.approval-reused',`${run.sku} 原图和审核证据未变化，复用七图审核`,JSON.stringify({workflowId:run.id,sourceWorkflowId:prior.id,draftRevision:revision,draftSha256:stamp}),now);this.db.exec('COMMIT');}
     catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');throw error;}
     return {draft,aiCalls:0,previewAttempts:0,remaining:remaining(draft),workflow:run};
   }
@@ -871,9 +874,9 @@ export class ImageWorkflowService {
       try{
         this.assertSourceConsistency(run.draftId);
         if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256)throw new AiError('SOURCE_CHANGED');
-        const now=new Date().toISOString();if(!reusedAssetId){this.db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,run.productId,`自动生成-${run.sku}-${slot.index}.png`,'gallery','image/png',candidate.width,candidate.height,candidate.byteSize,`assets/${id}.png`,`assets/${id}.preview.png`,candidate.sha256,now);this.db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(id,run.variantId,now);}
+        const now=new Date().toISOString();if(!reusedAssetId){registerGeneratedAsset(this.db,{id,productId:run.productId,fileName:`自动生成-${run.sku}-${slot.index}.png`,width:candidate.width,height:candidate.height,byteSize:candidate.byteSize,sha256:candidate.sha256,at:now});confirmAssetBinding(this.db,{productId:run.productId,assetId:id,variantId:run.variantId,at:now});}
         slot.approvedAssetId=id;slot.approvedSha256=candidate.sha256;slot.status='PASSED';slot.error=null;attempt.state='PASSED';attempt.error=null;this.save(run);
-        this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,reusedAssetId?'image.workflow.rechecked':'image.workflow.adopted',`${run.sku} 图片 ${slot.index}/7 ${attempt.riskBypass?(slot.index===1?'风险拦截已关闭；首图无字检查通过':'风险拦截已关闭；详情图不检查文字'):attempt.approvalPolicy?'侵权风险检测通过，详情图不检查文字':'侵权与主图无字复核通过'}`,JSON.stringify({workflowId:run.id,slot:slot.index,attempt:attempt.number,assetId:id,candidateId:candidate.id,reviewResultId:attempt.reviewResultId,riskInterceptionEnabled:run.riskInterceptionEnabled!==false,approvalPolicy:attempt.approvalPolicy??'legacy-text-review',visualReview:attempt.appearanceReview?.state==='DONE'?'performed':'not_performed',appearanceReviewResultIds:attempt.appearanceReview?.resultIds??[],...(run.recheckedFromRunId?{sourceWorkflowId:run.recheckedFromRunId}:{})}),now);
+        appendAuditEvent(this.db,randomUUID(),run.productId,reusedAssetId?'image.workflow.rechecked':'image.workflow.adopted',`${run.sku} 图片 ${slot.index}/7 ${attempt.riskBypass?(slot.index===1?'风险拦截已关闭；首图无字检查通过':'风险拦截已关闭；详情图不检查文字'):attempt.approvalPolicy?'侵权风险检测通过，详情图不检查文字':'侵权与主图无字复核通过'}`,JSON.stringify({workflowId:run.id,slot:slot.index,attempt:attempt.number,assetId:id,candidateId:candidate.id,reviewResultId:attempt.reviewResultId,riskInterceptionEnabled:run.riskInterceptionEnabled!==false,approvalPolicy:attempt.approvalPolicy??'legacy-text-review',visualReview:attempt.appearanceReview?.state==='DONE'?'performed':'not_performed',appearanceReviewResultIds:attempt.appearanceReview?.resultIds??[],...(run.recheckedFromRunId?{sourceWorkflowId:run.recheckedFromRunId}:{})}),now);
         this.db.exec('COMMIT');
       }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');slot.approvedAssetId=null;slot.approvedSha256=null;slot.status='RUNNING';attempt.state='GENERATED';throw error;}
     }catch(error){for(const path of written)await unlink(path).catch(()=>{});throw error;}
@@ -999,7 +1002,7 @@ export class ImageWorkflowService {
       if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256
         ||!this.db.prepare('SELECT 1 FROM assets a JOIN variant_assets v ON a.id=v.asset_id WHERE a.id=? AND a.sha256=? AND v.variant_id=? AND v.confirmed=1').get(asset.id,candidate.sha256,run.variantId))throw new AiError('SOURCE_CHANGED');
       run.approvedAssetId=asset.id;run.approvedSha256=candidate.sha256;run.status='COMPLETED';run.stage='complete';run.error=null;this.save(run);
-      this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.rechecked',run.sku+' 原图片侵权与 OCR 复核通过，未再次生图',
+      appendAuditEvent(this.db,randomUUID(),run.productId,'image.workflow.rechecked',run.sku+' 原图片侵权与 OCR 复核通过，未再次生图',
         JSON.stringify({workflowId:run.id,sourceWorkflowId:prior.id,assetId:asset.id,candidateId:candidate.id,reviewResultId:run.reviewResultIds.at(-1),visualReview:'not_performed'}),new Date().toISOString());
       this.db.exec('COMMIT');
     }catch(error){if(this.db.isTransaction)this.db.exec('ROLLBACK');run.approvedAssetId=null;run.approvedSha256=null;run.status='RUNNING';run.stage='adopting';throw error;}
@@ -1024,10 +1027,10 @@ export class ImageWorkflowService {
         this.assertSourceConsistency(run.draftId);
         if (this.store.getProduct(run.productId).revision!==run.productRevision || imageWorkflowDraftStamp(this.amazon.getDraft(run.draftId))!==run.draftSha256) throw new AiError('SOURCE_CHANGED');
         const now=new Date().toISOString();
-        this.db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,run.productId,`自动生成-${run.sku}.png`,'gallery','image/png',candidate.width,candidate.height,candidate.byteSize,`assets/${id}.png`,`assets/${id}.preview.png`,candidate.sha256,now);
-        this.db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?)').run(id,run.variantId,now);
+        registerGeneratedAsset(this.db,{id,productId:run.productId,fileName:`自动生成-${run.sku}.png`,width:candidate.width,height:candidate.height,byteSize:candidate.byteSize,sha256:candidate.sha256,at:now});
+        confirmAssetBinding(this.db,{productId:run.productId,assetId:id,variantId:run.variantId,at:now});
         run.approvedAssetId=id; run.approvedSha256=candidate.sha256; run.status='COMPLETED'; run.stage='complete'; run.error=null; this.save(run);
-        this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),run.productId,'image.workflow.adopted',`自动采用 ${run.sku} 图片（文字复核通过）`,JSON.stringify({workflowId:run.id,assetId:id,candidateId:candidate.id,reviewResultId:run.reviewResultIds.at(-1),visualReview:'not_performed'}),now);
+        appendAuditEvent(this.db,randomUUID(),run.productId,'image.workflow.adopted',`自动采用 ${run.sku} 图片（文字复核通过）`,JSON.stringify({workflowId:run.id,assetId:id,candidateId:candidate.id,reviewResultId:run.reviewResultIds.at(-1),visualReview:'not_performed'}),now);
         this.db.exec('COMMIT');
       } catch(error) { if(this.db.isTransaction)this.db.exec('ROLLBACK'); run.approvedAssetId=null;run.approvedSha256=null;run.status='RUNNING';run.stage='adopting';throw error; }
     } catch(error) { for(const path of written) await unlink(path).catch(()=>{}); throw error; }

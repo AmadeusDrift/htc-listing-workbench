@@ -2,7 +2,7 @@ import type { ModuleId } from '../../shared/workflow-context-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 
 export type DataOwner=ModuleId|'maintenance'|'settings'|'connections';
-/** Declares the target owner; legacy cross-owner writes remain migration work, not implicit permission. */
+/** Unique domain owners; authorized legacy adapters are command-scoped in scripts/sql-writer-registry.json. */
 export const MODULE_TABLES:Readonly<Partial<Record<DataOwner,readonly string[]>>>=Object.freeze({
   source:['collection_receipts','collection_captures','miaoshou_receipts','miaoshou_sync_runs','miaoshou_sync_items','source_snapshots'],
   product:['products','variants','facts','variant_assets','product_workspaces','source_image_provenance','source_consistency_attempts','source_consistency_assessments','source_consistency_decisions','source_consistency_bindings','product_source_adoptions','product_fact_scopes','product_fact_models'],
@@ -28,7 +28,7 @@ for(const [owner,tables] of Object.entries(MODULE_TABLES))for(const table of tab
 }
 const settingOwners:Readonly<Record<string,DataOwner>>={
   listing_rules_v1:'settings',sku_naming_v1:'sales',listing_copy_review_v1:'listing',
-  image_risk_interception_v1:'images',item_label_format_v1:'labels',data_policy:'maintenance',
+  image_appearance_review_v1:'images',image_risk_interception_v1:'images',item_label_format_v1:'labels',data_policy:'maintenance',
 };
 export function dataOwner(table:string,key?:string):DataOwner {
   if(table==='amazon_settings'){

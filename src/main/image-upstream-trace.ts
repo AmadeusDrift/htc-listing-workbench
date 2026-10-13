@@ -1,3 +1,5 @@
+import { appendAuditEvent } from './storage/audit.ts';
+import { confirmAssetBinding } from './products/asset-bindings.ts';
 export { isProductReference } from './source-reference-query.ts';
 import { isProductReference } from './source-reference-query.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -17,9 +19,6 @@ function explicitlyCorrected(db:DatabaseSync,productId:string,assetId:string,var
   if(!row)return false;
   const after=JSON.parse(String(row.detail_json)).after;
   return !after.variantIds.includes(variantId)||after.confirmed===false||after.confirmed===0;
-}
-function confirmBinding(db:DatabaseSync,assetId:string,variantId:string,at:string):void {
-  db.prepare('INSERT INTO variant_assets VALUES(?,?,1,?) ON CONFLICT(asset_id,variant_id) DO UPDATE SET confirmed=1,updated_at=excluded.updated_at').run(assetId,variantId,at);
 }
 /** Metadata repair must not change an already decided association epoch. The normal
  * source-proof path still checks the current specification; this creates no new authority. */
@@ -55,8 +54,8 @@ export function restoreWorkflowSourceBindings(db:DatabaseSync,productId:string):
     if(hasDecidedAssociation(db,productId,variantId,ref.id))continue;
     const at=new Date().toISOString();
     atomicAttribution(db,()=>{
-      confirmBinding(db,ref.id,variantId,at);
-      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),productId,'source-image.upstream-restored','沿用生成任务的 SKU 原图引用',JSON.stringify({basis:'workflow-reference',workflowId:run.id,variantId,assetId:ref.id}),at);
+      confirmAssetBinding(db,{productId,assetId:ref.id,variantId,at});
+      appendAuditEvent(db,randomUUID(),productId,'source-image.upstream-restored','沿用生成任务的 SKU 原图引用',JSON.stringify({basis:'workflow-reference',workflowId:run.id,variantId,assetId:ref.id}),at);
     });
   }
 }
@@ -69,7 +68,7 @@ export function bindProductReference(db:DatabaseSync,input:{productId:string;var
   if(binding?.confirmed===1&&scoped)return;
   const at=new Date().toISOString();
   atomicAttribution(db,()=>{
-    confirmBinding(db,input.assetId,input.variantId,at);
-    if(!scoped)db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),input.productId,'source-image.product-reference','商品参考图＋所选 SKU 规格',JSON.stringify({basis:'product-reference+selected-spec',...input}),at);
+    confirmAssetBinding(db,{...input,at});
+    if(!scoped)appendAuditEvent(db,randomUUID(),input.productId,'source-image.product-reference','商品参考图＋所选 SKU 规格',JSON.stringify({basis:'product-reference+selected-spec',...input}),at);
   });
 }

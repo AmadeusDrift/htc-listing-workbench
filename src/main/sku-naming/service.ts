@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from '../database.ts';
@@ -21,7 +22,7 @@ export class SkuNamingService {
     return this.transaction(() => {
       if (this.getSettings().revision !== value.revision) throw new UserFacingError('SKU 命名规则已被更改，请刷新后再保存');
       const next = { ...value, revision: value.revision + 1 };
-      this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run(SKU_NAMING_SETTINGS_KEY, JSON.stringify(next));
+      writeOwnedSetting(this.db,'sales',SKU_NAMING_SETTINGS_KEY, JSON.stringify(next));
       return next;
     });
   }

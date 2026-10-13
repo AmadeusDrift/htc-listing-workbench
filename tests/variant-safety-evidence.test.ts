@@ -1,3 +1,4 @@
+import {inheritLegacyPurposeSettings} from '../src/main/ai/purpose-routing.ts';
 import { addSourceOriginalFixture, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -236,7 +237,7 @@ test('reopen and encrypted backup retain source bytes, old exchanges, paid mock 
     calls++;const payload=JSON.parse(JSON.parse(String(options?.body)).messages[1].content);return chat(payload.candidate?reviewFor(payload):candidateFor(payload));
   }});
   try{
-    ai.saveConnection({id:'deepseek',apiKey:'synthetic-safety-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:true});
+    ai.saveConnection({id:'deepseek',apiKey:'synthetic-safety-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek-review','deepseek-v4-pro',false);
     const listing=new ListingAiService(f.store,f.service,ai),reference={draftId:draft.id,draftRevision:draft.revision};
     const suggestion=await listing.suggest(reference),review=await listing.review({...reference,suggestionResultId:suggestion.id});
     draft=await listing.adopt({...reference,suggestionResultId:suggestion.id,reviewResultId:review.id,fields:['material']});assert.equal(calls,2);

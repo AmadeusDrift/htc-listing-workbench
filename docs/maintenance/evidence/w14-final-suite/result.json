@@ -1,0 +1,17 @@
+{
+  "sourceCommit": "caadf5d635105d9d47341aab7b59b5ace14d502f",
+  "command": "npm test",
+  "exitCode": 0,
+  "tests": 3000,
+  "pass": 2997,
+  "fail": 0,
+  "cancelled": 0,
+  "skipped": 3,
+  "durationMs": 659964.0036,
+  "scope": "Isolated synthetic data and fake services. Production src/package/lock match integration; later differences are E2E-only execution fixture, scripts and docs.",
+  "skipReasons": [
+    "Windows file symlink creation privilege unavailable; directory junction and hard-link checks pass",
+    "Explicit authorized retained 19-response local sample absent",
+    "Explicit authorized actual 87-image local sample absent"
+  ]
+}

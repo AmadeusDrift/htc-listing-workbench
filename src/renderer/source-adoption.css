@@ -1,0 +1,9 @@
+.source-adoption-panel { margin-bottom: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); }
+.source-adoption-panel h3 { margin: 0 0 12px; font-size: 16px; }
+.source-adoption-panel p { margin: 8px 0; font-size: 13px; line-height: 1.65; }
+.source-adoption-comparison { overflow-x: auto; margin: 14px 0; }
+.source-adoption-comparison table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+.source-adoption-comparison th, .source-adoption-comparison td { padding: 10px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; line-height: 1.65; }
+.source-adoption-comparison th:first-child { width: 20%; }
+.source-adoption-panel details { margin: 12px 0; font-size: 13px; line-height: 1.65; }
+.source-adoption-panel label { display: flex; align-items: center; gap: 8px; margin: 14px 0; font-size: 13px; }

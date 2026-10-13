@@ -10,7 +10,7 @@ const dataRoot=await mkdtemp(resolve('.test-data/w12-'));
 const app=await launchGuarded({executable:require('electron'),args:['.'],cwd:resolve('.'),dataRoot,guardPath:resolve('scripts/release-network-guard.cjs')});
 const checks=[];
 try {
- const page=await app.firstWindow();page.setDefaultTimeout(10000);
+ const page=await app.firstWindow();page.setDefaultTimeout(10000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.locator('.primary-navigation').getByRole('button',{name:'设置',exact:true}).click({force:true});
  await page.locator('#settings-nav-images').click({force:true});
  const toggle=page.getByRole('switch',{name:'启用外观一致性复核'});
@@ -32,6 +32,7 @@ try {
  await expect(page.getByText('候选 1 个文件',{exact:false})).toBeVisible();await access(orphan);
  await page.getByRole('button',{name:'确认执行此清理预览',exact:true}).click({force:true});
  await expect(page.getByText('已删除 1 个文件',{exact:false})).toBeVisible();await assert.rejects(access(orphan));
+ await page.screenshot({path:'artifacts/w12/retention.png'});
  checks.push('真实预览不删除，确认执行后仅合成孤立素材删除');
  await page.getByLabel('备份口令',{exact:true}).fill('fixture-password');
  await page.locator('.primary-navigation').getByRole('button',{name:'采集箱',exact:true}).click({force:true});
@@ -47,10 +48,11 @@ try {
  await page.reload();await page.locator('.primary-navigation').getByRole('button',{name:'上架进度',exact:true}).click({force:true});
  await page.getByTestId('result-'+ids.draft).getByRole('button',{name:'手动处理'}).click({force:true});
  await expect(page.getByText('实际报价明细 · 已保存草稿',{exact:true})).toBeVisible();
+ await page.getByText('实际报价明细 · 已保存草稿',{exact:true}).click({force:true});
+ await expect(page.getByText('只读解释已保存报价，金额使用当前保存费表；系统建议价见规则填报记录。未向 Amazon 请求或改价。',{exact:true})).toBeVisible();
+ await page.screenshot({path:'artifacts/w12/actual-quote.png'});
  checks.push('草稿实际报价真实窄IPC只读，无草稿写入；实际APP明细可见');
- await writeFile('artifacts/w12/result.json',JSON.stringify({dataRoot,checks},null,2));
+ assert.deepEqual(errors,[]);const externalAttempts=await app.evaluate(()=>globalThis.__releaseGuard.attempts);assert.deepEqual(externalAttempts,[]);
+ await writeFile('artifacts/w12/result.json',JSON.stringify({dataRoot,checks,errors,externalAttempts},null,2));
  console.log(checks);
 } finally {await app.close();}
-
-
-

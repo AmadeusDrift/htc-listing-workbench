@@ -13,7 +13,7 @@ import { createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore } 
 import { previewSourceAdoption,adoptSource } from '../src/main/products/public.ts';
 import { assertSourceAdoptionHistory } from '../src/main/products/source-adoption.ts';
 import { ImageGenerationService } from '../src/main/image-generation/service.ts';
-import { DEFAULT_OPENAI_IMAGE_MODEL } from '../src/shared/image-generation-contracts.ts';
+import { DEFAULT_OPENROUTER_IMAGE_MODEL } from '../src/shared/image-generation-contracts.ts';
 
 function fixture(t:test.TestContext){
   t.mock.method(globalThis,'fetch',()=>{throw Error('No external requests');});
@@ -74,7 +74,7 @@ test('standalone image generation with no source assets freezes the product befo
     f.receive({...f.source,title:'Supplier changed while generating'});
     return new Response(JSON.stringify({data:[{b64_json:png.toString('base64')}]}));
   }});
-  generation.saveConnection({model:DEFAULT_OPENAI_IMAGE_MODEL,enabled:true,apiKey:'sk-isolated-fixture-key'});
+  generation.saveConnection({provider:'openrouter',model:DEFAULT_OPENROUTER_IMAGE_MODEL,enabled:true,apiKey:'sk-isolated-fixture-key'});
   const candidate=await generation.generate({productId:product.id,productRevision:product.revision,prompt:'Product photo',referenceAssetIds:[],size:'auto',quality:'auto',background:'auto'});
   assert.equal(candidate.productRevision,product.revision);assert.equal(f.store.getProduct(product.id).title,product.title);
   assert.equal(previewSourceAdoption(f.db,product.id)!.frozen,true);

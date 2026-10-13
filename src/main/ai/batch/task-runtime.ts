@@ -23,6 +23,7 @@ export class TaskBatchRuntime {
  private operation(item:BatchItem):BatchOperation{const {version,id,batchId,customId,state,receiptId,resultFingerprint,reportedCostUsd,adoption,...op}=item;return op;}
  run<T>(scope:TaskAiScope,action:()=>T):T{return taskAiContext.run(scope,action);}
  find(operationId:string):BatchItem|undefined{const row=this.db.prepare("SELECT id FROM ai_batch_items WHERE json_extract(record_json,'$.operationId')=? AND json_extract(record_json,'$.attempt')=1").get(operationId);return row?readItem(this.db,String(row.id)):undefined;}
+ pendingOperation(operationId:string):BatchOperation|undefined{const entry=this.pending.get(operationId);return entry?structuredClone(entry.operation):undefined;}
  async request(prepared:Prepared):Promise<{item:BatchItem;body:any}|null>{
   const scopeCredential=taskAiContext.getStore()?.credentialScope;if(scopeCredential&&scopeCredential!==this.credential().scope)throw new UserFacingError('任务连接快照已变化，未切换凭据或复制Batch请求');
   const op=prepared.operation,item=this.find(op.operationId),scope=taskAiContext.getStore();
@@ -37,6 +38,11 @@ export class TaskBatchRuntime {
    }
    if(['failed','missing'].includes(item.state))throw new UserFacingError('原 Batch 项目失败或结果缺失，保留费用与身份，未自动重发');
    throw new BatchWaitingError(op.operationId);
+  }
+  const staged=this.pending.get(op.operationId);
+  if(staged){
+   if(batchFingerprint(staged.operation)!==batchFingerprint(op))throw new UserFacingError('待建Batch请求快照已变化，未改为普通请求');
+   this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);
   }
   if(scope?.mode!=='deferred_batch'||this.service.previewPlan([op]).ordinary.length)return null;
   this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);

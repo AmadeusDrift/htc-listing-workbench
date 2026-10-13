@@ -876,8 +876,10 @@ export class AiService {
     return this.requests.run(key, profile.id, async activeSignal => {
       const waiting=taskScope?.waitingOperationId?this.batchTasks.find(taskScope.waitingOperationId):undefined;
       const waitingId=taskScope?.waitingOperationId&&!waiting?.adoption?taskScope.waitingOperationId:undefined;
-      if(waitingId&&(durable?.id??completion?.callId)&&(durable?.id??completion?.callId)!==waitingId)throw new UserFacingError('原Batch步骤身份尚未解决，不能替换请求编号');
-      const id = durable?.id??completion?.callId ?? waitingId?? (hash?`${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-a${hash.slice(17,20)}-${hash.slice(20,32)}`:randomUUID()); let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
+      if(waitingId&&(waiting||this.batchTasks.pendingOperation(waitingId))&&(durable?.id??completion?.callId)&&(durable?.id??completion?.callId)!==waitingId)throw new UserFacingError('原Batch步骤身份尚未解决，不能替换请求编号');
+      let id=durable?.id??completion?.callId??randomUUID();
+      const batchOperationId = durable?.id??completion?.callId ?? waitingId?? (hash?`${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-a${hash.slice(17,20)}-${hash.slice(20,32)}`:id);
+      let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       let batchItem:BatchItem|undefined,reservingBatch=false;let adapterContext:AdapterContext;
       let untrustedOutput: { value: unknown } | undefined, rejectionStage: AiOutputRejectionStage = 'operation-output-validation';
       try {
@@ -887,9 +889,9 @@ export class AiService {
         if(draftId&&this.db.prepare("SELECT 1 FROM ai_calls c WHERE json_extract(c.record_json,'$.schemaResponseRetained')=1 AND json_extract(c.record_json,'$.providerId')=? AND json_extract(c.record_json,'$.presentationContext.draftId')=? AND NOT EXISTS(SELECT 1 FROM ai_results r WHERE json_extract(r.record_json,'$.callId')=c.id) LIMIT 1").get(profile.id,draftId)){
           const blocked=new AiError('OUTPUT_INVALID');blocked.message='已收到 AI 响应，Schema 检查曾中断；原响应和费用保留，当前步骤无法安全本地恢复，未重发付费请求';throw blocked;
         }
-        const adopted=this.batchTasks.find(id);
+        const adopted=this.batchTasks.find(batchOperationId);
         if(adopted?.adoption){
-          if(adopted.inputFingerprint!==key||!taskScope?.authorize())throw new BatchWaitingError(id);
+          if(adopted.inputFingerprint!==key||!taskScope?.authorize())throw new BatchWaitingError(batchOperationId);
           await prepared.assertFresh();const saved=this.getResult(adopted.adoption.id);if(!saved)throw new AiError('INVALID_CONFIG');return saved;
         }
         const credentials = this.vault.read(profile.id, profile.generation);
@@ -899,14 +901,14 @@ export class AiService {
             const {model,provider,stream,...ordinaryBody}=body;let requestBody=ordinaryBody,references:BatchReference[]=[];
             if(stream!==false||JSON.stringify(provider)!==JSON.stringify({only:['openai'],allow_fallbacks:false,require_parameters:true}))return null;
             if(model!==profile.model)throw new AiError('CONFIG_CHANGED');
-            const existingBatch=this.batchTasks.find(id);
+            const existingBatch=this.batchTasks.find(batchOperationId)??this.batchTasks.pendingOperation(batchOperationId);
             if(existingBatch){requestBody=existingBatch.body;references=existingBatch.references;}
             else if(taskScope.mode==='deferred_batch'&&this.batchReferences&&JSON.stringify(ordinaryBody).includes('image_url')){
-              const pinned=await this.batchReferences.prepare(ordinaryBody,{taskId:taskScope.taskId,operationId:id,...input});requestBody=pinned.body;references=pinned.references;
+              const pinned=await this.batchReferences.prepare(ordinaryBody,{taskId:taskScope.taskId,operationId:batchOperationId,...input});requestBody=pinned.body;references=pinned.references;
             }
-            const replay=await this.batchTasks.request({operation:{aiCallId:id,taskId:taskScope.taskId,operationId:id,attempt:1,phase:taskScope.phase.toLowerCase(),inputFingerprint:key,schemaFingerprint:listingFingerprint(prepared.listingContext?.schemaSha256??{kind:profile.capability}),credentialScope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation}),owner:{...input,providerId:profile.id as 'openrouter'|'openrouter-review',generation:profile.generation},purpose:profile.routing,body:requestBody,references},authorize:taskScope.authorize,reserve:()=>{reservingBatch=true;try{adapterContext.beforeSend?.(JSON.stringify(body));}finally{reservingBatch=false;}}});
+            const replay=await this.batchTasks.request({operation:{aiCallId:batchOperationId,taskId:taskScope.taskId,operationId:batchOperationId,attempt:1,phase:taskScope.phase.toLowerCase(),inputFingerprint:key,schemaFingerprint:listingFingerprint(prepared.listingContext?.schemaSha256??{kind:profile.capability}),credentialScope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation}),owner:{...input,providerId:profile.id as 'openrouter'|'openrouter-review',generation:profile.generation},purpose:profile.routing,body:requestBody,references},authorize:taskScope.authorize,reserve:()=>{id=batchOperationId;reservingBatch=true;try{adapterContext.beforeSend?.(JSON.stringify(body));}finally{reservingBatch=false;}}});
             if(!replay)return null;
-            batchItem=replay.item;call=this.getCall(id)??undefined;if(!call)throw new AiError('INVALID_CONFIG');
+            id=batchOperationId;batchItem=replay.item;call=this.getCall(id)??undefined;if(!call)throw new AiError('INVALID_CONFIG');
             requestBytes=Buffer.byteLength(JSON.stringify(body));return {body:replay.body};
           },
           onProviderReceipt:async receipt=>{
@@ -916,6 +918,7 @@ export class AiService {
             this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
           },
           beforeSend: body => {
+            if(!reservingBatch&&(this.batchTasks.find(batchOperationId)||this.batchTasks.pendingOperation(batchOperationId)))throw new UserFacingError('原Batch身份仍受保护，不能转为普通请求重发');
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');
             const draftId=prepared.listingContext?.draftId??prepared.imageContext?.listing.draftId;

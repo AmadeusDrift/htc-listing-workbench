@@ -144,3 +144,36 @@ for(const revoke of [false,true,'stop'] as const)test(`runtime isolates group su
  assert.equal(posts,2);assert.equal(runtime.service.get(runtime.find(second.operationId)!.batchId).remoteBatchId,'batch_runtime_second');
  await assert.rejects(runtime.reconcile(first.taskId),/未知/);assert.equal(runtime.ready(second.operationId),true);assert.equal(gets,1);assert.equal(posts,2);
 });
+
+import { chat } from './fixtures/listing-ai.ts';
+for(const scenario of ['unscoped','immediate-openrouter','immediate-deepseek','deferred-deepseek','deferred-unpinned-vision'] as const)test(`ordinary retry allocates a new paid attempt: ${scenario}`,async t=>{
+ const f=await listingFixture(t),context=(f.ai as any).context,original=context.fetch,openrouter=!scenario.includes('deepseek');let posts=0;
+ if(openrouter){f.ai.saveConnection({id:'openrouter',apiKey:'ordinary-attempt-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});}
+ const vision=scenario==='deferred-unpinned-vision',color=f.ai.sourceColorContext({productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id}),providerId=openrouter?'openrouter':'deepseek';
+ context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),openrouter?'https://openrouter.ai/api/v1/chat/completions':'https://api.deepseek.com/chat/completions');if(posts===1)throw Error('ordinary temporary connection loss');if(vision){assert.match(String(init.body),/data:image\/png;base64/);return chat({kind:'source-color',verdict:'DETERMINED',colors:['Blue'],reason:'Visible blue body',referenceAssetIds:color.referenceAssets.map(r=>r.assetId)});}return original(url,init);};
+ f.ai.setUsagePolicy({providerId,dailyCallLimit:2,dailyTokenLimit:null});
+ const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:scenario.startsWith('deferred')?'deferred_batch' as const:'immediate' as const,authorize:()=>true};
+ const execute=()=>vision?f.ai.observeSourceColor(color,()=>{}):f.listing.suggest(f.reference),run=()=>scenario==='unscoped'?execute():f.ai.batchTasks.run(scope,execute);
+ await assert.rejects(run(),{code:'NETWORK_ERROR'});const result=await run();assert.equal(result.output.kind,vision?'source-color':'amazon-fields');
+ assert.equal(posts,2);const calls=f.ai.listCalls();assert.equal(calls.length,2);assert.notEqual(calls[0].id,calls[1].id);assert.equal(f.ai.getUsageSummary(providerId).attempts,2);assert.equal(f.ai.getUsageSummary(providerId).unknownCalls,1);
+ await assert.rejects(run(),{code:'QUOTA_EXCEEDED'});assert.equal(posts,2);assert.equal(f.ai.getUsageSummary(providerId).attempts,2);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);
+});
+
+test('switching immediate while a Batch operation is only staged cannot send an ordinary duplicate',async t=>{
+ const f=await listingFixture(t),context=(f.ai as any).context;let posts=0;
+ f.ai.saveConnection({id:'openrouter',apiKey:'staged-mode-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),'https://openrouter.ai/api/v1/batches');const body=JSON.parse(String(init.body));return Response.json({id:'batch_staged_mode',model:body.model,endpoint:'/v1/chat/completions',status:'in_progress'});};
+ const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',authorize:()=>true},run=()=>f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));
+ await assert.rejects(run(),{name:'BatchWaitingError'});scope.mode='immediate';await assert.rejects(run(),{name:'BatchWaitingError'});assert.equal(posts,0);
+ await f.ai.batchTasks.flush(scope.taskId);assert.equal(posts,1);await assert.rejects(run(),{name:'BatchWaitingError'});assert.equal(posts,1);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);
+});
+
+test('explicit immediate resume of a stopped unsent Batch plan makes one fresh ordinary attempt',async t=>{
+ const f=await listingFixture(t),context=(f.ai as any).context,original=context.fetch;let posts=0;
+ f.ai.saveConnection({id:'openrouter',apiKey:'unsent-mode-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),'https://openrouter.ai/api/v1/chat/completions');return original(url,init);};
+ const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',waitingOperationId:undefined as string|undefined,authorize:()=>true};
+ await assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),(error:any)=>{scope.waitingOperationId=error.operationId;return error.name==='BatchWaitingError';});
+ f.ai.batchTasks.stop(scope.taskId);scope.mode='immediate';f.ai.batchTasks.resume(scope.taskId);
+ const result=await f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));assert.equal(result.output.kind,'amazon-fields');assert.equal(posts,1);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);assert.notEqual(result.callId,scope.waitingOperationId);
+});

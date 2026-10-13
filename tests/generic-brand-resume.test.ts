@@ -1,6 +1,7 @@
+import { seedAuthorityHaulPricing } from './helpers/authority-haul-pricing.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fixture} from './fixtures/listing-ai.ts';
+import {fixture,legacyFixture} from './fixtures/listing-ai.ts';
 import {needsBusinessAuthorityRefresh} from '../src/main/image-workflow/policy-reevaluation.ts';
 const brandSchema={type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'}},required:['value']}};
 const brandingIssue=(code='5665',field='brand')=>({code,source:'amazon' as const,severity:'ERROR' as const,category:'field' as const,attributeNames:[field],autoFixable:false,message:`Brand approval required (${code})`});
@@ -24,7 +25,7 @@ test('brand-only legacy DONE refreshes Generic without FACT marker or another pa
 });
 for(const code of ['5665','5882'])test(`Generic platform ${code} in color requires manual handling without AI repair`,async t=>{
  const f=await fixture(t,{brand:brandSchema}),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
- r.draft.listingProgram='haul';p.putRecord(r);
+ r.draft.listingProgram='haul';await seedAuthorityHaulPricing(f,r.draft);p.putRecord(r);
  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[brandingIssue(code,'color')]});
  const result=await f.listing.complete(f.reference);
  assert.equal((result.draft.attributes.brand as any)[0].value,'Generic');assert.equal(result.aiCalls,0);assert.equal(f.requests.length,0);
@@ -71,8 +72,8 @@ test('ordinary brand schema errors are not classified as brand approval disputes
 
 for(const pending of ['candidate','review'] as const)test(`resumed ACTIVE ${pending} dispatch stops for Generic brand dispute and retains journal`,async t=>{
  const {randomUUID}=await import('node:crypto'),{listingFingerprint}=await import('../src/main/listing-ai/validation.ts');
- const f=await fixture(t,{brand:brandSchema}),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
- r.draft.listingProgram='haul';r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.previewIssues=[brandingIssue()];delete r.draft.attributes.material;p.putRecord(r);
+ const f=await legacyFixture(t,{brand:brandSchema}),p=(f.amazon as any).persistence,r=p.record(f.draft.id);
+ r.draft.listingProgram='haul';await seedAuthorityHaulPricing(f,r.draft);r.draft.attributes.brand=[{value:'Generic',marketplace_id:r.draft.marketplaceId}];r.draft.previewIssues=[brandingIssue()];delete r.draft.attributes.material;p.putRecord(r);
  const op=f.listing.beginCompletion(f.reference),context=f.listing.currentContext(f.amazon.getDraft(f.draft.id),f.product,f.amazon.executionTargetScope(f.draft.targetId).generation);
  context.fields=context.fields.filter(field=>field.name==='material');context.repairRequest={issues:[{field:'material',code:'90220',message:'Missing material'}],currentValues:{material:null}};
  const round={context,contextHash:listingFingerprint(context),candidate:{id:randomUUID(),sent:false,resultId:null},review:{id:randomUUID(),sent:false,resultId:null},resolved:false,adoptionId:null};op.rounds=[round];f.ai.completionJournal.save(op);

@@ -2,7 +2,7 @@ import type { AmazonDraft, JsonValue } from '../../shared/amazon-contracts.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { isObject } from '../amazon/context.ts';
-import { listingFingerprint } from './validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 export interface SelectedFirmnessCorrection { version:'selected-firmness/v1'; before:JsonValue; after:JsonValue; adoptionId:string; resultId:string; contextSha256:string; selectedSpec:{id:string;value:string}; selectedSpecSha256:string }
 /** Deliberately finite migration: no sentence editing, synonyms or AI authority. */
 export function selectedFirmnessCorrection(draft:AmazonDraft,context:ListingAiContext,getResult:(id:string)=>AiResult|undefined):SelectedFirmnessCorrection|null {

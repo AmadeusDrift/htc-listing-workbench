@@ -1,7 +1,7 @@
 import type { AutomaticImageCandidatePreview, ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import type { ImageGenerationService } from '../image-generation/service.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { integer, keys, uuid } from '../ai/validation.ts';
+import { integer, keys, uuid } from "../ai/primitives.ts";
 
 /** Only saved, validated local candidates belonging to this draft's slot may be previewed. */
 export async function readWorkflowCandidatePreview(raw: unknown, getProgress: (draftId: string) => ImageWorkflowRun | null, readCandidate: ImageGenerationService['readCandidate']): Promise<AutomaticImageCandidatePreview> {

@@ -5,8 +5,8 @@ import type { SecretStorage } from '../amazon/vault.ts';
 import type { AiProviderId } from '../../shared/ai-contracts.ts';
 import type { CredentialReadState } from '../../shared/credential-status.ts';
 import { AiError } from './errors.ts';
-import { isDeepSeek, keys, MODELS, parseProfileImport, providerId } from './validation.ts';
-import type { AiCredentials } from './validation.ts';
+import { isChatProvider, keys, MODELS, parseProfileImport, providerId } from "./primitives.ts";
+import type { AiCredentials } from "./primitives.ts";
 
 /** Separate from all other connection vaults, and bound to both provider ID and generation. */
 export class AiVault {
@@ -43,8 +43,8 @@ export class AiVault {
       if (!this.storage.isEncryptionAvailable()) return { state: 'encryption-unavailable' };
       const envelope = keys(JSON.parse(this.storage.decryptString(bytes)), ['version', 'id', 'generation', 'credentials']);
       if (envelope.version !== 1 || envelope.id !== id || envelope.generation !== generation) return { state: 'metadata-mismatch' };
-      const credentials = isDeepSeek(id) ? keys(envelope.credentials, ['apiKey']) : keys(envelope.credentials, ['accessKeyId', 'accessKeySecret'], ['securityToken']);
-      return { state: 'readable', credentials: parseProfileImport({ id, ...(isDeepSeek(id) ? { model: MODELS[id] } : {}), ...credentials }).credentials };
+      const credentials = isChatProvider(id) ? keys(envelope.credentials, ['apiKey']) : keys(envelope.credentials, ['accessKeyId', 'accessKeySecret'], ['securityToken']);
+      return { state: 'readable', credentials: parseProfileImport({ id, ...(isChatProvider(id) ? { model: MODELS[id] } : {}), ...credentials }).credentials };
     } catch { return { state: 'unreadable' }; }
   }
   has(id: AiProviderId, generation: number): boolean { try { this.read(id, generation); return true; } catch { return false; } }

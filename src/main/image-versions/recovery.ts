@@ -7,7 +7,7 @@ import type { ImageVersion } from '../../shared/image-version-contracts.ts';
 import { IMAGE_WRITE_CODES, IMAGE_WRITE_STATES } from '../../shared/image-write-contracts.ts';
 import type { ImageWriteCode, ImageWriteRecoveryStatus, ImageWriteSummary } from '../../shared/image-write-contracts.ts';
 import { AiError } from '../ai/errors.ts';
-import { date, integer, keys, uuid } from '../ai/validation.ts';
+import { date, integer, keys, uuid } from "../ai/primitives.ts";
 import { managedAssetPath } from '../security.ts';
 import { validateImageVersion } from './validation.ts';
 

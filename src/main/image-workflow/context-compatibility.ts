@@ -3,8 +3,8 @@ import { DIMENSION_FIELDS } from '../amazon/field-mapping.ts';
 import { HAUL_UNSUPPORTED_FIELDS } from '../amazon/listing-program.ts';
 import { compatibleApprovalRecipe } from './approval-reuse.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
-import { isFullSchema } from '../listing-ai/full-schema.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
+import { isFullSchema } from "../listing-ai/native-values.ts";
 
 /** Image requests do not consume field-card labels/help. Ignore only those two
  * metadata keys for compatibility; retain field order and source/schema rules.

@@ -7,5 +7,6 @@ test('A06 fact readers and family history do not import application services thr
   assert.deepEqual(result.unresolvedDynamicImports,[]);
   assert.equal(result.cycles.some((cycle:string[])=>cycle.includes('main/amazon/demo.ts')),false);
   assert.equal(result.cycles.some((cycle:string[])=>cycle.includes('main/amazon/service.ts')),false);
-  // The remaining AI/Listing/Image cluster is tracked until W05/W13, not hidden.
+  assert.equal(result.cycles.some((cycle:string[])=>cycle.includes('main/ai/adapters.ts')),false,'provider adapters must not participate in domain parser cycles');
+  assert.deepEqual(result.cycles,[],'all three inherited value-import clusters must remain eliminated');
 });

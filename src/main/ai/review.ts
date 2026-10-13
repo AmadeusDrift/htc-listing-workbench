@@ -5,8 +5,9 @@ import { requestDeepSeekJson } from './adapters.ts';
 import type { AdapterResult, TextPayload } from './adapters.ts';
 import { AiError } from './errors.ts';
 import type { AdapterContext } from './transport.ts';
-import { keys, protectedAttribute, validateTextOutput, validateTextReviewOutput } from './validation.ts';
-import type { DeepSeekCredentials, DeepSeekModel } from './validation.ts';
+import { keys } from "./primitives.ts";
+import { protectedAttribute, validateTextOutput, validateTextReviewOutput } from "./basic-output-validation.ts";
+import type { DeepSeekCredentials, DeepSeekModel } from "./primitives.ts";
 
 export interface ReviewPayload extends TextPayload {
   suggestionId: string; suggestionSha256: string; policyVersion: typeof TEXT_REVIEW_POLICY_VERSION; candidate: ContentSuggestionOutput;

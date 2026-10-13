@@ -1,3 +1,5 @@
+export { isFullSchema,evidenceVersion,imageEvidenceVersion,nativeText,candidateNative } from './native-values.ts';
+import { nativeText } from './native-values.ts';
 import { plainColorName, plainColorValue } from './plain-colors.ts';
 import { isPlatformFieldIssue } from '../amazon/preview-validation.ts';
 import { haulUnsupportedField } from '../amazon/listing-program.ts';
@@ -9,25 +11,13 @@ import type { ListingAiContext, ListingFieldsOutput, ListingFieldCandidate, List
 import { FULL_SCHEMA_CONTRACT } from '../../shared/listing-ai-contracts.ts';
 import { ListingValidationError } from './evidence-validation-v3.ts';
 import { compileAttributesSchema } from '../amazon/schema.ts';
-import { candidateTextValues, wrapCandidateValues } from '../amazon/field-mapping.ts';
+import { wrapCandidateValues } from '../amazon/field-mapping.ts';
 import { exactSkuColorIdentity } from './sku-colors.ts';
 import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
 
-export const isFullSchema=(context:{contract?:string}|undefined)=>context?.contract===FULL_SCHEMA_CONTRACT;
-export const evidenceVersion=(context:{contract?:string}|undefined)=>isFullSchema(context)?'listing-evidence/v4' as const:'listing-evidence/v3' as const;
-export const imageEvidenceVersion=(context:{contract?:string}|undefined)=>isFullSchema(context)?'listing-evidence/v4' as const:'listing-evidence/v5' as const;
 const fail=(reason:string):never=>{throw new ListingValidationError(reason);};
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 function json(value:unknown):value is JsonValue {return value===null||typeof value==='string'||typeof value==='boolean'||typeof value==='number'&&Number.isFinite(value)||Array.isArray(value)&&value.every(json)||object(value)&&Object.entries(value).every(([k,v])=>!['__proto__','prototype','constructor'].includes(k)&&json(v));}
-export function nativeText(field:string,value:JsonValue):string[]{
-  const known=candidateTextValues(field,value);if(known)return known;
-  if(typeof value==='string')return[value];
-  // Structured attributes are display data, not prose or claims for image captions.
-  return [];
-}
-export function candidateNative(candidate:ListingFieldCandidate,schema:AmazonSchema,marketplaceId:string,existing?:JsonValue):JsonValue {
-  return Object.hasOwn(candidate,'nativeValue')?structuredClone(candidate.nativeValue!):wrapCandidateValues(schema,marketplaceId,candidate.field,candidate.items.map(i=>i.value),existing);
-}
 function parseNativeCandidate(value:unknown):ListingFieldCandidate {
   if(!object(value)||typeof value.field!=='string'||!value.field||!Object.hasOwn(value,'nativeValue')||!json(value.nativeValue))fail('候选必须包含字段名与原生 JSON 值');
   const c=value as Record<string,unknown>,field=c.field as string,nativeValue=c.nativeValue as JsonValue;

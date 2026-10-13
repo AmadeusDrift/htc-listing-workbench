@@ -4,9 +4,9 @@ import { validateCompletionOperation,type CompletionOperation } from '../listing
 import type { AiCall,AiResult } from '../../shared/ai-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { REJECTION_VERSION,validateOutputRejection } from '../../shared/rejection-presentation.ts';
-import { keys,uuid,sha256,integer } from '../ai/validation.ts';
+import { keys, uuid, sha256, integer } from "../ai/primitives.ts";
 import { UserFacingError } from '../../shared/errors.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 
 export function validateWorkflowRejection(raw:unknown):NonNullable<ImageWorkflowRun['rejection']>{
  const o=keys(raw,['version','code','callId','resultId','contextSha256','stage','slot']);

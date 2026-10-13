@@ -3,16 +3,18 @@ import type { ProductRecordQuery, RecordPage, RecordPageOptions } from './record
 import type { CategoryDecision } from './category-ai-contracts.ts';
 import type { AiProviderConfigInput } from './connection-inputs.ts';
 import type { AiConnectionApi } from './ai-connection-contracts.ts';
+import type { AiPurposeApi } from './ai-purpose-contracts.ts';
 import type { ListingAiApi, ListingAiContext, ListingFieldsOutput, ListingFieldsReviewOutput, ListingEvidenceContractVersion } from './listing-ai-contracts.ts';
 import type { GeneratedImageOcrOutput, ImagePlanOutput, ImageTextReviewOutput, ImageIpReviewOutput, ListingCurrentReviewOutput, ProductImageContext } from './image-ai-contracts.ts';
 import type { SourceColorContext, SourceColorOutput } from './source-color-contracts.ts';
 import type { ListingNormalization } from './listing-normalization-contracts.ts';
 
-export const AI_PROVIDER_IDS = ['aliyun-ocr', 'aidge-segmentation', 'deepseek', 'deepseek-review', 'aliyun-image-risk'] as const;
+export const AI_PROVIDER_IDS = ['aliyun-ocr', 'aidge-segmentation', 'deepseek', 'deepseek-review', 'aliyun-image-risk','openrouter','openrouter-review'] as const;
 export type AiProviderId = typeof AI_PROVIDER_IDS[number];
 export type AiCapability = 'ocr' | 'segmentation' | 'text' | 'text-review' | 'image-generation' | 'image-risk';
 /** Returned connection metadata only. Saved credentials are never returned. */
 export interface AiProfile {
+  routing?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;
   thinking?: boolean;
   id: AiProviderId;
   capability: Exclude<AiCapability, 'image-generation'>;
@@ -21,7 +23,7 @@ export interface AiProfile {
   configured: boolean;
   generation: number;
 }
-export interface AiCapabilityInfo { capability: AiCapability; providerId: AiProviderId | 'openai-images' | 'tyai-images' | null; available: boolean; reason: string | null }
+export interface AiCapabilityInfo { capability: AiCapability; providerId: AiProviderId | 'openai-images' | 'tyai-images' | 'openrouter-images' | null; available: boolean; reason: string | null }
 export type AiErrorCode = 'INVALID_INPUT' | 'INVALID_CONFIG' | 'NOT_CONFIGURED' | 'DISABLED' | 'CONFIG_CHANGED' | 'SOURCE_CHANGED' | 'IMAGE_INVALID' | 'HOSTED_IMAGE_REQUIRED' | 'ENCRYPTION_UNAVAILABLE' | 'AUTH_FAILED' | 'SERVICE_PERMISSION_REQUIRED' | 'QUOTA_EXCEEDED' | 'RATE_LIMITED' | 'TIMEOUT' | 'NETWORK_ERROR' | 'PROVIDER_ERROR' | 'OUTPUT_INVALID' | 'BUSY' | 'CANCELLED' | 'INTERRUPTED' | 'SERVICE_CLOSED';
 export interface AiUsage { promptTokens: number; completionTokens: number; processedImages: number }
 export const AI_DAILY_CALL_MAX = 1000000;
@@ -35,6 +37,8 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  providerReceiptId?:string;
+  purposeSnapshot?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;
   /** Fixed safety state survives backup without retaining provider response text. */
   imagePlanRetryBlock?:'RESPONSE_NOT_CONTENT'|'RESPONSE_SECRET_ECHO';
   /** Provider content was received; independent of local parsing success. */
@@ -113,7 +117,7 @@ export interface SuggestContentInput { productId: string; productRevision: numbe
 export interface ReviewContentInput { productId: string; productRevision: number; suggestionResultId: string }
 /** Image generation uses the independent, candidate-only ImageGenerationApi contract. */
 export interface AiCallQuery extends RecordPageOptions { productId?: string; providerId?: AiProviderId; status?: AiCall['status'] }
-export interface AiApi extends AiConnectionApi, ListingAiApi {
+export interface AiApi extends AiConnectionApi, ListingAiApi,AiPurposeApi {
   listAiProviders(): Promise<AiProfile[]>;
   listAiCapabilities(): Promise<AiCapabilityInfo[]>;
   importAiProviderConfig(): Promise<AiProfile | null>;

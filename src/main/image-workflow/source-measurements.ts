@@ -3,7 +3,7 @@ import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { SourceImageMeasurement } from '../../shared/image-ai-contracts.ts';
 import { getReceipt } from '../miaoshou/persistence.ts';
 import { analyzeMiaoshouMeasurements, MEASUREMENT_LABELS } from '../../shared/miaoshou-measurements.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { describesOtherObject, isDefaultMeasurement } from './image-facts.ts';
 
 /** Read the original SKU-bound receipt, never listing defaults or AI-generated draft attributes. */

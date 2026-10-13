@@ -1,3 +1,4 @@
+import { inheritLegacyPurposeSettings } from '../../src/main/ai/purpose-routing.ts';
 import { confirmSourceConsistencyFixture } from '../helpers/source-consistency-proof.ts';
 import {UserFacingError} from '../../src/shared/errors.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -54,6 +55,7 @@ export async function completionOwnerFixture(t:TestContext,owner:'automatic'|'im
   const hosting=new HostingService(directory,store,mockStorage);let response=(p:any):Response|Promise<Response>=>chat(p.operation==='source-color'?{kind:'source-color',verdict:'DETERMINED',colors:['Blue'],reason:'Visible blue product body',referenceAssetIds:p.referenceImages.map((r:any)=>r.assetId)}:p.candidate?reviewFor(p):candidateFor(p));
   const ai=new AiService(directory,store,hosting,mockStorage,{fetch:async(_url,init)=>{const body=JSON.parse(String(init?.body)),content=body.messages[1].content,p=JSON.parse(typeof content==='string'?content:content[0].text);requests.push(p);return response(p);}});
   ai.saveConnection({id:'deepseek',apiKey:'fixture-only'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:true});
+  inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);inheritLegacyPurposeSettings((ai as any).db,'deepseek-review','deepseek-v4-pro',false);
   const listing=new ListingAiService(store,amazon,ai,()=>false),reference=()=>({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision});
   let images:ImageWorkflowService|undefined,automatic:AutomaticListingService|undefined,taskId:string|undefined;
   const profile={id:'alpha',name:'Alpha',generation:1,enabled:true,configured:true,host:'ftp.example.test',port:21,secure:true,remoteRoot:'/',publicBaseUrl:'https://images.example.test/'};

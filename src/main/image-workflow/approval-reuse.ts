@@ -3,8 +3,8 @@ import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
-import { boundedText, integer, keys, object, uuid } from '../ai/validation.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { boundedText, integer, keys, object, uuid } from "../ai/primitives.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { UserFacingError } from '../../shared/errors.ts';
 import { validateSalesRecipe } from '../sales-plans/records.ts';
 
@@ -55,4 +55,8 @@ export function plainColorApprovalMatches(run:ImageWorkflowRun,draft:AmazonDraft
   if(listingFingerprint(oldColor)===listingFingerprint(currentColor)||listingFingerprint(plainColorValue(oldColor,[variant.originalSpec,variant.normalizedSpec]))!==listingFingerprint(currentColor))return false;
   const previous={...draft,attributes:{...draft.attributes,color:oldColor}};
   return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(previous)))===run.draftSha256;
+}
+
+export function imageWorkflowDraftStamp(draft: AmazonDraft): string {
+  return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
 }

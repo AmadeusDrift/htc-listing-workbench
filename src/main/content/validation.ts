@@ -1,9 +1,11 @@
+import { isGenerationProvider, isReviewProvider } from "../ai/primitives.ts";
 import { TEXT_REVIEW_POLICY_VERSION } from '../../shared/ai-contracts.ts';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AdoptReviewedContentInput, ContentVersion } from '../../shared/content-contracts.ts';
 import { AiError } from '../ai/errors.ts';
 import { candidateFields, suggestionFingerprint } from '../ai/review.ts';
-import { date, integer, keys, modelFor, sha256, uuid, validateTextOutput } from '../ai/validation.ts';
+import { date, integer, keys, modelFor, sha256, uuid } from "../ai/primitives.ts";
+import { validateTextOutput } from "../ai/basic-output-validation.ts";
 
 export function parseAdoptReviewedContentInput(raw: unknown): AdoptReviewedContentInput {
   try { const o = keys(raw, ['productId', 'productRevision', 'reviewResultId']); return { productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), reviewResultId: uuid(o.reviewResultId) }; }
@@ -20,8 +22,8 @@ export function validateContentVersion(raw: unknown): ContentVersion {
 /** Validate historical provenance, not freshness: the product or SKU may have changed since adoption. */
 export function assertContentHistory(version: ContentVersion, results: ReadonlyMap<string, AiResult>, calls: ReadonlyMap<string, AiCall>): void {
   const generation = results.get(version.generationResultId), review = results.get(version.reviewResultId);
-  if (!generation || generation.providerId !== 'deepseek' || generation.output.kind !== 'text'
-    || !review || review.providerId !== 'deepseek-review' || review.output.kind !== 'text-review' || review.output.verdict !== 'PASS') throw new AiError('INVALID_CONFIG');
+  if (!generation || !isGenerationProvider(generation.providerId) || generation.output.kind !== 'text'
+    || !review || !isReviewProvider(review.providerId) || review.output.kind !== 'text-review' || review.output.verdict !== 'PASS') throw new AiError('INVALID_CONFIG');
   for (const result of [generation, review]) {
     const call = calls.get(result.callId);
     if (result.productId !== version.productId || result.productRevision !== version.sourceRevision || result.variantId !== version.variantId

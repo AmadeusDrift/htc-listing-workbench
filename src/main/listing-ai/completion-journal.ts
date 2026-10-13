@@ -10,13 +10,17 @@ import { resultHasOwner } from '../ai/result-owner.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
+import { isGenerationProvider,isReviewProvider } from '../ai/primitives.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { boundedText, date, integer, keys, sha256, uuid, validateAiCall, validateStoredAiResult } from '../ai/validation.ts';
-import { listingFingerprint, validateListingContext } from './validation.ts';
+import { boundedText, date, integer, keys, sha256, uuid } from "../ai/primitives.ts";
+import { validateAiCall, validateStoredAiResult } from "../ai/validation.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
+import { validateListingContext } from "./validation.ts";
 import { validateAiUsageRecord } from '../ai/usage.ts';
-import { isFullSchema,nativeCandidateIssues,fullCopyPolicyIssues,parseFullGeneration,retainValidNativeCandidates } from './full-schema.ts';
+import { isFullSchema } from "./native-values.ts";
+import { nativeCandidateIssues, fullCopyPolicyIssues, parseFullGeneration, retainValidNativeCandidates } from "./full-schema.ts";
 import { hasInvalidAiResponse,readInvalidAiOutputs } from '../ai/output-diagnostics.ts';
 
 export interface CompletionCall { id:string; sent:boolean; resultId:string|null; previous?:CompletionCall[] }
@@ -171,7 +175,7 @@ export class CompletionJournal {
     const usage=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(entry.id);
     if(!row||!usage)invalid();
     const call=validateAiCall(JSON.parse(String(row.record_json))),ledger=validateAiUsageRecord(JSON.parse(String(usage.record_json)));
-    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||call.providerId!==(kind==='candidate'?'deepseek':'deepseek-review')||ledger.id!==call.id||ledger.providerId!==call.providerId||ledger.startedAt!==call.startedAt)invalid();
+    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||!(kind==='candidate'?isGenerationProvider(call.providerId):isReviewProvider(call.providerId))||ledger.id!==call.id||ledger.providerId!==call.providerId||ledger.startedAt!==call.startedAt)invalid();
     const owner=call.presentationContext;
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
@@ -193,10 +197,10 @@ export class CompletionJournal {
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
     if(!row)return;
     const call=validateAiCall(JSON.parse(String(row.record_json))),kind=entry.id===round.candidate.id?'amazon-fields':'amazon-fields-review';
-    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||call.providerId!==(kind==='amazon-fields'?'deepseek':'deepseek-review')||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return;
+    if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||!(kind==='amazon-fields'?isGenerationProvider(call.providerId):isReviewProvider(call.providerId))||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return;
     const p=call.presentationContext;
     if(p&&(p.kind!=='listing'||p.draftId!==round.context.draftId||p.variantId!==round.context.variantId||p.sourceSha256!==round.contextHash))return;
-    if(call.responseReceived||call.rejection||this.directory&&hasInvalidAiResponse(this.directory,call,kind))return call;
+    if(call.providerReceiptId||call.responseReceived||call.rejection||this.directory&&hasInvalidAiResponse(this.directory,call,kind))return call;
   }
   /** Explicit continuation only. No provider, usage reservation, or call mutation. */
   recoverReceived(id:string):void {
@@ -266,7 +270,7 @@ export function assertCompletionHistory(db:DatabaseSync):void {
         const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id),usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);
         if(call.sent){
           if(!usageRow||!callRow&&op.state!=='GUARD')invalid();const usage=validateAiUsageRecord(JSON.parse(String(usageRow.record_json)));
-          if(usage.id!==call.id||usage.providerId!==(kind==='candidate'?'deepseek':'deepseek-review'))invalid();
+          if(usage.id!==call.id||!(kind==='candidate'?isGenerationProvider(usage.providerId):isReviewProvider(usage.providerId)))invalid();
           if(callRow){const saved=validateAiCall(JSON.parse(String(callRow.record_json)));if(saved.id!==call.id||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==usage.providerId||saved.startedAt!==usage.startedAt)invalid();}
         }else if(callRow||usageRow||db.prepare('SELECT id FROM ai_results WHERE json_extract(record_json,\'$.callId\')=?').get(call.id))invalid();
       }

@@ -2,23 +2,25 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AiCapabilityInfo } from '../../shared/ai-contracts.ts';
-import type { GenerateImageCandidateInput, GeneratedImageCandidate, ImageGenerationConnection, ImageGenerationProvider, OpenAiImageModel, TyaiImageModel } from '../../shared/image-generation-contracts.ts';
+import type { GenerateImageCandidateInput, GeneratedImageCandidate, ImageGenerationConnection, ImageGenerationProvider } from '../../shared/image-generation-contracts.ts';
 import type { WorkspaceStore, StoredAsset } from '../store.ts';
 import type { SecretStorage } from '../amazon/vault.ts';
 import { AiError, abortable, throwIfAborted } from '../ai/errors.ts';
-import { keys, uuid } from '../ai/validation.ts';
+import { readBounded } from '../ai/transport.ts';
+import { keys, uuid } from "../ai/primitives.ts";
 import { readManagedImage, sameAsset, validateImage } from '../ai/source.ts';
 import { inspectRaster } from '../image-format.ts';
-import { OpenAiImageAdapter } from './adapter.ts';
-import { TyaiImageAdapter } from './tyai-adapter.ts';
-import { ImageGenerationVault, imageApiKey, imageDefaults, imageModel, imageProvider, imageQuality, privateDirectory, validImageSize } from './vault.ts';
+import { OpenRouterImageAdapter,decodeOpenRouterImage } from '../ai/adapters/openrouter-images.ts';
+import { openRouterHttpError } from '../ai/adapters/openrouter-http.ts';
+import { OPENROUTER_IMAGE_MODELS } from '../../shared/image-generation-contracts.ts';
+import { openDatabase } from '../database.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { saveProviderReceipt,readProviderReceipt,saveImageRequestIntent,readImageRequestIntent } from '../ai/receipts.ts';
+import { ImageGenerationVault, imageApiKey, imageDefaults, imageModel, activeImageProvider as imageProvider, imageQuality, privateDirectory, validImageSize } from './vault.ts';
 import type { ImageGenerationConfig } from './vault.ts';
 import { readCandidateFiles } from './candidate.ts';
 import type { RelayDownloadDependencies } from './download.ts';
 import type { ImageModelCatalog } from '../../shared/image-generation-contracts.ts';
-import { isGeminiImageModel, relayDefaultQuality } from '../../shared/image-models.ts';
-import { builtInModels, fetchRelayModels } from './catalog.ts';
-import { GeminiRelayAdapter } from './gemini-adapter.ts';
 import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
 
@@ -26,8 +28,8 @@ export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?:
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
   const o = keys(raw, ['productId', 'productRevision', 'prompt', 'referenceAssetIds', 'size', 'quality', 'background']);
   if (!Number.isSafeInteger(o.productRevision) || Number(o.productRevision) < 1 || typeof o.prompt !== 'string' || !o.prompt.trim() || o.prompt.length > 32000 || o.prompt.includes('\0') ||
-      !Array.isArray(o.referenceAssetIds) || o.referenceAssetIds.length > (provider === 'tyai' && isGeminiImageModel(model) ? 14 : 16) || !validImageSize(o.size, provider, model) ||
-      typeof o.quality !== 'string' || !['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(o.quality) || typeof o.background !== 'string' || !['auto', 'opaque', 'transparent'].includes(o.background)) throw new AiError('INVALID_INPUT');
+      !Array.isArray(o.referenceAssetIds) || o.referenceAssetIds.length > 16 || !validImageSize(o.size, provider, model) ||
+      typeof o.quality !== 'string' || !['auto', 'low', 'medium', 'high'].includes(o.quality) || typeof o.background !== 'string' || !['auto', 'opaque', 'transparent'].includes(o.background)) throw new AiError('INVALID_INPUT');
   const refs = o.referenceAssetIds.map(uuid); if (new Set(refs).size !== refs.length) throw new AiError('INVALID_INPUT');
   return { productId: uuid(o.productId), productRevision: Number(o.productRevision), prompt: o.prompt.trim(), referenceAssetIds: refs,
     size: o.size as GenerateImageCandidateInput['size'], quality: o.quality as GenerateImageCandidateInput['quality'], background: o.background as GenerateImageCandidateInput['background'] };
@@ -37,33 +39,45 @@ const fingerprint = (config: ImageGenerationConfig) => digest(JSON.stringify(con
 
 /** Provider credentials and candidate artifacts stay separate from product source images. */
 export class ImageGenerationService {
-  private directory: string; private store: WorkspaceStore; private vault: ImageGenerationVault; private adapter: OpenAiImageAdapter; private relay: TyaiImageAdapter;
+  private sharedConnection?:{read():string|null;save(key:string):unknown;disconnect():unknown};
+  private directory: string; private store: WorkspaceStore; private vault: ImageGenerationVault; private adapter: OpenRouterImageAdapter; private db:DatabaseSync;
   private decodePreview: (bytes: Buffer) => Buffer; private timeoutMs: number; private closed = false;
   private running?: { controller: AbortController; promise: Promise<unknown> };
   private checked?: { fingerprint: string; result: 'accessible' | 'failed'; at: string };
   private scope?: { fingerprint: string; token: string };
-  private fetcher: typeof fetch; private gemini: GeminiRelayAdapter;
+  private fetcher: typeof fetch;
   private catalog?: { keyHash: string; value: ImageModelCatalog };
   constructor(directory: string, store: WorkspaceStore, storage: SecretStorage, deps: ImageGenerationDependencies) {
     this.directory = directory; this.store = store; this.vault = new ImageGenerationVault(directory, storage);
-    this.fetcher = deps.fetch ?? globalThis.fetch; this.gemini = new GeminiRelayAdapter(deps);
-    this.adapter = new OpenAiImageAdapter({ fetch: deps.fetch }); this.relay = new TyaiImageAdapter({ fetch: deps.fetch, downloadDependencies: deps.downloadDependencies }); this.decodePreview = deps.decodePreview;
+    this.fetcher = deps.fetch ?? globalThis.fetch; this.db=openDatabase(directory);
+    this.adapter = new OpenRouterImageAdapter({ fetch: deps.fetch }); this.decodePreview = deps.decodePreview;
     this.timeoutMs = deps.timeoutMs ?? 660000;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 1800000) throw new AiError('INVALID_CONFIG');
   }
   private ensureOpen(): void { if (this.closed) throw new AiError('SERVICE_CLOSED'); }
+  attachOpenRouterConnection(port:{read():string|null;save(key:string):unknown;disconnect():unknown}):void{
+    if(this.sharedConnection)throw new AiError('INVALID_CONFIG');this.sharedConnection=port;
+  }
+  private readConnection(provider:ImageGenerationProvider='openrouter'):ReturnType<ImageGenerationVault['inspect']>{
+    imageProvider(provider);const saved=this.vault.inspect(provider);
+    if(!this.sharedConnection)return saved.state==='ready'&&saved.config.credentialRef?{state:'absent'}:saved;
+    const apiKey=this.sharedConnection.read();if(!apiKey)return{state:'absent'};
+    return{state:'ready',config:{...(saved.state==='ready'?saved.config:{provider:'openrouter' as const,...imageDefaults('openrouter'),enabled:false}),apiKey,credentialRef:'openrouter'}};
+  }
   get busy(): boolean { return !!this.running; }
   getModels(): ImageModelCatalog {
-    this.ensureOpen(); const current = this.vault.inspect('tyai');
-    return structuredClone(current.state === 'ready' && this.catalog?.keyHash === digest(current.config.apiKey) ? this.catalog.value : builtInModels());
+    this.ensureOpen(); const current = this.readConnection('openrouter');
+    return structuredClone(current.state === 'ready' && this.catalog?.keyHash === digest(current.config.apiKey) ? this.catalog.value : ({source:'builtin' as const,fetchedAt:null,models:OPENROUTER_IMAGE_MODELS.map(id=>({id,protocol:'images' as const,endpoints:['/api/v1/images']}))}));
   }
   async refreshModels(): Promise<ImageModelCatalog> {
-    this.ensureOpen(); const config = this.config(false, 'tyai');
+    this.ensureOpen(); const config = this.config(false, 'openrouter');
     return this.controlled(async signal => {
       const timeout = setTimeout(() => this.cancel(new AiError('TIMEOUT')), 20000);
       try {
-        const value = await fetchRelayModels(this.fetcher, config.apiKey, signal); throwIfAborted(signal);
-        const current = this.vault.inspect('tyai');
+        const response=await this.fetcher('https://openrouter.ai/api/v1/images/models',{headers:{authorization:'Bearer '+config.apiKey},signal,redirect:'error'});
+        if(!response.ok)throw new AiError('SERVICE_PERMISSION_REQUIRED');const raw=await readBounded(response,4*1024*1024,signal) as any;if(!Array.isArray(raw?.data))throw new AiError('OUTPUT_INVALID');
+        const value:ImageModelCatalog={source:'remote',fetchedAt:new Date().toISOString(),models:raw.data.filter((r:any)=>OPENROUTER_IMAGE_MODELS.includes(r.id)).map((r:any)=>({id:r.id,protocol:'images',endpoints:['/api/v1/images']}))}; throwIfAborted(signal);
+        const current = this.readConnection('openrouter');
         if (current.state !== 'ready' || fingerprint(current.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
         this.catalog = { keyHash: digest(config.apiKey), value }; return structuredClone(value);
       } finally { clearTimeout(timeout); }
@@ -77,39 +91,41 @@ export class ImageGenerationService {
   }
   getConnection(rawProvider?: unknown): ImageGenerationConnection {
     this.ensureOpen(); const activeProvider = this.vault.activeProvider(), provider = rawProvider === undefined ? activeProvider : imageProvider(rawProvider);
-    const read = this.vault.inspect(provider), config = read.state === 'ready' ? read.config : null, defaults = imageDefaults(provider);
+    const read = this.readConnection(provider), config = read.state === 'ready' ? read.config : null, defaults = imageDefaults(provider);
     const check = config && this.checked?.fingerprint === fingerprint(config) ? this.checked : null;
     return { provider, activeProvider, model: config?.model ?? defaults.model, size: config?.size ?? defaults.size, quality: config?.quality ?? defaults.quality, configured: !!config, enabled: config?.enabled ?? false,
       credentialState: read.state, accessCheck: check?.result ?? 'not-checked', checkedAt: check?.at ?? null };
   }
   capability(): AiCapabilityInfo {
     const connection = this.getConnection();
-    return { capability: 'image-generation', providerId: connection.provider === 'openai' ? 'openai-images' : 'tyai-images', available: connection.configured && connection.enabled,
-      reason: !connection.configured ? `尚未保存 ${connection.provider === 'openai' ? 'OpenAI' : 'Tyai'} API Key` : !connection.enabled ? '生图接口尚未启用' : '已启用，实际生图待测试' };
+    return { capability: 'image-generation', providerId: 'openrouter-images', available: connection.configured && connection.enabled,
+      reason: !connection.configured ? '尚未保存 OpenRouter API Key' : !connection.enabled ? '生图接口尚未启用' : '已启用，实际生图待测试' };
   }
   saveConnection(raw: unknown): ImageGenerationConnection {
     this.ensureOpen(); const o = keys(raw, ['model', 'enabled'], ['apiKey', 'provider', 'size', 'quality']);
     const provider = o.provider === undefined ? this.vault.activeProvider() : imageProvider(o.provider), model = imageModel(o.model, provider);
     if (typeof o.enabled !== 'boolean' || (o.apiKey !== undefined && typeof o.apiKey !== 'string')) throw new AiError('INVALID_CONFIG');
-    const previous = this.vault.inspect(provider), defaults = imageDefaults(provider);
+    const previous = this.readConnection(provider), defaults = imageDefaults(provider);
     const sameModel = previous.state === 'ready' && previous.config.model === model;
-    const size = o.size ?? (sameModel ? previous.config.size : defaults.size), quality = imageQuality(o.quality ?? (sameModel ? previous.config.quality : provider === 'tyai' ? relayDefaultQuality(model) : defaults.quality));
+    const size = o.size ?? (sameModel ? previous.config.size : defaults.size), quality = imageQuality(o.quality ?? (sameModel ? previous.config.quality : defaults.quality));
+    if(!['auto','low','medium','high'].includes(quality))throw new AiError('INVALID_CONFIG');
     if (!validImageSize(size, provider, model)) throw new AiError('INVALID_CONFIG');
     const apiKey = typeof o.apiKey === 'string' && o.apiKey.trim() ? imageApiKey(o.apiKey) : previous.state === 'ready' ? previous.config.apiKey : null;
     if (!apiKey) throw new AiError('NOT_CONFIGURED');
-    this.vault.save({ provider, model, enabled: o.enabled, apiKey, size, quality }); this.checked = undefined; this.cancel(new AiError('CONFIG_CHANGED'));
+    if(this.sharedConnection&&o.apiKey)this.sharedConnection.save(apiKey);
+    this.vault.save({ provider, model, enabled: o.enabled, apiKey:this.sharedConnection?'':apiKey, size, quality,...(this.sharedConnection?{credentialRef:'openrouter' as const}:{}) }); this.checked = undefined; this.cancel(new AiError('CONFIG_CHANGED'));
     return this.getConnection();
   }
   disconnect(rawProvider?: unknown): ImageGenerationConnection {
     this.ensureOpen(); const provider = rawProvider === undefined ? this.vault.activeProvider() : imageProvider(rawProvider);
-    this.vault.remove(provider); this.checked = undefined; this.cancel(new AiError('CONFIG_CHANGED')); return this.getConnection(provider);
+    this.sharedConnection?.disconnect();this.vault.remove(provider); this.checked = undefined; this.cancel(new AiError('CONFIG_CHANGED')); return this.getConnection(provider);
   }
   private config(requireEnabled: boolean, provider = this.vault.activeProvider()): ImageGenerationConfig {
-    const value = this.vault.inspect(provider); if (value.state !== 'ready') throw new AiError('NOT_CONFIGURED');
+    const value = this.readConnection(provider); if (value.state !== 'ready') throw new AiError('NOT_CONFIGURED');
     if (requireEnabled && !value.config.enabled) throw new AiError('DISABLED'); return value.config;
   }
   private assertConfig(config: ImageGenerationConfig): void {
-    const value = this.vault.inspect(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
+    const value = this.readConnection(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
   }
   private controlled<T>(task: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
     this.ensureOpen(); if (this.running) return Promise.reject(new AiError('BUSY'));
@@ -124,12 +140,11 @@ export class ImageGenerationService {
   }
   async checkConnection(rawProvider?: unknown): Promise<ImageGenerationConnection> {
     this.ensureOpen(); const provider = rawProvider === undefined ? this.vault.activeProvider() : imageProvider(rawProvider), config = this.config(false, provider);
-    if (provider === 'tyai') return this.getConnection(provider);
     return this.controlled(async signal => {
-      try { await this.adapter.checkModel(config.apiKey, config.model as OpenAiImageModel, signal); throwIfAborted(signal);
-        const current = this.vault.inspect(provider); if (current.state !== 'ready' || fingerprint(current.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED'); }
+      try { await this.adapter.checkModel(config.apiKey, config.model, signal); throwIfAborted(signal);
+        const current = this.readConnection(provider); if (current.state !== 'ready' || fingerprint(current.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED'); }
       catch (error) {
-        if (!signal.aborted && this.vault.inspect().state === 'ready') { this.checked = { fingerprint: fingerprint(config), result: 'failed', at: new Date().toISOString() }; }
+        if (!signal.aborted && this.readConnection().state === 'ready') { this.checked = { fingerprint: fingerprint(config), result: 'failed', at: new Date().toISOString() }; }
         throw error;
       }
       this.checked = { fingerprint: fingerprint(config), result: 'accessible', at: new Date().toISOString() }; return this.getConnection(provider);
@@ -154,7 +169,14 @@ export class ImageGenerationService {
   }
   async reconcileWorkflowGeneration(rawId:string):Promise<GeneratedImageCandidate|null>{
     this.ensureOpen();const id=uuid(rawId);
-    if(!existsSync(join(this.directory,'image-generation','candidates',id)))return null;
+    if(!existsSync(join(this.directory,'image-generation','candidates',id))){
+      const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
+      const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
+      if(receipt.status<200||receipt.status>=300)throw openRouterHttpError(receipt.status);
+      const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
+      const candidate:GeneratedImageCandidate={...intent,requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
+      delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
+    }
     return (await this.readCandidate(id)).candidate;
   }
   private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string}):Promise<GeneratedImageCandidate>{
@@ -169,7 +191,7 @@ export class ImageGenerationService {
         const asset = this.store.getAssetRecord(id); if (!asset || asset.productId !== input.productId) throw new AiError('SOURCE_CHANGED');
         validateImage(asset, false); return asset;
       });
-      if (assets.reduce((total, asset) => total + asset.byteSize, 0) > (config.provider === 'tyai' ? 20 : 23) * 1024 * 1024) throw new AiError('IMAGE_INVALID');
+      if (assets.reduce((total, asset) => total + asset.byteSize, 0) > 23 * 1024 * 1024) throw new AiError('IMAGE_INVALID');
       const references: { mimeType: 'image/png' | 'image/jpeg'; bytes: Buffer }[] = [];
       for (const asset of assets) references.push({ mimeType: asset.mimeType as 'image/png' | 'image/jpeg', bytes: await readManagedImage(this.directory, asset, signal) });
       let editSource:GeneratedImageCandidate['editSource'];
@@ -187,8 +209,10 @@ export class ImageGenerationService {
       const request = { apiKey: config.apiKey, prompt: input.prompt, size: input.size, quality: input.quality, background: input.background, references };
       this.store.freezeSourceVersion(input.productId,input.productRevision);
       stage='request';enteredAdapter=true;
-      const result = config.provider === 'tyai' ? await (isGeminiImageModel(config.model) ? this.gemini : this.relay).generate({ ...request, model: config.model as TyaiImageModel }, signal)
-        : await this.adapter.generate({ ...request, model: config.model as OpenAiImageModel }, signal);
+      const requestId=attempt?.requestId??randomUUID();
+      if(readImageRequestIntent(this.db,requestId)){const error=new AiError('INTERRUPTED');error.message='原生图请求已有发送意图；请回收原响应，未重发';throw error;}
+      saveImageRequestIntent(this.db,{version:1,id:requestId,provider:'openrouter',model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit':'generate',sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})});
+      const result=await this.adapter.generate({...request,model:config.model},signal,{onProviderReceipt:receipt=>saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined).then(()=>{})});
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
       stage='revalidate';
@@ -198,7 +222,7 @@ export class ImageGenerationService {
       stage='preview';
       try { preview = this.decodePreview(result.bytes); const shape = inspectRaster(preview); if (shape.mimeType !== 'image/png' || preview.length > 4 * 1024 * 1024) throw new Error(); }
       catch(error) { record(error);throw invalidImageOutput('preview'); }
-      const candidate: GeneratedImageCandidate = { id: attempt?.requestId??randomUUID(), provider: config.provider, model: config.model, mode: assets.length ? 'edit' : 'generate',
+      const candidate: GeneratedImageCandidate = { id: requestId, provider: config.provider, model: config.model, mode: assets.length ? 'edit' : 'generate',
         productId: input.productId, productRevision: input.productRevision, createdAt: new Date().toISOString(), requestId: result.requestId,
         sourceAssets: assets.map(asset => ({ id: asset.id, sha256: asset.sha256 })), reviewState: 'unreviewed', mimeType: 'image/png',
         width: result.width, height: result.height, byteSize: result.bytes.length, sha256: digest(result.bytes), previewUrl: `data:image/png;base64,${preview.toString('base64')}`,...(editSource?{editSource}:{}) };
@@ -225,5 +249,5 @@ export class ImageGenerationService {
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
   cancel(reason = new AiError('CANCELLED')): void { this.running?.controller.abort(reason); }
-  async close(): Promise<void> { this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {}); }
+  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {}); this.db.close(); }
 }

@@ -5,7 +5,7 @@ import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { AiError } from '../ai/errors.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { candidateTextValues } from '../amazon/field-mapping.ts';
-import { isFullSchema,nativeText } from '../listing-ai/full-schema.ts';
+import { isFullSchema, nativeText } from "../listing-ai/native-values.ts";
 
 type Measurement = { kind:'length'|'weight'; value:number };
 const measurementPattern=()=>/(\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)*)\s*(millimeters?|centimeters?|毫米|厘米|千克|公斤|英寸|inches|inch|ounces|ounce|pounds|pound|grams|gram|mm|cm|kg|lbs|lb|oz|in|g|m|克|米)(?![a-z])/gi;

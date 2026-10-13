@@ -1,4 +1,5 @@
-import {isFullSchema} from './full-schema.ts';
+import { isGenerationProvider } from "../ai/primitives.ts";
+import { isFullSchema } from "./native-values.ts";
 import {randomUUID} from 'node:crypto';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AmazonDraft} from '../../shared/amazon-contracts.ts';
@@ -6,7 +7,7 @@ import {UserFacingError} from '../../shared/errors.ts';
 import {validateAiCall,validateStoredAiResult} from '../ai/validation.ts';
 import {resultHasOwner} from '../ai/result-owner.ts';
 import {validateAiUsageRecord} from '../ai/usage.ts';
-import {listingFingerprint} from './validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import type {CompletionOperation,CompletionRound} from './completion-journal.ts';
 
 export interface LegacyCompletionHistory { checkpointIds:string[]; callIds:string[]; resultIds:string[]; adoptionIds:string[]; priorRounds:number; missingAttemptDebt:number; stepDebts?:{contextHash:string;kind:'candidate'|'review';callIds:string[]}[] }
@@ -44,7 +45,7 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
   const stepDebts:NonNullable<LegacyCompletionHistory['stepDebts']>=[];
   for(const call of missing){
     if(!['deepseek','deepseek-review'].includes(call.providerId))invalid();
-    const contextHash=call.presentationContext!.sourceSha256,kind=call.providerId==='deepseek'?'candidate':'review';
+    const contextHash=call.presentationContext!.sourceSha256,kind=isGenerationProvider(call.providerId)?'candidate':'review';
     let step=stepDebts.find(step=>step.contextHash===contextHash&&step.kind===kind);
     if(!step){step={contextHash,kind,callIds:[]};stepDebts.push(step);}step.callIds.push(call.id);
   }

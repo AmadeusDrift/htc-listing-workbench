@@ -1,5 +1,5 @@
 import type { ImageSelection, ImageVersion } from '../../shared/image-version-contracts.ts';
-import { boundedText, integer, keys, uuid } from '../ai/validation.ts';
+import { boundedText, integer, keys, uuid } from "../ai/primitives.ts";
 import { AiError } from '../ai/errors.ts';
 export function imageHash(raw: unknown): string { if (typeof raw !== 'string' || !/^[a-f0-9]{64}$/.test(raw)) throw new AiError('INVALID_INPUT'); return raw; }
 function date(raw: unknown): string { const text = boundedText(raw, 24); if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(text) || !Number.isFinite(Date.parse(text)) || new Date(text).toISOString() !== text) throw new AiError('INVALID_INPUT'); return text; }

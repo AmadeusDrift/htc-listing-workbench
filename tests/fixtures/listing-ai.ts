@@ -1,3 +1,4 @@
+import { inheritLegacyPurposeSettings } from '../../src/main/ai/purpose-routing.ts';
 import { addSourceOriginalFixture,confirmSourceConsistencyFixture } from '../helpers/source-consistency-proof.ts';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -31,6 +32,7 @@ export async function fixture(t:TestContext, extraSchemaFields:JsonObject={}) {
   let respond=(payload:any,_options?:RequestInit):Promise<Response>|Response=>chat(payload.candidate?reviewFor(payload):candidateFor(payload));
   const ai=new AiService(directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{const body=JSON.parse(String(options?.body)),payload=JSON.parse(body.messages[1].content);requests.push(body);return respond(payload,options);}});
   ai.saveConnection({id:'deepseek',apiKey:'fixture-shared-listing-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});ai.saveFunctionSettings({id:'deepseek-review',model:'deepseek-v4-pro',enabled:true});
+  inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);inheritLegacyPurposeSettings((ai as any).db,'deepseek-review','deepseek-v4-pro',false);
   const listing=new ListingAiService(store,amazon,ai);t.after(async()=>{await ai.close();await hosting.close();amazon.close();store.close();rmSync(directory,{recursive:true,force:true});});
   return{directory,store,amazon,hosting,ai,listing,product,draft,requests,reference:{draftId:draft.id,draftRevision:draft.revision},respond:(fn:typeof respond)=>{respond=fn;}};
 }

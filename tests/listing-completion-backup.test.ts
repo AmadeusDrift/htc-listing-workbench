@@ -37,8 +37,13 @@ for(const beforeDraft of [false,true])for(const success of [false,true])test(`re
   }finally{await ai.close();await hosting.close();amazon.close();store.close();}
 });
 
-test('completion backup validates strict records, call/result identity, usage and adoption linkage',async t=>{
-  const f=await fixture(t);f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return{...d,state:d.fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:d.fieldAdoptions?.length?[]:[issue]};};await f.listing.complete(f.reference);
+for(const gateway of ['deepseek','openrouter'] as const)test(`${gateway} completion backup validates strict records, call/result identity, usage and adoption linkage`,async t=>{
+  const f=await fixture(t);
+  if(gateway==='openrouter'){
+    f.ai.saveConnection({id:gateway,apiKey:'openrouter-completion-fixture'});f.ai.setEnabled({id:gateway,enabled:true});f.ai.setEnabled({id:'openrouter-review',enabled:true});
+    for(const p of f.ai.getPurposeProfiles().filter(p=>['listing_completion','copy_review'].includes(p.purposeId)))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway,model:'openai/gpt-6-luna',effort:'medium'}});
+  }
+  f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return{...d,state:d.fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:d.fieldAdoptions?.length?[]:[issue]};};await f.listing.complete(f.reference);
   const op=f.listing.completionOperations(f.draft.id)[0],db=openDatabase(f.directory);
   try{
     await createWorkspaceBackup(f.directory,join(f.directory,'valid.htcbackup'),pass);
@@ -54,7 +59,7 @@ test('completion backup validates strict records, call/result identity, usage an
 });
 
 test('schema 17 encrypted backup migrates without inventing a completion operation',async t=>{
-  const f=await fixture(t),db=openDatabase(f.directory);db.exec('DROP TABLE listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS schema_fetch_operations; PRAGMA user_version=17;');db.close();
+  const f=await fixture(t),db=openDatabase(f.directory);db.exec('DROP TABLE listing_completion_operations; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; PRAGMA user_version=17;');db.close();
   const file=join(f.directory,'schema17.htcbackup');await createWorkspaceBackup(f.directory,file,pass);
   const restored=await prepareWorkspaceRestore(f.directory,file,pass),snapshot=openDatabase(restored.stagingDirectory);
   try{assert.equal(snapshot.prepare('PRAGMA user_version').get()!.user_version,SCHEMA_VERSION);assert.equal(snapshot.prepare('SELECT id FROM listing_completion_operations').all().length,0);}finally{snapshot.close();}

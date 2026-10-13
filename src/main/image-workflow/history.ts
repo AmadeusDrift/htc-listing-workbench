@@ -6,7 +6,7 @@ import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
 import type { ProductImageContext } from '../../shared/image-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { assertCurrentListingReview, assertImagePlan, assertImageTextReview, validateProductImageContext } from '../ai/image-validation.ts';
 import { workflowRuns } from './records.ts';
 import { referenceMeasurementEvidence } from './image-facts.ts';

@@ -21,15 +21,17 @@ import { UserFacingError } from '../../shared/errors.ts';
 import type { WorkspaceStore } from '../store.ts';
 import type { AiService } from '../ai/service.ts';
 import type { AmazonService } from '../amazon/service.ts';
-import { integer, keys, uuid } from '../ai/validation.ts';
+import { integer, keys, uuid } from "../ai/primitives.ts";
 import { candidateTextValues, validateFieldValues, validatePolicyOutputs, wrapCandidateValues } from '../amazon/field-mapping.ts';
 import { buildListingContext } from './context.ts';
-import { assertListingEvidence, assertListingReview, listingFingerprint, selectedSkuCategoryConflicts, validateListingContext } from './validation.ts';
+import { assertListingEvidence, assertListingReview, selectedSkuCategoryConflicts, validateListingContext } from "./validation.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 import type { CurrentListingCopy } from '../../shared/image-ai-contracts.ts';
 import { currentImageListingSnapshot } from '../image-workflow/image-facts.ts';
 import { currentDraftEvidenceIssues, currentProseRepairIssues } from './current-evidence.ts';
 import { isProseField } from './evidence-prose-v3.ts';
-import { isFullSchema,candidateNative,nativeCandidateIssues,fullCopyPolicyIssues } from './full-schema.ts';
+import { isFullSchema, candidateNative } from "./native-values.ts";
+import { nativeCandidateIssues, fullCopyPolicyIssues } from "./full-schema.ts";
 
 export interface CurrentCopyRepairResult {
   draft: AmazonDraft;

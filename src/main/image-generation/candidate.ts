@@ -3,7 +3,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GeneratedImageCandidate } from '../../shared/image-generation-contracts.ts';
 import { AiError } from '../ai/errors.ts';
-import { keys, uuid } from '../ai/validation.ts';
+import { keys, uuid } from "../ai/primitives.ts";
 import { inspectRaster } from '../image-format.ts';
 import { imageModel, imageProvider, privateDirectory } from './vault.ts';
 

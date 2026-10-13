@@ -1,6 +1,7 @@
 import type {ListingAiContext,ListingFieldsOutput} from '../../shared/listing-ai-contracts.ts';
-import {parseFullGeneration,retainValidNativeCandidates,isFullSchema} from './full-schema.ts';
-import {listingFingerprint} from './validation.ts';
+import { parseFullGeneration, retainValidNativeCandidates } from "./full-schema.ts";
+import { isFullSchema } from "./native-values.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 /** Only the known reference-parser rejection is replayed; other conflicts stay rejected. */
 export function replayReferenceCandidates(output:ListingFieldsOutput,context:ListingAiContext):ListingFieldsOutput {
  const fields=new Set(output.missing.filter(m=>m.reason.includes('[FIELD_REFERENCE]')).map(m=>m.field));

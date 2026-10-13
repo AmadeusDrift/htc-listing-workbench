@@ -17,7 +17,7 @@ import { inspectRaster } from '../image-format.ts';
 import { uuid } from './validation.ts';
 import { sourceImageReceipt, sourceImageMappings } from '../source-images.ts';
 import type { SourceImageReceipt } from '../source-images.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 
 interface DownloadBudget { remainingBytes: number }
 /** Main-process-only scope; never accepted through IPC or stored across automatic runs. */

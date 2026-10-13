@@ -7,7 +7,7 @@ import { resultHasOwner } from '../ai/result-owner.ts';
 import {productReferenceImages} from './reference-purpose.ts';
 import { evaluateImageRisk, describeImageRisk } from '../../shared/image-risk-policy.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
-import { isProductReference } from '../image-upstream-trace.ts';
+import { isProductReference } from "../source-reference-query.ts";
 import { imageListingCopyMatches } from './context-compatibility.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -23,7 +23,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonDraft, AmazonSchema } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
-import { imageEvidenceVersion,isFullSchema } from '../listing-ai/full-schema.ts';
+import { imageEvidenceVersion, isFullSchema } from "../listing-ai/native-values.ts";
 import type { ProductImageContext } from '../../shared/image-ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY, IMAGE_TEXT_REVIEW_POLICY_VERSION } from '../../shared/image-ai-contracts.ts';
 import { assertCurrentListingReview, assertImageSetPlan, assertImagePlan, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../ai/image-validation.ts';
@@ -39,17 +39,19 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { openDatabase } from '../database.ts';
 import { CompletionJournal } from '../listing-ai/completion-journal.ts';
 import { ListingAiService } from '../listing-ai/service.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { buildListingContext } from '../listing-ai/context.ts';
 import { currentImageListingSnapshot, referenceMeasurementEvidence, sourceDimensionEvidence, imageEvidence } from './image-facts.ts';
 import { readManagedImage } from '../ai/source.ts';
 import { AiError, throwIfAborted } from '../ai/errors.ts';
-import { integer, keys, uuid } from '../ai/validation.ts';
+import { integer, keys, uuid } from "../ai/primitives.ts";
 import { privateDirectory } from '../image-generation/vault.ts';
 
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
-import { approvedWorkflowAsset, currentWorkflowPlanIds, imageWorkflowDraftStamp, selectImageReferences, validateStoredImageWorkflowRun, workflowRuns } from './records.ts';
+import { approvedWorkflowAsset, currentWorkflowPlanIds, validateStoredImageWorkflowRun, workflowRuns } from "./records.ts";
+import { imageWorkflowDraftStamp } from "./approval-reuse.ts";
+import { selectImageReferences } from "../assets/reference-selection.ts";
 import { parseAutomaticSources, prepareImageWorkflowSources } from './sources.ts';
 import type { AutomaticImageSources, AutomaticSourcesResult } from './sources.ts';
 import { currentSourceImageMeasurements } from './source-measurements.ts';
@@ -70,7 +72,7 @@ type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
-type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'sourceObservationEvidence'>>;
+type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'sourceObservationEvidence'|'purposeProfile'>>;
 type Generator = Pick<ImageGenerationService, 'getConnection' | 'configurationScope' | 'generate' | 'readCandidate' | 'generateForWorkflow' | 'reconcileWorkflowGeneration'>;
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const remaining = (draft: AmazonDraft) => (draft.previewIssues.some(issue => issue.severity === 'ERROR') ? draft.previewIssues : draft.localIssues).filter(issue => issue.severity === 'ERROR').map(issue => issue.message);
@@ -85,6 +87,11 @@ export class ImageWorkflowService {
   private activeSources = new Map<string, { scope: string; controller: AbortController; promise: Promise<AutomaticSourcesResult> }>();
   private sources?: AutomaticImageSources;
   private closed = false;
+  private workflowProfile(id:string){
+    if(this.ai.purposeProfile&&id==='deepseek')return this.ai.purposeProfile('image_plan',true);
+    if(this.ai.purposeProfile&&id==='deepseek-review')return this.ai.purposeProfile('image_text_review',false,true);
+    return this.ai.getProfile(id);
+  }
   constructor(directory: string, store: WorkspaceStore, amazon: AmazonService, ai: AiStages, generation: Generator, dependencies: { listing?: ListingStage; sources?: AutomaticImageSources } = {}) {
     this.directory = directory; this.store = store; this.amazon = amazon; this.ai = ai; this.generation = generation;
     this.listing = dependencies.listing ?? new ListingAiService(store, amazon, ai as AiService,()=>this.getCopyReviewSettings().enabled);
@@ -540,8 +547,8 @@ export class ImageWorkflowService {
       if(!reuse&&(!connection?.configured||!connection.enabled))throw new UserFacingError('请在设置中配置并启用生图服务，然后继续自动准备');
       const generationScope=reuse?null:this.generation.configurationScope(),configStamp=listingFingerprint(connection);
       const profileIds=['deepseek','deepseek-review','aliyun-ocr',...(riskEnabled?['aliyun-image-risk']:[])];
-      for(const id of profileIds){const profile=this.ai.getProfile(id);if(!profile.configured||!profile.enabled)throw new UserFacingError('请在设置中配置并启用文案、图片侵权检测和 OCR 接口');}
-      const profileStamp=listingFingerprint(profileIds.map(id=>this.ai.getProfile(id))),product=this.store.getProduct(run.productId);
+      for(const id of profileIds){const profile=this.workflowProfile(id);if(!profile.configured||!profile.enabled)throw new UserFacingError('请在设置中配置并启用文案、图片侵权检测和 OCR 接口');}
+      const profileStamp=listingFingerprint(profileIds.map(id=>this.workflowProfile(id))),product=this.store.getProduct(run.productId);
       const derived=new Set(workflowRuns(this.db).flatMap(record=>record.slots?record.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):record.approvedAssetId?[record.approvedAssetId]:[]));
       const variantIds=[...new Set(initial.salesPlan?.recipe.components.map(component=>component.variantId)??[run.variantId])];
       const confirmed=(assetId:string,variantId:string)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId));
@@ -659,14 +666,14 @@ export class ImageWorkflowService {
         if(current.revision!==run.productRevision||imageWorkflowDraftStamp(draft)!==run.draftSha256||target.generation!==base.listing.targetGeneration||target.target.paused||!target.target.configured)throw new AiError('SOURCE_CHANGED');
         assertEquivalentDraft(draft,target.generation);
         if(base.setPolicy&&listingFingerprint(base.sourceMeasurements??[])!==listingFingerprint(currentSourceImageMeasurements(this.db,draft)))throw new AiError('SOURCE_CHANGED');
-        if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
+        if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.workflowProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
         const schema=await this.amazon.getSchema(draft.schema);throwIfAborted(signal);
         assertImageSchemaCurrent(schema,base.listing);
         for(const ref of run.referenceAssets){const asset=this.store.getAssetRecord(ref.id);if(!asset||asset.productId!==run.productId||asset.sha256!==ref.sha256)throw new AiError('SOURCE_CHANGED');await readManagedImage(this.directory,asset,signal);}
         const after=this.amazon.getDraft(run.draftId),latestTarget=this.amazon.executionTargetScope(after.targetId);
         if(this.store.getProduct(run.productId).revision!==run.productRevision||imageWorkflowDraftStamp(after)!==run.draftSha256||latestTarget.generation!==base.listing.targetGeneration||latestTarget.target.paused||!latestTarget.target.configured)throw new AiError('SOURCE_CHANGED');
         assertEquivalentDraft(after,latestTarget.generation);
-        if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
+        if(!reuse&&(this.generation.configurationScope()!==generationScope||listingFingerprint(this.generation.getConnection())!==configStamp)||listingFingerprint(profileIds.map(id=>this.workflowProfile(id)))!==profileStamp)throw new AiError('CONFIG_CHANGED');
         throwIfAborted(signal);
         this.assertSourceConsistency(run.draftId);
       };
@@ -722,10 +729,14 @@ export class ImageWorkflowService {
           assertImagePlan(plan.output,context);
           if(!plan.output.productUnderstanding?.sufficient||riskEnabled&&plan.output.ipRisk?.verdict!=='PASS')throw new UserFacingError('原图片规划尚未通过来源或 IP 初筛');
           if(['GENERATING','UNKNOWN'].includes(attempt.state)){
-            const recovered=await this.generation.reconcileWorkflowGeneration(attempt.requestId);
+            let recovered:GeneratedImageCandidate|null;
+            try{recovered=await this.generation.reconcileWorkflowGeneration(attempt.requestId);}
+            catch(error){
+              if(error instanceof AiError&&'definitive' in error&&error.definitive===true){attempt.state='RETRYABLE_FAILURE';slot.status='FAILED';attempt.error=slot.error=`原收据明确拒绝 [DEFINITIVE_FAILURE]：${publicError(error)}`;this.save(run);continue;}
+              throw error;
+            }
             if(!recovered){
-              if(slot.attempts.length>=run.maxAttempts){slot.status='FAILED';slot.error=attempt.error='生图结果无法恢复且已用完尝试次数；原请求和费用记录保留';this.save(run);throw new UserFacingError(slot.error);}
-              attempt.state='RETRYABLE_FAILURE';slot.status='PENDING';attempt.error='已核对原生图记录仍无法恢复；按已授权规则重试缺失步骤，原请求和费用记录保留';this.save(run);continue;
+              attempt.state='UNKNOWN';slot.status='UNKNOWN';slot.error=attempt.error='原生图请求结果未知 [RESULT_UNKNOWN]，尚无可回收收据；保留原请求编号和费用，不创建新请求';this.save(run);throw new UserFacingError(slot.error);
             }
             attempt.candidateId=recovered.id;attempt.state='GENERATED';attempt.error=null;this.save(run);
           }
@@ -847,10 +858,10 @@ export class ImageWorkflowService {
       if (!reuse && (!connection?.configured || !connection.enabled)) throw new UserFacingError('请在设置中配置并启用生图服务，然后重新开始自动准备');
       const generationScope=reuse ? null : this.generation.configurationScope(), configStamp=listingFingerprint(connection);
       for (const [id,label] of [['deepseek','DeepSeek 内容生成'],['deepseek-review','DeepSeek 独立复核'],['aliyun-ocr','阿里云 OCR'],['aliyun-image-risk','阿里云图片侵权风险检测']] as const) {
-        const profile = this.ai.getProfile(id); if (!profile.configured || !profile.enabled) throw new UserFacingError(`请在设置中配置并启用${label}，然后重新开始自动准备`);
+        const profile = this.workflowProfile(id); if (!profile.configured || !profile.enabled) throw new UserFacingError(`请在设置中配置并启用${label}，然后重新开始自动准备`);
       }
       const profileIds=['deepseek','deepseek-review','aliyun-ocr','aliyun-image-risk'];
-      const profileStamp=listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)));
+      const profileStamp=listingFingerprint(profileIds.map(id=>this.workflowProfile(id)));
       const derived = new Set(workflowRuns(this.db).flatMap(r => r.approvedAssetId ? [r.approvedAssetId] : []));
       const product = this.store.getProduct(run.productId);
       const referenceProduct=productReferenceImages(product,[run.variantId].flatMap(variantId=>this.ai.sourceObservationEvidence?.({productId:product.id,productRevision:product.revision,variantId})??[]));
@@ -882,14 +893,14 @@ export class ImageWorkflowService {
         throwIfAborted(signal);
         const draft=this.amazon.getDraft(run.draftId), current=this.store.getProduct(run.productId), target=this.amazon.executionTargetScope(draft.targetId);
         if (current.revision!==run.productRevision || draft.revision!==context.listing.draftRevision || imageWorkflowDraftStamp(draft)!==run.draftSha256 || target.generation!==context.listing.targetGeneration || target.target.paused || !target.target.configured) throw new AiError('SOURCE_CHANGED');
-        if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
+        if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.workflowProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
         const schema=await this.amazon.getSchema(draft.schema); throwIfAborted(signal);
         assertImageSchemaCurrent(schema,context.listing);
         for (const ref of run.referenceAssets) { const asset=this.store.getAssetRecord(ref.id); if (!asset || asset.productId!==run.productId || asset.sha256!==ref.sha256) throw new AiError('SOURCE_CHANGED'); await readManagedImage(this.directory,asset,signal); }
         if (this.store.getProduct(run.productId).revision!==run.productRevision || this.amazon.getDraft(run.draftId).revision!==context.listing.draftRevision) throw new AiError('SOURCE_CHANGED');
         const latestTarget=this.amazon.executionTargetScope(draft.targetId);
         if (latestTarget.generation!==context.listing.targetGeneration || latestTarget.target.paused || !latestTarget.target.configured) throw new AiError('SOURCE_CHANGED');
-        if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.ai.getProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
+        if ((!reuse&&(this.generation.configurationScope()!==generationScope || listingFingerprint(this.generation.getConnection())!==configStamp)) || listingFingerprint(profileIds.map(id=>this.workflowProfile(id)))!==profileStamp) throw new AiError('CONFIG_CHANGED');
         throwIfAborted(signal);
         this.assertSourceConsistency(run.draftId);
       };

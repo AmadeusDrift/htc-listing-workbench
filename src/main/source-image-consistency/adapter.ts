@@ -1,7 +1,7 @@
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
 import { SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
 import { requestDeepSeekJson } from '../ai/adapters.ts';
-import type { DeepSeekCredentials } from '../ai/validation.ts';
+import type { DeepSeekCredentials } from "../ai/primitives.ts";
 import type { AdapterContext } from '../ai/transport.ts';
 import type { DeepSeekReferenceImage } from '../ai/vision.ts';
 import { AiError } from '../ai/errors.ts';

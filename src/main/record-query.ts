@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { RecordPage } from '../shared/record-query-contracts.ts';
 import { AiError } from './ai/errors.ts';
-import { integer, keys, providerId, uuid } from './ai/validation.ts';
+import { integer, keys, providerId, uuid } from "./ai/primitives.ts";
 
 const filterFields = {
   ai_results: ['productId'], ai_calls: ['productId', 'providerId', 'status'],

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { CopyReviewSettings, ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
-import { keys } from '../ai/validation.ts';
+import { keys } from "../ai/primitives.ts";
 import { UserFacingError } from '../../shared/errors.ts';
 
 const KEY='listing_copy_review_v1';

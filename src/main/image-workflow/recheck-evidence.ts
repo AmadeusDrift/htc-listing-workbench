@@ -5,9 +5,9 @@ import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { currentImageListingSnapshot } from './image-facts.ts';
-import { imageWorkflowDraftStamp } from './records.ts';
+import { imageWorkflowDraftStamp } from "./approval-reuse.ts";
 import { imageListingContextsMatch } from './context-compatibility.ts';
 
 /** Proves a recheck recorded this exact draft version, not that its review passed. */

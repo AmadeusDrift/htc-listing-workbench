@@ -2,7 +2,7 @@ import { ListingCorrections, selfPackageDeletion } from './corrections.ts';
 import { PROGRAM_RELATION_FIELDS, packageGraphIssues, unitPackageAttributes } from './program-relations.ts';
 import { isSchemaTransientError } from './schema-retry.ts';
 import { sameSchemaValidation } from './schema-compatibility.ts';
-import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
+import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
 import { validateAutomaticListingTask } from '../automatic-listing/records.ts';
 import { hasGenericBrand } from '../image-workflow/policy-reevaluation.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';

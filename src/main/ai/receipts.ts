@@ -1,0 +1,64 @@
+import { createHash } from 'node:crypto';
+import type { DatabaseSync } from 'node:sqlite';
+import { mkdir,readFile,lstat } from 'node:fs/promises';
+import { resolve,join } from 'node:path';
+import { writeFileAtomically } from '../files.ts';
+import type { ProviderReceiptCapture } from './transport.ts';
+import type { AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
+import { UserFacingError } from '../../shared/errors.ts';
+import { assertRecordTable } from '../storage/record-table.ts';
+import { openRouterMetadata } from './adapters/openrouter-http.ts';
+
+export const PROVIDER_RECEIPT_TABLES={ai_provider_receipts:['id','record_json'],ai_image_requests:['id','record_json']};
+export interface ProviderReceipt {version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
+const hash=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex');
+function parse(raw:unknown):ProviderReceipt{
+  const r=raw as ProviderReceipt;
+  if(!r||Object.keys(r).sort().join()!=='byteSize,callId,costUsd,endpoint,gateway,id,model,receivedAt,relativePath,reportedTokens,requestId,sha256,status,version'||r.version!==1||!/^[a-f0-9-]{36}$/.test(r.callId)||!Number.isInteger(r.status)||r.status<100||r.status>599||typeof r.model!=='string'||r.model.length>200||typeof r.endpoint!=='string'||!(r.endpoint.startsWith('/api/')||r.gateway==='deepseek'&&r.endpoint==='/chat/completions')||r.endpoint.length>200||r.requestId!==null&&(typeof r.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(r.requestId))||!Number.isSafeInteger(r.byteSize)||r.byteSize<1||r.byteSize>200*1024*1024||!/^[a-f0-9]{64}$/.test(r.id)||!/^[a-f0-9]{64}$/.test(r.sha256)
+    ||r.relativePath!==`ai-receipts/${r.id}.json`||!['openrouter','deepseek'].includes(r.gateway)||!Number.isFinite(Date.parse(r.receivedAt))
+    ||r.costUsd!==null&&(typeof r.costUsd!=='number'||!Number.isFinite(r.costUsd)||r.costUsd<0)
+    ||r.reportedTokens!==null&&(!Number.isSafeInteger(r.reportedTokens)||r.reportedTokens<0||r.reportedTokens>2_000_000_000))throw new UserFacingError('AI原始收据记录无效');return r;
+}
+export async function saveProviderReceipt(db:DatabaseSync,directory:string,callId:string,capture:ProviderReceiptCapture,purpose:AiPurposeSnapshot|undefined):Promise<ProviderReceipt>{
+  if(!/^[a-f0-9-]{36}$/.test(callId))throw new UserFacingError('AI收据调用身份无效');
+  const bytes=Buffer.from(JSON.stringify({version:1,callId,purpose:purpose??null,...capture})),sha256=hash(bytes),id=hash(callId+':'+sha256),relativePath=`ai-receipts/${id}.json`;
+  const metadata=openRouterMetadata(capture.body);
+  const value:ProviderReceipt={reportedTokens:metadata.usageKnown?metadata.usage.promptTokens+metadata.usage.completionTokens:null,version:1,id,callId,gateway:capture.gateway,endpoint:capture.endpoint,model:capture.model,status:capture.status,requestId:capture.requestId,receivedAt:capture.receivedAt,relativePath,sha256,byteSize:bytes.length,costUsd:capture.costUsd};parse(value);
+  await mkdir(join(directory,'ai-receipts'),{recursive:true});
+  const folder=await lstat(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())throw new UserFacingError('AI收据目录无效');
+  const path=resolve(directory,relativePath);
+  try{await writeFileAtomically(path,bytes,false);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST'||hash(await readFile(path))!==sha256)throw error;}
+  await writeFileAtomically(join(directory,'ai-receipts',callId+'.receipt.json'),JSON.stringify(value));
+  db.prepare('INSERT OR IGNORE INTO ai_provider_receipts(id,record_json) VALUES(?,?)').run(id,JSON.stringify(value));return value;
+}
+export async function readProviderReceipt(db:DatabaseSync,directory:string,callId:string):Promise<unknown|null>{
+  if(!/^[a-f0-9-]{36}$/.test(callId))throw new UserFacingError('AI收据调用身份无效');
+  try{const folder=await lstat(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())throw new UserFacingError('AI收据目录无效');}
+  catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
+  const row=db.prepare("SELECT record_json FROM ai_provider_receipts WHERE json_extract(record_json,'$.callId')=? ORDER BY rowid DESC LIMIT 1").get(callId);
+  let record:ProviderReceipt;
+  if(row)record=parse(JSON.parse(String(row.record_json)));
+  else{try{const pointer=join(directory,'ai-receipts',callId+'.receipt.json'),stat=await lstat(pointer);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size<1||stat.size>8192)throw new UserFacingError('AI收据指针文件无效');record=parse(JSON.parse(await readFile(pointer,'utf8')));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}}
+  if(record.callId!==callId)throw new UserFacingError('AI原始收据归属不一致');const path=resolve(directory,record.relativePath),stat=await lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==record.byteSize)throw new UserFacingError('AI原始收据文件身份无效');const bytes=await readFile(path);
+  if(bytes.length!==record.byteSize||hash(bytes)!==record.sha256)throw new UserFacingError('AI原始收据文件缺失或损坏');return JSON.parse(bytes.toString('utf8'));
+}
+export function providerReceiptFiles(db:DatabaseSync):ProviderReceipt[]{
+  if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<25)return[];
+  assertRecordTable(db,'ai_provider_receipts');assertRecordTable(db,'ai_image_requests');
+  for(const row of db.prepare('SELECT id,record_json FROM ai_image_requests').iterate()){const value=parseImageRequest(JSON.parse(String(row.record_json)));if(value.id!==row.id)throw new UserFacingError('生图请求身份不一致');}
+  return db.prepare('SELECT id,record_json FROM ai_provider_receipts').all().map(row=>{const value=parse(JSON.parse(String(row.record_json)));if(value.id!==row.id)throw new UserFacingError('AI收据身份不一致');return value;});
+}
+export interface ImageRequestIntent{version:1;id:string;provider:'openrouter';model:string;productId:string;productRevision:number;createdAt:string;mode:'generate'|'edit';sourceAssets:{id:string;sha256:string}[];editSource?:{id:string;sha256:string}}
+function parseImageRequest(raw:unknown):ImageRequestIntent{
+  const r=raw as ImageRequestIntent,uuid=(s:unknown)=>typeof s==='string'&&/^[a-f0-9-]{36}$/.test(s);
+  if(!r||r.version!==1||r.provider!=='openrouter'||!uuid(r.id)||!uuid(r.productId)||typeof r.model!=='string'||r.model.length>200||!Number.isSafeInteger(r.productRevision)||r.productRevision<1||!Number.isFinite(Date.parse(r.createdAt))||!['generate','edit'].includes(r.mode)||!Array.isArray(r.sourceAssets)||r.sourceAssets.length>16||r.sourceAssets.some(a=>!uuid(a.id)||!/^[a-f0-9]{64}$/.test(a.sha256)))throw new UserFacingError('生图请求意图无效');
+  if(Object.keys(r).some(k=>!['version','id','provider','model','productId','productRevision','createdAt','mode','sourceAssets','editSource'].includes(k)))throw new UserFacingError('生图意图包含未知字段');
+  const asset=(a:unknown)=>{const v=a as {id:string;sha256:string};return !!v&&Object.keys(v).sort().join()==='id,sha256'&&uuid(v.id)&&/^[a-f0-9]{64}$/.test(v.sha256);};
+  if(!r.sourceAssets.every(asset)||(r.editSource!==undefined&&(r.mode!=='edit'||!asset(r.editSource))))throw new UserFacingError('生图请求来源无效');return r;
+}
+export function saveImageRequestIntent(db:DatabaseSync,intent:ImageRequestIntent):void{
+  const value=parseImageRequest(intent);db.prepare('INSERT INTO ai_image_requests(id,record_json) VALUES(?,?)').run(value.id,JSON.stringify(value));
+}
+export function readImageRequestIntent(db:DatabaseSync,id:string):ImageRequestIntent|null{
+  const row=db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id);if(!row)return null;const value=parseImageRequest(JSON.parse(String(row.record_json)));if(value.id!==id)throw new UserFacingError('生图请求身份不一致');return value;
+}

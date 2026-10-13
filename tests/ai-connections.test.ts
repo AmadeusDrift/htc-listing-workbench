@@ -17,13 +17,13 @@ const aliyun = { accessKeyId: 'shared-aliyun-key-id', accessKeySecret: 'shared-a
 const cipher = (directory: string, id: AiProviderId) => readFile(join(directory, 'ai-vault', `${id}.bin`));
 const connection = (service: AiService, id = 'deepseek') => service.listConnections().find(row => row.id === id)!;
 
-test('two vendor connections begin unconfigured with public role metadata only', async t => {
+test('three vendor connections begin unconfigured with public role metadata only', async t => {
   const f = await fixture(t);
   assert.equal(typeof f.service.listConnections, 'function', 'grouped connection API must exist');
   const rows = f.service.listConnections();
-  assert.deepEqual(rows.map(row => row.id), ['deepseek', 'aliyun']);
+  assert.deepEqual(rows.map(row => row.id), ['deepseek', 'aliyun','openrouter']);
   assert.ok(rows.every(row => row.state === 'unconfigured'));
-  assert.deepEqual(rows.map(row=>row.profiles.length),[2,3]);
+  assert.deepEqual(rows.map(row=>row.profiles.length),[2,3,2]);
   for (const row of rows) assert.deepEqual(Object.keys(row).sort(), ['credentials', 'id', 'profiles', 'state']);
   assert.ok(rows.flatMap(row => row.profiles).every(profile => !profile.configured && !profile.enabled));
   assert.deepEqual(f.service.connectionTemplate('deepseek'), { id: 'deepseek', apiKey: '' });
@@ -220,6 +220,7 @@ test('disabling one function cancels it and retains both credentials', async t =
   f.service.saveConnection({ id: 'deepseek', apiKey: secret });
   f.service.saveFunctionSettings({ id: 'deepseek', model: 'deepseek-flash', enabled: true });
   f.service.saveFunctionSettings({ id: 'deepseek-review', model: 'deepseek-v4-pro', enabled: true });
+  const purpose=f.service.getPurposeProfiles().find(p=>p.purposeId==='listing_generation')!;f.service.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
   const pending = f.service.suggest(f.textInput), rejected = assert.rejects(pending, isCode('DISABLED')); await held.started;
   const saved = f.service.saveFunctionSettings({ id: 'deepseek', model: 'deepseek-flash', enabled: false });
   await rejected; held.release();

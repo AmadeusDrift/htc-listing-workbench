@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { createHash, createCipheriv, randomBytes, randomUUID, scryptSync } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore, discardPreparedRestore, recoverInterruptedRestore } from '../src/main/backup.ts';
@@ -143,11 +143,9 @@ test('加密备份不包含 SQLite 空闲页中已删除的 Amazon 返回数据'
   db.exec('DELETE FROM schema_cache'); db.close();
   assert.ok((await readFile(join(directory, 'red.sqlite'))).includes(Buffer.from(sentinel)));
   const info = await createWorkspaceBackup(directory, file, 'test passphrase 123'); assert.equal(info.expiresAt, null);
-  const bytes = await readFile(file), offset = Buffer.byteLength('HTC-BACKUP-1\n'), headerEnd = offset + 28;
-  const key = scryptSync('test passphrase 123', bytes.subarray(offset, offset + 16), 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
-  const cipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(offset + 16, headerEnd)); cipher.setAAD(bytes.subarray(0, headerEnd)); cipher.setAuthTag(bytes.subarray(-16));
-  const manifest = JSON.parse(gunzipSync(Buffer.concat([cipher.update(bytes.subarray(headerEnd, -16)), cipher.final()])).toString('utf8')); key.fill(0);
-  assert.equal(Buffer.from(manifest.database, 'base64').includes(Buffer.from(sentinel)), false);
+  const prepared = await prepareWorkspaceRestore(join(root, 'restored'), file, 'test passphrase 123');
+  assert.equal((await readFile(join(prepared.stagingDirectory, 'red.sqlite'))).includes(Buffer.from(sentinel)), false);
+  await discardPreparedRestore(join(root, 'restored'), prepared);
 });
 
 test('重复文件名不能覆盖旧备份或破坏它的到期清理登记', async t => {

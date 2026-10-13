@@ -68,8 +68,9 @@ test('schema 17 encrypted backup migrates without inventing a completion operati
 for(const sent of [false,true])test(`normal draft retention keeps exportable ${sent?'sent safety':'unsent historical'} operation records`,async t=>{
   const f=await fixture(t);f.amazon.previewDraft=async()=>{if(!sent)throw new Error('preview offline');return{...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]};};f.respond(()=>{throw new Error('lost response');});await assert.rejects(f.listing.complete(f.reference));
   const op=f.listing.completionOperations(f.draft.id)[0],db=openDatabase(f.directory);db.prepare('UPDATE listing_drafts SET created_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z',f.draft.id);db.close();
-  const cleanup=f.amazon.cleanupData();assert.equal(cleanup.removedDrafts,1);await createWorkspaceBackup(f.directory,join(f.directory,'after-retention.htcbackup'),pass);
-  assert.equal(f.listing.getCompletion(op.id).state,sent?'GUARD':'RETIRED');
+  const cleanup=f.amazon.cleanupData();assert.equal(cleanup.removedDrafts,sent?0:1);await createWorkspaceBackup(f.directory,join(f.directory,'after-retention.htcbackup'),pass);
+  assert.equal(f.listing.getCompletion(op.id).state,sent?op.state:'RETIRED');
+  if(sent)assert.ok(f.amazon.getDraft(op.draftId),'UNKNOWN evidence keeps its original draft');
 });
 
 

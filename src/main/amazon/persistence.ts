@@ -1,4 +1,5 @@
 import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
+import { protectedDraftIds } from '../retention-references.ts';
 import { transaction } from '../application/transaction.ts';
 import { freezeSourceForProduct } from '../products/source-adoption.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -140,12 +141,21 @@ export class AmazonPersistence {
         let record: DraftRecord; try { record = parseRecord(row.record_json); } catch { continue; }
         this.rememberAcceptedSku(record);
       }
-      this.db.prepare('DELETE FROM amazon_exchanges WHERE created_at < ?').run(cutoff);
-      this.db.prepare('DELETE FROM issues WHERE draft_id IN (SELECT id FROM listing_drafts WHERE created_at < ?)').run(cutoff);
-      retireCompletionDrafts(this.db,cutoff);
-      const removedDrafts = Number(this.db.prepare('DELETE FROM listing_drafts WHERE created_at < ?').run(cutoff).changes);
-      const removedSchemas = Number(this.db.prepare('DELETE FROM schema_cache WHERE fetched_at < ?').run(cutoff).changes);
-      const removedCalls = Number(this.db.prepare('DELETE FROM amazon_calls WHERE created_at < ?').run(logCutoff).changes);
+      const protectedIds = protectedDraftIds(this.db);
+      retireCompletionDrafts(this.db, cutoff, protectedIds);
+      for (const row of this.db.prepare('SELECT id,draft_id FROM amazon_exchanges WHERE created_at < ?').all(cutoff)) {
+        if (!protectedIds.has(String(row.draft_id))) this.db.prepare('DELETE FROM amazon_exchanges WHERE id=?').run(row.id);
+      }
+      let removedDrafts = 0;
+      for (const row of this.db.prepare('SELECT id FROM listing_drafts WHERE created_at < ?').all(cutoff)) {
+        if (protectedIds.has(String(row.id))) continue;
+        this.db.prepare('DELETE FROM issues WHERE draft_id=?').run(row.id);
+        removedDrafts += Number(this.db.prepare('DELETE FROM listing_drafts WHERE id=?').run(row.id).changes);
+      }
+      const removedSchemas = Number(this.db.prepare('DELETE FROM schema_cache WHERE fetched_at < ? AND checksum NOT IN (SELECT schema_checksum FROM listing_drafts)').run(cutoff).changes);
+      // Unknown writes can have old/unattributed call events: keep all such evidence.
+      const unknown = this.db.prepare("SELECT 1 FROM amazon_write_locks WHERE state IN ('UNKNOWN','SUBMITTING','SENDING') LIMIT 1").get();
+      const removedCalls = unknown || protectedIds.size ? 0 : Number(this.db.prepare('DELETE FROM amazon_calls WHERE created_at < ?').run(logCutoff).changes);
       this.savePolicy({ ...policy, logRetentionDays: Math.max(365, policy.logRetentionDays), lastCleanupAt: new Date(now).toISOString() });
       this.db.exec('COMMIT'); result = { removedDrafts, removedSchemas, removedCalls };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

@@ -88,6 +88,14 @@ export class ItemLabelService {
   private arm(){if(!this.started||this.stopped||this.running)return;if(this.timer)clearTimeout(this.timer);const due=this.list().filter(row=>row.current&&!!row.requestedAt&&!row.paused&&['QUEUED','WAITING_SKU'].includes(row.status)).map(row=>row.status==='WAITING_SKU'?this.now()+5000:Date.parse(row.nextDueAt!));if(!due.length){this.timer=null;return;}this.timer=setTimeout(()=>{this.timer=null;void this.runDue().catch(()=>{});},Math.max(10,Math.min(2147483647,Math.min(...due)-this.now())));this.timer.unref?.();}
   resume():void{this.started=true;this.arm();}
   suspendScheduling():void{this.started=false;if(this.timer)clearTimeout(this.timer);this.timer=null;}
+  holdForMaintenance(): () => void {
+    const started = this.started; this.suspendScheduling(); let released = false;
+    return () => {
+      if (released) return; released = true;
+      if (this.stopped) return;
+      this.started = started; this.arm();
+    };
+  }
   hasActiveWork():boolean{return this.running!==null;}
   retry(id:string):ItemLabelRecord{const row=this.get(id);if(!row.current||row.status!=='FAILED')throw new UserFacingError('只能重试当前失败的标签版本');if(!this.matches(row))throw new UserFacingError('备货绑定已变化，请刷新');if(row.attempts>=1000)throw new UserFacingError('标签累计重试次数已达上限');row.requestedAt=this.at();row.status='QUEUED';row.paused=false;row.nextDueAt=this.at();row.message='已安排人工确认重试';row.errorCode=null;this.put(row);this.arm();return row;}
   pauseJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&!['READY','CANCELLED'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}

@@ -1,3 +1,6 @@
+import {randomUUID} from 'node:crypto';
+import {realAmazonSchema} from './fixtures/amazon/schema-fixture.ts';
+import {saveInput} from './fixtures/listing-ai.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
@@ -21,8 +24,14 @@ async function fixture(t:test.TestContext, mode:'live'|'demo'='live') {
   const snapshot=demoSchema(target,selection,Date.now());
   const field=(type:string,extra:JsonObject={})=>({type:'array',minItems:1,items:{type:'object',properties:{value:{type,...extra},marketplace_id:{type:'string'}},required:['value'],additionalProperties:false}});
   snapshot.schema={type:'object',properties:{is_value_stores_item:field('boolean'),purchasable_offer:{type:'array',minItems:1,items:{type:'object',properties:{audience:{type:'string',enum:['BZR']},marketplace_id:{type:'string'}},required:['audience']}},item_name:field('string'),material:field('string'),brand:field('string')},required:['is_value_stores_item','purchasable_offer','item_name','material'],additionalProperties:false};
+  const realSchema=realAmazonSchema();snapshot.schema.$defs=realSchema.schema.$defs;snapshot.metaSchema=realSchema.metaSchema;
+  const real=realSchema.schema.properties as JsonObject;
+  (snapshot.schema.properties as JsonObject).purchasable_offer=real.purchasable_offer;
+  (snapshot.schema.properties as JsonObject).item_package_weight=real.item_package_weight;
+  (snapshot.schema.properties as JsonObject).item_package_dimensions=real.item_package_dimensions;
   service.getSchema=async()=>snapshot;
-  const product=store.createProduct(),draft=await service.createDraft({...selection,listingProgram:'haul',productId:product.id,variantId:product.variants[0].id});
+  let product=store.createProduct();product=store.saveProduct({...saveInput(product),facts:[{id:randomUUID(),name:'采购币种',value:'CNY',source:'manual',sourceRef:'Offline preview fixture',state:'human_confirmed'}],variants:saveInput(product).variants.map(v=>({...v,purchasePrice:'2.4'}))});
+  const draft=await service.createDraft({...selection,listingProgram:'haul',productId:product.id,variantId:product.variants[0].id});
   return{service,requests,draft};
 }
 

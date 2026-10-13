@@ -76,7 +76,7 @@ async function fixture(t: test.TestContext, dependencies: AiDependencies = {}, h
 
 test('providers start disabled; imports encrypt credentials and templates never reveal configured values', async t => {
   const f = await fixture(t);
-  assert.equal(f.service.listProfiles().length, 5); assert.ok(f.service.listProfiles().every(p => !p.enabled && !p.configured));
+  assert.deepEqual(f.service.listProfiles().map(p=>p.id).sort(), ['aliyun-ocr','aidge-segmentation','deepseek','deepseek-review','aliyun-image-risk','openrouter','openrouter-review'].sort()); assert.ok(f.service.listProfiles().every(p => !p.enabled && !p.configured));
   assert.equal(f.service.capabilities().find(c => c.capability === 'image-generation')!.available, false);
   assert.throws(() => f.service.setEnabled({ id: 'aliyun-ocr', enabled: true }), isCode('NOT_CONFIGURED'));
   const configured = f.service.importProfile({ id: 'aliyun-ocr', ...aliyun }); assert.equal(configured.enabled, false); assert.equal(configured.configured, true);

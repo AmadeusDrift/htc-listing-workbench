@@ -8,7 +8,7 @@ import type { ProductDetail } from '../src/shared/contracts.ts';
 import { CATEGORY_FIELD_REPAIR_FIELDS } from '../src/shared/automatic-listing-contracts.ts';
 
 test('pricing blocking display prefers structured causes over legacy notice wording', () => {
-  const draft = { businessRules: { revision: 0, fields: {}, quote: null, bundleQuantity: 1, notices: ['售价上限内无法满足目标 ROI'],
+  const draft = { listingProgram:'haul', businessRules: { revision: 0, fields: {}, quote: null, bundleQuantity: 1, notices: ['售价上限内无法满足目标 ROI'],
     pricingDecision: { version: 1, status: 'needs_input', code: 'PACKAGE_INPUT_UNCONFIRMED', quoteError: 'ROI_MAX_PRICE',
       inputs: { costCny: 999, dimensionsInches: [1,1,1], weightPounds: .2 },
       evidence: { cost: 'confirmed_cny', dimensions: 'business_default', weight: 'business_default', packageScope: 'source_sale_unit', saleUnit: 'confirmed',

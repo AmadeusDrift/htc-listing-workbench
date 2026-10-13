@@ -236,11 +236,11 @@ test('preview freshness is checked again after access-token renewal immediately 
   assert.equal(f.requests.filter(r => r.init.method === 'PUT' && !r.url.searchParams.has('mode')).length, 0);
 });
 
-test('uncertain write tombstone survives retention after raw draft deletion', async t => {
+test('uncertain draft and write tombstone survive retention together', async t => {
   const f = fixture(t); const d = await preview(f);
   f.hook((url, init) => init.method === 'PUT' && !url.searchParams.has('mode') ? json({}, 503) : undefined);
   await f.service.submitDraft(d, true); f.service.saveDataPolicy({ retentionDays: 1 }); f.advance(2 * 86_400_000); f.service.cleanupData();
-  assert.equal(f.service.listDrafts(d.productId).length, 0); f.reopen();
+  assert.equal(f.service.listDrafts(d.productId).length, 1); assert.equal(f.service.listDrafts(d.productId)[0].state,'UNKNOWN'); f.reopen();
   await assert.rejects(f.service.createDraft({ ...d.schema, productId: d.productId, variantId: d.variantId }), /未知|未确认|回读/);
 });
 

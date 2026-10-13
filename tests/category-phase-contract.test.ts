@@ -1,6 +1,6 @@
 import test from 'node:test';
-import {readFileSync,readdirSync} from 'node:fs';
-import {join} from 'node:path';
+import {openDatabase} from '../src/main/database.ts';
+import {readProviderReceipt} from '../src/main/ai/receipts.ts';
 import assert from 'node:assert/strict';
 import {validateCategoryDecision} from '../src/main/ai/category-adapter.ts';
 import {classifyProduct} from '../src/main/catalog/classification.ts';
@@ -18,9 +18,9 @@ test('classification keeps original search terms when the selected output omits 
  assert.deepEqual(result.keywords,['cloth']);assert.equal(result.productType,'CLEANING_CLOTH');
 });
 for(const productType of ['CLEANING_CLOTH','UNKNOWN_TYPE',null])test(`ledger accepts only actual candidate ${productType} with empty repeated keywords`,async t=>{
- const raw=decision('select',productType);const f=await fixture(t,{fetch:async()=>json({id:'category-contract',choices:[{finish_reason:'stop',message:{content:JSON.stringify(raw)}}],usage:{prompt_tokens:10,completion_tokens:10,total_tokens:20}})});f.enable('deepseek');
+ const raw={id:'category-contract',answers:{category:{type:'choice',choice:productType},review:{type:'choice',choice:'clear'}},usage:{input_tokens:10,output_tokens:10}};const f=await fixture(t,{fetch:async()=>json(raw)});f.service.saveConnection({id:'openrouter',apiKey:'category-contract-offline-key'});f.service.setEnabled({id:'openrouter',enabled:true});
  const request=f.service.decideCategory({productId:f.imageInput.productId,productRevision:f.imageInput.productRevision,phase:'select',keywords:['cloth'],candidates:[{name:'CLEANING_CLOTH',displayName:'Cloth'}]});
  if(productType==='CLEANING_CLOTH'){const result=await request;assert.equal(result.output.productType,productType);assert.deepEqual(result.output.keywords,[]);}
- else {await assert.rejects(request,isCode('OUTPUT_INVALID'));const call=f.service.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');const folder=join(f.directory,'ai-diagnostics');const name=readdirSync(folder).find(n=>n.includes(call.id))!;const diagnostic=JSON.parse(readFileSync(join(folder,name),'utf8'));assert.deepEqual(diagnostic.output,raw);assert.equal(diagnostic.rejectionReason,productType===null?'CATEGORY_SELECTION_MISSING':'CATEGORY_NOT_IN_CANDIDATES');}
+ else {await assert.rejects(request,isCode('OUTPUT_INVALID'));const call=f.service.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');const db=openDatabase(f.directory);try{const receipt=await readProviderReceipt(db,f.directory,call.id);assert.deepEqual((receipt as {body:unknown}|null)?.body,raw);}finally{db.close();}}
  assert.equal(f.requests.length,1);
 });

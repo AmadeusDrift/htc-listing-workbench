@@ -1,3 +1,4 @@
+import { useFormGuard } from './FormGuard';
 import { useEffect, useState } from 'react';
 import { Download, Plug, RefreshCw, Unplug } from 'lucide-react';
 import type { MiaoshouPreferences, MiaoshouStatus } from '../shared/miaoshou-contracts';
@@ -28,12 +29,15 @@ export function MiaoshouSettings({ busy }: { busy: boolean }) {
   }
   const disabled = busy || working || savingPreferences || !status;
   async function save() {
-    if (disabled || appKey.trim().length < 8 || appSecret.trim().length < 8) return;
+    if (disabled || appKey.trim().length < 8 || appSecret.trim().length < 8) return false;
+    let success = false;
     await action(async () => {
       const result = await window.red.saveMiaoshouConfig({ appKey: appKey.trim(), appSecret: appSecret.trim() });
-      setAppKey(''); setAppSecret(''); return result;
+      setAppKey(''); setAppSecret(''); success = true; return result;
     }, '配置已加密保存。到采集箱点击“同步妙手采集箱”导入商品。');
+    return success;
   }
+  useFormGuard({ dirty: () => !!(appKey || appSecret), save, discard: () => { setAppKey(''); setAppSecret(''); } });
   return <section className="settings-section" aria-label="妙手采集设置">
     <div className="settings-section-title"><Plug size={19} /><div><h3>妙手公共采集箱</h3><p>先在妙手采集，再一键同步商品与全部 SKU 到工作台。</p></div></div>
     <div className="miaoshou-auto-setting"><div><h4>进入采集箱时自动检查并导入</h4><p id="miaoshou-auto-help">开启后，每次进入采集箱都会检查妙手并导入新增商品。默认关闭；手动同步始终可用。</p></div><label className="inbox-auto-toggle"><input type="checkbox" role="switch" aria-label="进入采集箱时自动检查并导入" aria-describedby="miaoshou-auto-help" checked={preferences?.autoSyncOnInbox ?? false} disabled={busy || working || savingPreferences || !preferences} onChange={event => void savePreferences(event.target.checked)} /><span aria-hidden="true"><i /></span></label></div>

@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+import { usePageState } from './navigation-context';
+import type { ProblemContext } from './navigation-context';
+import { useEffect } from 'react';
 import { ArrowRight, Box, ChevronDown, Search } from 'lucide-react';
 import type { AutomaticListingItem } from '../shared/automatic-listing-contracts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
@@ -14,10 +16,10 @@ const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行',
 export function OutcomeCount({ tone, label, value, suffix = '' }: { tone: 'success' | 'info' | 'warning' | 'danger' | 'neutral'; label: string; value: number; suffix?: string }) {
   return <span className="outcome-count" data-tone={value ? tone : undefined}>{label} {value}{suffix}</span>;
 }
-interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string): void; onShipping?: (batchId: string) => void }
+interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
 
-function SalesItem({ item, busy, pending, revision, onManual, onShipping }: Actions & { item: AutomaticListingItem }) {
-  const [expanded, setExpanded] = useState(item.status === 'RUNNING');
+function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey }: Actions & { item: AutomaticListingItem; memoryKey: string }) {
+  const [expanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, item.status === 'RUNNING');
   const specification = item.salesPlan?.recipe.specification;
   const outcome = automaticItemOutcome(item);
   const itemTone = outcome === 'systemRepair' ? 'danger' : ['ruleFiltered','profitFiltered','notSelected','needsInput','unknown','unclassified'].includes(outcome) ? 'warning' : outcome === 'completed' ? 'success' : outcome === 'pending' ? 'neutral' : 'info';
@@ -33,12 +35,12 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping }: Acti
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
     </div>}
-    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => onManual(item.productId, item.draftId ?? undefined)}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
+    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => onManual(item.productId, item.draftId ?? undefined, { variantId: item.variantId })}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
   </li>;
 }
 
-function SourceVariants({ group, query }: { group: AutomaticProductGroup; query: string }) {
-  const [expanded, setExpanded] = useState(Boolean(query));
+function SourceVariants({ group, query, memoryKey }: { group: AutomaticProductGroup; query: string; memoryKey: string }) {
+  const [expanded, setExpanded] = usePageState(`task:${memoryKey}:source:${group.productId}`, Boolean(query));
   useEffect(() => { if (query) setExpanded(true); }, [query]);
   return <details className="automatic-source-variants" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary>查看全部 {group.sourceVariantCount} 个来源规格 · {group.excludedCount} 个未纳入本次任务</summary>
@@ -50,10 +52,10 @@ function SourceVariants({ group, query }: { group: AutomaticProductGroup; query:
   </details>;
 }
 
-export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, ...actions }: Actions & { groups: AutomaticProductGroup[]; sourceErrors: Record<string, string>; loadingSources: boolean }) {
-  const [expandedIds, setExpandedIds] = useState<string[]>([]);
-  const [search, setSearch] = useState('');
-  const [collapsedSearchIds, setCollapsedSearchIds] = useState<string[]>([]);
+export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, memoryKey = 'current', ...actions }: Actions & { memoryKey?: string; groups: AutomaticProductGroup[]; sourceErrors: Record<string, string>; loadingSources: boolean }) {
+  const [expandedIds, setExpandedIds] = usePageState<string[]>(`task:${memoryKey}:expanded`, []);
+  const [search, setSearch] = usePageState(`task:${memoryKey}:search`, '');
+  const [collapsedSearchIds, setCollapsedSearchIds] = usePageState<string[]>(`task:${memoryKey}:collapsed`, []);
   const visible = filterAutomaticProductGroups(groups, search);
   const query = search.trim().toLocaleLowerCase();
   return <div className="automatic-source-groups">
@@ -80,9 +82,9 @@ export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, .
           {sourceErrors[group.productId] && <p className="workflow-notice" role="alert">来源规格读取失败：{sourceErrors[group.productId]}。任务进度仍可查看；请点击“刷新任务”重试。</p>}
           {group.families.map(family => <section className="automatic-sales-family" key={family.key} aria-label={family.parentSku ? `父 SKU ${family.parentSku}` : '销售组'}>
             <div className="automatic-family-heading"><strong>{family.label}</strong><span className="small-copy">{family.items.length} 个销售 SKU{!family.parentSku ? family.items.every(item => item.salesPlan?.familyResolved && item.salesPlan.parentage === 'NONE') ? ' · 独立销售，无 Amazon 父体' : ' · 尚未确认 Amazon 父体' : ' · 已有父 SKU 关系'}</span></div>
-            <ul className="automatic-task-items">{family.items.map(item => <SalesItem key={item.key} item={item} {...actions} />)}</ul>
+            <ul className="automatic-task-items">{family.items.map(item => <SalesItem memoryKey={memoryKey} key={item.key} item={item} {...actions} />)}</ul>
           </section>)}
-          {group.sourceVariantCount !== null && <SourceVariants group={group} query={query} />}
+          {group.sourceVariantCount !== null && <SourceVariants memoryKey={memoryKey} group={group} query={query} />}
         </div>}
       </article>;
     })}

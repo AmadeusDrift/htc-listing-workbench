@@ -1,4 +1,5 @@
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
+import { COPY_REVIEW_TABLES,assertCopyReviewHistory,retainCopyReviewHistory } from './ai/copy-review-upgrade.ts';
 import { RestorePathGuard, writeRestoreFile } from './restore-paths.ts';
 import { V2_MAGIC, hashBackupFile, writeStreamingBackup, readStreamingBackup, type BackupFile } from './backup-stream.ts';
 import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, invalidateCorrectionAuthorizations } from './amazon/correction-history.ts';
@@ -183,6 +184,8 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
+    if(version>=28)Object.assign(approved,{image_reference_pins:['id','record_json']});
+    if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -411,6 +414,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainBatchHistory(current,snapshot);
     retainFieldGroupHistory(current,snapshot);
+    retainCopyReviewHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);

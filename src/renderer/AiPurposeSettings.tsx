@@ -1,3 +1,4 @@
+import { useFormGuard } from './FormGuard';
 import { useEffect,useState } from 'react';
 import { AI_PURPOSE_LABELS } from '../shared/ai-purpose-contracts';
 import type { AiPurposeProfile,TextModelCapability,ReasoningEffort,AiPurposeId } from '../shared/ai-purpose-contracts';
@@ -14,10 +15,11 @@ function PurposeRow({profile,profiles,models,connections,busy,saved}:{profile:Ai
   const selected=options.find(m=>m.gateway===draft.gateway&&m.model===draft.model),valid=!!selected&&selected.efforts.includes(draft.effort)&&(!vision||selected.vision);
   const label=AI_PURPOSE_LABELS[profile.purposeId];
   async function save(){
-    if(working||busy||!dirty||!valid)return;setWorking(true);setError('');
-    try{const value=await window.red.saveAiPurposeProfile({purposeId:profile.purposeId,expectedRevision:draft.revision,patch:{gateway:draft.gateway,model:draft.model,effort:draft.effort,upgradePurposeId:draft.upgradePurposeId}});setDraft(value);saved(value);}
-    catch(cause){setError(errorText(cause));}finally{setWorking(false);}
+    if(working||busy||!valid)return false;if(!dirty)return true;setWorking(true);setError('');
+    try{const value=await window.red.saveAiPurposeProfile({purposeId:profile.purposeId,expectedRevision:draft.revision,patch:{gateway:draft.gateway,model:draft.model,effort:draft.effort,upgradePurposeId:draft.upgradePurposeId}});setDraft(value);saved(value);return true;}
+    catch(cause){setError(errorText(cause));return false;}finally{setWorking(false);}
   }
+  useFormGuard({dirty:()=>dirty,save,discard:()=>{setDraft(structuredClone(profile));setError('');}});
   return <div className="ai-function-row" data-ai-purpose={profile.purposeId}>
     <div className="credential-heading"><strong>{label}</strong><span className="small-copy">{profile.source==='user'?'独立配置':profile.source==='legacy-function'?'沿用旧偏好':'默认配置'}</span></div>
     <div className="ai-function-controls">

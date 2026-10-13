@@ -1,3 +1,4 @@
+import { runCopyReview,readCopyReview,copyReviewReason,copyReviewResult } from './copy-review-upgrade.ts';
 import {reviewProductAppearance} from './appearance-adapter.ts';
 import {validatePurposeSnapshot as validateAppearancePurposeSnapshot} from './purpose-routing.ts';
 import { resolvePurpose,listPurposeProfiles,savePurposeProfile,inheritLegacyPurposeSettings } from './purpose-routing.ts';
@@ -107,7 +108,7 @@ interface PreparedRequest {
   assertBeforeSend?(): void;
 }
 interface DurableFieldCall {
-  id?:string;assignments:FieldPurposeAssignment[];part?:NonNullable<AiResult['fieldGroupPart']>;
+  id?:string;assignments?:FieldPurposeAssignment[];part?:NonNullable<AiResult['fieldGroupPart']>;
   sent?:(call:AiCall)=>void;result?:(result:AiResult)=>void;
 }
 type TextSnapshot = { payload: TextPayload; sources: { result: AiResult; asset: StoredAsset }[] };
@@ -453,7 +454,8 @@ export class AiService {
   /** Trusted main-process entry only. Shares credentials, request control and usage accounting. */
   async listingFields(context: ListingAiContext, assertContextFresh: () => Promise<void>, review?: { suggestionId: string; candidate: ListingFieldsOutput }, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
     this.ensureOpen();this.assertListingSource(context);
-    if(review)return this.listingFieldsOnce(context,assertContextFresh,this.activePurpose('copy_review',false,true),review,signal,completion);
+    if(review){const source=this.getResult(review.suggestionId);if(!source||source.output.kind!=='amazon-fields'||source.sourceSha256!==listingFingerprint(context)||listingFingerprint(source.output)!==listingFingerprint(review.candidate))throw new AiError('SOURCE_CHANGED');}
+    if(review)return runCopyReview(this.db,{contextHash:listingFingerprint(context),scope:{suggestionId:review.suggestionId},completion,signal,canResume:id=>this.canResumeCopyReview(id),fresh:assertContextFresh,snapshot:()=>this.activePurpose('copy_review',false,true).routing!,budget:()=>{if(completion)this.completionJournal.assertUpgradeBudget(completion);},link:result=>{if(completion)this.completionJournal.linkReviewUpgrade(completion,result);},invoke:(routing,hooks,request)=>this.listingFieldsOnce(context,assertContextFresh,this.frozenReviewProfile(routing),review,signal,request,hooks)});
     const groups=fieldPurposeGroups(this.db,context,!!completion),existing=findFieldGroup(this.db,context,completion?.callId);
     if(!existing&&groups.length===1)return this.listingFieldsOnce(context,assertContextFresh,this.frozenPurposeProfile(groups[0].purpose),undefined,signal,completion,{assignments:groups[0].assignments});
     if(!groups.length)throw new AiError('INVALID_INPUT');
@@ -461,6 +463,13 @@ export class AiService {
     return this.runFieldGroups(operation,context,assertContextFresh,signal,completion);
   }
   hasListingFieldGroup(callId:string):boolean{return !!readFieldGroup(this.db,callId);}
+  hasPendingCopyReview(resultId:string):boolean{const result=this.getResult(resultId);if(!result)return false;const op=readCopyReview(this.db,result.callId);if(!op)return false;if(copyReviewResult(this.db,op)?.id!==result.id)throw new UserFacingError('文案复核升级链归属不一致');return !!copyReviewReason(result)&&!copyReviewResult(this.db,op,true);}
+  private canResumeCopyReview(callId:string):boolean{return !!(this as unknown as {batchTasks?:{find(id:string):unknown}}).batchTasks?.find(callId);}
+  private frozenReviewProfile(routing:AiPurposeSnapshot):AiProfile{
+    if(!routing.capability.json||routing.capability.endpoint==='decisions')throw new UserFacingError('本次冻结的文案升级目标不支持聊天JSON复核');
+    const id:AiProviderId=routing.gateway==='openrouter'?'openrouter-review':'deepseek-review';let profile:AiProfile;try{profile=this.assertProfile(id);}catch{throw new UserFacingError(`本次冻结文案复核目标 ${routing.gateway} / ${routing.model} 未配置或未启用，未切换渠道`);}
+    return {...profile,model:routing.model,thinking:!['none','not_applicable'].includes(routing.effectiveEffort),routing};
+  }
   private frozenPurposeProfile(routing:AiPurposeSnapshot):AiProfile{
     const id:AiProviderId=routing.gateway==='openrouter'?'openrouter':'deepseek',profile=this.assertProfile(id);
     return{...profile,model:routing.model,thinking:!['none','not_applicable'].includes(routing.effectiveEffort),routing};
@@ -535,14 +544,14 @@ export class AiService {
   }
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
-    this.ensureOpen();this.assertListingSource(context); const profile = this.activePurpose('copy_review',false,true), currentCopy = validateCurrentListingCopy(copy,isFullSchema(context));
+    this.ensureOpen();this.assertListingSource(context); const currentCopy = validateCurrentListingCopy(copy,isFullSchema(context));
     assertCurrentCopyEvidence(currentCopy,context);
-    return this.start(profile, context, { operation: 'listing-current-review', context, currentCopy }, async activeSignal => {
+    return runCopyReview(this.db,{contextHash:listingFingerprint(context),scope:{currentCopy},signal,freshCompleted:true,canResume:id=>this.canResumeCopyReview(id),fresh:assertContextFresh,snapshot:()=>this.activePurpose('copy_review',false,true).routing!,invoke:(routing,hooks)=>{const profile=this.frozenReviewProfile(routing);return this.start(profile, context, { operation: 'listing-current-review', context, currentCopy }, async activeSignal => {
       const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal);this.assertListingSource(context); };
       await assertFresh();
       return { variantId: context.variantId, assetId: null, assetSha256: null, sourceResultIds: [], sourceSha256: listingFingerprint(context), listingContext: context, assertFresh,
         invoke: (credentials, adapterContext) => reviewCurrentListing(context, currentCopy, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
-    }, signal);
+    }, signal,undefined,hooks);}});
   }
   private imageSources(context: ProductImageContext): StoredAsset[] {
     const source = this.product(context.listing.productId, context.listing.productRevision);

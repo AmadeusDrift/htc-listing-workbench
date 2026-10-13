@@ -1,3 +1,4 @@
+import { useFormGuard, useGuardedNavigation } from './FormGuard';
 import { useEffect, useState } from 'react';
 import { Gauge, RefreshCw } from 'lucide-react';
 import { AI_DAILY_CALL_MAX, AI_DAILY_TOKEN_MAX } from '../shared/ai-contracts';
@@ -27,9 +28,10 @@ const count = (value: number) => value.toLocaleString('zh-CN');
 
 export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner }) {
   const api = window.red;
+  const guarded = useGuardedNavigation();
   const [provider, setProvider] = useState<AiProviderId>('openrouter');
   const vendor = aiVendorFor(provider);
-  const selectVendor = (id: AiVendorId) => setProvider(AI_VENDOR_FUNCTIONS[id][0]);
+  const selectVendor = (id: AiVendorId) => guarded(() => setProvider(AI_VENDOR_FUNCTIONS[id][0]));
   const [summary, setSummary] = useState<AiUsageSummary | null>(null);
   const [calls, setCalls] = useState(() => savedLimit(null, CALL_PRESETS));
   const [tokens, setTokens] = useState(() => savedLimit(null, TOKEN_PRESETS));
@@ -70,18 +72,21 @@ export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner 
     } finally { setWorking(false); }
   }
   async function save() {
-    if (!valid || working || !summary) return;
+    if (!valid || working || !summary) return false;
+    let success = false;
     const policy: AiUsagePolicy = { providerId: provider, dailyCallLimit: callLimit, dailyTokenLimit: tokenLimit };
     setWorking(true);
     try {
       await run('正在保存 AI 用量上限…', async () => {
         await api.setAiUsagePolicy(policy);
-        apply(await api.getAiUsageSummary(provider));
+        apply(await api.getAiUsageSummary(provider)); success = true;
         setNotice(`${names[provider]}的用量上限已保存，将用于后续请求。`);
       });
     } finally { setWorking(false); }
+    return success;
   }
 
+  useFormGuard({ dirty: () => dirty, save, discard: () => { if (summary) apply(summary); } });
   return <section className="settings-section ai-settings" aria-label="AI 用量与上限">
     <div className="settings-section-title"><Gauge size={19} /><div><h3>AI 连接、用量与上限</h3><p>每家供应商只填一次密钥；功能、模型和用量上限分别设置。</p></div></div>
     <div className="ai-service-selector">
@@ -91,7 +96,7 @@ export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner 
     <div className="ai-connection-column"><AiConnectionSettings key={vendor} vendor={vendor} busy={disabled} run={run} onVendorChange={selectVendor} /></div>
     <section className="ai-usage-column" aria-label="AI 用量管理">
     <div className="credential-heading"><h4>用量与上限</h4><button type="button" className="button secondary" disabled={disabled} onClick={() => void refresh()}><RefreshCw size={15} />刷新 AI 用量</button></div>
-    <label className="field"><span>统计功能</span><select aria-label="AI 用量服务" value={provider} disabled={disabled} onChange={event => setProvider(event.target.value as AiProviderId)}>{AI_VENDOR_FUNCTIONS[vendor].map(id => <option key={id} value={id}>{AI_FUNCTION_NAMES[id]}</option>)}</select></label>
+    <label className="field"><span>统计功能</span><select aria-label="AI 用量服务" value={provider} disabled={disabled} onChange={event => { const next = event.target.value as AiProviderId; guarded(() => setProvider(next)); }}>{AI_VENDOR_FUNCTIONS[vendor].map(id => <option key={id} value={id}>{AI_FUNCTION_NAMES[id]}</option>)}</select></label>
     <p className="settings-help">这里只统计所选功能；共用密钥后，各功能已有的用量和上限仍分别保留。</p>
     <p className="settings-help">每天按 UTC 00:00（北京时间 08:00）重新计算额度。默认不限制；自定义为 0 时不允许新的调用。失败或中断的发送尝试也会计入次数。</p>
     {loading && <p className="small-copy" role="status">正在读取用量…</p>}

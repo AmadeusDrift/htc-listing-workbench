@@ -1,3 +1,5 @@
+import { usePageState } from './navigation-context';
+import type { ProblemContext } from './navigation-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PauseCircle, Play, RefreshCw, XCircle } from 'lucide-react';
 import type { AutomaticAdaptationPreview, AutomaticListingStatus, AutomaticListingTask } from '../shared/automatic-listing-contracts';
@@ -10,12 +12,12 @@ import { buildAutomaticProductGroups, summarizeAutomaticItems } from './automati
 
 const statusLabels: Record<AutomaticListingStatus, string> = { CREATED:'已创建', QUEUED:'等待执行', RUNNING:'运行中', WAITING:'等待平台或服务返回', PAUSED:'已暂停', NEEDS_ATTENTION:'需要处理', COMPLETED:'任务完成', CANCELLED:'已取消' };
 function tone(status: AutomaticListingStatus): SettingsStatusTone { return status === 'COMPLETED' ? 'success' : status === 'NEEDS_ATTENTION' ? 'danger' : status === 'PAUSED' ? 'warning' : status === 'CANCELLED' ? 'neutral' : 'info'; }
-interface Props { products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string): void; onShipping?: (batchId: string) => void }
+interface Props { products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
 
 export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onShipping }: Props) {
   const api = window.red;
   const [tasks, setTasks] = useState<AutomaticListingTask[]>([]);
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = usePageState('automatic:task', '');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
   const [adaptation,setAdaptation]=useState<AutomaticAdaptationPreview|null>(null);
@@ -124,7 +126,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
       </div>}
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
-      <AutomaticProductGroups key={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={onManual} onShipping={onShipping} />
+      <AutomaticProductGroups key={task.id} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}
   </section>;
 }

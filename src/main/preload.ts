@@ -101,6 +101,11 @@ const api: RedApi = {
   prepareCollectionConnection: () => invoke('red:collection:prepare'),
   openCollectionConnectionFolder: () => invoke('red:collection:open-directory'),
   getCollectionReceipt: productId => invoke('red:collection:receipt', productId),
+  onUnsavedCloseRequested: listener => {
+    const handler = () => listener();
+    ipcRenderer.on('red:unsaved-close-requested', handler);
+    return () => { ipcRenderer.removeListener('red:unsaved-close-requested', handler); };
+  },
   onCollectionReceived: listener => {
     if (typeof listener !== 'function') throw new Error('采集事件监听器无效');
     const handler = (_event: Electron.IpcRendererEvent, result: CollectionReceiveResult) => listener(result);

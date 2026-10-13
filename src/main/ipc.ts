@@ -31,7 +31,7 @@ import { installMiaoshouIpc } from './miaoshou-ipc.ts';
 import type { MiaoshouService } from './miaoshou/service.ts';
 import type { MiaoshouImageService } from './miaoshou/images.ts';
 import { installCollectionIpc } from './collection-ipc.ts';
-import type { CollectionBridge } from './collection/service.ts';
+import type { CollectionHistoryPort } from './collection/history.ts';
 import { ListingAiService } from './listing-ai/service.ts';
 import { ListingRuleStore } from './listing-rules.ts';
 import { AppearanceStore } from './appearance.ts';
@@ -53,7 +53,7 @@ export function decodePreview(bytes: Buffer): Buffer {
   const scale = Math.min(1, 640 / Math.max(width, height));
   return image.resize({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), quality: 'good' }).toPNG();
 }
-export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionBridge, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService): void {
+export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionHistoryPort, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService): void {
   let active = 0, restoring = false, shuttingDownForRestore = false;
   function handle(channel: string, argumentCount: number, callback: (...args: unknown[]) => unknown) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {

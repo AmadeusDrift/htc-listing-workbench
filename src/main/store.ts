@@ -1,3 +1,4 @@
+import { appendAuditEvent } from './storage/audit.ts';
 import { readNativeImageReceipt } from './source-images.ts';
 import { transaction } from './application/transaction.ts';
 import { freezeSourceForProduct } from './products/public.ts';
@@ -45,7 +46,7 @@ export class WorkspaceStore {
   }
   recordWorkspaceEvent(action: string, summary: string, detail: unknown = {}): void { this.audit(null, action, summary, detail); }
   private audit(productId: string | null, action: string, summary: string, detail: unknown): void {
-    this.db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?,?)').run(randomUUID(), productId, action, summary, JSON.stringify(detail), now());
+    appendAuditEvent(this.db,randomUUID(), productId, action, summary, JSON.stringify(detail), now());
   }
   private insertProduct(origin: ProductOrigin, title = '未命名商品'): string {
     const id = randomUUID(), date = now();

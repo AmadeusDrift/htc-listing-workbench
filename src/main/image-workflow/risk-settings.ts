@@ -1,3 +1,4 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import { imageRiskPolicy, evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import type { ImageIpReviewOutput } from '../../shared/image-ai-contracts.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -19,7 +20,7 @@ export function parseImageRiskSettings(raw:unknown):ImageRiskSettings {
 }
 export function writeImageRiskSettings(db:DatabaseSync,raw:unknown):ImageRiskSettings {
   const value=parseImageRiskSettings(raw);
-  db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run(KEY,JSON.stringify(value));
+  writeOwnedSetting(db,'images',KEY,JSON.stringify(value));
   return value;
 }
 export function riskPolicyCompatible(run:ImageWorkflowRun|null|undefined,settings:ImageRiskSettings,getOutput:(id:string)=>ImageIpReviewOutput|undefined):boolean {

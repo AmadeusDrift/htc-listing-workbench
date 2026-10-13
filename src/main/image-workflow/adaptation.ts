@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { readImageRiskSettings } from './risk-settings.ts';
 import { semanticJson } from '../amazon/preparation.ts';
 import { imageRiskSourceSnapshot } from '../ai/image-validation.ts';
@@ -56,7 +57,7 @@ export function saveImageAdaptation(db:DatabaseSync,run:ImageWorkflowRun|null|un
   if(!db.isTransaction)throw new Error('Image adaptation requires task transaction');
   const decision=inspectImageAdaptation(run,before,after,source,db);if(!decision.compatible)throw new Error(decision.message);
   const references=run.referenceAssets.map(ref=>{const asset=db.prepare('SELECT sha256 FROM assets WHERE id=? AND product_id=?').get(ref.id,source.id);if(asset?.sha256!==ref.sha256)throw new Error('原参考图内容已变化');return ref;});
-  db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),source.id,'image.workflow.task-adapted',decision.message,JSON.stringify({workflowId:run.id,workflowHash:fingerprint(run),approvedBefore:approvedBaseline(db,run,before),before,after,sourceHash:fingerprint(source),references}),new Date().toISOString());
+  appendAuditEvent(db,randomUUID(),source.id,'image.workflow.task-adapted',decision.message,JSON.stringify({workflowId:run.id,workflowHash:fingerprint(run),approvedBefore:approvedBaseline(db,run,before),before,after,sourceHash:fingerprint(source),references}),new Date().toISOString());
 }
 export function currentImageAdaptation(db:DatabaseSync,run:ImageWorkflowRun,draft:AmazonDraft,source:ProductDetail):boolean{
   const row=db.prepare("SELECT detail_json FROM audit_events WHERE action='image.workflow.task-adapted' AND json_extract(detail_json,'$.workflowId')=? ORDER BY rowid DESC LIMIT 1").get(run.id);if(!row)return false;

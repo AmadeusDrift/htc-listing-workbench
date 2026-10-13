@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
@@ -157,7 +158,7 @@ export class ProcurementService {
     try {
       const result = this.db.prepare("UPDATE procurement_batches SET record_json=? WHERE id=? AND json_extract(record_json,'$.revision')=?").run(JSON.stringify(validated), batch.id, input.revision as number);
       if (result.changes !== 1) throw new UserFacingError('备货批次已更新，请刷新后再保存');
-      this.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'procurement.revised','采购人工修订；原始来源与销售计划保持',JSON.stringify({previous,current:validated}),at);
+      appendAuditEvent(this.db,randomUUID(),null,'procurement.revised','采购人工修订；原始来源与销售计划保持',JSON.stringify({previous,current:validated}),at);
       this.db.exec('COMMIT');
     } catch(error) {this.db.exec('ROLLBACK');throw error;}
     return this.get(validated.id);

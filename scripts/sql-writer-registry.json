@@ -1,0 +1,1044 @@
+{
+  "version": 1,
+  "scope": "Reviewed exact command/operation/table and normalized SQL signatures, never wildcard directory/table permissions. Changed/new SQL requires review.",
+  "writers": {
+    "main/ai/batch/records.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "writeBatch|INSERT|ai_batches",
+        "writeItem|INSERT|ai_batch_items"
+      ],
+      "statements": {
+        "writeBatch|5de7124e87e9d27fea8d352c25ebef95653de2c358b0003e479ac6268a4222ec": 1,
+        "writeItem|3b905e2ed4eb8e5e0b1e7ebcd3e33536027df4ff05264f215b7a423796b8bf8d": 1
+      }
+    },
+    "main/ai/batch/recovery.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainProviderReceipts|INSERT|ai_image_requests",
+        "retainProviderReceipts|INSERT|ai_provider_receipts"
+      ],
+      "statements": {
+        "retainProviderReceipts|9dffd193a6e12997f9a19934462beed3432b486ded502275d3a4f887f016fe02": 1,
+        "retainProviderReceipts|33a82f8d37901aaac14b417cddc1193bbff6189e159a3205da95d44ddbb4f908": 1
+      }
+    },
+    "main/ai/copy-review-upgrade.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainCopyReviewHistory|INSERT|ai_calls",
+        "save|INSERT|ai_copy_review_upgrades",
+        "save|UPDATE|ai_copy_review_upgrades"
+      ],
+      "statements": {
+        "save|88927f56ddd532490ad281008d15581b12126a33d0981a32c61ed84a6e3a1a74": 1,
+        "save|75715ca1a122f7e07496700db2a65807e542b126d61e0f8b2e9fdf1affcb5b26": 1,
+        "retainCopyReviewHistory|67d089d04eadc0fd17a5feca045a689e2bda7918c53766633165f05969b37a5f": 1
+      }
+    },
+    "main/ai/field-purpose-groups.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainFieldGroupHistory|INSERT|ai_calls",
+        "saveFieldGroup|INSERT|ai_field_groups"
+      ],
+      "statements": {
+        "saveFieldGroup|5a4ff7d4ce127ed5e2d14731b7cdd71f2573e7db2e794b5e7c691c219fa7f876": 1,
+        "retainFieldGroupHistory|67d089d04eadc0fd17a5feca045a689e2bda7918c53766633165f05969b37a5f": 1
+      }
+    },
+    "main/ai/purpose-routing.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "initializePurposeProfiles|CREATE|ai_purpose_profiles",
+        "write|INSERT|ai_purpose_profiles"
+      ],
+      "statements": {
+        "write|5b54dc07816df544f5eb48094636483c608d5d370d785efba92695db40060c06": 1,
+        "initializePurposeProfiles|2aee30734326805935cd2a8b0fc7e05f04b188f3f755a7927cc49e1bd54ec251": 1
+      }
+    },
+    "main/ai/receipts.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "indexProviderReceiptPointers|INSERT|ai_provider_receipts",
+        "saveImageRequestIntent|INSERT|ai_image_requests",
+        "saveProviderReceipt|INSERT|ai_provider_receipts"
+      ],
+      "statements": {
+        "saveProviderReceipt|a9456050e74f18bc08d762c949cfd54eb5cd44a923b793dc2db00f32f6238eac": 1,
+        "indexProviderReceiptPointers|9dffd193a6e12997f9a19934462beed3432b486ded502275d3a4f887f016fe02": 1,
+        "saveImageRequestIntent|cedd19f73b0a7fa8c9f48005231a7c4b44a39b33c45eb8c2cc30efe84c62f7d0": 1
+      }
+    },
+    "main/ai/results.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "recordRecoveredAiResult|INSERT|ai_results"
+      ],
+      "statements": {
+        "recordRecoveredAiResult|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1
+      }
+    },
+    "main/ai/service.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "recoverFieldCandidates|INSERT|ai_results",
+        "recoverGroupedField|INSERT|ai_results",
+        "recoverImagePlan|INSERT|ai_results",
+        "runFieldGroups|INSERT|ai_results",
+        "saveCall|INSERT|ai_calls",
+        "saveProfile|INSERT|ai_profiles",
+        "start|INSERT|ai_results"
+      ],
+      "statements": {
+        "saveProfile|2f57ac3c3e583313b05c30cad9536f57db782c4f491782642ff3fbe38c1aa36d": 1,
+        "saveCall|4633a1c6198502e2494f8ab97e07b767fd848e2882d738726659358c919fa214": 1,
+        "recoverFieldCandidates|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1,
+        "runFieldGroups|a2f94624e3ba4c8064174edf125a3ce6b421acbb2193e542153944233269355f": 1,
+        "recoverGroupedField|a2f94624e3ba4c8064174edf125a3ce6b421acbb2193e542153944233269355f": 1,
+        "recoverImagePlan|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1,
+        "start|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1
+      }
+    },
+    "main/ai/usage.ts": {
+      "role": "ai",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "attachBatch|INSERT|ai_calls",
+        "reserve|INSERT|ai_calls",
+        "retainAiUsage|INSERT|ai_usage_policies",
+        "retainImagePlanningAttempts|INSERT|ai_calls",
+        "retainImagePlanningAttempts|UPDATE|ai_calls",
+        "retainSchemaResponseCalls|INSERT|ai_calls",
+        "retainSourceColorAttempts|INSERT|ai_calls",
+        "saveRecord|INSERT|ai_usage_ledger",
+        "setPolicy|INSERT|ai_usage_policies"
+      ],
+      "statements": {
+        "saveRecord|9de4e412cd3498f7094063b0109003ce80e290f3999ae7d98fe138b327ac0d9d": 1,
+        "setPolicy|1e7c7fde392c0403f1157efa71c11fb260a4668c0832eee5bc70d0f3a29a5892": 1,
+        "reserve|7f0f3f64bdff84e8bfb1cbfdb63847f52a9637323a2c157bbafddf5c28052ff3": 1,
+        "attachBatch|67d089d04eadc0fd17a5feca045a689e2bda7918c53766633165f05969b37a5f": 1,
+        "retainAiUsage|1e7c7fde392c0403f1157efa71c11fb260a4668c0832eee5bc70d0f3a29a5892": 1,
+        "retainSourceColorAttempts|7f0f3f64bdff84e8bfb1cbfdb63847f52a9637323a2c157bbafddf5c28052ff3": 1,
+        "retainImagePlanningAttempts|5889494fa7175c017849f70d1fcb659325db2dcb0b73c564162703340f83844b": 1,
+        "retainImagePlanningAttempts|7f0f3f64bdff84e8bfb1cbfdb63847f52a9637323a2c157bbafddf5c28052ff3": 1,
+        "retainSchemaResponseCalls|4633a1c6198502e2494f8ab97e07b767fd848e2882d738726659358c919fa214": 1
+      }
+    },
+    "main/amazon/correction-history.ts": {
+      "role": "publish",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "invalidateCorrectionAuthorizations|UPDATE|amazon_write_locks",
+        "invalidateCorrectionAuthorizations|UPDATE|listing_correction_attempts",
+        "invalidateCorrectionAuthorizations|UPDATE|listing_corrections",
+        "retainCorrectionHistory|DELETE|amazon_write_locks",
+        "retainCorrectionHistory|INSERT|amazon_write_locks",
+        "retainCorrectionHistory|INSERT|listing_correction_attempts",
+        "retainCorrectionHistory|INSERT|listing_corrections"
+      ],
+      "statements": {
+        "retainCorrectionHistory|bf44608ff0461db9807cdc7e77fd15559c2c4b743e6ec67013207d79de82db61": 1,
+        "retainCorrectionHistory|ece08c0d948acf3496f1bad79b0ea6c48ad5ce8e548da38e01fca8ab61005feb": 1,
+        "retainCorrectionHistory|e5ada6b92f458c2c56864f33b317c0f0bd134ab9b6b1c09afcd9bb04fe4aacfa": 1,
+        "retainCorrectionHistory|1eefaec0a3cd4ac0b356be8387f73191c6c2dcc2a6ba31858b9d1cea0968d1a3": 1,
+        "invalidateCorrectionAuthorizations|89b666b8fbd2a85d6a688dfbeec3c551d5283e4a98311d53a467c0e6e7fba866": 1
+      }
+    },
+    "main/amazon/corrections.ts": {
+      "role": "publish",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "finish|DELETE|amazon_write_locks",
+        "finish|UPDATE|amazon_write_locks",
+        "finish|UPDATE|listing_correction_attempts",
+        "save|INSERT|listing_corrections",
+        "send|INSERT|amazon_write_locks",
+        "send|INSERT|listing_correction_attempts",
+        "state|UPDATE|listing_corrections"
+      ],
+      "statements": {
+        "save|ece08c0d948acf3496f1bad79b0ea6c48ad5ce8e548da38e01fca8ab61005feb": 1,
+        "state|b90968dbfab49d18bd86843ff066e59ff7ca874b00bdcb2d11908a59787eea1f": 1,
+        "send|b6640c56ecf0d3a44dcb5d917764452b6eaa9cec164331ce193f6b89e6a62890": 1,
+        "send|b6934c124052428449296a1e50d8ab89abf0583164f05f018b92d7681ac5fd39": 1,
+        "finish|35e4b2fed0459e97ae57a3b97d72bcb9e3ac3eac4f41fb168563703e013eedf4": 1,
+        "finish|964f788060856e417a16d7eb9d1484c12a01b79dfd63bd3092493571ba1191a4": 1,
+        "finish|342ebec7ec307d2614387347d13bbcf08e2a2728017eb7f23e8d3bf435b7055a": 1
+      }
+    },
+    "main/amazon/persistence.ts": {
+      "role": "legacy-explicit-adapter",
+      "review": "putTarget: connections; putSchema: catalog; persist: listing plus publish exchanges; beginWrite/finishWrite/releaseAccepted/recover/addCall: publish; cleanup: catalog/listing/publish subject to existing reference and retention guards. Permission only exact registered SQL in these methods.",
+      "commands": [
+        "addCall|INSERT|amazon_calls",
+        "beginWrite|INSERT|amazon_write_locks",
+        "cleanup|DELETE|amazon_calls",
+        "cleanup|DELETE|amazon_exchanges",
+        "cleanup|DELETE|issues",
+        "cleanup|DELETE|listing_drafts",
+        "cleanup|DELETE|schema_cache",
+        "finishWrite|DELETE|amazon_write_locks",
+        "finishWrite|INSERT|amazon_exchanges",
+        "finishWrite|UPDATE|amazon_write_locks",
+        "persist|INSERT|amazon_exchanges",
+        "persist|INSERT|listing_drafts",
+        "putSchema|INSERT|schema_cache",
+        "putTarget|INSERT|amazon_targets",
+        "recover|UPDATE|amazon_write_locks",
+        "recover|UPDATE|listing_correction_attempts",
+        "recover|UPDATE|listing_corrections",
+        "releaseAccepted|DELETE|amazon_write_locks"
+      ],
+      "statements": {
+        "putTarget|bc86168ad134109987d9366a57c1d70f6537ca0d49cf5fe65c933f1bf00b7880": 1,
+        "putSchema|0c25565976d6ef4dcd08c0a4b76f2a476918c1822917b31d557ab382418aa183": 1,
+        "persist|f5186d862bc8e14e5e022ce21548444a6a2fdc9af651f5a362f8c4aedc2e3c58": 1,
+        "persist|4eb5b12892e5ebda4ad15cdc022cdc86920a8207b2f386e906213d0a8ef25feb": 1,
+        "beginWrite|5f768f63c1927bdfef1c0f967c2ecbd6db9fd94f4baa9a62e1f3643ba5abbcb7": 1,
+        "finishWrite|4eb5b12892e5ebda4ad15cdc022cdc86920a8207b2f386e906213d0a8ef25feb": 1,
+        "finishWrite|53d1b03c7c08cd5c2316515e40cb189ee67ac96ad2cdb66af29cccce977ba220": 1,
+        "finishWrite|51607f82c2b41307b0f2f71e8c0e311d933477342db42aa35a227f8e84c29124": 1,
+        "finishWrite|516aba35481867febaade09e872516b9a55feaa9997189b363dc423b21d207d8": 1,
+        "releaseAccepted|1ddcb17ded0f48b79c943e9847e33d26da97ac9c0e026ebb888781a3e08299a9": 1,
+        "recover|e30981c9621a507711c4340ed8c56418bf64305ddc5f1def21dafd24a3205fbd": 1,
+        "recover|1296f44678b78330c3420b163a6a1d514590403caa8d4a3dbf3d8634f678a9f1": 1,
+        "recover|e4210b6ee24f340467e384787f57f06ca51be83e26a7efd1341f82a1efe26d52": 1,
+        "addCall|748837b1c04a59816b0e2e7c90d103a91bb15505d8ca1516af547fe376b536ff": 1,
+        "cleanup|8291a3f65b7a43d231b91c8aa57ce584c72c3d61b94256406d3408b0dc2f7738": 1,
+        "cleanup|8f3418d6e94a11e7fb49e61bd0f38269658615bc82c0bb1ca798016ccae0333f": 1,
+        "cleanup|604d1b61599ffbc29fd40213ba2195e2b4508ebaff306ee1d05d03fcc3715f1b": 1,
+        "cleanup|49fa85f699221a9ab60ad04052f08ecd237034d7c76cb241c87e411fe87f1870": 1,
+        "cleanup|d84dec1271c682c5fcb8ea4abd4e063c108cf95df74f19e6a15ed36a89e77b7a": 1
+      }
+    },
+    "main/amazon/service.ts": {
+      "role": "listing",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "applyTaskAdaptation|UPDATE|listing_drafts"
+      ],
+      "statements": {
+        "applyTaskAdaptation|5f73ad3f0831fe6d8017c15ca7e6ea6b03d934249608e083e2a250f0d52283e0": 1
+      }
+    },
+    "main/assets/commands.ts": {
+      "role": "assets",
+      "review": "M09 metadata registration requires active caller transaction; does not confer workflow approval.",
+      "commands": [
+        "registerGeneratedAsset|INSERT|assets"
+      ],
+      "statements": {
+        "registerGeneratedAsset|1bac0c3ad71a4b88ea8ea1709be61ffc5fffa78b516cb4a243ba6cd7293daa57": 1
+      }
+    },
+    "main/automatic-listing/schema-retry-budget.ts": {
+      "role": "tasks",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainSchemaRetryBudgets|UPDATE|automatic_listing_tasks"
+      ],
+      "statements": {
+        "retainSchemaRetryBudgets|5662832c0de1a0c1c0cceeb6dd590d159bb58a3660cab89226af859f6981555b": 1
+      }
+    },
+    "main/automatic-listing/service.ts": {
+      "role": "tasks",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|automatic_listing_tasks"
+      ],
+      "statements": {
+        "save|e9fc74096def255f70760ad6fa59d1d1a99f386775c09ad379c84fa3d919e9d9": 1
+      }
+    },
+    "main/automatic-listing/task-results.ts": {
+      "role": "tasks",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "commit|UPDATE|automatic_listing_tasks"
+      ],
+      "statements": {
+        "commit|c18be9672ab2f063091510cad553e6dcae9880000541a16dd4b9cc7d6e93a070": 1
+      }
+    },
+    "main/backup.ts": {
+      "role": "restore-adapter",
+      "review": "disconnectSnapshot: authenticated restore staging only, revoke credentials and interrupt unsafe jobs. retainSafetyHistory: copy original protected histories and UNKNOWN locks into snapshot. No authority to change live task state, resend or delete historical evidence.",
+      "commands": [
+        "disconnectSnapshot|UPDATE|ai_calls",
+        "disconnectSnapshot|UPDATE|ai_profiles",
+        "disconnectSnapshot|UPDATE|amazon_targets",
+        "disconnectSnapshot|UPDATE|automatic_listing_tasks",
+        "disconnectSnapshot|UPDATE|execution_tasks",
+        "disconnectSnapshot|UPDATE|hosting_profiles",
+        "disconnectSnapshot|UPDATE|hosting_uploads",
+        "disconnectSnapshot|UPDATE|image_workflow_runs",
+        "disconnectSnapshot|UPDATE|item_labels",
+        "disconnectSnapshot|UPDATE|listing_drafts",
+        "disconnectSnapshot|UPDATE|listing_followups",
+        "disconnectSnapshot|UPDATE|miaoshou_sync_runs",
+        "retainSafetyHistory|INSERT|amazon_calls",
+        "retainSafetyHistory|INSERT|amazon_write_locks"
+      ],
+      "statements": {
+        "disconnectSnapshot|bd578fa6a85ab4ce9702b1f46d650277ba6877fb7008bd43f0ef5de2e9c1b37b": 1,
+        "disconnectSnapshot|bcfa649cfffef337dab48b8e4a5391d03b1c1d7f331fed4eb752bf950bee83c8": 1,
+        "disconnectSnapshot|4825ec5d419e294d1c66f9f6f56d0089dc510f4622ac1d70cc2907f07c028873": 1,
+        "disconnectSnapshot|88b43e77a8762028ebcee151cd210a4fa811077ba99b87ce79f3f4f22092ecee": 1,
+        "disconnectSnapshot|53740235542cb6b60febf4c5226ee08ebedc4a0dd35f9857893955c53ab46b4e": 1,
+        "disconnectSnapshot|ab787a3654fcda287dbc8fc2e30aeabb2a899f167eb8b857731371ff4c80d800": 1,
+        "disconnectSnapshot|b9f190e1932d5994ceb02457e35fe4abdd1b8787d491765a7d89565ef56b96d2": 1,
+        "disconnectSnapshot|4046331580622aec89554b32d727f01536a74c898d9f8a426625357959d3bc5c": 1,
+        "disconnectSnapshot|df8182894ab1da16efad9fd30d2d4c1bb00cec1aea5186bffc0ce0cb8f2a5358": 1,
+        "disconnectSnapshot|267871b27dee53a78ea1f84268536817e3331f275dc49943bf14a40451656fdf": 1,
+        "retainSafetyHistory|8d17688ae55dcd477bcc002adff89da7d66af07b1f7937ced643e85b0fd5f516": 1,
+        "retainSafetyHistory|d9d680aca0b29e111174a699811276b45921a0b31ac2c80ed5e3ddb89c9de9a9": 1
+      }
+    },
+    "main/catalog/schema-operations.ts": {
+      "role": "catalog",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "initializeSchemaOperations|CREATE|schema_fetch_operations",
+        "restoreSchemaOperations|INSERT|schema_fetch_operations",
+        "saveSchemaOperation|INSERT|schema_fetch_operations"
+      ],
+      "statements": {
+        "saveSchemaOperation|55983821cf0d9bc9e87290f62250254c12254cfc30a55a49792c639ca8c28c8a": 1,
+        "initializeSchemaOperations|c33404dc2fb3ae0759c51f71837ad6d093188787311923ca36d6a06376116c2d": 1,
+        "restoreSchemaOperations|5756a2296ebe8d5833aeb193fbb6345e0431eb7c8e60754b5b5159e3fe629a49": 1
+      }
+    },
+    "main/catalog/service.ts": {
+      "role": "catalog",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "synchronize|INSERT|category_libraries"
+      ],
+      "statements": {
+        "synchronize|eff2fec7859fadc50a92c040ee07a36f3252d9113f26372035b203cd8a66f012": 1
+      }
+    },
+    "main/content/service.ts": {
+      "role": "listing",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "adopt|INSERT|content_versions"
+      ],
+      "statements": {
+        "adopt|7f5e4c68706cf0591488d2e8380b6e8d0b3f8dd5093a7bd9241d6b77ba405db0": 1
+      }
+    },
+    "main/database.ts": {
+      "role": "migration-adapter",
+      "review": "openDatabase: established sequential schema migrations and compatibility updates only. Static imported index/schema definitions are registered separately. Not a business write port.",
+      "commands": [
+        "openDatabase|ALTER|amazon_targets",
+        "openDatabase|ALTER|amazon_write_locks",
+        "openDatabase|ALTER|listing_drafts",
+        "openDatabase|ALTER|schema_cache",
+        "openDatabase|CREATE|ai_calls",
+        "openDatabase|CREATE|ai_profiles",
+        "openDatabase|CREATE|ai_results",
+        "openDatabase|CREATE|ai_usage_ledger",
+        "openDatabase|CREATE|ai_usage_policies",
+        "openDatabase|CREATE|amazon_calls",
+        "openDatabase|CREATE|amazon_exchanges",
+        "openDatabase|CREATE|amazon_settings",
+        "openDatabase|CREATE|amazon_targets",
+        "openDatabase|CREATE|amazon_write_locks",
+        "openDatabase|CREATE|assets",
+        "openDatabase|CREATE|audit_events",
+        "openDatabase|CREATE|automatic_listing_tasks",
+        "openDatabase|CREATE|category_libraries",
+        "openDatabase|CREATE|collection_captures",
+        "openDatabase|CREATE|collection_receipts",
+        "openDatabase|CREATE|content_versions",
+        "openDatabase|CREATE|execution_tasks",
+        "openDatabase|CREATE|facts",
+        "openDatabase|CREATE|hosting_profiles",
+        "openDatabase|CREATE|hosting_uploads",
+        "openDatabase|CREATE|image_selections",
+        "openDatabase|CREATE|image_versions",
+        "openDatabase|CREATE|image_workflow_runs",
+        "openDatabase|CREATE|image_write_operations",
+        "openDatabase|CREATE|issues",
+        "openDatabase|CREATE|item_labels",
+        "openDatabase|CREATE|listing_completion_operations",
+        "openDatabase|CREATE|listing_correction_attempts",
+        "openDatabase|CREATE|listing_corrections",
+        "openDatabase|CREATE|listing_drafts",
+        "openDatabase|CREATE|listing_followups",
+        "openDatabase|CREATE|miaoshou_receipts",
+        "openDatabase|CREATE|miaoshou_sync_items",
+        "openDatabase|CREATE|miaoshou_sync_runs",
+        "openDatabase|CREATE|procurement_batches",
+        "openDatabase|CREATE|product_workspaces",
+        "openDatabase|CREATE|products",
+        "openDatabase|CREATE|schema_cache",
+        "openDatabase|CREATE|shipment_documents",
+        "openDatabase|CREATE|source_image_provenance",
+        "openDatabase|CREATE|variant_assets",
+        "openDatabase|CREATE|variants",
+        "openDatabase|INSERT|product_workspaces",
+        "openDatabase|UPDATE|amazon_write_locks",
+        "openDatabase|UPDATE|listing_drafts"
+      ],
+      "statements": {
+        "openDatabase|88b15eab8f5ff9a7ae615e57edda53f180a2326296114f9a82fcb6b32e974541": 1,
+        "openDatabase|bc257d5ecbb4c4ea862a3385facdbb655f905038ee2b6446d4eccfd8e70e0fa2": 1,
+        "openDatabase|b69e7f7ada55d0f8dc978bc1ac3ef0a54285643234d892c17bfe778d83263b93": 1,
+        "openDatabase|2c95b981e8b2c442b0e3e2362912883b9dbc22de14e55bdef8373ab3707399e7": 1,
+        "openDatabase|19937870e9872db4a1c02bcffab1a3bb75cafc2ca75c1c7363f44de96bb0cf94": 1,
+        "openDatabase|05e379c90c1b851d31b1c4a685f53e142ed25567f0169ea3305fe06640fb3226": 1,
+        "openDatabase|b4d3031f93d1e8945e67bdbd99677a20c9c6ecc6d86b46b1c4963b0ce9c9db8f": 1,
+        "openDatabase|13f3213eb50aab294b200aa43662155672d13a8c00a74de1c4169b2fd28cfced": 1,
+        "openDatabase|0c3f10ce68499fcd41682bdb856b0a8da98e8f1f3c21556ee51f3ad422aef21e": 1,
+        "openDatabase|0fe3bf1087538ff9385beec6ce30d72731587e168ff1fb1b235c2386248b7548": 1,
+        "openDatabase|0f7ab6428a1cb96e74e1f6e44eff96927c48f8149b08df4c0117257394b444c7": 1,
+        "openDatabase|3f73951154e59ca79892c83832f7a969d5aec852d4e907669c91fdd5338824f0": 1,
+        "openDatabase|7f4ed908b8cae18f98e58da3bba80f8e37a8308e696a979b27cfbf713683733b": 1,
+        "openDatabase|41453b06be3fdca8bc125e09ce8152d733fdd88ab739c85f6cfc114e7965728c": 1,
+        "openDatabase|d5d0683a76f6b2635dda3d45e659b046d3bbeffeefbf480c83c6ad981cd3b553": 1,
+        "openDatabase|e8ed9e204fb77cb32312cb3f15bc4a3f8319364891f5de18195e66a6f0618bfd": 1,
+        "openDatabase|910458c0bf11157199c762762d9262dc2e4d71a3978fce35e23c80fdedaced14": 1,
+        "openDatabase|ec8680c2e9660016d63482569ecf5d244e9ff45a834b5ad4e87310cb99d334c4": 1,
+        "openDatabase|7f980dd4c6e315d179b3462c36e0585893fc1c78a11fe90c3db0385d2e4fcd0f": 1
+      }
+    },
+    "main/execution/service.ts": {
+      "role": "publish",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|execution_tasks"
+      ],
+      "statements": {
+        "save|f935162887cd9b86ee436ec52cd599411fe6d5c724b21ad2ae627bde635cc403": 1
+      }
+    },
+    "main/followup/service.ts": {
+      "role": "observations",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|listing_followups"
+      ],
+      "statements": {
+        "save|d502781a5e828c6e10a23e2e2a172317b4b1db89f28c72daa72b603dcb7ad548": 1
+      }
+    },
+    "main/hosting/reference-history.ts": {
+      "role": "assets",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainReferencePinHistory|INSERT|image_reference_pins"
+      ],
+      "statements": {
+        "retainReferencePinHistory|c87812551eb563572978a758d6109ef792df144082e2d4508930d8a0a16f0030": 1
+      }
+    },
+    "main/hosting/reference-pins.ts": {
+      "role": "assets",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|image_reference_pins"
+      ],
+      "statements": {
+        "save|c87812551eb563572978a758d6109ef792df144082e2d4508930d8a0a16f0030": 1
+      }
+    },
+    "main/hosting/service.ts": {
+      "role": "assets",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "saveProfile|INSERT|hosting_profiles",
+        "saveUpload|INSERT|hosting_uploads"
+      ],
+      "statements": {
+        "saveProfile|c4f42029f8f8d6f6b6d4cfdd4896d8728fd570e69d7751281b8cdcc57d6d01b0": 1,
+        "saveUpload|8e6de6037da4edafc2d2c2ccabd855c97bba2d29824e8d288ed940f2689af134": 1
+      }
+    },
+    "main/image-versions/recovery.ts": {
+      "role": "images",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "begin|INSERT|image_write_operations",
+        "commit|INSERT|image_versions",
+        "finish|UPDATE|image_write_operations",
+        "recoverOne|UPDATE|image_write_operations"
+      ],
+      "statements": {
+        "begin|ea507b6925bf03b7739b038985862c731ff3d6df598d9cfeb538958fab26b67e": 1,
+        "commit|5ee0c94eeaaed342bab31470ee96290b9eeffd2315130a3c8a1f7f5628570583": 1,
+        "finish|da4f19772ca44cfa737b1eda43803f9b52e11e43adc8874cb766f4b91c97eff8": 1,
+        "recoverOne|c829f49c98f82b00923cc81e5e9180fbb0aaa248bc11c3351de9d5540819b0e0": 1
+      }
+    },
+    "main/image-versions/service.ts": {
+      "role": "images",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "select|INSERT|image_selections"
+      ],
+      "statements": {
+        "select|b7e505e6795cb4e49fe07a48a60d142199ba381e4af16337f0a707f24342e745": 1
+      }
+    },
+    "main/image-workflow/completion-link.ts": {
+      "role": "images",
+      "review": "M08 same-db transaction command, CAS exact expected JSON + draftId/STARTED/unlinked; only completion operationId changes.",
+      "commands": [
+        "linkLegacyPreparation|UPDATE|image_workflow_runs"
+      ],
+      "statements": {
+        "linkLegacyPreparation|8909b4e97b8e3befe88e2dbd876b44530b3fdd7c418b76916d0e71e4db957a21": 1
+      }
+    },
+    "main/image-workflow/service.ts": {
+      "role": "images",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|image_workflow_runs"
+      ],
+      "statements": {
+        "save|eab50b79a8bfbb1158ff28e7d0b7934a1fed2f7dcabee685313c1019f542edb5": 1
+      }
+    },
+    "main/item-labels/service.ts": {
+      "role": "labels",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "put|INSERT|item_labels"
+      ],
+      "statements": {
+        "put|4c27c0cc81a85ce541338045875872a5cb8cce4afe95508a2adfe813c7a037f1": 1
+      }
+    },
+    "main/listing-ai/completion-journal.ts": {
+      "role": "listing",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "save|INSERT|listing_completion_operations",
+        "save|UPDATE|listing_completion_operations"
+      ],
+      "statements": {
+        "save|65c3fa9336dd6185fa36fc9afaf23da1bcf96a88b7264c45cc08fc99762364f5": 1,
+        "save|326c54f171d6a90e6503c3dec1e2415a9e822f43a8ed43180d4e88bb0783975d": 1
+      }
+    },
+    "main/miaoshou/persistence.ts": {
+      "role": "source",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "persistImport|INSERT|miaoshou_receipts"
+      ],
+      "statements": {
+        "persistImport|0cc944d8767bd77407b4f55c5e321ea4bb7f21c38e76b1acc34ae599949455f8": 1
+      }
+    },
+    "main/miaoshou/source-snapshots.ts": {
+      "role": "source",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "saveSourceSnapshot|INSERT|source_snapshots"
+      ],
+      "statements": {
+        "saveSourceSnapshot|5fe4b7b0b88ba7f71a872fa155464c6ed5538fbc59d0999ced045dd951855d45": 1
+      }
+    },
+    "main/miaoshou/sync.ts": {
+      "role": "source",
+      "review": "Source sync records; resume interpolates fixed WHERE predicates with bound run/cycle. SQL signature freezes template.",
+      "commands": [
+        "resume|UPDATE|miaoshou_sync_items",
+        "saveItem|INSERT|miaoshou_sync_items",
+        "saveRun|INSERT|miaoshou_sync_runs"
+      ],
+      "statements": {
+        "saveRun|6576b9e17ce2dbd548c40b3c3550e5f1cb5a2d7edda66d5d2a6ad7718086f0df": 1,
+        "saveItem|0015b466d7df6c079157ef1a9fea208a72f9105409b5f0ee4472c36ffa3d8d78": 1,
+        "resume|68e3e4b85239bbb4f325fb3df96f599cb4c07027fe4b605aaf3f1625be776a14": 1
+      }
+    },
+    "main/procurement/service.ts": {
+      "role": "procurement",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "create|INSERT|procurement_batches",
+        "ensureAutomaticBatch|UPDATE|procurement_batches",
+        "update|UPDATE|procurement_batches"
+      ],
+      "statements": {
+        "create|5fceef9703f238cce6cfbf2af6fd9c9fe9a052ad148cdea646c17c998d588a81": 1,
+        "ensureAutomaticBatch|8762381ec52aa34039dd51972d7823c8699bd9027efe9147e4dfbed9b9eaad98": 1,
+        "update|ee1e888811a6e67c56a2e49b410bdc6b06f423a1e39f79d0a9b6f27e29c81b24": 1
+      }
+    },
+    "main/procurement/shipment-documents.ts": {
+      "role": "documents",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "importDocument|INSERT|shipment_documents"
+      ],
+      "statements": {
+        "importDocument|b5fc891d859a1bc82c00a29b09c60c94b70eb37c7bff19c227659a55c096fb6b": 1
+      }
+    },
+    "main/products/asset-bindings.ts": {
+      "role": "product",
+      "review": "M02 binding requires active caller transaction and matching asset/variant product IDs. Attribution decision remains caller responsibility.",
+      "commands": [
+        "confirmAssetBinding|INSERT|variant_assets"
+      ],
+      "statements": {
+        "confirmAssetBinding|0e5415becf3212c3a8a843500f9a665537b49933f52ac6052ec65c6422d9c6c2": 1
+      }
+    },
+    "main/products/repository.ts": {
+      "role": "product",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "receiveSourceProduct|DELETE|facts",
+        "receiveSourceProduct|DELETE|product_fact_scopes",
+        "receiveSourceProduct|DELETE|variants",
+        "receiveSourceProduct|INSERT|facts",
+        "receiveSourceProduct|INSERT|product_fact_scopes",
+        "receiveSourceProduct|INSERT|product_workspaces",
+        "receiveSourceProduct|INSERT|products",
+        "receiveSourceProduct|INSERT|variants",
+        "receiveSourceProduct|UPDATE|products",
+        "receiveSourceProduct|UPDATE|variants"
+      ],
+      "statements": {
+        "receiveSourceProduct|60a95ececc6f4acfe7547b24a20212eebb8118ec866733bf3633011f78f90e1d": 1,
+        "receiveSourceProduct|d93fa9355906689aaa02ccaab495a206a20d3fbdf1ff5d7fba3709757ca2eef3": 1,
+        "receiveSourceProduct|3b22e2a467a07b28146194a9d733f71a47199aa273eeb23a0575a8ea7ee99f39": 1,
+        "receiveSourceProduct|1ff7235d539ddb58e265edf637490fa96abe557fdbe9aebc91da0ac4b71e5b4d": 1,
+        "receiveSourceProduct|e0f6ae9a1dec45c09eb2aabcf25f42d59fc816c57d1b162f702d1c946a097d38": 1,
+        "receiveSourceProduct|cdb449f05a7c7e281542d5c953f9b9c7579b5e6afdff9b011d70c8a0abb60a72": 1,
+        "receiveSourceProduct|db4bb5248d917d7da312c4156d88b743611608f0df8c91fa171406642b29f5c5": 1,
+        "receiveSourceProduct|2ce7e47631837aa57a7471955f647b4be7654d5ca284a0814e15c7a66aae3cfe": 1,
+        "receiveSourceProduct|5da5491122fd3d21adfae6264c622da586ff611b6bd7799f1c7b48017e88201b": 1,
+        "receiveSourceProduct|50af5e985366f21e4038fbdf66e67dd0c60ee2687765c7779facb69e53febf11": 1
+      }
+    },
+    "main/products/source-adoption.ts": {
+      "role": "product",
+      "review": "Product adoption journal. Existing adoptSource audit append is a command-scoped maintenance adapter on the same transaction; file belongs to concurrent M02 work.",
+      "commands": [
+        "adoptSource|INSERT|audit_events",
+        "save|INSERT|product_source_adoptions"
+      ],
+      "statements": {
+        "save|48797f582ed7cb1ea392b71ce7e4f78f682456c3a5d615891db638ee635b1071": 1,
+        "adoptSource|922896d408b79d3c39e1fc09e52c65add77b71bead251fe9749443f96150dbd5": 1
+      }
+    },
+    "main/sku-naming/records.ts": {
+      "role": "sales",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "retainSkuNamingHistory|INSERT|sku_naming_groups",
+        "retainSkuNamingHistory|INSERT|sku_naming_identities",
+        "retainSkuNamingHistory|INSERT|sku_naming_sequences",
+        "retainSkuNamingHistory|UPDATE|sku_naming_groups"
+      ],
+      "statements": {
+        "retainSkuNamingHistory|2d0e61c700fe1f8bdf97bc2833dd02fa51f8e4ed0459b4be503a0daa43a506be": 1,
+        "retainSkuNamingHistory|30ffee62381a98ac84b7a6d18c13e97e46480051b6c635b128153d0255f942ad": 1,
+        "retainSkuNamingHistory|0c2f7634a8f26e38994ecccc5865a7408741eb3213bf3c60af3342b32e670b55": 1,
+        "retainSkuNamingHistory|f3ca6b4aa85f11adfbfefd58827e8d203cf2419dd0452053c21683d6588f86c5": 1
+      }
+    },
+    "main/sku-naming/schema.ts": {
+      "role": "sales",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "<module>|CREATE|sku_naming_groups",
+        "<module>|CREATE|sku_naming_identities",
+        "<module>|CREATE|sku_naming_sequences"
+      ],
+      "statements": {
+        "<module>|7bedd41a9de29dc7340232d6134089f60f1f45f924a878a765dc82ff451d7cd1": 1,
+        "<module>|19178bc502de3703bf6e3e328c34c61ba9739dc2268314d5c08ad60bc3c0f969": 1,
+        "<module>|8e55dff7cbe70db2204d20467591a021fe668d91c393d64d8eda8d4250f50667": 1
+      }
+    },
+    "main/sku-naming/service.ts": {
+      "role": "sales",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "allocate|INSERT|sku_naming_groups",
+        "allocate|INSERT|sku_naming_sequences",
+        "appendChildren|UPDATE|sku_naming_groups",
+        "reserveIdentity|INSERT|sku_naming_identities"
+      ],
+      "statements": {
+        "allocate|eab03569b524163a1a2c4be98c80032eb2cbaac7c51809a30bfce89eca2ab068": 1,
+        "allocate|0c2f7634a8f26e38994ecccc5865a7408741eb3213bf3c60af3342b32e670b55": 1,
+        "appendChildren|30ffee62381a98ac84b7a6d18c13e97e46480051b6c635b128153d0255f942ad": 1,
+        "reserveIdentity|f3ca6b4aa85f11adfbfefd58827e8d203cf2419dd0452053c21683d6588f86c5": 1
+      }
+    },
+    "main/source-image-consistency/history.ts": {
+      "role": "product",
+      "review": "Product-owned attribution history. Dynamic schema definitions limited to CONSISTENCY_TABLES (attempts, assessments, decisions, bindings). Restore retains protected history.",
+      "commands": [
+        "<module>|CREATE|$dynamic",
+        "recordConsistencyAssessment|INSERT|source_consistency_assessments",
+        "recordConsistencyBinding|INSERT|source_consistency_bindings",
+        "recordRecoveredConsistency|INSERT|source_consistency_assessments",
+        "reserveConsistencyAttempt|INSERT|source_consistency_attempts",
+        "retainConsistencyAttempts|INSERT|source_consistency_attempts"
+      ],
+      "statements": {
+        "<module>|b9b170eb965f569287111d3d273eacab95729c97e099f3980c91ae6598f77cf6": 1,
+        "recordConsistencyBinding|05783f310fb522934f60a7835817326c7da724eb76dfbf7de6b58596bc7258e8": 1,
+        "reserveConsistencyAttempt|0084cb93dbaf892dd72e0ddb8a8a996a19394be425cd470b104e35e9bae24be7": 1,
+        "recordConsistencyAssessment|f7696dcad317e614ecb849ca0cf75a54c100fb7c08ce1e6a9f7e6e7cdcfe25b7": 1,
+        "recordRecoveredConsistency|f7696dcad317e614ecb849ca0cf75a54c100fb7c08ce1e6a9f7e6e7cdcfe25b7": 1,
+        "retainConsistencyAttempts|0084cb93dbaf892dd72e0ddb8a8a996a19394be425cd470b104e35e9bae24be7": 1
+      }
+    },
+    "main/source-image-consistency/proof.ts": {
+      "role": "product",
+      "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
+      "commands": [
+        "saveConsistencyDecision|INSERT|source_consistency_decisions"
+      ],
+      "statements": {
+        "saveConsistencyDecision|57b023a3ceeb1f7ebc4f268b498b59f7cf61a0a3d87c3c4b605693db59021295": 1
+      }
+    },
+    "main/storage/audit.ts": {
+      "role": "maintenance",
+      "review": "Common append-only audit port, on exact caller db. No update/delete permission; joins enclosing transaction.",
+      "commands": [
+        "appendAuditEvent|INSERT|audit_events"
+      ],
+      "statements": {
+        "appendAuditEvent|922896d408b79d3c39e1fc09e52c65add77b71bead251fe9749443f96150dbd5": 1
+      }
+    },
+    "main/storage/migrations.ts": {
+      "role": "migration-adapter",
+      "review": "Sequential version journal and exact migration DDL; dynamic tables restricted by SOURCE_TABLES (source_snapshots, product_source_adoptions, product_fact_scopes).",
+      "commands": [
+        "apply|CREATE|$dynamic",
+        "apply|CREATE|ai_batch_items",
+        "apply|CREATE|ai_batches",
+        "apply|CREATE|ai_copy_review_upgrades",
+        "apply|CREATE|ai_field_groups",
+        "apply|CREATE|ai_image_requests",
+        "apply|CREATE|ai_provider_receipts",
+        "apply|CREATE|image_reference_pins",
+        "apply|CREATE|module_migration_journal",
+        "migrateModules|INSERT|module_migration_journal"
+      ],
+      "statements": {
+        "apply|e92d9e436f712629a91500df245264ea0fc1e5c1b1b85d2a7dfde58375f84c4c": 1,
+        "apply|00c07d7f7a6924e20f1f8bd5e0f05e3deb551d7f9bf4ebffd2fb9b405305b45b": 1,
+        "apply|4837509b28a0e83ee81b0c65dc93e96673099db9f44627c5a006af5cc19431e1": 1,
+        "apply|1fc0391a0c98e511a126e11fba6f245f250e49107d18130b775208eeb7dda0c0": 1,
+        "apply|67d3afd31b79eb12a53b85f8af45280a7fceb153bd399a36c3267973d5f1873e": 1,
+        "apply|515f830315f74410b5e6cf5fde9e930f1105a6935016951af674f983171c1b0f": 1,
+        "apply|12a24fb5069b595551dd158be5bf8032888e23843ee0b3d75c6f12acd8f1a167": 1,
+        "migrateModules|420b8fe85ad22128b80f6ac3b1c9bec173297a5999574a19712d7678e39eb006": 1
+      }
+    },
+    "main/storage/settings.ts": {
+      "role": "settings-key-adapter",
+      "review": "Physical shared-table adapter: assertOwner(owner, amazon_settings, actual key) precedes INSERT. Owner mapping includes fixed keys and three bounded prefixes.",
+      "commands": [
+        "writeOwnedSetting|INSERT|amazon_settings"
+      ],
+      "statements": {
+        "writeOwnedSetting|7a14fdb66798db639f058c4d72426bff212e44b29727d1b9074d9d43dc863ddc": 1
+      }
+    },
+    "main/store.ts": {
+      "role": "legacy-explicit-adapter",
+      "review": "Product/variant/facts/workspaces/association/provenance: M02. addAssets/updateAsset/anchorSourceImage/importSampleProducts asset metadata: M09 legacy commands, preserving revision and existing transaction guards. receiveCollectionSnapshot receipts/captures: M01 intake adapter. No permissions inherited from filename.",
+      "commands": [
+        "addAssets|INSERT|assets",
+        "addAssets|UPDATE|products",
+        "anchorSourceImage|INSERT|source_image_provenance",
+        "anchorSourceImage|INSERT|variant_assets",
+        "anchorSourceImage|UPDATE|assets",
+        "anchorSourceImage|UPDATE|products",
+        "createProduct|INSERT|variants",
+        "importSampleProducts|INSERT|assets",
+        "importSampleProducts|INSERT|variant_assets",
+        "importSampleProducts|UPDATE|product_workspaces",
+        "insertProduct|INSERT|product_workspaces",
+        "insertProduct|INSERT|products",
+        "moveWorkspaceProducts|INSERT|product_workspaces",
+        "receiveCollectionSnapshot|INSERT|collection_captures",
+        "receiveCollectionSnapshot|INSERT|collection_receipts",
+        "receiveCollectionSnapshot|INSERT|variants",
+        "receiveCollectionSnapshot|UPDATE|products",
+        "saveInsideTransaction|DELETE|facts",
+        "saveInsideTransaction|DELETE|variants",
+        "saveInsideTransaction|INSERT|facts",
+        "saveInsideTransaction|INSERT|variants",
+        "saveInsideTransaction|UPDATE|products",
+        "saveInsideTransaction|UPDATE|variants",
+        "updateAsset|DELETE|variant_assets",
+        "updateAsset|INSERT|variant_assets",
+        "updateAsset|UPDATE|assets",
+        "updateAsset|UPDATE|products"
+      ],
+      "statements": {
+        "insertProduct|6f2d3f7c802ce34a514e4a1525b4c40426c54b483088ff836f26175f1ecb63c6": 1,
+        "insertProduct|415195b9d9205b87b95e183bf7064484920f498a9dfb8b9ce6c8532878298169": 1,
+        "createProduct|37b1e15f07fec070bd654f3e086e06e24281d4f3963f1dd3876e4ba250a83e26": 1,
+        "moveWorkspaceProducts|9424ba4e001cc08f57ad4987712afc09c515879b23cac5480ee546f02bccf786": 1,
+        "saveInsideTransaction|8d1aa1eda8064be9a6dbf260e0650d419e65c1b2d4a8fe98a016003bee61310b": 1,
+        "saveInsideTransaction|7e5505837535973e24d5b244b21d1c6e3cb70c5d14ab28ce299d4b4bdb4f6918": 1,
+        "saveInsideTransaction|39d6adf2e25d62602c748c84e9ce13a684c1b357040321658a3c2efbd7725d3c": 1,
+        "saveInsideTransaction|e0f6ae9a1dec45c09eb2aabcf25f42d59fc816c57d1b162f702d1c946a097d38": 1,
+        "saveInsideTransaction|c87bb9fc4d472ea2ced6d6689971a0ae981394c1739dc1c2da5c838fb0733054": 1,
+        "saveInsideTransaction|1758b44319af7c850d6690acc9fd111a1acba30196518aef701abe855ae33150": 1,
+        "addAssets|c99a49c3794dad61641c1006414733b0e1da28d4229633e7381c0081111c074d": 1,
+        "addAssets|8079f7c498684d03d47efca20efdcd76a9c035883f4d052c372fbadcb4d3787f": 1,
+        "updateAsset|05703609b58b921d1cad81b73b7e8d4ef6a2f7cb2f35acc57b5f418528b991dc": 1,
+        "updateAsset|73d5c24963ced8a9fed3696700a786d254749fc31942f3a7163d65eddb563a2a": 1,
+        "updateAsset|483687a8b1650d4ee77cb4222c080f0d0a6060016f64d30f6d85b65b4a380e15": 1,
+        "updateAsset|b591af956face61e981f18ceae665eff647258dbcc3bb94c64130179bbd09bd2": 1,
+        "updateAsset|8079f7c498684d03d47efca20efdcd76a9c035883f4d052c372fbadcb4d3787f": 1,
+        "anchorSourceImage|a0b0c97d04cf4d0c291876e6ae3f584ae9a88f06e29bd1e01377fef6bab92e55": 1,
+        "anchorSourceImage|73d5c24963ced8a9fed3696700a786d254749fc31942f3a7163d65eddb563a2a": 1,
+        "anchorSourceImage|0f90d14e764c0aecc7011c9e4e37a3e0ce20c7f16adc3a1865c57d728b60aef4": 1,
+        "anchorSourceImage|8079f7c498684d03d47efca20efdcd76a9c035883f4d052c372fbadcb4d3787f": 1,
+        "importSampleProducts|c99a49c3794dad61641c1006414733b0e1da28d4229633e7381c0081111c074d": 1,
+        "importSampleProducts|b591af956face61e981f18ceae665eff647258dbcc3bb94c64130179bbd09bd2": 1,
+        "importSampleProducts|f223860cc837a04add0b23b314b2449fcb5ba1f735e28b1d8f5a0ed4df25a8f7": 1,
+        "receiveCollectionSnapshot|8a40d1e13e7173910a309ace561536abf5d60139e00fc0812be73451df3076fc": 1,
+        "receiveCollectionSnapshot|2ce7e47631837aa57a7471955f647b4be7654d5ca284a0814e15c7a66aae3cfe": 1,
+        "receiveCollectionSnapshot|cf3d18c3802e9e607239aaed339f77b6398d33150faf5ebe1ab16f649c55acc0": 1,
+        "receiveCollectionSnapshot|ca75c8a740928629c6ff93a53606f4035489e63075f515ff35e5b5f932b12266": 1
+      }
+    }
+  },
+  "opaque": [
+    {
+      "file": "main/ai/aliyun-image-risk.ts",
+      "command": "reviewImageWithAliyun",
+      "expression": "endpoint",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/ai/batch/task-runtime.ts",
+      "command": "flush",
+      "expression": "fresh.map(p=>p.operation)",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/ai/service.ts",
+      "command": "deferOpenRouter",
+      "expression": "ordinaryBody",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/business-rules.ts",
+      "command": "applyBusinessRules",
+      "expression": "field",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/fact-authority.ts",
+      "command": "currentFactAuthority",
+      "expression": "field",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/field-mapping.ts",
+      "command": "mapMeasurementFields",
+      "expression": "field",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/service.ts",
+      "command": "prepareCorrection",
+      "expression": "input",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/service.ts",
+      "command": "migrateSelectedFirmness",
+      "expression": "db",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/service.ts",
+      "command": "migrateFixedBrand",
+      "expression": "db",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/amazon/source-facts.ts",
+      "command": "parseMeasurement",
+      "expression": "text",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/application/transaction.ts",
+      "command": "transaction",
+      "expression": "savepoint?`SAVEPOINT ${savepoint}`:'BEGIN IMMEDIATE'",
+      "review": "Controlled BEGIN/savepoint/commit/rollback only; monotonically generated savepoint names."
+    },
+    {
+      "file": "main/application/transaction.ts",
+      "command": "transaction",
+      "expression": "savepoint?`RELEASE SAVEPOINT ${savepoint}`:'COMMIT'",
+      "review": "Controlled BEGIN/savepoint/commit/rollback only; monotonically generated savepoint names."
+    },
+    {
+      "file": "main/application/transaction.ts",
+      "command": "transaction",
+      "expression": "savepoint?`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`:'ROLLBACK'",
+      "review": "Controlled BEGIN/savepoint/commit/rollback only; monotonically generated savepoint names."
+    },
+    {
+      "file": "main/database.ts",
+      "command": "openDatabase",
+      "expression": "index.sql",
+      "review": "Versioned schema/index definitions: RECORD/COLLECTION/MIAOSHOU/SKU_NAMING/CONSISTENCY constants, not caller-supplied SQL."
+    },
+    {
+      "file": "main/database.ts",
+      "command": "openDatabase",
+      "expression": "sql",
+      "review": "Versioned schema/index definitions: RECORD/COLLECTION/MIAOSHOU/SKU_NAMING/CONSISTENCY constants, not caller-supplied SQL."
+    },
+    {
+      "file": "main/hosting/batch-references.ts",
+      "command": "resolveImage",
+      "expression": "url",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/hosting/batch-references.ts",
+      "command": "run",
+      "expression": "{operationId:owner.operationId,...version}",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/image-workflow/deferred-fields.ts",
+      "command": "isDeferredImageIssue",
+      "expression": "field",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/item-labels/files.ts",
+      "command": "declaredRoot",
+      "expression": "remaining",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/item-labels/files.ts",
+      "command": "declaredRoot",
+      "expression": "source",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/listing-ai/completion-journal.ts",
+      "command": "completionOperations",
+      "expression": "'SELECT id,record_json FROM listing_completion_operations'+(draftId?\" WHERE json_extract(record_json,'$.draftId')=?\":'')+' ORDER BY rowid'",
+      "review": "Read-only SELECT composition, fixed field names and bound draft/safety identity arguments."
+    },
+    {
+      "file": "main/listing-ai/completion-journal.ts",
+      "command": "saleOperations",
+      "expression": "'SELECT id,record_json FROM listing_completion_operations WHERE '+fields.map(name=>`json_extract(record_json,'$.safetyIdentity.${name}')=?`).join(' AND ')",
+      "review": "Read-only SELECT composition, fixed field names and bound draft/safety identity arguments."
+    },
+    {
+      "file": "main/listing-ai/evidence-category-v2.ts",
+      "command": "parseCategorySource",
+      "expression": "clause",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/miaoshou/protocol.ts",
+      "command": "exactNumberToken",
+      "expression": "source",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/miaoshou/source-attribute-normalization-v1.ts",
+      "command": "normalizeSourceAttributeV1",
+      "expression": "trimmed",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/miaoshou/source-snapshots.ts",
+      "command": "sourceIdentity",
+      "expression": "url.pathname",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/reference-retention.ts",
+      "command": "protected",
+      "expression": "path",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "shared/miaoshou-measurements.ts",
+      "command": "splitToken",
+      "expression": "token.trim()",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "shared/miaoshou-measurements.ts",
+      "command": "parseText",
+      "expression": "body",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "shared/sku-naming.ts",
+      "command": "skuCollectionDate",
+      "expression": "value",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "shared/source-links.ts",
+      "command": "sourceProductUrl",
+      "expression": "url.pathname",
+      "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    }
+  ],
+  "tableSets": [
+    {
+      "file": "main/miaoshou/source-snapshots.ts",
+      "name": "SOURCE_TABLES",
+      "tables": [
+        "source_snapshots",
+        "product_source_adoptions",
+        "product_fact_scopes"
+      ]
+    },
+    {
+      "file": "main/source-image-consistency/history.ts",
+      "name": "CONSISTENCY_TABLES",
+      "tables": [
+        "source_consistency_attempts",
+        "source_consistency_assessments",
+        "source_consistency_decisions",
+        "source_consistency_bindings"
+      ]
+    }
+  ]
+}

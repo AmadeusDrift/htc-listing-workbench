@@ -1,3 +1,4 @@
+import { linkLegacyPreparation } from '../image-workflow/completion-link.ts';
 import { isGenerationProvider } from "../ai/primitives.ts";
 import { isFullSchema } from "./native-values.ts";
 import {randomUUID} from 'node:crypto';
@@ -12,7 +13,7 @@ import type {CompletionOperation,CompletionRound} from './completion-journal.ts'
 
 export interface LegacyCompletionHistory { checkpointIds:string[]; callIds:string[]; resultIds:string[]; adoptionIds:string[]; priorRounds:number; missingAttemptDebt:number; stepDebts?:{contextHash:string;kind:'candidate'|'review';callIds:string[]}[] }
 export function legacyCompletionOwners(db:DatabaseSync,draftId:string){
-  return db.prepare("SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND json_extract(record_json,'$.contentPreparation.state')='STARTED' AND json_type(record_json,'$.contentPreparation.operationId') IS NULL").all(draftId).map(row=>({id:String(row.id),record:JSON.parse(String(row.record_json))}));
+  return db.prepare("SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND json_extract(record_json,'$.contentPreparation.state')='STARTED' AND json_type(record_json,'$.contentPreparation.operationId') IS NULL").all(draftId).map(row=>({id:String(row.id),recordJson:String(row.record_json),record:JSON.parse(String(row.record_json))}));
 }
 /** Only persisted field outputs and exact adoption receipts prove a completed step. */
 export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOperation,draft:AmazonDraft,legacyScopeHash?:()=>string):CompletionOperation {
@@ -53,7 +54,7 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
   return operation;
 }
 export function linkLegacyCompletionOwners(db:DatabaseSync,draftId:string,operationId:string):void {
-  for(const owner of legacyCompletionOwners(db,draftId)){owner.record.contentPreparation.operationId=operationId;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(owner.record),owner.id);}
+  for(const owner of legacyCompletionOwners(db,draftId)){linkLegacyPreparation(db,{id:owner.id,draftId,operationId,expectedJson:owner.recordJson});}
 }
 
 /** The provider identity and frozen hash keep review/candidate and later rounds separate. */

@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { ListingCorrections, selfPackageDeletion } from './corrections.ts';
 import { PROGRAM_RELATION_FIELDS, packageGraphIssues, unitPackageAttributes } from './program-relations.ts';
 import { isSchemaTransientError } from './schema-retry.ts';
@@ -165,7 +166,7 @@ export class AmazonService {
       const {after}=selfPackageDeletion(d.attributes,d.sku,d.marketplaceId),before=clone(r);d.attributes=after;d.revision++;d.previewedAt=null;r.preview=null;
       d.localIssues=[...packageGraphIssues(d,this.persistence.records().map(r=>r.draft)),...validateAttributes(d.schema.schema,after,d.schema.metaSchema),...listingProgramIssues(d.listingProgram,d.schema,after),...imageIssues(after),...copyPolicyIssues(d),...this.declarationIssues(d)];
       d.state=d.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';r.request=this.request(r);this.event(r,'save','按旧 AI 精确采纳依据删除独立 SKU 包装自引用；原响应、采纳记录和预算保留，旧预览失效');this.persistence.putRecord(r);
-      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
+      appendAuditEvent(db,randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
     });}finally{this.busy.delete(r.draft.id);}
   }
   private at(): string { return new Date(this.now()).toISOString(); }
@@ -444,7 +445,7 @@ export class AmazonService {
         record.draft={...draft,schema,attributes,salesPlan:plan,revision:draft.revision+1,state:'DRAFT',localIssues:issues,previewIssues:[],previewedAt:null,requestId:null};
         record.preview=null;record.previewResponse=null;record.request=this.request(record);
         const at=this.at();record.draft.updatedAt=at;record.draft.events.push({at,operation:'save',state:'DRAFT',requestId:null,summary:FAMILY_REBIND_EVENT_SUMMARY});this.persistence.putRecord(record);
-        this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.family.rebound',FAMILY_REBIND_EVENT_SUMMARY,
+        appendAuditEvent(this.persistence.db,randomUUID(),draft.productId,'listing.family.rebound',FAMILY_REBIND_EVENT_SUMMARY,
           JSON.stringify({draftId:draft.id,before,after:record}),record.draft.updatedAt);
         return clone(record.draft);
       });
@@ -707,7 +708,7 @@ export class AmazonService {
     record.draft=draft;record.preview=null;record.request=this.request(record);
     this.event(record,'local_validation','用户适配当前来源与规则；保留原属性、图片和平台响应，本地重新校验');
     const afterRecord=clone(record);
-    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
+    appendAuditEvent(db,randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
     db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
     return clone(draft);
   }
@@ -730,7 +731,7 @@ export class AmazonService {
       this.event(record,'save','按当前选中规格独立纠正旧软毛特点；保留原始事实、AI响应及预算');journal.save(op);
       taskResult.commit(draft,op.remaining);
       this.persistence.putRecord(record);
-      const after=clone(record);db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.selected-firmness-corrected','当前规格硬度本地纠正',JSON.stringify({version:1,operationId:op.id,proof,before,after,beforeSha256:createHash('sha256').update(JSON.stringify(before)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(after)).digest('hex')}),draft.updatedAt);
+      const after=clone(record);appendAuditEvent(db,randomUUID(),draft.productId,'listing.selected-firmness-corrected','当前规格硬度本地纠正',JSON.stringify({version:1,operationId:op.id,proof,before,after,beforeSha256:createHash('sha256').update(JSON.stringify(before)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(after)).digest('hex')}),draft.updatedAt);
       return clone(draft);
     });}finally{this.busy.delete(record.draft.id);}
   }
@@ -766,7 +767,7 @@ export class AmazonService {
       op.draftRevision=draft.revision;op.draftStamp=completionDraftStamp(draft);journal.save(op);
       taskResult.commit(draft);
       this.persistence.putRecord(record);
-      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.fixed-brand-migrated','固定 Generic 独立本地迁移',JSON.stringify({version:1,operationId:op.id,before,after:clone(record)}),draft.updatedAt);
+      appendAuditEvent(db,randomUUID(),draft.productId,'listing.fixed-brand-migrated','固定 Generic 独立本地迁移',JSON.stringify({version:1,operationId:op.id,before,after:clone(record)}),draft.updatedAt);
       return clone(draft);
     });}finally{this.busy.delete(record.draft.id);}
   }
@@ -816,7 +817,7 @@ export class AmazonService {
         const record = this.checked(input); this.mutable(record); this.currentProduct(record); assertFresh();
         if (adoption.fromRevision !== record.draft.revision || adoption.toRevision !== record.draft.revision + 1) throw new UserFacingError('采纳修订不匹配');
         const feedback={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
-        if(preserveFeedback)this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
+        if(preserveFeedback)appendAuditEvent(this.persistence.db,randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
         for(const field of PROGRAM_RELATION_FIELDS)if(adoption.fields.includes(field)||semanticJson(attributes[field]??null)!==semanticJson(record.draft.attributes[field]??null))throw new UserFacingError('关系字段由程序管理，不能采用 AI 候选');
         const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
         const scopedOperation=new CompletionJournal(this.persistence.db).list(input.id).find(op=>op.scopedRepair&&op.rounds.some(round=>round.candidate.resultId===adoption.suggestionResultId));

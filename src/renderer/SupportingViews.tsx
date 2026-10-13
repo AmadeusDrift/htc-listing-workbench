@@ -7,7 +7,6 @@ import { BackupSettings } from './BackupSettings';
 import { AiUsageSettings } from './AiUsageSettings';
 import { DiagnosticsSettings } from './DiagnosticsSettings';
 import { MiaoshouSettings } from './MiaoshouSettings';
-import { CollectionSettings } from './CollectionSettings';
 import type { AmazonTarget } from '../shared/amazon-contracts';
 import type { TaskRunner } from './amazon-ui';
 import { ListingRulesSettings } from './ListingRulesSettings';
@@ -47,7 +46,7 @@ export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTar
     </div>
     <div hidden={selected !== 'ai'} aria-label="AI 连接与用量"><AiUsageSettings busy={busy} run={run} /></div>
     <div hidden={selected !== 'diagnostics'} aria-label="诊断与关于"><DiagnosticsSettings busy={busy} run={run} /><section className="settings-section"><h3>关于 HTC</h3><dl className="settings-values"><div><dt>应用版本</dt><dd>{settings.appVersion}</dd></div><div><dt>数据格式</dt><dd>{settings.schemaVersion}</dd></div></dl></section></div>
-    <div hidden={selected !== 'collection'} aria-label="采集连接"><MiaoshouSettings busy={busy} /><CollectionSettings busy={busy} run={run} /></div>
+    <div hidden={selected !== 'collection'} aria-label="采集连接"><MiaoshouSettings busy={busy} /></div>
     <div hidden={selected !== 'amazon'} aria-label="店铺连接"><AmazonSettings targets={targets} busy={busy} run={run} onTargetsChanged={onTargetsChanged} /></div>
     <div hidden={selected !== 'product' && selected !== 'pricing'} aria-label="商品与定价规则"><ListingRulesSettings section={selected === 'pricing' ? 'pricing' : 'product'} targets={targets} busy={busy} run={run} /></div>
     </div></div>

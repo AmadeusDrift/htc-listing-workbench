@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { usePageState } from './navigation-context';
 import { ArrowUpRight, CheckCircle2, CircleDashed, RefreshCw, Search } from 'lucide-react';
 import type { ProductSummary } from '../shared/contracts';
 import type { AmazonDraft } from '../shared/amazon-contracts';
@@ -11,8 +11,8 @@ import { formatDate } from './utils';
 
 interface Props { products: ProductSummary[]; drafts: AmazonDraft[]; busy: boolean; run: TaskRunner; onRefresh: () => void; onOpen: (productId: string, draftId: string) => void }
 export function ResultsPage({ products, drafts, busy, run, onRefresh, onOpen }: Props) {
-  const [scope, setScope] = useState<'all' | 'live' | 'demo'>('all');
-  const [query, setQuery] = useState('');
+  const [scope, setScope] = usePageState<'all' | 'live' | 'demo'>('results:scope', 'all');
+  const [query, setQuery] = usePageState('results:query', '');
   const counts = resultCounts(drafts);
   const names = new Map(products.map(product => [product.id, product.title]));
   const rows = drafts.filter(draft => (scope === 'all' || draft.mode === scope) && `${draft.sku} ${draft.targetName} ${names.get(draft.productId) ?? ''}`.toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

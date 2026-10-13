@@ -21,6 +21,7 @@ export function ListingRulesSettings({ section, busy, run, targets }: { section:
   function pricing(change: Partial<PricingRules>) { setRules(value => value && ({ ...value, pricing: { ...value.pricing, ...change } })); setDirty(true); setNotice(''); }
   async function save() {
     if (!rules) return false;
+    if (shopCode || manufacturer) { setError('请先添加或清空正在填写的店铺规则，再保存。'); return false; }
     let success = false;
     try {
       const next = parseListingRules({ ...rules, pricing: { ...rules.pricing, bundleSizes: sizes.split(/[,，\s]+/).filter(Boolean).map(Number) } });
@@ -28,7 +29,7 @@ export function ListingRulesSettings({ section, busy, run, targets }: { section:
     } catch (cause) { setError(errorText(cause)); }
     return success;
   }
-  useFormGuard({ dirty: () => dirty, save, discard: () => { const saved = savedRules.current; if (saved) { setRules(saved); setSizes(saved.pricing.bundleSizes.join(', ')); } setDirty(false); setError(''); } });
+  useFormGuard({ dirty: () => dirty || !!shopCode || !!manufacturer, save, discard: () => { const saved = savedRules.current; if (saved) { setRules(saved); setSizes(saved.pricing.bundleSizes.join(', ')); } setDirty(false); setShopCode(''); setManufacturer(''); setError(''); } });
   if (!rules) return <section className="settings-section"><p role="status">{error || '正在读取规则…'}</p></section>;
   const p = rules.product, r = rules.pricing;
   const amount = (key: keyof PricingRules, label: string, unit?: string) => <NumberField key={key} label={label} value={r[key] as number} unit={unit} onChange={value => pricing({ [key]: value })} />;

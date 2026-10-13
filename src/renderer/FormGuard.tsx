@@ -2,6 +2,9 @@ import { createContext, useContext, useEffect, useId, useRef } from 'react';
 import type { DraftGuard } from './amazon-ui';
 import type { createFormGuardRegistry } from './form-guard-registry';
 
+export const GuardedNavigationContext = createContext<(action: () => void) => void>(action => action());
+export const useGuardedNavigation = () => useContext(GuardedNavigationContext);
+
 export const FormGuardContext = createContext<ReturnType<typeof createFormGuardRegistry> | null>(null);
 export function useFormGuard(guard: DraftGuard) {
   const registry = useContext(FormGuardContext), id = useId(), latest = useRef(guard);

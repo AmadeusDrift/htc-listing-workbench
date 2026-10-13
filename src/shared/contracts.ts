@@ -137,6 +137,7 @@ export interface ExportResult { cancelled: boolean; path?: string }
 
 /** Narrow IPC boundary. File system paths are selected by native dialogs, never submitted by the renderer. */
 export interface RedApi extends SourceConsistencyApi, AmazonApi, BackupApi, WorkspaceApi, HostingApi, ExecutionApi, AiApi, ImageVersionApi, ContentApi, DiagnosticApi, CollectionApi, MiaoshouApi, ListingRulesApi, CatalogApi, ProcurementApi, FollowupApi, ProductDataApi, AppearanceApi, ImageGenerationApi, ImageWorkflowApi, AutomaticListingApi, ItemLabelApi, ShipmentDocumentApi, SkuNamingApi {
+  onUnsavedCloseRequested(listener: () => void): () => void;
   listProducts(): Promise<ProductSummary[]>;
   getProduct(id: string): Promise<ProductDetail>;
   createProduct(): Promise<ProductDetail>;

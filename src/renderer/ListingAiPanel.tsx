@@ -1,3 +1,4 @@
+import { safeIssueExplanation } from '../shared/safe-issue-explanation';
 import { presentRejection } from '../shared/rejection-presentation';
 import { useEffect, useState } from 'react';
 import type { AiResult } from '../shared/ai-contracts';
@@ -13,7 +14,7 @@ function textValue(value: JsonValue | undefined): string {
   if (Array.isArray(value)) return value.map(v => typeof v === 'object' && v && !Array.isArray(v) ? String(v.value ?? JSON.stringify(v)) : String(v)).join('\n');
   return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
-export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:AmazonDraft;disabled:boolean;dirty:boolean;run:TaskRunner;onAdopt:(draft:AmazonDraft)=>void}) {
+export function ListingAiPanel({draft,disabled,dirty,run,onAdopt,onLocate}: {draft:AmazonDraft;disabled:boolean;dirty:boolean;run:TaskRunner;onAdopt:(draft:AmazonDraft)=>void;onLocate?:(path:string)=>void}) {
   const [results,setResults]=useState<AiResult[]>([]), [suggestionId,setSuggestionId]=useState(''), [selected,setSelected]=useState<CandidateField[]>([]), [notice,setNotice]=useState(''), [pending,setPending]=useState(false), [cancelling,setCancelling]=useState(false);
   const [completion,setCompletion]=useState<Awaited<ReturnType<ListingAiApi['completeAmazonFields']>>|null>(null);
   useEffect(()=>{setCompletion(null);},[draft.id]);
@@ -68,12 +69,12 @@ export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:Amazon
       <div><strong>{completion.draft.revision===draft.revision?'处理结果':'上次处理结果'}：{completion.draft.mode==='demo'?'演示 · ':''}{listingStateLabels[completion.draft.state]}</strong>
         <p>AI 调用 {completion.aiCalls} 次 · {completion.draft.mode==='demo'?'演示':'Amazon 验证'}预览 {completion.previewAttempts} 次 · 草稿修订 {completion.draft.revision}</p>
         {!!completion.rejections?.length&&<ul>{completion.rejections.flatMap(r=>r.details.entries.map(e=><li key={r.resultId+e.field}>{labels[e.field]}：{presentRejection(e.code)}</li>))}</ul>}
-        {completion.remaining.length?<><p>仍需处理：</p><ul>{completion.remaining.map((message,index)=><li key={index}>{message}</li>)}</ul></>:<p>本次流程没有返回待处理项，请继续核对草稿和预览记录。</p>}
+        {completion.remaining.length?<><p>仍需处理：</p><ul>{completion.remaining.map((message,index)=><li key={index}>{safeIssueExplanation(message)}</li>)}</ul></>:<p>本次流程没有返回待处理项，请继续核对草稿和预览记录。</p>}
       </div>
     </div>}
     {draft.businessRules&&<div className="settings-subsection">
       <h4>规则填报记录 · 规则修订 {draft.businessRules.revision}</h4>
-      {!!draft.businessRules.notices.length&&<div className="workflow-warning" role="alert"><ul>{draft.businessRules.notices.map((message,index)=><li key={index}>{message}</li>)}</ul></div>}
+      {!!draft.businessRules.notices.length&&<div className="workflow-warning" role="alert"><ul>{draft.businessRules.notices.map((message,index)=><li key={index}>{safeIssueExplanation(message)}</li>)}</ul></div>}
       {draft.businessRules.quote&&<div>
         <strong>规则报价（本地估算）</strong><p className="small-copy">按已保存费表和包装参数计算；每套 {draft.businessRules.bundleQuantity} 件，结果仍需结合实际包装和预览核对。</p>
         <dl className="connection-values">
@@ -92,12 +93,12 @@ export function ListingAiPanel({draft,disabled,dirty,run,onAdopt}: {draft:Amazon
     <div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked} title={blockedReason} onClick={()=>void act('generate')}>生成英文字段建议</button><button type="button" className="button secondary" disabled={blocked||!output||stale||!output.candidates.length} title={blockedReason??(stale?'建议已过期':!output?.candidates.length?'没有可复核候选':undefined)} onClick={()=>void act('review')}>复核字段建议（可选）</button></div>
     {suggestions.length>0&&<label className="field"><span>建议记录</span><select aria-label="AI 字段建议记录" disabled={pending} value={suggestionId} onChange={e=>{setSuggestionId(e.target.value);setSelected([]);}}>{suggestions.map(r=><option key={r.id} value={r.id}>草稿修订 {r.listingContext?.draftRevision} · {new Date(r.createdAt).toLocaleString()} · {r.fieldGroupAssembly?[...new Set(r.fieldGroupAssembly.sources.map(s=>s.model))].join(' / '):r.model}</option>)}</select></label>}
     {output&&<div className="listing-ai-candidates">{output.candidates.map(candidate=><article className="listing-ai-candidate" key={candidate.field}>
-      <label className="listing-ai-choice"><input type="checkbox" aria-label={`采纳${labels[candidate.field]}`} checked={selected.includes(candidate.field)} disabled={blocked||stale||reviewBlocked||reviewRequired} onChange={e=>setSelected(values=>e.target.checked?[...values,candidate.field]:values.filter(f=>f!==candidate.field))}/><strong>{labels[candidate.field]}</strong></label>
-      <div className="listing-ai-diff"><div><span className="small-copy">草稿当前值</span><p>{textValue(draft.attributes[candidate.field])}</p></div><div><span className="small-copy">建议值</span>{candidate.items.map((item,index)=><p key={index}>{item.value}</p>)}</div></div>
+      <label className="listing-ai-choice"><input type="checkbox" aria-label={`采纳${(labels[candidate.field]??candidate.field)}`} checked={selected.includes(candidate.field)} disabled={blocked||stale||reviewBlocked||reviewRequired} onChange={e=>setSelected(values=>e.target.checked?[...values,candidate.field]:values.filter(f=>f!==candidate.field))}/><strong>{(labels[candidate.field]??candidate.field)}</strong></label>
+      <div className="listing-ai-diff"><div><span className="small-copy">草稿当前值</span><p>{textValue(draft.attributes[candidate.field])}</p></div><div><span className="small-copy">建议值</span>{Object.hasOwn(candidate,'nativeValue')?<pre>{JSON.stringify(candidate.nativeValue,null,2)}</pre>:candidate.items.map((item,index)=><p key={index}>{item.value}</p>)}</div></div>
       <details><summary>查看依据</summary>{candidate.items.map((item,i)=><div key={i}>{item.transformation==='infer'&&<p className="small-copy">模型推断：{item.inferenceReason}</p>}<p className="small-copy">{item.evidenceIds.map(id=>{const fact=suggestion?.listingContext?.evidence.find(e=>e.id===id);return fact?`${fact.name}：${fact.value}`:id;}).join('；')}</p></div>)}</details>
     </article>)}</div>}
-    {!!output?.missing.length&&<div className="workflow-warning"><div><strong>本次未取得可用字段</strong><ul>{output.missing.map(m=><li key={m.field}>{labels[m.field]??m.field}：{m.reason}</li>)}</ul></div></div>}
-    {!!report?.issues.length&&<div className="workflow-warning"><ul>{report.issues.map((issue,i)=><li key={i}>{labels[issue.field]??issue.field}：{issue.message}</li>)}</ul></div>}
+    {!!output?.missing.length&&<div className="workflow-warning"><div><strong>本次未取得可用字段</strong><ul>{output.missing.map(m=><li key={m.field}>{labels[m.field]??m.field}：{presentRejection(suggestion?.fieldRejections?.version==='rejection-presentation/v1'?suggestion.fieldRejections.entries.find(entry=>entry.field===m.field)?.code:undefined)}<p className="small-copy">{suggestion?.fieldRejections?.entries.find(entry=>entry.field===m.field)?.origin==='local-validation'?'本地校验说明':'模型或历史说明（未核实）'}：{safeIssueExplanation(m.reason)}</p>{onLocate&&<button type="button" className="text-button" onClick={()=>onLocate(m.field)}>定位字段</button>}</li>)}</ul></div></div>}
+    {!!report?.issues.length&&<div className="workflow-warning"><ul>{report.issues.map((issue,i)=><li key={i}>{labels[issue.field]??issue.field}：{safeIssueExplanation(issue.message)}</li>)}</ul></div>}
     {output&&<div className="workflow-actions"><button type="button" className="button secondary" disabled={blocked||stale||reviewBlocked||reviewRequired||!selected.length} title={blockedReason??(stale?'建议已过期':reviewBlocked?'复核尚未通过':reviewRequired?'旧建议需要复核':!selected.length?'请先选择可用候选':undefined)} onClick={()=>void act('adopt')}>采纳所选字段并检查</button><span className="small-copy">{reviewBlocked?'最新复核未通过，请先处理问题。':reviewRequired?'这份旧建议仍需独立复核，或重新生成。':'请核对候选事实；采纳后仍需运行验证预览。'}</span></div>}
     {notice&&<p className="workflow-notice" role="status">{notice}</p>}
     {!!draft.fieldAdoptions?.length&&<details><summary>字段采纳记录 · {draft.fieldAdoptions.length} 次</summary>{draft.fieldAdoptions.map(a=><p className="small-copy" key={a.id}>修订 {a.fromRevision} → {a.toRevision} · {a.fields.map(f=>labels[f]).join('、')} · {a.reviewResultId?'含独立复核':'未运行独立复核'} · {new Date(a.at).toLocaleString()}</p>)}</details>}

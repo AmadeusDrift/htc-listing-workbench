@@ -60,6 +60,7 @@ export function SkuNamingSettings({ busy, run, targets, api: suppliedApi }: Prop
   }
   async function save() {
     if (!settings || working) return false;
+    if (newStore || newPrefix) { setError('请先添加或清空正在填写的店铺前缀，再保存。'); return false; }
     let success = false;
     setWorking(true); setError(''); setNotice('');
     try {
@@ -74,9 +75,9 @@ export function SkuNamingSettings({ busy, run, targets, api: suppliedApi }: Prop
     finally { setWorking(false); }
     return success;
   }
-  useFormGuard({ dirty: () => dirty, save, discard: () => {
+  useFormGuard({ dirty: () => dirty || !!newStore || !!newPrefix, save, discard: () => {
     if (savedSettings.current) { setSettings(savedSettings.current); setSelectedId(savedSettings.current.defaultTemplateId); }
-    setDirty(false); setError('');
+    setDirty(false); setNewStore(''); setNewPrefix(''); setError('');
   } });
   if (!settings || !selected) return <section className="settings-section"><p role={error ? 'alert' : 'status'}>{error || '正在读取 SKU 命名规则…'}</p>{error && <button type="button" className="button secondary" onClick={() => void reload()}>重新读取</button>}</section>;
   const codes = [...new Set(settings.templates.flatMap(template => Object.keys(template.prefixes)))].sort();

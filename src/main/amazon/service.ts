@@ -43,6 +43,7 @@ import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
 import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
 import { assertStoredPricingForPaid } from './pricing-guard.ts';
+import { qualifyActualOffer } from '../pricing/public.ts';
 import { assertCurrentPricingForPaid, pricingQualificationIssue } from '../pricing/qualification.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
@@ -314,6 +315,10 @@ export class AmazonService {
   }
   listDrafts(productId: string): AmazonDraft[] { this.ensureOpen(); return this.persistence.records(textField(productId, '商品 ID', 100)).map(record => this.vault.redact(record.draft)); }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }
+  getActualQuoteDetails(id:string) {
+    const draft=this.getDraft(id),rules=readListingRules(this.persistence.db);
+    return {...qualifyActualOffer(draft,rules,this.now()),draftId:draft.id,draftRevision:draft.revision,sku:draft.sku,ruleRevision:rules.revision,sourceRevision:draft.productRevision,bundleQuantity:draft.businessRules?.bundleQuantity??null};
+  }
   getDraft(id: string): AmazonDraft { this.ensureOpen(); return this.vault.redact(this.persistence.record(textField(id, '草稿 ID', 100)).draft); }
   /** A definitive INVALID response permits repair; absence of a response never does. Main process only. */
   wasSubmissionRejected(id: string): boolean {

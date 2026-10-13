@@ -141,7 +141,13 @@ export interface AmazonCallEvent {
 }
 export interface AmazonDataPolicy { retentionDays: number; logRetentionDays: number; lastCleanupAt: string | null }
 export interface CleanupResult { removedSchemas: number; removedDrafts: number; removedCalls: number; removedBackups?: number }
+export interface ActualQuoteDetails {
+ draftId:string; draftRevision:number; sku:string; ruleRevision:number; sourceRevision:number; bundleQuantity:number|null;
+ qualified:boolean; exempt:boolean; issue:{code:string;message:string}|null; currency:'USD'; costCurrency:'CNY';
+ offers:{price:number;promotion:boolean;roi:number;commission:number;deliveryFee:number;upfrontCny:number;profitCny:number;billableWeightGrams:number}[];
+}
 export interface AmazonApi {
+ getActualQuoteDetails(draftId:string):Promise<ActualQuoteDetails>;
   listAmazonTargets(): Promise<AmazonTarget[]>;
   getAmazonCredentialDiagnostics(): Promise<AmazonCredentialDiagnostics>;
   enableAmazonDemo(): Promise<AmazonTarget>;

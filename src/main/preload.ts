@@ -205,6 +205,7 @@ const api: RedApi = {
   disconnectAmazonTarget: id => invoke('red:amazon:disconnect', id),
   searchAmazonProductTypes: input => invoke('red:amazon:types', input),
   getAmazonSchema: input => invoke('red:amazon:schema', input),
+  getActualQuoteDetails:id=>invoke('red:amazon:actual-quote',id),
   listAmazonDrafts: id => invoke('red:amazon:drafts', id),
   createAmazonDraft: input => invoke('red:amazon:draft-create', input),
   prepareAmazonDrafts: input => invoke('red:amazon:drafts-prepare', input),

@@ -40,6 +40,14 @@ try {
  await expect(page.getByLabel('备份口令',{exact:true})).toHaveValue('fixture-password');
  await page.getByLabel('备份口令',{exact:true}).fill('');
  checks.push('引用清理真实空预览、无自动清理说明、空计划禁止执行、备份口令导航保护');
+ const ids=await page.evaluate(async()=>{await window.red.loadExamples();await window.red.enableAmazonDemo();const product=await window.red.getProduct((await window.red.listProducts())[0].id);const target=(await window.red.listAmazonTargets())[0];const draft=await window.red.createAmazonDraft({productId:product.id,variantId:product.variants[0].id,targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});return {product:product.id,draft:draft.id,sku:draft.sku};});
+ const before=await page.evaluate(async id=>JSON.stringify(await window.red.listAmazonDrafts(id)),ids.product);
+ const quote=await page.evaluate(id=>window.red.getActualQuoteDetails(id),ids.draft);assert.equal(quote.draftId,ids.draft);
+ assert.equal(await page.evaluate(async id=>JSON.stringify(await window.red.listAmazonDrafts(id)),ids.product),before);
+ await page.reload();await page.locator('.primary-navigation').getByRole('button',{name:'上架进度',exact:true}).click({force:true});
+ await page.getByTestId('result-'+ids.draft).getByRole('button',{name:'手动处理'}).click({force:true});
+ await expect(page.getByText('实际报价明细 · 已保存草稿',{exact:true})).toBeVisible();
+ checks.push('草稿实际报价真实窄IPC只读，无草稿写入；实际APP明细可见');
  await writeFile('artifacts/w12/result.json',JSON.stringify({dataRoot,checks},null,2));
  console.log(checks);
 } finally {await app.close();}

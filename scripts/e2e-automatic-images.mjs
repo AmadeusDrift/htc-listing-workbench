@@ -2,10 +2,10 @@ import { _electron as electron } from 'playwright';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createDecipheriv, createHash, scryptSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { gunzipSync } from 'node:zlib';
+import { readStreamingBackup } from '../src/main/backup-stream.ts';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resizeWindow } from './e2e-window.mjs';
@@ -51,13 +51,13 @@ function installMockTransport(keys) {
   };
   state.sourcePng = seed => png(seed).toString('base64');
   const observe = window => {
-    window.webContents.backgroundThrottling = false;
+    window.webContents.setBackgroundThrottling(false);
     if (window.isVisible()) state.shownWindows.push(window.id);
     window.on('show', () => state.shownWindows.push(window.id));
   };
   app.on('browser-window-created', (_event, window) => observe(window));
   void app.whenReady().then(() => {
-    for (const window of BrowserWindow.getAllWindows()) window.webContents.backgroundThrottling = false;
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.setBackgroundThrottling(false);
     session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
       state.remoteRequests.push(details.url); callback({ cancel: true });
     });
@@ -73,6 +73,12 @@ function installMockTransport(keys) {
       call.model = body.model;
       if (new Headers(options.headers).get('authorization') !== `Bearer ${keys.deepseek}`) throw Error('Unexpected test text credential');
       const idsFor = field => payload.evidence.filter(value => !['color', 'material'].includes(field) || value.meaning === field).map(value => value.id);
+      if(call.kind==='source-image-consistency'){
+        assert.equal(body.model,'deepseek-flash'); assert.ok(Array.isArray(content));
+        const hashes=content.filter(part=>part.type==='image_url').map(image=>digest(Buffer.from(image.image_url.url.split(',')[1],'base64')));
+        assert.deepEqual(hashes,payload.referenceAssets.map(asset=>asset.sha256)); call.referenceHashes=hashes;
+        return chat({kind:'source-image-consistency',version:'source-image-consistency/v2',assets:payload.referenceAssets.map(asset=>({assetId:asset.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:[],appearance:['Visible synthetic product fixture'],claims:[],contentPurpose:'product',observations:[]}))});
+      }
       if (call.kind === 'image-plan') {
         call.repair = Boolean(payload.repair);
         assert.equal(body.model, 'deepseek-flash'); assert.ok(Array.isArray(content));
@@ -85,10 +91,21 @@ function installMockTransport(keys) {
           assert.equal(decoded.isEmpty(), false); assert.deepEqual(decoded.getSize(), { width: payload.referenceImages[index].width, height: payload.referenceImages[index].height });
           assert.equal(digest(bytes), payload.referenceImages[index].sha256); return digest(bytes);
         });
-        call.visualSummary = 'Blue product with the shape and components shown in the source reference.';
+        call.visualSummary = 'Blue product with the shape and components shown in the source reference';
         call.sufficient = state.mode !== 'vision-unclear';
         const ipRisk = state.mode === 'ip-source' ? { verdict: 'BLOCKED', findings: [{ category: 'character', name: '测试知名角色', evidence: '来源图中有可辨识的角色面部与标志性服装。', referenceAssetIds: [payload.referenceImages[0].assetId] }] } : { verdict: 'PASS', findings: [] };
         return chat({ ...(payload.setPolicy&&!payload.slot?{setPlan:{style:'Natural light and warm neutral surfaces.',dimensionEvidenceIds:[],dimensionReason:'No verified dimensions in this fixture.',slots:Array.from({length:7},(_,i)=>({index:i+1,role:i===0?'main_scene':'scene',focus:'Daily scene '+(i+1),evidenceIds:[],scene:'Distinct tabletop setting '+(i+1),prompt:'Show the actual source product in a realistic scene '+(i+1),textMode:'none',expectedText:[]}))}}:{}), kind: 'image-plan', ipRisk, productUnderstanding: { summary: call.visualSummary, referenceAssetIds: payload.referenceImages.map(image => image.assetId), uncertainties: call.sufficient ? ['Exact size is unknown from the photograph.'] : ['来源图片无法确认当前 SKU。'], sufficient: call.sufficient }, prompt: 'Use only the supplied reference product. Preserve its color, construction and count. Realistic tabletop use scene. No added text, words, labels or marks.', textMode: 'none', expectedText: [] });
+      }
+      if (call.kind === 'image-appearance-review') {
+        assert.equal(body.model,'deepseek-flash'); assert.ok(Array.isArray(content));
+        const images=content.filter(part=>part.type==='image_url');
+        assert.equal(images.length,payload.referenceImages.length+1);
+        const hashes=images.map(image=>digest(Buffer.from(image.image_url.url.split(',')[1],'base64')));
+        assert.deepEqual(hashes.slice(0,-1),payload.referenceImages.map(image=>image.sha256));
+        assert.equal(hashes.at(-1),payload.candidate.sha256);
+        assert.ok(state.calls.some(prior=>prior.kind==='image-generation'&&prior.imageSha256===hashes.at(-1)));
+        call.referenceHashes=hashes; call.candidateSha256=payload.candidate.sha256;
+        return chat({verdict:'PASS',checks:[{aspect:'identity',expected:'Fixture coaster from selected SKU',observed:'Matching synthetic fixture coaster',reason:'Deterministic appearance fixture; source and candidate bytes verified',referenceAssetIds:payload.referenceImages.map(image=>image.assetId)}]});
       }
       if (call.kind === 'image-text-review') {
         const text = payload.unverifiedOcr.text;
@@ -153,17 +170,13 @@ function installMockTransport(keys) {
       return response({ Code: 'success', RequestId: `automatic-ocr-${state.calls.length}`, Data: { Width: 1024, Height: 1024, Content: text,
         SubImageCount: text ? 1 : 0, SubImages: text ? [{ SubImageId: 0, BlockInfo: { BlockCount: 1, BlockDetails: [{ BlockId: 0, BlockContent: text, BlockConfidence: 99 }] } }] : [] } });
     }
-    if (address === 'https://tyaiapi.com/v1/images/edits' || address === 'https://api.openai.com/v1/images/edits') {
+    if (address === 'https://openrouter.ai/api/v1/images' && options.method === 'POST') {
       call.kind = 'image-generation'; call.attempt = ++state.imageCount;
       if (new Headers(options.headers).get('authorization') !== `Bearer ${keys.image}`) throw Error('Unexpected test image credential');
-      if (options.body instanceof FormData) {
-        call.model = options.body.get('model');
-        call.prompt = options.body.get('prompt');
-        call.referenceHashes = await Promise.all(options.body.getAll('image[]').map(async file => digest(Buffer.from(await file.arrayBuffer()))));
-      } else {
-        const body = JSON.parse(options.body); call.model = body.model; call.prompt = body.prompt;
-        call.referenceHashes = body.images.map(image => digest(Buffer.from(image.image_url.split(',')[1], 'base64')));
-      }
+      const body = JSON.parse(options.body); call.model = body.model; call.prompt = body.prompt;
+      assert.equal(body.model, 'openai/gpt-image-2.5-sunburst');
+      assert.deepEqual(body.provider, { only: ['openai'], allow_fallbacks: false });
+      call.referenceHashes = body.input_references.map(image => digest(Buffer.from(image.image_url.url.split(',')[1], 'base64')));
       const plan = state.calls.findLast(previous => previous.kind === 'image-plan');
       assert.equal(plan?.sufficient, true); assert.deepEqual(plan.repair?call.referenceHashes.slice(1):call.referenceHashes, plan.referenceHashes);
       assert.ok(call.prompt.includes(plan.visualSummary)); assert.ok(call.prompt.includes('Exact size is unknown'));
@@ -290,7 +303,16 @@ async function configure() {
     await window.red.saveAiConnection({ id: 'aliyun', accessKeyId: keys.accessId, accessKeySecret: keys.accessSecret });
     await window.red.saveAiFunctionSettings({ id: 'aliyun-ocr', model: 'RecognizeAllText/Commerce', enabled: true });
     await window.red.saveAiFunctionSettings({ id: 'aliyun-image-risk', model: 'aigcViolationDetection', enabled: true });
-    await window.red.saveImageGenerationConnection({ provider: 'tyai', apiKey: keys.image, model: 'gpt-image-2.5-sunburst-4k-max', enabled: true, size: '1024x1024', quality: 'high' });
+    await window.red.saveImageGenerationConnection({ provider: 'openrouter', apiKey: keys.image, model: 'openai/gpt-image-2.5-sunburst', enabled: true, size: '1024x1024', quality: 'high' });
+    // API-R2 purpose routes are explicit and no longer inherited from old role
+    // settings. Preserve this suite's deterministic DeepSeek text fixtures.
+    for (const profile of await window.red.getAiPurposeProfiles()) {
+      if (profile.purposeId.endsWith('_decision')) continue;
+      const review = ['copy_review','copy_review_difficult','image_text_review'].includes(profile.purposeId);
+      await window.red.saveAiPurposeProfile({purposeId:profile.purposeId,expectedRevision:profile.revision,
+        patch:{gateway:'deepseek',model:review?'deepseek-v4-pro':'deepseek-flash',effort:'none'}});
+    }
+
   }, fakeKeys);
 }
 async function createProduct(label) {
@@ -338,7 +360,12 @@ async function importRemoteProduct() {
 async function selectProduct(product, targetId) {
   await page.reload(); await expect(button('新建商品')).toBeEnabled();
   await click(page.locator('nav').getByRole('button', { name: '自动上架', exact: true }));
-  await panel().getByTestId(`automatic-select-${product.id}`).check({ force: true });
+  const selection=panel().getByTestId(`automatic-select-${product.id}`);
+  // The twelve-product restore fixture spans two current eight-row pages.
+  // Select through the real pagination UI instead of assuming the oldest row
+  // remains on page one after reload/restore.
+  if(await selection.count()===0)await click(panel().getByRole('button',{name:'下一页',exact:true}));
+  await selection.check({ force: true });
   await panel().getByRole('combobox', { name: /目标店铺与站点/ }).selectOption(targetId);
   assert.equal(await panel().locator('textarea').count(), 0);
   assert.equal(await panel().getByRole('textbox', { name: /提示词|参考图/ }).count(), 0);
@@ -390,6 +417,14 @@ async function beginImageWorkflow(product, targetId) {
     const current = await window.red.getProduct(product.id);
     const sources = await window.red.prepareAutomaticProductSources({ productId: current.id, productRevision: current.revision, variantIds: [current.variants[0].id] });
     if (sources.missing.length) throw Error(sources.missing[0].message);
+    // The current application requires source observations before content work.
+    // Use its real observer for imported URL-only fixtures, never a manual
+    // confirmation or a renderer bridge replacement.
+    const sourceInput={productId:current.id,productRevision:sources.product.revision,variantId:current.variants[0].id};
+    let sourceView=await window.red.getSourceConsistency(sourceInput);
+    if(sourceView.status==='PENDING')sourceView=await window.red.prepareSourceConsistency(sourceInput);
+    if(!['MATCH','MANUAL'].includes(sourceView.status))throw Error('Source fixture observation failed: '+sourceView.status);
+
     const prepared = await window.red.listAmazonDrafts(current.id);
     let draft = prepared.find(value => value.variantId === current.variants[0].id && value.productRevision === sources.product.revision);
     if (!draft) draft = (await window.red.prepareAmazonDrafts({ targetId, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US', listingProgram: 'standard', items: [{ productId: current.id, productRevision: sources.product.revision, variantId: current.variants[0].id, attributes: {} }] })).items[0].draft;
@@ -399,8 +434,11 @@ async function beginImageWorkflow(product, targetId) {
   }, { product, targetId });
 }
 async function screenshot(name) {
-  await page.evaluate(async () => { await document.fonts.ready; await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); });
-  const encoded = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString('base64'));
+  await page.evaluate(async () => { await document.fonts.ready; });
+  const encoded = await app.evaluate(async ({ BrowserWindow }) => {
+    const capture=BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined,{stayHidden:true,stayAwake:true});
+    let timer;try{return (await Promise.race([capture,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Native screenshot timed out')),10000);})])).toPNG().toString('base64');}finally{clearTimeout(timer);}
+  });
   const path = join(artifacts, `${build.packaged ? 'packaged-' : ''}automatic-images-${name}.png`);
   await writeFile(path, Buffer.from(encoded, 'base64')); screenshots.push(path); await assertHidden();
 }
@@ -428,7 +466,7 @@ try {
   const results = await page.evaluate(id => window.red.listAiResults(id), passed.product.id);
   assert.ok(results.some(result => result.output.kind === 'listing-current-review' && result.output.verdict === 'PASS'));
   assert.ok(results.some(result => result.output.kind === 'image-text-review' && result.output.verdict === 'PASS' && result.output.visualReview === 'not_performed'));
-  assert.deepEqual(passed.calls.map(call => call.kind), ['listing-fields', 'listing-fields-review', 'listing-current-review','source-ocr','image-plan',...Array.from({length:7},(_,index)=>['image-plan', 'image-generation', 'ip-token', 'ip-upload', 'ip-check', ...(index===0?['ocr', 'image-text-review']:[])]).flat()]);
+  assert.deepEqual(passed.calls.map(call => call.kind), ['listing-fields', 'listing-fields-review', 'listing-current-review','source-ocr','image-plan',...Array.from({length:7},(_,index)=>['image-plan', 'image-generation', 'ip-token', 'ip-upload', 'ip-check', 'image-appearance-review', ...(index===0?['ocr', 'image-text-review']:[])]).flat()]);
   assert.equal(passed.calls.filter(call=>call.kind==='ocr').length,1);
   assert.equal(passed.calls.filter(call=>call.kind==='image-text-review').length,1);
   assert.ok(passed.workflow.slots.slice(1).every(slot=>slot.attempts.every(attempt=>!attempt.ocrResultId&&!attempt.reviewResultId)));
@@ -495,13 +533,15 @@ try {
   assert.equal(unclear.workflow.stage, 'planning'); assert.equal(unclear.workflow.approvedAssetId, null);
   assert.equal(unclear.calls.filter(call => call.kind === 'image-generation').length, 0);
   assert.equal(unclear.calls.filter(call => call.kind === 'ocr').length, 0);
-  assert.match(unclear.workflow.error, /来源图片无法确认当前 SKU/);
+  assert.equal(unclear.workflow.error, '来源图片不足以确认当前商品。请核对已关联原图和当前规格。');
+  const unclearPlan=(await page.evaluate(id=>window.red.listAiResults(id),unclear.product.id)).find(result=>result.output.kind==='image-plan');
+  assert.ok(unclearPlan.output.productUnderstanding.uncertainties.includes('来源图片无法确认当前 SKU。'));
   pass('insufficient visual understanding stops at planning and displays the reason before any image generation or OCR request');
 
   const sourceRisk = await scenario(await createProduct('SOURCE-IP'), target.id, 'ip-source', 'blocked');
   assert.equal(sourceRisk.workflow.stage, 'planning'); assert.equal(sourceRisk.workflow.approvedAssetId, null);
   assert.equal(sourceRisk.calls.filter(call => ['image-generation','ip-token','ocr'].includes(call.kind)).length, 0);
-  assert.match(sourceRisk.workflow.error, /商品 IP 初筛未通过/); assert.match(sourceRisk.workflow.error, /测试知名角色/);
+  assert.match(sourceRisk.workflow.error, /来源 AI IP 初筛未通过（非阿里云评分）/); assert.match(sourceRisk.workflow.error, /测试知名角色/);
   pass('a source IP finding stops before image generation and shows its concrete evidence');
 
   const generatedRisk = await scenario(await createProduct('GENERATED-IP'), target.id, 'ip-generated', 'blocked');
@@ -509,7 +549,9 @@ try {
   assert.equal(generatedRisk.calls.filter(call => call.kind === 'image-generation').length, 1);
   assert.equal(generatedRisk.calls.filter(call => call.kind === 'ocr').length, 0); assert.equal(generatedRisk.workflow.ipReviewResultIds.length, 1);
   assert.equal(generatedRisk.current.assets.length, generatedRisk.product.assets.length);
-  assert.match(generatedRisk.workflow.error, /疑似品牌标识/);
+  assert.match(generatedRisk.workflow.error, /实际等级 high/); assert.match(generatedRisk.workflow.error, /当前阈值 分数 > 90 或等级 ≥ high/); assert.match(generatedRisk.workflow.error, /trademark/);
+  const generatedRiskResult=(await page.evaluate(id=>window.red.listAiResults(id),generatedRisk.product.id)).find(result=>result.output.kind==='image-ip-review');
+  assert.equal(generatedRiskResult.output.verdict,'BLOCKED'); assert.equal(generatedRiskResult.output.labels[0].description,'检测到疑似品牌标识');
   pass('Aliyun checks the exact generated bytes; an IP finding stops before OCR without regeneration or adoption');
 
   const unavailable = await scenario(await createProduct('IP-UNAVAILABLE'), target.id, 'ip-unavailable', 'failed');
@@ -525,7 +567,7 @@ try {
   await click(button('图片与生图'));
   const riskSwitch=page.getByRole('switch',{name:'启用图片风险拦截'});
   await expect(riskSwitch).toBeEnabled();await expect(riskSwitch).toBeChecked();await riskSwitch.click();await expect(riskSwitch).not.toBeChecked();
-  await expect.poll(()=>page.evaluate(()=>window.red.getImageRiskSettings())).toEqual({enabled:false});
+  await expect.poll(()=>page.evaluate(()=>window.red.getImageRiskSettings())).toEqual({enabled:false,scoreThreshold:90,levelThreshold:'high'});
   await screenshot('risk-interception-disabled');
   const disabledRisk=await scenario(await createProduct('RISK-DISABLED'),target.id,'ip-source','done');
   assert.equal(disabledRisk.workflow.riskInterceptionEnabled,false);
@@ -622,8 +664,10 @@ try {
   assert.equal(downloaded.assets.length, 1, 'Download only one successful mapped reference for the selected SKU');
   assert.ok(downloaded.assets[0].variantIds.includes(remoteVariant.id));
   const sourceImageIds = remote.receipt.skuMappings.find(mapping => mapping.localVariantId === remoteVariant.id).imageIds;
-  const expectedBindings = remote.receipt.skuMappings.filter(mapping => mapping.imageIds.some(id => sourceImageIds.includes(id))).map(mapping => mapping.localVariantId).sort();
-  assert.deepEqual([...downloaded.assets[0].variantIds].sort(), expectedBindings);
+  const receiptBindings = remote.receipt.skuMappings.filter(mapping => mapping.imageIds.some(id => sourceImageIds.includes(id))).map(mapping => mapping.localVariantId).sort();
+  assert.ok(receiptBindings.includes(remoteVariant.id)); assert.ok(receiptBindings.length>1,'Fixture must preserve sibling SKU mapping evidence');
+  assert.deepEqual([...downloaded.assets[0].variantIds], [remoteVariant.id], 'Automatic source preparation binds only the requested SKU');
+  assert.deepEqual((await page.evaluate(id=>window.red.getMiaoshouReceipt(id),remote.product.id)).skuMappings,remote.receipt.skuMappings,'Preparing one SKU never removes sibling source mappings');
   const downloadedBytes = await readFile(join(dataRoot, 'assets', `${downloaded.assets[0].id}.png`));
   assert.equal(downloadedBytes.length, downloaded.assets[0].byteSize);
   assert.ok(downloadedBytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])));
@@ -659,24 +703,27 @@ try {
       purchasable_offer:[{marketplace_id:'ATVPDKIKX0DER',currency:'USD',audience:'ALL',our_price:[{schedule:[{value_with_tax:2.5}]}]}]}});
   },{draftId:remoteDrafts[0].id,productId:remote.product.id});
   const beforeCopyBlock=await app.evaluate(()=>globalThis.__automaticImagesE2E.calls.length);
+  const priorCopyCallIds=await page.evaluate(async()=> (await window.red.listAiCalls()).map(call=>call.id));
   await beginImageWorkflow(remote.product,target.id);
   const copyBlocked=(await page.evaluate(()=>globalThis.__imageWorkflowPromise)).workflow;
   assert.equal(copyBlocked.status,'BLOCKED');assert.match(copyBlocked.error,/商品文案复核未通过/);
   const copyBlockCalls=await app.evaluate((_electron,before)=>globalThis.__automaticImagesE2E.calls.slice(before),beforeCopyBlock);
-  assert.equal(copyBlockCalls.filter(call=>call.kind==='listing-current-review').length,1);
+  assert.equal(copyBlockCalls.filter(call=>call.kind==='listing-current-review').length,2,'Unsupported copy receives the configured first and difficult reviews exactly once');
+  const copyCalls=await page.evaluate(ids=>window.red.listAiCalls().then(calls=>calls.filter(call=>!ids.includes(call.id))),priorCopyCallIds);
+  assert.deepEqual(copyCalls.map(call=>call.purposeSnapshot.purposeId).sort(),['copy_review','copy_review_difficult']);
   assert.ok(copyBlockCalls.every(call=>call.kind!=='image-generation'));
   const beforeCopyRepeat=await app.evaluate(()=>globalThis.__automaticImagesE2E.calls.length);
   await beginImageWorkflow(remote.product,target.id);
   assert.equal((await page.evaluate(()=>globalThis.__imageWorkflowPromise)).workflow.status,'BLOCKED');
   assert.equal(await app.evaluate(()=>globalThis.__automaticImagesE2E.calls.length),beforeCopyRepeat);
-  pass('with required business fields supplied, unsupported imported copy is blocked and its saved rejection prevents repeated paid reviews');
+  pass('with required business fields supplied, unsupported imported copy is blocked and its configured difficult review is recorded and both saved rejections prevent repeated paid reviews');
 
   assert.equal((await page.evaluate(() => window.red.listAmazonCalls())).filter(call => call.operation === 'putListingsItem').length, 0);
   assertPrivate(await page.evaluate(() => ({ text: document.body.innerText, localStorage: { ...localStorage }, sessionStorage: { ...sessionStorage } })));
   await page.evaluate(()=>window.red.saveImageRiskSettings({enabled:false}));
   await page.evaluate(()=>window.red.saveCopyReviewSettings({enabled:false}));
   await close(); await launch();
-  assert.deepEqual(await page.evaluate(()=>window.red.getImageRiskSettings()),{enabled:false});
+  assert.deepEqual(await page.evaluate(()=>window.red.getImageRiskSettings()),{enabled:false,scoreThreshold:90,levelThreshold:'high'});
   assert.deepEqual(await page.evaluate(()=>window.red.getCopyReviewSettings()),{enabled:false});
   assert.equal((await page.evaluate(id=>window.red.getAutomaticProductProgress(id),disabledCopy.draft.id)).id,recheckedCopy.workflow.id);
   assert.deepEqual((await page.evaluate(id=>window.red.listAiResults(id),disabledCopy.product.id)).find(result=>result.id===skippedCopyPlan.id),skippedCopyPlan);
@@ -690,34 +737,44 @@ try {
   await app.evaluate(({ dialog }, path) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); }, backupPath);
   const backup = await page.evaluate(() => window.red.createWorkspaceBackup({ passphrase: 'automatic-images-isolated-backup-2026' }));
   assert.equal(backup.cancelled, false); assert.equal(backup.productCount, 12);
-  const backupBytes = await readFile(backupPath), magic = Buffer.from('HTC-BACKUP-1\n'), offset = magic.length, headerEnd = offset + 28;
-  assert.ok(backupBytes.subarray(0, offset).equals(magic));
-  const backupKey = scryptSync('automatic-images-isolated-backup-2026', backupBytes.subarray(offset, offset + 16), 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
-  let assetPaths;
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', backupKey, backupBytes.subarray(offset + 16, headerEnd));
-    decipher.setAAD(backupBytes.subarray(0, headerEnd)); decipher.setAuthTag(backupBytes.subarray(-16));
-    const manifest = JSON.parse(gunzipSync(Buffer.concat([decipher.update(backupBytes.subarray(headerEnd, -16)), decipher.final()])).toString());
-    assetPaths = manifest.assets.map(asset => asset.path);
-    assert.ok(assetPaths.includes(`assets/${approved.id}.png`));
-    assert.ok(assetPaths.every(path => path.startsWith('assets/')));
-    assert.equal(assetPaths.some(path => /candidate|vault/i.test(path)), false, 'Only managed assets, not provider caches or credentials, enter the encrypted backup');
-    for (const key of Object.values(fakeKeys)) assert.equal(Buffer.from(manifest.database, 'base64').includes(Buffer.from(key)), false);
-  } finally { backupKey.fill(0); }
+  const backupBytes = await readFile(backupPath);
+  assert.equal(backupBytes.subarray(0,13).toString(),'HTC-BACKUP-2\n');
+  const inspectRoot=await mkdtemp(resolve('.test-data/automatic-images-backup-inspection-'));
+  const manifest=await readStreamingBackup(backupPath,'automatic-images-isolated-backup-2026',inspectRoot,path=>join(inspectRoot,path));
+  const assetPaths=manifest.files.map(file=>file.path);
+  assert.ok(assetPaths.includes(`assets/${approved.id}.png`));
+  assert.ok(assetPaths.every(path=>path==='red.sqlite'||path.startsWith('assets/')||path.startsWith('documents/')||path.startsWith('ai-receipts/')||/^image-generation\/candidates\/[a-f0-9-]{36}\/(candidate\.json|image\.png|preview\.png)$/.test(path)));
+  assert.equal(assetPaths.some(path=>/vault|browser/i.test(path)),false,'Credentials and browser data never enter the encrypted backup');
+  assert.ok(assetPaths.some(path=>path.startsWith('ai-receipts/')),'Paid provider receipts remain recoverable');
+  for(const id of passed.workflow.candidateIds){
+    for(const file of ['candidate.json','image.png','preview.png']){
+      const relative=`image-generation/candidates/${id}/${file}`;
+      assert.ok(assetPaths.includes(relative),'Paid candidates are retained history in v2 backups');
+      assert.deepEqual(await readFile(join(inspectRoot,relative)),await readFile(join(dataRoot,relative)));
+    }
+  }
+  for(const file of manifest.files){
+    const bytes=await readFile(join(inspectRoot,file.path));
+    assert.equal(sha256(bytes),file.sha256);
+    for(const key of Object.values(fakeKeys))assert.equal(bytes.includes(Buffer.from(key)),false);
+  }
   backups.push({ ...backup, sha256: sha256(backupBytes), assetPaths });
   const afterBackup = await page.evaluate(() => window.red.createProduct());
   await chooseFile(backupPath);
   await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
   await assertHidden();
-  const closedForRestore = app.waitForEvent('close');
+  // V2 authenticates hundreds of retained candidate/receipt files before exit.
+  // Attach rejection immediately so a close timeout cannot become an unhandled
+  // rejection while the restore IPC is still running.
+  const closedForRestore = app.waitForEvent('close', { timeout: 180000 }).then(() => null, error => error);
   const restored = await page.evaluate(() => window.red.restoreWorkspaceBackup({ passphrase: 'automatic-images-isolated-backup-2026' }));
   assert.equal(restored.cancelled, false);
   sessions.push(await app.evaluate(() => { const { calls, unexpected, remoteRequests, shownWindows } = globalThis.__automaticImagesE2E; return { calls, unexpected, remoteRequests, shownWindows }; }));
-  await closedForRestore; app = null; page = null;
+  const restoreCloseError = await closedForRestore; if (restoreCloseError) throw restoreCloseError; app = null; page = null;
   await launch();
   const restoredProducts = await page.evaluate(() => window.red.listProducts());
   assert.equal(restoredProducts.length, 12); assert.ok(!restoredProducts.some(product => product.id === afterBackup.id));
-  assert.deepEqual(await page.evaluate(()=>window.red.getImageRiskSettings()),{enabled:false});
+  assert.deepEqual(await page.evaluate(()=>window.red.getImageRiskSettings()),{enabled:false,scoreThreshold:90,levelThreshold:'high'});
   assert.deepEqual(await page.evaluate(()=>window.red.getCopyReviewSettings()),{enabled:false});
   assert.equal((await page.evaluate(id=>window.red.getAutomaticProductProgress(id),disabledCopy.draft.id)).id,recheckedCopy.workflow.id);
   assert.deepEqual((await page.evaluate(id=>window.red.listAiResults(id),disabledCopy.product.id)).find(result=>result.id===skippedCopyPlan.id),skippedCopyPlan);
@@ -726,12 +783,12 @@ try {
   assert.equal(sha256(await readFile(join(dataRoot, 'assets', `${approved.id}.png`))), passed.workflow.approvedSha256);
   assert.equal((await page.evaluate(id => window.red.listAiResults(id), passed.product.id)).length, results.length);
   assert.ok((await page.evaluate(() => window.red.listAiProviders())).every(profile => !profile.configured && !profile.enabled));
-  assert.equal((await page.evaluate(() => window.red.getImageGenerationConnection('tyai'))).configured, false);
+  assert.equal((await page.evaluate(() => window.red.getImageGenerationConnection('openrouter'))).configured, false);
   await selectProduct(passed.product, target.id);
   await expect(panel().locator('details[aria-label="全局自动化连接"]')).toContainText('连接尚未就绪');
   await expect(button('启动并自动发布')).toBeDisabled();
   assert.deepEqual(await app.evaluate(() => globalThis.__automaticImagesE2E.calls), []);
-  pass('encrypted backup/restore preserves both switches, explicit copy-skip history, approved PNGs and review/workflow provenance, excludes candidate caches and credentials, and returns the UI to setup-required state');
+  pass('encrypted backup/restore preserves both switches, explicit copy-skip history, approved PNGs and review/workflow provenance, retains paid candidates/receipts and excludes credentials, and returns the UI to setup-required state');
   }
   await close();
   assert.deepEqual(sessions.flatMap(session => session.unexpected), []); assert.deepEqual(sessions.flatMap(session => session.remoteRequests), []);

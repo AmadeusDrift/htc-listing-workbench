@@ -1,0 +1,604 @@
+{
+  "recordedAt": "2026-10-13T18:08:01.155Z",
+  "schemaVersion": 30,
+  "dataset": {
+    "products": 2000,
+    "tasks": 5000,
+    "itemsPerTask": 1,
+    "assets": 2000,
+    "bytesPerImage": 68,
+    "imageDimensions": "1x1 synthetic PNG; independent owner/path, shared bytes",
+    "allTasks": "PAUSED",
+    "credentials": 0,
+    "grants": 0,
+    "fixtureCreationMs": 1978.972
+  },
+  "environment": {
+    "platform": "win32",
+    "release": "10.0.26300",
+    "arch": "x64",
+    "cpu": "AMD Ryzen 5 9600X 6-Core Processor             ",
+    "logicalCpuCount": 12,
+    "totalMemoryBytes": 33396543488,
+    "node": "v24.21.0",
+    "electron": {
+      "node": "24.21.0",
+      "acorn": "8.18.0",
+      "ada": "4.0.0",
+      "amaro": "1.1.11",
+      "ares": "1.34.8",
+      "brotli": "1.2.0",
+      "cldr": "48.0",
+      "icu": "78.2",
+      "llhttp": "9.4.3",
+      "merve": "1.2.2",
+      "modules": "149",
+      "napi": "10",
+      "nbytes": "0.1.4",
+      "ncrypto": "0.0.1",
+      "nghttp2": "1.70.0",
+      "nghttp3": "",
+      "ngtcp2": "",
+      "openssl": "0.0.0",
+      "simdjson": "4.6.7",
+      "simdutf": "7.7.0",
+      "sqlite": "3.53.4",
+      "tz": "2025c",
+      "undici": "7.29.1",
+      "unicode": "17.0",
+      "uv": "1.52.1",
+      "uvwasi": "0.0.23",
+      "v8": "15.2.124.28-electron.0",
+      "zlib": "1.3.2.1-motley",
+      "zstd": "1.6.0",
+      "electron": "44.4.5",
+      "chrome": "152.0.7977.130"
+    },
+    "runLabel": "preflight-concurrent-work",
+    "window": {
+      "visible": true,
+      "focused": false,
+      "backgroundThrottling": false,
+      "nativeSize": [
+        1441,
+        1001
+      ],
+      "contentSize": [
+        1440,
+        1000
+      ]
+    },
+    "rendererVisibility": "visible"
+  },
+  "measurements": [
+    {
+      "name": "search 1999 / 2000 products",
+      "completionWallMs": 22.41840000000002,
+      "durationToPaintOpportunityMs": 37.69999998807907,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索采集箱",
+          "start": 385.69999998807907,
+          "dispatchDelayMs": 0.5,
+          "domFeedbackMs": 0.19999998807907104,
+          "feedback": "input value: 1999",
+          "eventToPaintOpportunityMs": 8.699999988079071
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.200456,
+          "deltaSeconds": 0.0063910000000000355
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.629145,
+          "deltaSeconds": 0.02675099999999997
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.376533,
+          "deltaSeconds": 0.027793000000000012
+        }
+      ]
+    },
+    {
+      "name": "clear search / restore page of 20",
+      "completionWallMs": 27.7188000000001,
+      "durationToPaintOpportunityMs": 37.59999996423721,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索采集箱",
+          "start": 423.19999998807907,
+          "dispatchDelayMs": 0.30000001192092896,
+          "domFeedbackMs": 0.09999996423721313,
+          "feedback": "input value: ",
+          "eventToPaintOpportunityMs": 11
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.211691,
+          "deltaSeconds": 0.010763000000000078
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.64536,
+          "deltaSeconds": 0.016208
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.413578,
+          "deltaSeconds": 0.037044999999999995
+        }
+      ]
+    },
+    {
+      "name": "filter ignored products",
+      "completionWallMs": 35.141000000000076,
+      "durationToPaintOpportunityMs": 67.60000002384186,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "已忽略0",
+          "start": 480.2999999523163,
+          "dispatchDelayMs": 5.199999988079071,
+          "domFeedbackMs": 1.7000000476837158,
+          "feedback": "active filter: 已忽略0",
+          "eventToPaintOpportunityMs": 4.700000047683716
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.221611,
+          "deltaSeconds": 0.00935700000000006
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.699741,
+          "deltaSeconds": 0.0543809999999999
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.436742,
+          "deltaSeconds": 0.023164000000000018
+        }
+      ]
+    },
+    {
+      "name": "restore inbox filter",
+      "completionWallMs": 48.89039999999977,
+      "durationToPaintOpportunityMs": 57.69999998807907,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "待整理2000",
+          "start": 551.8999999761581,
+          "dispatchDelayMs": 1,
+          "domFeedbackMs": 3.699999988079071,
+          "feedback": "active filter: 待整理2000",
+          "eventToPaintOpportunityMs": 12.199999988079071
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.233698,
+          "deltaSeconds": 0.011651999999999996
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.747674,
+          "deltaSeconds": 0.045933
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.474941,
+          "deltaSeconds": 0.03819899999999998
+        }
+      ]
+    },
+    {
+      "name": "image pagination page 2 and local PNG decode",
+      "completionWallMs": 65.16760000000022,
+      "durationToPaintOpportunityMs": 80.19999998807907,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "采集箱下一页",
+          "start": 607,
+          "dispatchDelayMs": 1.2000000476837158,
+          "domFeedbackMs": 2.899999976158142,
+          "feedback": "第 2 / 100 页",
+          "eventToPaintOpportunityMs": 11.099999964237213
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.26877,
+          "deltaSeconds": 0.03463499999999997
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.783653,
+          "deltaSeconds": 0.035979000000000094
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.533397,
+          "deltaSeconds": 0.05845600000000001
+        }
+      ]
+    },
+    {
+      "name": "navigate automatic and load 5000 task options",
+      "completionWallMs": 174.31740000000036,
+      "durationToPaintOpportunityMs": 253.19999998807907,
+      "longTasks": [
+        {
+          "start": 808.0999999642372,
+          "duration": 59
+        }
+      ],
+      "inputEvents": [
+        {
+          "type": "click",
+          "label": "自动上架",
+          "start": 724.7999999523163,
+          "dispatchDelayMs": 0.8999999761581421,
+          "domFeedbackMs": 5.100000023841858,
+          "feedback": "active navigation: 自动上架",
+          "eventToPaintOpportunityMs": 27.400000035762787
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.35727,
+          "deltaSeconds": 0.06539099999999998
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.886002,
+          "deltaSeconds": 0.08709199999999995
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 0.889398,
+          "deltaSeconds": 0.34741299999999997
+        }
+      ]
+    },
+    {
+      "name": "switch paused task and render local counts",
+      "completionWallMs": 240.79109999999946,
+      "durationToPaintOpportunityMs": 253.5,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "选择自动上架任务",
+          "start": 979.2999999523163,
+          "dispatchDelayMs": 0,
+          "domFeedbackMs": 3.400000035762787,
+          "feedback": "正在读取已保存任务",
+          "eventToPaintOpportunityMs": 8.300000011920929
+        },
+        {
+          "type": "change",
+          "label": "选择自动上架任务",
+          "start": 979.8999999761581,
+          "dispatchDelayMs": 0,
+          "domFeedbackMs": 2.800000011920929,
+          "feedback": "正在读取已保存任务",
+          "eventToPaintOpportunityMs": 7.699999988079071
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.403977,
+          "deltaSeconds": 0.04630599999999996
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.89989,
+          "deltaSeconds": 0.013888000000000011
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 1.193821,
+          "deltaSeconds": 0.304423
+        }
+      ]
+    },
+    {
+      "name": "task search while polling 5000 saved records",
+      "completionWallMs": 27.564300000000003,
+      "durationToPaintOpportunityMs": 38.80000001192093,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "input",
+          "label": "搜索任务商品或 SKU",
+          "start": 1250.699999988079,
+          "dispatchDelayMs": 0.40000003576278687,
+          "domFeedbackMs": 0.8999999761581421,
+          "feedback": "input value: SYNTH",
+          "eventToPaintOpportunityMs": 15.399999976158142
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.421299,
+          "deltaSeconds": 0.007802000000000087
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.927857,
+          "deltaSeconds": 0.02101200000000003
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 1.242797,
+          "deltaSeconds": 0.04006899999999991
+        }
+      ]
+    },
+    {
+      "name": "refresh 5000 tasks and immediately type",
+      "completionWallMs": 146.8764999999994,
+      "durationToPaintOpportunityMs": 156.39999997615814,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "change",
+          "label": "搜索任务商品或 SKU",
+          "start": 1308.0999999642372,
+          "dispatchDelayMs": 0,
+          "domFeedbackMs": 0.699999988079071,
+          "feedback": "input value: SYNTH",
+          "eventToPaintOpportunityMs": 10.699999988079071
+        },
+        {
+          "type": "click",
+          "label": "刷新任务",
+          "start": 1309.699999988079,
+          "dispatchDelayMs": 2.699999988079071,
+          "domFeedbackMs": 3.5,
+          "feedback": "refresh disabled with visible reading feedback",
+          "eventToPaintOpportunityMs": 9.099999964237213
+        },
+        {
+          "type": "input",
+          "label": "搜索任务商品或 SKU",
+          "start": 1419.3999999761581,
+          "dispatchDelayMs": 0.10000002384185791,
+          "domFeedbackMs": 0.800000011920929,
+          "feedback": "input value: SYNTH-500",
+          "eventToPaintOpportunityMs": 9.600000023841858
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.470707,
+          "deltaSeconds": 0.04891000000000001
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 0.969149,
+          "deltaSeconds": 0.041291999999999995
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 1.396645,
+          "deltaSeconds": 0.15384799999999998
+        }
+      ]
+    },
+    {
+      "name": "refresh 5000 tasks and immediately navigate inbox",
+      "completionWallMs": 193.4971999999998,
+      "durationToPaintOpportunityMs": 206.9000000357628,
+      "longTasks": [],
+      "inputEvents": [
+        {
+          "type": "change",
+          "label": "搜索任务商品或 SKU",
+          "start": 1509.2999999523163,
+          "dispatchDelayMs": 0,
+          "domFeedbackMs": 0.7000000476837158,
+          "feedback": "input value: SYNTH-500",
+          "eventToPaintOpportunityMs": 10.200000047683716
+        },
+        {
+          "type": "click",
+          "label": "刷新任务",
+          "start": 1511.199999988079,
+          "dispatchDelayMs": 2.400000035762787,
+          "domFeedbackMs": 3.099999964237213,
+          "feedback": "refresh disabled with visible reading feedback",
+          "eventToPaintOpportunityMs": 8.300000011920929
+        },
+        {
+          "type": "click",
+          "label": "采集箱",
+          "start": 1641.5999999642372,
+          "dispatchDelayMs": 0.8999999761581421,
+          "domFeedbackMs": 16.400000035762787,
+          "feedback": "active navigation: 采集箱",
+          "eventToPaintOpportunityMs": 25.100000023841858
+        }
+      ],
+      "processCpu": [
+        {
+          "type": "Browser",
+          "pid": 40224,
+          "cpuSeconds": 1.558476,
+          "deltaSeconds": 0.06063200000000002
+        },
+        {
+          "type": "GPU",
+          "pid": 54440,
+          "cpuSeconds": 1.034369,
+          "deltaSeconds": 0.04849300000000012
+        },
+        {
+          "type": "Utility",
+          "pid": 54348,
+          "cpuSeconds": 0.06991,
+          "deltaSeconds": 0
+        },
+        {
+          "type": "Tab",
+          "pid": 47968,
+          "cpuSeconds": 1.607885,
+          "deltaSeconds": 0.20096099999999995
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "limitations": [
+    "Wall clock includes CPU, IPC, scheduling and local filesystem IO; no storage hardware attribution.",
+    "Synthetic small PNG covers pagination/decode/owner isolation, not real megapixel decode load.",
+    "Single run observations, not p95/SLA. 200ms refers to ordinary visible feedback target from acceptance line 114.",
+    "Paused synthetic demo target with no credentials; local adaptation may report unavailable configuration. No remote statistics or migrations exercised."
+  ],
+  "startup": {
+    "guardedLaunchTo2000ProductsUiMs": 1139.899,
+    "renderer": {
+      "timeOrigin": 1791914884050.5,
+      "now": 226.0999999642372,
+      "dpr": 1.25,
+      "width": 1440,
+      "height": 1000,
+      "longTasks": []
+    }
+  },
+  "apiCounts": {
+    "products": 2000,
+    "tasks": 5000
+  },
+  "taskOptionSemantics": {
+    "count": 5000,
+    "selected": "4fcf8adc-2430-4f9c-83ae-4dcf1b6b3b1e",
+    "selectedText": "Synthetic offline target · SYNTHETIC · 已暂停 · 2026/10/14 02:08:01",
+    "expectedId": "4fcf8adc-2430-4f9c-83ae-4dcf1b6b3b1e"
+  },
+  "safety": {
+    "installedBeforeMain": true,
+    "blockedAttempts": []
+  },
+  "taskStates": {
+    "count": 5000,
+    "paused": 5000,
+    "imageAttempts": 0
+  },
+  "persistedSafety": {
+    "paused": 5000,
+    "activityRows": {
+      "ai_calls": 0,
+      "amazon_calls": 0,
+      "hosting_uploads": 0,
+      "execution_tasks": 0
+    },
+    "foreignKeyViolations": [],
+    "ownedAssets": 2000
+  },
+  "completed": true
+}

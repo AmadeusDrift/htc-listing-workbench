@@ -21,8 +21,8 @@ import { assertSourceImageHistory, validateSourceImageProvenance } from './sourc
 import { assertCompletionHistory, retainCompletionOperations, validateCompletionOperation } from './listing-ai/completion-journal.ts';
 import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { mkdir, readFile, rename, rm, lstat, open } from 'node:fs/promises';
-import { existsSync, renameSync } from 'node:fs';
+import { mkdir, readFile, rm, lstat, open } from 'node:fs/promises';
+import { existsSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -567,7 +567,7 @@ export async function discardPreparedRestore(directory: string, prepared: Prepar
 }
 
 async function recoverJournal(root: string, journal: RestoreJournal): Promise<void> {
-  new RestorePathGuard(root);
+  const rootGuard=new RestorePathGuard(root);
   const staging = stagingPath(root, journal.stagingDirectory, 'staging'), rollback = stagingPath(root, journal.rollbackDirectory, 'rollback');
   const names=journal.version===1?legacyManagedNames:journal.version===2?versionTwoManagedNames:managedNames;
   if (![1,2,3].includes(journal.version) || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !names.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
@@ -576,8 +576,11 @@ async function recoverJournal(root: string, journal: RestoreJournal): Promise<vo
   if (journal.phase === 'installing') {
     for (const name of names) {
       const prior = join(rollback, name), current = join(root, name);
-      if (existsSync(prior)) { await rm(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true }); await rename(prior, current); }
-      else if (!journal.priorNames.includes(name)) await rm(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true });
+      if(!existsSync(prior)&&!existsSync(current)&&!journal.priorNames.includes(name))continue;
+      // Nested managed paths must never traverse a substituted parent during rollback.
+      rootGuard.assertDirectory(dirname(current),true);if(existsSync(current))rootGuard.assertTree(current);
+      if (existsSync(prior)) { new RestorePathGuard(rollback).assertTree(prior);rmSync(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true });renameSync(prior,current); }
+      else if (!journal.priorNames.includes(name)) rmSync(current, { recursive: ['assets','documents','ai-receipts',CANDIDATE_DIRECTORY].includes(name), force: true });
       else if (!existsSync(current)) throw new UserFacingError('恢复中断，原始工作区需要人工恢复；未建立空库以免覆盖资料');
     }
   }

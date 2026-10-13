@@ -3,7 +3,7 @@ import {referencePinHistory,referencePinRetentionOwner} from '../src/main/hostin
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
-import {mkdirSync,mkdtempSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdirSync,mkdtempSync,writeFileSync,readFileSync,rmSync,existsSync,renameSync,symlinkSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {WorkspaceStore} from '../src/main/store.ts';
 import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
@@ -46,4 +46,13 @@ test('restoring an older backup retains newer candidate pins and never shortens 
 test('a pin cannot authenticate candidate bytes belonging to another hash',async t=>{
  const f=fixture(t),id=candidate(f.source),now=new Date(),hash='a'.repeat(64),pin={id:randomUUID(),version:1,operationId:randomUUID(),purpose:'candidate-review',state:'READY',url:`https://images.example.test/references/${hash}.png`,createdAt:now.toISOString(),retainedUntil:new Date(now.getTime()+72*3600_000).toISOString(),releasedAt:null,attempts:1,assetId:id,sha256:hash,sourceKind:'candidate',sourceVersion:`candidate:${id}`,originalPath:`image-generation/candidates/${id}/image.png`,byteSize:png.length,mimeType:'image/png'};
  const db=openDatabase(f.source);db.prepare('INSERT INTO image_reference_pins VALUES(?,?)').run(pin.id,JSON.stringify(pin));db.close();await assert.rejects(()=>createWorkspaceBackup(f.source,f.file,f.pass),/版本不一致/);
+});
+
+test('rollback refuses a substituted candidate parent without deleting or moving into its target',async t=>{
+ const f=fixture(t),prior=candidate(f.target);await createWorkspaceBackup(f.source,f.file,f.pass);const prepared=await prepareWorkspaceRestore(f.target,f.file,f.pass);
+ const outside=join(f.root,'sentinel-only');mkdirSync(join(outside,'candidates'),{recursive:true});const sentinel=join(outside,'candidates','sentinel.txt');writeFileSync(sentinel,'keep');
+ await assert.rejects(()=>commitWorkspaceRestore(f.target,prepared,point=>{if(point==='database-installed'){renameSync(join(f.target,'image-generation'),join(f.target,'generation-parked'));symlinkSync(outside,join(f.target,'image-generation'),'junction');throw new Error('injected parent swap');}}),/链接|路径身份/);
+ assert.equal(readFileSync(sentinel,'utf8'),'keep');assert.equal(existsSync(join(outside,'candidates',prior)),false);assert.equal(existsSync(join(f.target,'.restore-journal.json')),true);
+ // Remove only the test junction itself, never the target, before the enclosing fixture cleanup.
+ rmSync(join(f.target,'image-generation'));renameSync(join(f.target,'generation-parked'),join(f.target,'image-generation'));
 });

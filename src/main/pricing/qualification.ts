@@ -1,6 +1,7 @@
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ListingRules } from '../../shared/listing-rules.ts';
-import { ListingQuoteError, quoteListing } from '../../shared/listing-rules.ts';
+import { ListingQuoteError, quoteListing, listingPriceEvaluator } from '../../shared/listing-rules.ts';
+import { isObject } from '../amazon/context.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { assertPricingDecision } from './history.ts';
 import { actualOfferIssue, hasActualOffer } from './offer.ts';
@@ -68,4 +69,32 @@ export function assertCurrentPricingForPaid(draft: AmazonDraft, rules: ListingRu
 }
 export function qualifiedPricing(draft: AmazonDraft, rules: ListingRules): boolean {
   return !pricingExempt(draft) && pricingEvidenceCurrent(draft,rules) && pricingQualificationIssue(draft,rules)===null;
+}
+
+/** Read-only SKU/draft detail; historical suggestions never replace actual offers. */
+export function qualifyActualOffer(draft: AmazonDraft, rules: ListingRules, now = Date.now()) {
+  const issue=pricingQualificationIssue(draft,rules,now), exempt=pricingExempt(draft);
+  const offers: { price:number; promotion:boolean; roi:number; commission:number; deliveryFee:number; upfrontCny:number; profitCny:number; billableWeightGrams:number }[]=[];
+  const inputs=draft.businessRules?.pricingDecision?.inputs;
+  if (!exempt && pricingEvidenceCurrent(draft,rules) && inputs?.costCny!=null && inputs.dimensionsInches && inputs.weightPounds!=null) {
+    try {
+      const calculation=listingPriceEvaluator({costCny:inputs.costCny,dimensionsInches:inputs.dimensionsInches,weightPounds:inputs.weightPounds},rules.pricing);
+      for (const offer of Array.isArray(draft.attributes.purchasable_offer)?draft.attributes.purchasable_offer:[]) {
+        if(!isObject(offer)||offer.currency!=='USD'||offer.audience!=='BZR'||offer.marketplace_id!==undefined&&offer.marketplace_id!==draft.marketplaceId)continue;
+        for(const field of ['our_price','discounted_price'] as const) {
+          const groups=offer[field]; if(!Array.isArray(groups))continue;
+          for(const group of groups) {
+            if(!isObject(group)||!Array.isArray(group.schedule))continue;
+            for(const schedule of group.schedule) {
+              if(!isObject(schedule)||typeof schedule.value_with_tax!=='number'||!Number.isFinite(schedule.value_with_tax)||schedule.value_with_tax<=0)continue;
+              if(typeof schedule.end_at==='string'&&Date.parse(schedule.end_at)<=now)continue;
+              const value=calculation.evaluate(schedule.value_with_tax);
+              offers.push({...value,promotion:field==='discounted_price',upfrontCny:calculation.upfrontCny,profitCny:value.roi*calculation.upfrontCny,billableWeightGrams:calculation.billableWeightGrams});
+            }
+          }
+        }
+      }
+    } catch(error) { if(!(error instanceof ListingQuoteError))throw error; }
+  }
+  return {qualified:!exempt&&issue===null,exempt,issue,offers,currency:'USD' as const,costCurrency:'CNY' as const};
 }

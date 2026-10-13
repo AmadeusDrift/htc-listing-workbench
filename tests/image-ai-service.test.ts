@@ -34,7 +34,8 @@ import type { AiCall } from '../src/shared/ai-contracts.ts';
 // Literal pre-presentation history has no new call sidecar; keep original result bytes below unchanged.
 function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiResult) {
   const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!;
-  const call=JSON.parse(String(row.record_json));delete call.presentationContext;delete call.purposeSnapshot;
+  const call=JSON.parse(String(row.record_json));delete call.presentationContext;delete call.purposeSnapshot;delete call.purposeAssignments;
+  db.prepare('DELETE FROM ai_copy_review_upgrades WHERE id=?').run(result.callId);
   db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);
 }
 
@@ -1692,4 +1693,12 @@ test('W07 default OpenRouter Luna to Sol appearance escalation uses real service
  for(const [index,request] of requests.entries()){assert.equal(request.body.model,index%2===0?'openai/gpt-6-luna':'openai/gpt-6.1-sol');assert.equal(request.body.messages[1].content.length,3);}
  for(const slot of result.workflow.slots!){assert.equal(slot.attempts.length,1);const ids=slot.attempts[0].appearanceReview!.resultIds;assert.equal(ids.length,2);for(const [index,id] of ids.entries()){const review=f.ai.getResult(id)!;assert.equal(review.providerId,'openrouter-review');assert.deepEqual(validateAiResult(review),review);assert.equal(review.output.kind,'image-appearance-review');if(review.output.kind==='image-appearance-review'){assert.equal(review.output.verdict,index===0?'UNCERTAIN':'PASS');assert.equal(review.output.previousResultId,index===0?null:ids[0]);}assert.ok(f.ai.getCall(review.callId)!.providerReceiptId);}}
  const before=requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(f.requests.filter(r=>r.operation==='image-appearance-review').length,before);
+});
+test('A19 image workflow resumes a pending current-copy upgrade before considering copy repair',async t=>{
+ const f=await fixture(t),before=f.ai.listResults(f.product.id).length;let reviewCalls=0;
+ f.respond((operation,payload)=>{if(operation!=='listing-current-review')return undefined;reviewCalls++;const out=currentReview(payload);out.verdict='NEEDS_CHANGES';out.checks[0].verdict='UNSUPPORTED';out.checks[0].reason='Specific source ambiguity';out.checks[0].claims[0].verdict='UNSUPPORTED';out.checks[0].claims[0].reason='Specific source ambiguity';out.issues=[{field:out.checks[0].field,message:'Specific source ambiguity'}] as any;return chat(out);});
+ await assert.rejects(f.ai.reviewCurrentListing(f.context.listing,f.context.currentListingCopy,async()=>{if(f.ai.listResults(f.product.id).length>before)throw new Error('exit after first');}),/exit after first/);
+ const pending=f.ai.listResults(f.product.id).filter(r=>r.output.kind==='listing-current-review').at(-1)!;assert.equal(f.ai.hasPendingCopyReview(pending.id),true);
+ const {workflow,posts}=productionWorkflow(f),listing=(workflow as any).listing;let resumed=0,repairs=0;listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});listing.reviewCurrentForImages=async()=>{resumed++;throw new Error('resume original upgrade');};listing.repairCurrentForImages=async()=>{repairs++;throw new Error('must not repair while upgrade pending');};
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(resumed,1,result.workflow.error??'expected original review entry');assert.equal(repairs,0);assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(posts(),0);assert.equal(reviewCalls,1);
 });

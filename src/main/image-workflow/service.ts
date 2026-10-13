@@ -74,7 +74,7 @@ type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
-type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'sourceObservationEvidence'|'purposeProfile'|'reviewGeneratedImageAppearance'>>;
+type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'hasPendingCopyReview'|'sourceObservationEvidence'|'purposeProfile'|'reviewGeneratedImageAppearance'>>;
 type Generator = Pick<ImageGenerationService, 'getConnection' | 'configurationScope' | 'generate' | 'readCandidate' | 'generateForWorkflow' | 'reconcileWorkflowGeneration'>;
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const remaining = (draft: AmazonDraft) => (draft.previewIssues.some(issue => issue.severity === 'ERROR') ? draft.previewIssues : draft.localIssues).filter(issue => issue.severity === 'ERROR').map(issue => issue.message);
@@ -589,7 +589,7 @@ export class ImageWorkflowService {
           const candidates=this.ai.listResults(run.productId).filter(value=>value.output.kind==='listing-current-review'&&value.listingContext&&listingFingerprint(value.listingContext)===listingFingerprint(snapshot.context)&&listingFingerprint(value.output.currentListingCopy)===listingFingerprint(snapshot.currentListingCopy)&&this.ai.getCall(value.callId)?.status==='SUCCEEDED');
           const saved=candidates.at(-1);
           if(saved?.output.kind==='listing-current-review')assertCurrentListingReview({...saved.output,kind:'amazon-fields-review'},snapshot.currentListingCopy,snapshot.context);
-          return saved?{context:snapshot.context,currentListingCopy:snapshot.currentListingCopy,review:saved}:undefined;
+          return saved&&!this.ai.hasPendingCopyReview?.(saved.id)?{context:snapshot.context,currentListingCopy:snapshot.currentListingCopy,review:saved}:undefined;
         };
         let copy=copyReviewEnabled?cachedCopy():undefined;
         const colorPending=nonDeferredImageIssues(initial).some(issue=>issue.attributeNames.includes('color'))

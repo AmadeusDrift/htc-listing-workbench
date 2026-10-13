@@ -52,7 +52,7 @@ test('verified prepare rejects damaged READY reuse and retains the old PDF on SK
   assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].status,'FAILED');
   const retry=f.service.retry(ready.id);assert.notEqual(retry.id,ready.id);
   assert.equal(f.service.get(ready.id).current,false);assert.deepEqual(f.service.get(ready.id).files,ready.files);
-  await f.service.runDue();assert.equal(f.service.get(retry.id).status,'READY');assert.equal(f.requests.length,2);
+  await f.service.runDue();assert.equal(f.service.get(retry.id).status,'READY');assert.equal(f.requests.length,1);
 });
 
 test('label lifecycle is projected from the label owner without revising manual procurement',async t=>{
@@ -111,11 +111,70 @@ test('UNKNOWN keeps its original identity through price/shipment revisions, prep
 test('a late UNKNOWN response blocks an already queued newer revision of the same SKU',async t=>{
   const f=fixture(t),batch=f.batch();let reject!:(error:unknown)=>void;
   f.setCreate(()=>new Promise((_resolve,fail)=>{reject=fail;}));const [old]=f.service.prepareBatch(batch.id);const pending=f.service.runDue();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.service.get(old.id).requestPending,true);
   changeQuantity(f,batch.id,6);f.service.prepareBatch(batch.id);
+  assert.equal(f.service.get(old.id).requestPending,true);
   reject(new AmazonTransportError('late unknown',null,'late-request',true));await pending;
   f.setCreate(async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf'}]},status:200,requestId:'should-not-send'}));
   await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(old.id).errorCode,'REQUEST_UNKNOWN');assert.equal(f.service.get(old.id).requestId,'late-request');
   assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].id,old.id);await f.reopen();await f.service.runDue();assert.equal(f.requests.length,1);
+});
+
+for(const superseded of [false,true])test(`restart holds an actually persisted REQUESTING request, superseded=${superseded}`,async t=>{
+  const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);
+  row.status='REQUESTING';row.attempts=1;row.requestId='first-request';row.nextDueAt=null;
+  const db=openDatabase(f.dir);db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();
+  if(superseded)changeQuantity(f,batch.id,6);
+  await f.reopen();const held=f.service.get(row.id);
+  assert.equal(held.errorCode,'REQUEST_UNKNOWN');assert.equal(held.id,row.id);assert.equal(held.attempts,1);assert.equal(held.requestId,'first-request');
+  assert.equal(held.status,superseded?'STALE':'FAILED');assert.throws(()=>f.service.retry(row.id),/未知/);
+  assert.equal((await f.service.prepareVerifiedBatch(batch.id))[0].id,row.id);await f.service.runDue();assert.equal(f.requests.length,0);
+});
+
+test('restart distinguishes a known response download from an unknown sent request',async t=>{
+  const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);row.status='DOWNLOADING';row.attempts=1;row.requestId='known-response';row.nextDueAt=null;
+  const db=openDatabase(f.dir);db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();
+  await f.reopen();const held=f.service.get(row.id);assert.equal(held.errorCode,'INTERRUPTED');assert.equal(held.requestId,'known-response');
+  assert.throws(()=>f.service.retry(row.id),/恢复|缺失|原标签/);assert.equal(f.requests.length,0);
+});
+
+test('known response resumes its saved download after restart without a second POST or exposing URL',async t=>{
+  const f=fixture(t),batch=f.batch();f.setCreate(async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf?signature=private-capability'}]},status:200,requestId:'known-result'}));
+  f.setDownload(async()=>{throw Error('offline');});const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
+  assert.equal(f.requests.length,1);
+  // Restore the persisted in-download snapshot, as if the process died before catch ran.
+  const db=openDatabase(f.dir),inFlight={...f.service.get(row.id),status:'DOWNLOADING',errorCode:null};db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(inFlight),row.id);db.close();
+  const {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore}=await import('../src/main/backup.ts');
+  const archive=resolve('.test-data',randomUUID()+'.htcbackup'),destination=resolve('.test-data','download-restored-'+randomUUID());
+  await createWorkspaceBackup(f.dir,archive,'synthetic-download-test');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'synthetic-download-test'));
+  const restored=new implementation!.ItemLabelService(destination,f.amazon,f.procurement,{now:()=>Date.parse('2026-10-08T00:00:00.000Z'),sleep:async()=>{}});
+  try{f.setDownload(async()=>pdfBytes());restored.retry(row.id);await restored.runDue();assert.equal(restored.get(row.id).status,'READY');assert.equal(f.requests.length,1);}finally{await restored.close();}
+  await f.reopen();f.setDownload(async()=>pdfBytes());f.service.retry(row.id);await f.service.runDue();
+  const ready=f.service.get(row.id);assert.equal(ready.status,'READY');assert.equal(ready.requestId,'known-result');assert.equal(ready.attempts,1);assert.equal(f.requests.length,1);
+  assert.ok(!JSON.stringify(f.service.list()).includes('private-capability'));
+});
+
+test('expired saved downloads and legacy missing descriptors cannot generate a replacement request',async t=>{
+  const f=fixture(t),batch=f.batch();f.setDownload(async()=>{throw Error('offline');});const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
+  f.advance(16*60000);await f.reopen();assert.throws(()=>f.service.retry(row.id),/过期|恢复/);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+
+test('a mismatched recovery fingerprint blocks download retry and keeps the original request',async t=>{
+  const f=fixture(t),batch=f.batch();f.setDownload(async()=>{throw Error('offline');});const [row]=f.service.prepareBatch(batch.id);await f.service.runDue();
+  const db=openDatabase(f.dir);db.prepare("UPDATE amazon_settings SET value_json=json_set(value_json,'$.fingerprint',?) WHERE key=?").run('a'.repeat(64),'item_label_download_v1:'+row.id);db.close();
+  assert.throws(()=>f.service.retry(row.id),/不匹配/);await f.service.runDue();assert.equal(f.requests.length,1);assert.equal(f.service.get(row.id).attempts,1);
+});
+
+test('credential rotation cannot turn a known response into another POST',async t=>{
+  const f=fixture(t),batch=f.batch();f.setDownload(async()=>{throw Error('offline');});f.service.prepareBatch(batch.id);await f.service.runDue();
+  const target=f.amazon.executionTargetScope().target;f.amazon.executionTargetScope=()=>({target,generation:2});
+  const [rotated]=await f.service.prepareVerifiedBatch(batch.id);assert.throws(()=>f.service.retry(rotated.id),/恢复|缺失|原标签/);await f.service.runDue();assert.equal(f.requests.length,1);
+});
+
+test('transient download retries have their own finite budget and retain the original POST identity',async t=>{
+  const f=fixture(t),batch=f.batch();f.setDownload(async()=>{throw new AmazonTransportError('download unavailable',503,'download-request',false);});
+  const [row]=f.service.prepareBatch(batch.id);for(let n=0;n<4;n++){await f.service.runDue();f.advance(120000);}
+  const failed=f.service.get(row.id);assert.equal(failed.status,'FAILED');assert.equal(failed.downloadAttempts,3);assert.equal(failed.attempts,1);assert.equal(failed.requestId,'request-1');assert.equal(f.requests.length,1);
 });
 test('automatic procurement is incremental and idempotent and preserves sales units', t=>{
   const f=fixture(t),job=randomUUID(); const [first]=f.procurement.ensureAutomaticBatch(job,[f.draft.id],{[f.draft.id]:5});
@@ -263,13 +322,13 @@ test('prepare never retries failed unknown or exhausted labels and strict intent
  const {validateItemLabelRecord}=await import('../src/main/item-labels/records.ts');for(const requestedAt of [null,123,'bad'])assert.throws(()=>validateItemLabelRecord({...failed,requestedAt}));
  const legacy={...failed};delete legacy.requestedAt;assert.equal(validateItemLabelRecord(legacy).fingerprint,failed.fingerprint);
 });
-test('legacy in-flight labels retain original evidence and require explicit retry',async t=>{
+test('legacy in-flight labels retain original evidence and block ordinary retry',async t=>{
  const f=fixture(t),batch=f.batch(),[row]=f.service.syncBatch(batch.id),db=openDatabase(f.dir);row.status='REQUESTING';row.attempts=1;row.requestId='sent-id';
  db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(row),row.id);db.close();await f.reopen();const held=f.service.get(row.id);
- assert.equal(held.status,'FAILED');assert.equal(held.errorCode,'INTERRUPTED');assert.equal(held.requestId,'sent-id');assert.equal(held.attempts,1);
+ assert.equal(held.status,'FAILED');assert.equal(held.errorCode,'REQUEST_UNKNOWN');assert.equal(held.requestId,'sent-id');assert.equal(held.attempts,1);
  f.service.prepareBatch(batch.id);await f.service.runDue();assert.equal(f.requests.length,0);
  const audit=openDatabase(f.dir);const evidence=audit.prepare("SELECT detail_json FROM audit_events WHERE action='item-labels.legacy-interrupted'").get();audit.close();assert.equal(JSON.parse(String(evidence?.detail_json)).status,'REQUESTING');
- f.service.retry(row.id);await f.service.runDue();assert.equal(f.requests.length,1);
+ assert.throws(()=>f.service.retry(row.id),/未知/);await f.service.runDue();assert.equal(f.requests.length,0);
 });
 test('prepare IPC is explicit and ordinary procurement saves remain local',async t=>{
  const f=fixture(t),batch=f.batch(),handlers=new Map<string,Function>();

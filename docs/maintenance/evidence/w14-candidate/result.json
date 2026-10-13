@@ -1,0 +1,35 @@
+{
+  "sourceCommit": "aa3b96c679b391424dcff5188589b4a4ac0c4f7e",
+  "manifestSha256": "b507adf879d580054cfc0b856ae12072288a0e08d1f8006e2477bbda50bea414",
+  "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e",
+  "candidate": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-approved\\artifacts\\HTC-2.5.0-API-R2-20261014\\candidate",
+  "activated": false,
+  "scope": "actual candidate Electron and synthetic local data; no external provider acceptance",
+  "checks": [
+    "candidate execPath/appPath/version, hidden sandbox, exact public IPC API",
+    "actual Electron safeStorage, SQLite write, nativeImage PNG",
+    "real preload/IPC sample persistence and managed image rendering",
+    "compatibility IPC retains independent thinking/key and rejects invalid input; real purpose UI independently saves model/effort without mutating other purposes, legacy settings or calling providers",
+    "restarted actual EXE displays exact persisted purpose models/efforts/revisions and retains compatibility thinking without re-entering the shared synthetic key",
+    "same candidate restart preserves SQLite, encrypted synthetic secret and product IDs; no outbound"
+  ],
+  "errors": [],
+  "passed": true,
+  "guardProbes": {
+    "attempts": [
+      "global.fetch",
+      "node:http.get",
+      "node:https.request",
+      "node:net.connect",
+      "electron.net.fetch",
+      "electron.net.request",
+      "electron.session.fetch",
+      "electron.session.webRequest"
+    ],
+    "total": 8,
+    "sessions": 1
+  },
+  "sessionCount": 2,
+  "packageFiles": 88,
+  "filesDigest": "53e17ac4634f0640654344200bf4993a5b0da31d4d949724a813f05aeb31465c"
+}

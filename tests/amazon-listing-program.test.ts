@@ -323,8 +323,9 @@ test('Haul create and prepare use configured defaults rather than unrelated mult
       assert.equal(mapping.status,'mapped');assert.match(mapping.reason,/业务规则/);assert.deepEqual(mapping.sourceFactIds,[]);
     }
     assert.equal(draft.attributes.item_weight,undefined,'package default cannot imply net weight');
-    const decision=draft.businessRules!.pricingDecision!;assert.equal(decision.version,2);
-    if(decision.version!==2)throw Error('Expected current pricing decision');
+    const decision=draft.businessRules!.pricingDecision!;assert.equal(decision.version,3);
+    if(decision.version!==3)throw Error('Expected current pricing decision');
+    assert.equal(decision.dependencies.costCny,decision.inputs.costCny);
     assert.deepEqual(decision.inputs.dimensionsInches,[1.97,1.97,1.97]);assert.equal(decision.inputs.weightPounds,.22);
     assert.deepEqual(decision.attributeInputs,{item_package_dimensions:draft.attributes.item_package_dimensions,item_package_weight:draft.attributes.item_package_weight});
     for (const field of ['item_package_quantity','number_of_packs']) assert.equal(field in draft.attributes,false,`must not inherit global ${field}`);

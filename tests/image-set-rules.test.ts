@@ -37,17 +37,20 @@ test('single-slot planning accepts camera look directions while keeping the appr
   assert.throws(()=>assertImagePlan(validateImagePlan(p),c));
 });
 
-test('lens-look exceptions never apply to captions, focus, scene, style or product understanding',()=>{
+test('lens-look exceptions never authorize captions, focus, scene or style',()=>{
   for(const change of [
     (p:any)=>{p.setPlan.slots[2].focus='50mm lens look';},
     (p:any)=>{p.setPlan.slots[2].scene='50mm lens look';},
     (p:any)=>{p.setPlan.style='50mm lens look';},
-    (p:any)=>{p.productUnderstanding.summary='50mm lens look';},
-    (p:any)=>{p.productUnderstanding.uncertainties=['50mm lens look'];},
     (p:any)=>{p.setPlan.slots[2].textMode='planned';p.setPlan.slots[2].expectedText=[{text:'50mm lens look',evidenceIds:[]}];}
   ]){
     const p=plan();change(p);assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));
   }
+});
+
+function observationHandoff(p:ReturnType<typeof plan>,c:ReturnType<typeof context>){const local=structuredClone(p);c={...c,setPlan:local.setPlan,slot:{index:1,total:7,provisional:true}};delete local.setPlan;return imageGenerationPrompt(local,c);}
+test('observations retain lens measurements without rendering them as product claims',()=>{
+ for(const field of ['summary','uncertainties'] as const){const p=plan(),before=structuredClone(p);if(field==='summary')p.productUnderstanding.summary='50mm lens look';else p.productUnderstanding.uncertainties=['50mm lens look'];const original=structuredClone(p);assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),context()));assert.doesNotMatch(observationHandoff(p,context()),/50\s*mm/i);assert.deepEqual(p,original);assert.notDeepEqual(p,before);}
 });
 
 test('photography directions do not hide unsupported product dimensions or default sizes',()=>{
@@ -105,7 +108,7 @@ test('the source-image size selected by the whole-set plan also supports its vis
   p.setPlan.slots[6]={...p.setPlan.slots[6],role:'dimensions',evidenceIds:[id],textMode:'planned',expectedText:[{text:'Diameter 8 cm',evidenceIds:[id]}]};
   p.productUnderstanding.summary+=' Printed diameter 8 cm.';
   assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),c));
-  p.productUnderstanding.summary+=' Height 80 cm.';assert.throws(()=>assertImagePlan(validateImagePlan(p),c));
+  p.productUnderstanding.summary+=' Height 80 cm.';const original=structuredClone(p);assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),c));assert.doesNotMatch(observationHandoff(p,c),/80\s*cm/);assert.deepEqual(p,original);p.setPlan.slots[6].expectedText.push({text:'Height 80 cm',evidenceIds:[id]});assert.throws(()=>assertImagePlan(validateImagePlan(p),c));
 });
 test('provider handoff appends hard role/text rules and exactly the approved captions',()=>{
   const c=context(),p=plan();c.setPlan=p.setPlan;c.slot={index:1,total:7,provisional:true};delete p.setPlan;
@@ -207,7 +210,7 @@ test('explicit excluded packaging metadata accepts retained replies without pass
 test('OCR packaging exclusions never hide neighboring claims or become creative instructions',()=>{
   const note=excludedPackagingNotes[2];
   for(const text of [note+'产品长 99 cm。','产品长 99 cm。'+note,note.replace('，不用于','，产品长 99 cm，不用于'),note.replace('32.3cm','32.3cm，产品长 99 cm')]){
-    const p=plan();p.productUnderstanding.uncertainties=[text];assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));
+    const p=plan();p.productUnderstanding.uncertainties=[text];const original=structuredClone(p);assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),context()));assert.doesNotMatch(observationHandoff(p,context()),/99\s*cm/);assert.deepEqual(p,original);p.prompt=text;assert.throws(()=>assertImagePlan(validateImagePlan(p),context()));
   }
   for(const field of ['prompt','scene','focus','style','caption']){
     const p=plan();
@@ -229,7 +232,7 @@ test('excluded packaging metadata cannot exempt positive claims, mixed clauses, 
     '产品长 99 cm。'+excludedPackagingNotes[1],
   ]){
     const p=plan();p.productUnderstanding.uncertainties=[claim];
-    assert.throws(()=>assertImagePlan(validateImagePlan(p),context()),claim);
+    const original=structuredClone(p);assert.doesNotThrow(()=>assertImagePlan(validateImagePlan(p),context()));assert.doesNotMatch(observationHandoff(p,context()),/99\s*cm/);assert.deepEqual(p,original);p.prompt=claim;assert.throws(()=>assertImagePlan(validateImagePlan(p),context()),claim);
   }
   for(const mutate of [
     (p:any)=>{p.prompt=excludedPackagingNotes[0];},

@@ -37,17 +37,20 @@ export function assertMiaoshouHistory(db: DatabaseSync): void {
       if (row && row.product_id !== receipt.productId) return fail();
     }
   }
+  if(db.prepare("SELECT 1 FROM sqlite_master WHERE name='source_snapshots' AND type='table'").get())for(const row of db.prepare('SELECT id FROM source_snapshots').iterate()){
+    const source=readSourceSnapshot(db,String(row.id));if(!source)return fail('STORAGE');assertMiaoshouFactHistory(db,source.receipt);
+  }
 }
 export function getReceipt(db: DatabaseSync, rawProductId: unknown): MiaoshouReceipt | null {
   const productId = uuid(rawProductId);
-  const adopted=adoptedSourceReceipt(db,productId);if(adopted)return adopted;
+  const adopted=adoptedSourceReceipt(db,productId);if(adopted)assertMiaoshouFactHistory(db,adopted);
   try {
     const rows = db.prepare("SELECT id,record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.productId')=?").all(productId);
-    if (!rows.length) return null; if (rows.length !== 1) return fail('STORAGE');
+    if (!rows.length) return adopted; if (rows.length !== 1) return fail('STORAGE');
     const receipt = validateMiaoshouReceipt(JSON.parse(String(rows[0].record_json)));
     if (rows[0].id !== receipt.id || receipt.productId !== productId) return fail('STORAGE');
     assertMiaoshouFactHistory(db, receipt);
-    return receipt;
+    return adopted??receipt;
   } catch (error) { if (error instanceof MiaoshouError) throw error; return fail('STORAGE'); }
 }
 function result(receipt: MiaoshouReceipt, duplicate: boolean): MiaoshouImportResult {
@@ -62,6 +65,7 @@ export function persistImport(db:DatabaseSync,_store:WorkspaceStore,snapshot:Mia
       .map(row=>validateMiaoshouReceipt(JSON.parse(String(row.record_json)))).filter(receipt=>sourceIdentity(receipt.snapshot,accountScope,mode)===identity);
     if(originals.length>1)return fail('STORAGE');
     const original=originals[0],productId=original?.productId??randomUUID();
+    if(original){assertMiaoshouFactHistory(db,original);const adopted=adoptedSourceReceipt(db,productId);if(adopted)assertMiaoshouFactHistory(db,adopted);}
     let prior=original?readSourceAdoption(db,productId):null;
     if(original&&!prior){assertMiaoshouFactHistory(db,original);prior=adoptReceivedSource(db,saveSourceSnapshot(db,original),null,true);}
     const known=original?db.prepare("SELECT id FROM source_snapshots WHERE json_extract(record_json,'$.receipt.fingerprint')=?").get(contentFingerprint):null;

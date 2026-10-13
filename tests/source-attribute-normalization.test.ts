@@ -154,6 +154,8 @@ test('duplicate imports leave historical JSON, facts and saved context fingerpri
   const legacy=structuredClone(f.receipt) as MiaoshouReceipt & {factNormalizations?:Trace};delete legacy.factNormalizations;
   f.db.prepare('UPDATE facts SET name=?,value=? WHERE id=?').run(f.snapshot.attributes[0].name,f.snapshot.attributes[0].value,f.product.facts[0].id);
   const oldJson=JSON.stringify(legacy,null,2);f.db.prepare('UPDATE miaoshou_receipts SET record_json=? WHERE id=?').run(oldJson,legacy.id);
+  // A genuine legacy receipt predates source snapshots/adoption/scopes; do not relabel a current sidecar as legacy.
+  f.db.prepare('DELETE FROM product_source_adoptions WHERE id=?').run(f.product.id);f.db.prepare("DELETE FROM source_snapshots WHERE json_extract(record_json,'$.receipt.productId')=?").run(f.product.id);f.db.prepare("DELETE FROM product_fact_scopes WHERE json_extract(record_json,'$.productId')=?").run(f.product.id);
   const before=f.store.getProduct(f.product.id),{context,draft}=listing(before),sha=listingFingerprint(context);
   assert.equal(f.again().duplicate,true);assert.equal(f.db.prepare('SELECT record_json FROM miaoshou_receipts WHERE id=?').get(legacy.id)!.record_json,oldJson);
   assert.deepEqual(f.store.getProduct(before.id),before);assert.deepEqual(getReceipt(f.db,before.id),legacy);assert.equal(listingFingerprint(buildListingContext(draft,f.store.getProduct(before.id),1)),sha);
@@ -247,7 +249,7 @@ test('backup rejects a forged trace and known cross-product identity association
 });
 
 test('failure after fact insertion rolls back facts, trace, product and audit as one transaction',t=>{
-  const f=fixture(t,[]),snapshot={...f.snapshot,remoteId:'101',attributes:[{name:'材质',value:'Ｓｉｌｉｃｏｎｅ'}]};
+  const f=fixture(t,[]),snapshot={...f.snapshot,remoteId:'101',sources:f.snapshot.sources.map(source=>({...source,sourceItemId:'654321',sourceItemUrl:'https://detail.1688.com/offer/654321.html'})),attributes:[{name:'材质',value:'Ｓｉｌｉｃｏｎｅ'}]};
   const counts=()=>['products','variants','facts','product_workspaces','miaoshou_receipts','audit_events'].map(table=>f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n),before=counts();
   f.db.exec("CREATE TRIGGER reject_new_source_receipt BEFORE INSERT ON miaoshou_receipts BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END");
   assert.throws(()=>persistImport(f.db,f.store,snapshot,f.mapping,scope,'live',date));assert.deepEqual(counts(),before);
@@ -259,4 +261,11 @@ test('different original names normalizing to one category field retain both fac
   assert.equal(trace(f.receipt)!.entries.length,2);assert.notEqual(f.product.facts[0].id,f.product.facts[1].id);
   assert.equal(listing(f.product).mapped.age_range_description,undefined);assert.throws(()=>assertClaim(f.product,'age_range_description','Adult'));
   const {draft,context}=listing(f.product);assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Adult'}]}},context).length);
+});
+
+test('adopted version traces cannot bypass original and versioned fact ownership validation',t=>{
+ const f=fixture(t,[{name:'材质',value:'Ｓｉｌｉｃｏｎｅ'}]),other=f.store.createProduct(),factId=randomUUID();
+ f.store.saveProduct({...saveInput(other),facts:[{id:factId,name:'材质',value:'Silicone',state:'human_confirmed',source:'manual',sourceRef:''}]});
+ const row=f.db.prepare('SELECT id,record_json FROM source_snapshots').get()!,source=JSON.parse(String(row.record_json));source.receipt.factNormalizations.entries[0].factId=factId;f.db.prepare('UPDATE source_snapshots SET record_json=? WHERE id=?').run(JSON.stringify(source),row.id);
+ assert.throws(()=>getReceipt(f.db,f.product.id));assert.throws(()=>assertMiaoshouHistory(f.db));assert.throws(()=>f.again());assert.deepEqual(f.store.getProduct(f.product.id),f.product);
 });

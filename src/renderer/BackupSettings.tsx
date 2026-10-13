@@ -1,3 +1,5 @@
+import { useFormGuard } from './FormGuard';
+import { RetentionSettings } from './RetentionSettings';
 import { useState } from 'react';
 import { Copy, Download, LockKeyhole, RotateCcw, Shuffle } from 'lucide-react';
 import type { TaskRunner } from './amazon-ui';
@@ -7,6 +9,7 @@ export function BackupSettings({ busy, run }: { busy: boolean; run: TaskRunner }
   const [confirmation, setConfirmation] = useState('');
   const [notice, setNotice] = useState('');
   const [copying, setCopying] = useState(false);
+  useFormGuard({dirty:()=>!!password||!!confirmation,save:async()=>{setNotice('备份口令不会单独保存，请先创建备份或恢复；也可放弃输入后离开。');return false;},discard:()=>{setPassword('');setConfirmation('');setNotice('');}});
   const disabled = busy || copying;
   const valid = password.length >= 12 && password.length <= 256;
   function generate() {
@@ -33,14 +36,14 @@ export function BackupSettings({ busy, run }: { busy: boolean; run: TaskRunner }
     setPassword(''); setConfirmation('');
     setNotice(restore ? '恢复完成，工作台即将重新启动。' : `已备份 ${result.productCount} 件商品、${result.assetCount} 张图片及上架记录。${result.expiresAt ? `此备份将于 ${new Date(result.expiresAt).toLocaleDateString('zh-CN')} 到期清理。` : ''}`);
   }
-  return <section className="settings-section backup-settings"><div className="settings-section-title"><LockKeyhole size={19} /><div><h3>加密备份与恢复</h3><p>保存商品、图片和上架记录，便于换机或恢复资料。</p></div></div>
+  return <><RetentionSettings busy={busy}/><section className="settings-section backup-settings"><div className="settings-section-title"><LockKeyhole size={19} /><div><h3>加密备份与恢复</h3><p>保存商品、图片和上架记录，便于换机或恢复资料。</p></div></div>
     <p className="settings-help">备份口令用于加密整个文件，请自行妥善保存。授权密钥不进入备份，恢复后需要重新导入店铺授权。目前支持最多 256 MB 原始数据。</p>
-    <p className="settings-help">含 Amazon 资料的完整备份会随数据保留期限到期删除。工作台会在启动和“清理到期数据”时检查已登记的备份；自行复制、改名的副本需要自行按期限清理。</p>
+    <p className="settings-help">完整备份与素材清理是不同操作。素材清理只在确认预览后执行，备份保留期限按已登记的政策处理；自行复制、改名的副本需要自行管理。</p>
     <div className="backup-fields"><label className="field"><span>备份口令</span><input type="password" aria-label="备份口令" autoComplete="off" minLength={12} maxLength={256} value={password} placeholder="至少 12 个字符" disabled={disabled} onChange={event => { setPassword(event.target.value); setNotice(''); }} /></label>
       <div className="workflow-actions"><button type="button" className="button secondary" disabled={disabled} onClick={generate}><Shuffle size={15} />随机生成口令</button><button type="button" className="button secondary" disabled={disabled || !valid} onClick={() => void copy()}><Copy size={15} />复制口令</button></div>
       <label className="field"><span>创建备份时确认口令</span><input type="password" aria-label="确认备份口令" autoComplete="off" maxLength={256} value={confirmation} disabled={disabled} onChange={event => setConfirmation(event.target.value)} placeholder="恢复已有备份时无需填写" /></label></div>
     <div className="workflow-actions"><button type="button" className="button secondary" disabled={disabled || !valid || password !== confirmation} onClick={() => void operate(false)}><Download size={15} />创建加密备份</button>
       <button type="button" className="button secondary" disabled={disabled || !valid} onClick={() => void operate(true)}><RotateCcw size={15} />从备份恢复</button></div>
     {notice && <p className="amazon-notice" role="status">{notice}</p>}
-  </section>;
+  </section></>;
 }

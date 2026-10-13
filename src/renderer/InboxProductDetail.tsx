@@ -1,3 +1,4 @@
+import { SourceAdoptionPanel } from './SourceAdoptionPanel';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, X } from 'lucide-react';
 import type { ProductDetail } from '../shared/contracts';
@@ -11,11 +12,11 @@ import { InboxDialog } from './InboxDialog';
 import { InboxSourceImage } from './InboxSourceImage';
 import { CollectionSource } from './CollectionSource';
 
-interface Props { productId: string; hasSourceUpdate?: boolean; busy: boolean; onClose: () => void; onMove: (ids: string[], lane: WorkspaceLane, open?: boolean) => void }
+interface Props { productId: string; hasSourceUpdate?: boolean; busy: boolean; onClose: () => void; onChanged:()=>Promise<unknown>; onMove: (ids: string[], lane: WorkspaceLane, open?: boolean) => void }
 const measurementFields: MeasurementField[] = ['item.length', 'item.width', 'item.height', 'item.diameter', 'item.weight', 'package.length', 'package.width', 'package.height', 'package.weight'];
 const galleryPageSize = 8;
 
-export function InboxProductDetail({ productId, hasSourceUpdate, busy, onClose, onMove }: Props) {
+export function InboxProductDetail({ productId, hasSourceUpdate, busy, onClose, onMove, onChanged }: Props) {
   const [product, setProduct] = useState<ProductDetail | null>(null), [receipt, setReceipt] = useState<MiaoshouReceipt | null>(null);
   const [loading, setLoading] = useState(true), [error, setError] = useState(''), [sourceError, setSourceError] = useState(''), [reload, setReload] = useState(0);
   const [skuKey, setSkuKey] = useState(''), [imageIndex, setImageIndex] = useState(0), [galleryPage, setGalleryPage] = useState(0);
@@ -78,6 +79,7 @@ export function InboxProductDetail({ productId, hasSourceUpdate, busy, onClose, 
     <div className="inbox-dialog-body inbox-product-body">
       {loading ? <div className="inbox-detail-loading" role="status"><LoaderCircle className="spin" size={23} /><span>正在读取商品资料…</span></div> : error ? <div className="inbox-detail-loading" role="alert"><p>{error}</p><button type="button" className="button secondary" onClick={() => setReload(value => value + 1)}>重试读取商品</button></div> : product && <>
         {sourceError && <div className="inbox-inline-error" role="alert"><span>来源资料读取失败：{sourceError}</span><button type="button" className="text-button" onClick={() => setReload(value => value + 1)}>重试读取来源</button></div>}
+        {product&&<SourceAdoptionPanel product={product} busy={busy} onAdopted={value=>{setProduct(value);returnToImported();void window.red.getMiaoshouReceipt(productId).then(setReceipt).catch(cause=>setSourceError(errorText(cause)));void onChanged();}}/>}
         {(hasSourceUpdate || latestRequested) && <div className="inbox-source-update"><div><p role="status">{latestRequested && latestState === 'loading' ? '正在读取来源新版本…' : showingLatest ? '当前展示最近同步的来源新版本，仅供查看，入箱资料未改变。' : latestRequested && latestState === 'empty' ? '暂未找到可用的新版本，当前仍展示入箱资料。' : latestRequested && latestState === 'failed' ? '新版本读取失败，当前仍展示入箱资料。' : '来源有更新，当前展示入箱时保留的资料。'}</p>{latestRequested && latestState === 'failed' && <p role="alert">{latestError}</p>}</div><div className="inbox-source-version-actions">{latestRequested && (latestState === 'empty' || latestState === 'failed') && <button type="button" className="text-button" onClick={() => { setLatestState('loading'); setLatestRetry(value => value + 1); }}>重试读取新版本</button>}<button type="button" className="button secondary" onClick={() => { if (latestRequested) returnToImported(); else { setLatestState('loading'); setLatestRequested(true); } }}>{latestRequested ? '返回入箱资料' : '查看来源新版本'}</button></div></div>}
         {latestRequested && latestState === 'loading' ? <div className="inbox-detail-loading" role="status"><LoaderCircle className="spin" size={23} /><span>正在读取来源新版本…</span></div> : <div className="inbox-detail-grid">
           <section className="inbox-gallery" aria-label="商品图集">

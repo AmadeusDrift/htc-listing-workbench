@@ -1,3 +1,4 @@
+import { ActualQuoteDetailsPanel } from './ActualQuoteDetailsPanel';
 import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { useEffect } from 'react';
@@ -31,6 +32,7 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping, memory
     {(['FAILED','SCREENED','WAITING'].includes(item.status)||['READBACK','LABELS'].includes(item.stage)&&item.status!=='DONE'||item.error)&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{automaticItemReason(item)}</p>}
     {expanded && <div className="automatic-sale-body">
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
+      {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision}/>}
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}

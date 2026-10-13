@@ -53,13 +53,18 @@ export function adoptedSourceReceipt(db:DatabaseSync,productId:string){
 }
 export function previewSourceAdoption(db:DatabaseSync,productId:string){
   const state=readSourceAdoption(db,productId);if(!state)return null;
-  const product=db.prepare('SELECT revision,title,description FROM products WHERE id=?').get(productId);
+  // One SQLite statement binds every displayed current value to expectedRevision.
+  // Separate renderer product reads can otherwise show old facts with a new CAS token.
+  const product=db.prepare(`SELECT revision,title,description,
+    (SELECT json_group_array(json_object('id',id,'name',name,'value',value)) FROM (SELECT id,name,value FROM facts WHERE product_id=products.id ORDER BY position)) AS facts_json,
+    (SELECT json_group_array(json_object('id',id,'originalSpec',original_spec,'purchasePrice',purchase_price)) FROM (SELECT id,original_spec,purchase_price FROM variants WHERE product_id=products.id ORDER BY position)) AS variants_json
+    FROM products WHERE id=?`).get(productId);
   if(!product)throw new UserFacingError('来源主档不存在');
   const candidate=readSourceSnapshot(db,state.latestSnapshotId)!;
   return{productId,expectedRevision:Number(product.revision),snapshotId:candidate.id,source:candidate.receipt.snapshot,
     pending:state.latestSnapshotId!==state.adoptedSnapshotId,frozen:state.frozen||hasStarted(db,productId),
     requiresManualConfirmation:Number(product.revision)!==state.productRevision,
-    current:{title:String(product.title),description:String(product.description)}};
+    current:{title:String(product.title),description:String(product.description),facts:JSON.parse(String(product.facts_json)) as {id:string;name:string;value:string}[],variants:JSON.parse(String(product.variants_json)) as {id:string;originalSpec:string;purchasePrice:string}[]}};
 }
 /** Explicit replacement command, after preview. Never adopts into already processed drafts/tasks. */
 export function adoptSource(db:DatabaseSync,input:{productId:string;expectedRevision:number;snapshotId:string;confirmReplaceManual:boolean}):SourceAdoption{

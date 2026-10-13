@@ -16,7 +16,8 @@ import type { AutomaticListingDependencies } from '../src/main/automatic-listing
 import type { AmazonDraft, AmazonTarget } from '../src/shared/amazon-contracts.ts';
 import type { ProductDetail } from '../src/shared/contracts.ts';
 import type { ExecutionTask } from '../src/shared/execution-contracts.ts';
-import { defaultListingRules } from '../src/shared/listing-rules.ts';
+import { defaultListingRules, quoteListing } from '../src/shared/listing-rules.ts';
+import { pricingQualificationIssue } from '../src/main/pricing/qualification.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { fingerprint } from '../src/main/execution/records.ts';
 import { imageWorkflowDraftStamp } from '../src/main/image-workflow/records.ts';
@@ -28,6 +29,7 @@ import { sourceStamp, validateAutomaticListingTask } from '../src/main/automatic
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { currentFactAuthority } from '../src/main/amazon/fact-authority.ts';
+import { inheritLegacyPurposeSettings } from '../src/main/ai/purpose-routing.ts';
 
 function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   mkdirSync(resolve('.test-data'), { recursive: true });
@@ -53,12 +55,17 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
       executionTargetScope: () => ({ target: structuredClone(target), generation: 1 }),
       listDrafts: () => [...drafts.values()].map(value => structuredClone(value)),
       getDraft: id => structuredClone(drafts.get(id)!),
-      async prepareDrafts(raw) {
+      async prepareDrafts(raw, plans) {
         const selected = product.variants.find(value => value.id === (raw as any).items[0].variantId)!;
         const value = { id: randomUUID(), productId: product.id, productRevision: product.revision, variantId: selected.id, sku: selected.sku,
           targetId: target.id, targetName: target.name, sellerId: target.sellerId, marketplaceId: target.marketplaceId, mode, revision: 1, listingProgram: mode === 'live' ? 'haul' : 'standard',
           schema: { targetId: target.id, productType: 'BOX', requirements: 'LISTING', parentageLevel: 'NONE', locale: target.locale }, state: 'BLOCKED', attributes: {}, submittedAt: null,
           localIssues: [], previewIssues: [], listingIssues: [], createdAt: now, updatedAt: now } as unknown as AmazonDraft;
+        if (mode === 'live') {
+          const recipe=plans?.[0]?.recipe;
+          const priced=applyBusinessRules({product,variant:selected,target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:recipe?recipe.totalCostCny:Number(selected.purchasePrice),saleUnit:recipe,now:new Date()},rules);
+          value.attributes=priced.attributes;value.businessRules=priced.report;
+        }
         drafts.set(value.id, value);
         return { items: [{ productId: product.id, variantId: selected.id, sku: value.sku, draft: structuredClone(value), disposition: 'CREATED', issues: [], error: null }] } as any;
       },
@@ -112,11 +119,29 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   };
   const cleanups:(()=>Promise<void>)[]=[];
   const service = new AutomaticListingService(directory, dependencies);
-  t.after(async () => { await service.close(); for(const close of cleanups)await close(); rmSync(directory, { recursive: true, force: true }); });
+  t.after(async () => { release?.(); await service.close(); for(const close of cleanups)await close(); rmSync(directory, { recursive: true, force: true }); });
   const create = () => service.create({ productIds: [product.id], targetId: target.id, profileId: 'alpha', productType: 'BOX' });
   return { service, directory, dependencies, cleanups, create, product, target, profile, rules, drafts, executions, calls, workflow,
     setReady: () => { ready = true; }, failImages: () => { imageFailure = true; },
     holdImages: (callback: () => void) => { started = callback; }, releaseImages: () => release?.() };
+}
+
+/** A persisted pre-v3 report: no dependency digest existed in this format. */
+function legacyV2Pricing(f:ReturnType<typeof fixture>,draft:AmazonDraft) {
+  const inputs={costCny:2.4,dimensionsInches:[1.97,1.97,1.97] as [number,number,number],weightPounds:.22};
+  const attributeInputs={item_package_dimensions:[{length:{value:1.97,unit:'inches'},width:{value:1.97,unit:'inches'},height:{value:1.97,unit:'inches'}}],item_package_weight:[{value:.22,unit:'pounds'}]};
+  const quote=quoteListing(inputs,f.rules.pricing);
+  draft.attributes={...structuredClone(attributeInputs),number_of_items:[{value:1}],purchasable_offer:[{audience:'BZR',currency:'USD',marketplace_id:f.target.marketplaceId,our_price:[{schedule:[{value_with_tax:quote.price}]}]}]};
+  draft.businessRules={revision:f.rules.revision,fields:{},notices:[],quote,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:2.4,quantity:1,saleUnitCostCny:2.4},pricingDecision:{version:2,status:'quoted',code:'QUOTE_VALID',quoteError:null,inputs,attributeInputs,evidence:{cost:'confirmed_cny',dimensions:'business_default',weight:'business_default',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:null,weightPounds:null}}}};
+  assert.equal(pricingQualificationIssue(draft,f.rules),null,'v2 fixture must qualify before the test mutates its evidence');
+}
+
+async function reachedStage(event:Promise<void>, operation:Promise<void>, describe:()=>unknown) {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    await Promise.race([event,operation.then(()=>{throw new Error(`Expected test stage was never reached: ${JSON.stringify(describe())}`);}),
+      new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error(`Timed out waiting for test stage: ${JSON.stringify(describe())}`)),15_000);})]);
+  } finally { clearTimeout(timer); }
 }
 
 test('resume IPC survives background observation while its confirmation dialog is open', async t => {
@@ -235,14 +260,13 @@ test('confirmed pricing rejection is terminal and excluded only in the same targ
 for(const mutation of ['precision','partial','null','unsupported','missing-snapshot'] as const)test(`actual automatic prepare blocks a stale v2 successful quote before images: ${mutation}`,async t=>{
   const f=fixture(t,'live'),prepare=f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts=async input=>{
-    const result=await prepare(input),draft=result.items[0].draft!,resolved=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},f.rules);
-    draft.attributes=resolved.attributes;draft.businessRules=resolved.report;
-    assert.ok(draft.businessRules.quote);assert.equal(draft.businessRules.pricingDecision?.version,2);
+    const result=await prepare(input),draft=result.items[0].draft!;
+    legacyV2Pricing(f,draft);
     if(mutation==='precision')draft.attributes.item_package_weight=[{value:.22000001,unit:'pounds'}];
     if(mutation==='partial')draft.attributes.item_package_dimensions=[{length:{value:1.97,unit:'inches'}}];
     if(mutation==='null')draft.attributes.item_package_weight=null;
-    if(mutation==='unsupported')(draft.businessRules.pricingDecision as any).version=3;
-    if(mutation==='missing-snapshot')delete (draft.businessRules.pricingDecision as any).attributeInputs;
+    if(mutation==='unsupported')(draft.businessRules!.pricingDecision as any).version=99;
+    if(mutation==='missing-snapshot')delete (draft.businessRules!.pricingDecision as any).attributeInputs;
     f.drafts.set(draft.id,structuredClone(draft));return result;
   };
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
@@ -252,10 +276,10 @@ for(const mutation of ['precision','partial','null','unsupported','missing-snaps
 for(const phase of ['source-color','after-color','field-intent','recheck'] as const)test(`automatic repair rechecks v2 before new paid ${phase}`,async t=>{
   const f=fixture(t,'live'),task=await f.create(),row=task.items[0];
   const result=await f.dependencies.amazon.prepareDrafts({targetId:f.target.id,productType:'BOX',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US',listingProgram:'haul',items:[{productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id,attributes:{}}]});
-  const draft=result.items[0].draft!,priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:2.4,now:new Date()},f.rules);
-  draft.attributes=priced.attributes;draft.businessRules=priced.report;
+  const draft=result.items[0].draft!;legacyV2Pricing(f,draft);
   if(phase!=='after-color')draft.attributes.item_package_weight=null;
   f.drafts.set(draft.id,structuredClone(draft));row.draftId=draft.id;row.stage='IMAGES';
+  const child=f.dependencies.execution.create({draftIds:[draft.id],profileId:'alpha'});row.executionTaskIds=[child.id];row.repairAttempts=1;
   row.repair={phase:phase==='recheck'?'RECHECK_PENDING':'FIELDS_PENDING',sourceWorkflowId:randomUUID(),draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft),remaining:phase==='recheck'?[]:['color: required']};
   let colors=0,fields=0,intents=0,rechecks=0;
   f.dependencies.prepareSourceColors=async()=>{colors++;const changed=f.drafts.get(draft.id)!;changed.attributes.item_package_weight=null;return {aiCalls:0,evidenceChanged:false};};
@@ -266,11 +290,11 @@ for(const phase of ['source-color','after-color','field-intent','recheck'] as co
   assert.equal(colors,phase==='after-color'?1:0);assert.equal(fields,0);assert.equal(intents,0);assert.equal(rechecks,0);
 });
 
-test('pricing text without typed evidence remains unclassified and retained',async t=>{
-  const f=fixture(t),prepare=f.dependencies.amazon.prepareDrafts;
+test('pricing text without typed evidence requires evidence and never proves a rule rejection',async t=>{
+  const f=fixture(t,'live'),prepare=f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts=async input=>{const result=await prepare(input),draft=result.items[0].draft!;draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};f.drafts.set(draft.id,structuredClone(draft));return result;};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  const row=f.service.get(task.id).items[0];assert.equal(row.status,'FAILED');assert.equal((row as any).outcome.kind,'UNCLASSIFIED');
+  const row=f.service.get(task.id).items[0];assert.equal(row.status,'FAILED');assert.equal(row.outcome?.kind,'NEEDS_INPUT');assert.equal(row.outcome?.code,'PRICING_EVIDENCE_STALE');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
   const queue=await (f.service as any).queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].pendingCount,1);assert.equal(queue.products[0].eligibleCount,0);
 });
 
@@ -441,7 +465,7 @@ test('child sales SKUs keep images while waiting for their parent and resume aut
   f.dependencies.resolveFamily=async({plans})=>plans.map(plan=>({...plan,parentage:'CHILD',parentSku:plan.baseSku,variationTheme:'COLOR',relationReason:'Schema 允许颜色',familyResolved:true}));
   const prepare=f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts=async(raw,plans)=>{
-    assert.equal((raw as any).parentageLevel,'CHILD');const result=await prepare(raw);
+    assert.equal((raw as any).parentageLevel,'CHILD');const result=await prepare(raw,plans);
     const draft=result.items[0].draft!;draft.sku=plans![0].sku;draft.salesPlan=plans![0];draft.schema.parentageLevel='CHILD';f.drafts.set(draft.id,structuredClone(draft));return result;
   };
   f.dependencies.ensureParent=async child=>{assert.equal(f.workflow.get(child.id)?.status,'COMPLETED');return {draftId:parentDraftId,ready:parentReady};};
@@ -473,11 +497,14 @@ for(const action of ['pause','cancel'] as const)for(const resumeParents of [fals
   const classify=(f.service as any).classifyFailure.bind(f.service);
   (f.service as any).classifyFailure=async(...args:any[])=>{await classify(...args);entered();await held;};
   f.dependencies.procurement.ensureAutomaticBatch=()=>{throw new UserFacingError('Local procurement fixture failure');};
-  f.setReady();const pending=f.service.refreshWaiting();await started;
-  f.service[action](task.id);const stopped=f.service.get(task.id),calls=structuredClone(f.calls);release();await pending;await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
-  const saved=f.service.get(task.id);assert.equal(saved.status,action==='pause'?'PAUSED':'CANCELLED');
-  assert.equal(f.calls.batches,calls.batches);assert.equal(f.calls.labels,calls.labels);assert.equal(f.calls.submissions,calls.submissions);
-  assert.deepEqual(saved.items.at(-1),stopped.items.at(-1),'the later readback row stays untouched');
+  f.setReady();const pending=f.service.refreshWaiting();
+  try {
+    await reachedStage(started,pending,()=>f.service.get(task.id));
+    f.service[action](task.id);const stopped=f.service.get(task.id),calls=structuredClone(f.calls);release();await pending;await new Promise(resolve=>setImmediate(resolve));await f.service.waitForIdle();
+    const saved=f.service.get(task.id);assert.equal(saved.status,action==='pause'?'PAUSED':'CANCELLED');
+    assert.equal(f.calls.batches,calls.batches);assert.equal(f.calls.labels,calls.labels);assert.equal(f.calls.submissions,calls.submissions);
+    assert.deepEqual(saved.items.at(-1),stopped.items.at(-1),'the later readback row stays untouched');
+  } finally {release();await pending;}
 });
 
 test('changed scope after native confirmation blocks before paid or remote work', async t => {
@@ -490,7 +517,8 @@ test('changed scope after native confirmation blocks before paid or remote work'
 test('pause during images revokes later publishing, and explicit resume reuses completed images', async t => {
   const f = fixture(t), task =await f.create();
   let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
-  f.holdImages(entered); f.service.startAuthorized(f.service.prepareStart(task.id)); await started;
+  f.holdImages(entered); f.service.startAuthorized(f.service.prepareStart(task.id));
+  await reachedStage(started,f.service.waitForIdle(),()=>f.service.get(task.id));
   f.service.pause(task.id); f.releaseImages(); await f.service.waitForIdle();
   assert.equal(f.calls.submissions, 0); assert.equal(f.service.get(task.id).status, 'PAUSED');
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle(); await f.service.refreshWaiting();
@@ -548,25 +576,28 @@ test('an execution retry cannot publish completed images incompatible with the c
 });
 
 test('an infeasible saved price quote blocks before image generation and shows its real constraint', async t => {
-  const f=fixture(t),prepare=f.dependencies.amazon.prepareDrafts,originalRules=structuredClone(f.rules);
+  const f=fixture(t,'live'),prepare=f.dependencies.amazon.prepareDrafts,originalRules=structuredClone(f.rules);
   const reason='售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置';
   f.dependencies.amazon.prepareDrafts=async(...args)=>{const result=await prepare(...args),draft=result.items[0].draft!;
-    draft.businessRules={revision:1,fields:{},notices:[reason],quote:null,bundleQuantity:1};
+    const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:100,now:new Date()},f.rules);
+    draft.attributes=priced.attributes;draft.businessRules=priced.report;draft.businessRules.notices=[reason];
     draft.localIssues=[{code:'LOCAL_required',message:'our_price: missing',severity:'ERROR',attributeNames:['purchasable_offer'],category:'field',source:'local',autoFixable:false}];
     f.drafts.set(draft.id,structuredClone(draft));return result;};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  const saved=f.service.get(task.id);assert.match(saved.items[0].error!,/定价.*售价上限内无法满足目标 ROI/);
+  const saved=f.service.get(task.id);assert.equal(saved.items[0].outcome?.code,'ROI_MAX_PRICE');assert.match(saved.items[0].outcome!.message,/上限/);
   assert.equal(saved.items[0].stage,'DRAFT');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.deepEqual(f.rules,originalRules);
-  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();assert.equal(f.calls.images,0);
+  assert.equal(saved.items[0].status,'SCREENED');assert.throws(()=>f.service.prepareStart(task.id),/已经结束/);assert.equal(f.calls.images,0);
 });
 
 test('a definitive pricing constraint discovered during field repair is not sent for another paid repair',async t=>{
-  const f=fixture(t);let repairs=0,rechecks=0;
+  const f=fixture(t,'live');let repairs=0,rechecks=0;
   f.dependencies.execution.startAuthorized=approved=>{const child=f.executions.get(approved.id)!;child.status='NEEDS_ATTENTION';child.items[0].steps=[{name:'validate',status:'FAILED',attempts:1,error:'our_price missing'}];return structuredClone(child);};
-  f.dependencies.repairFields=async id=>{repairs++;const draft=f.drafts.get(id)!;draft.revision++;draft.businessRules={revision:1,fields:{},quote:null,bundleQuantity:1,notices:['售价上限内无法满足目标 ROI，请核对采购成本、包装参数或定价设置']};return {draft:structuredClone(draft),remaining:['our_price missing']};};
+  f.dependencies.repairFields=async id=>{repairs++;const draft=f.drafts.get(id)!;draft.revision++;
+    const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],target:f.target,schema:realAmazonSchema(),attributes:{},measurements:{},costCny:100,now:new Date()},f.rules);
+    draft.attributes=priced.attributes;draft.businessRules=priced.report;return {draft:structuredClone(draft),remaining:['our_price missing']};};
   f.dependencies.recheckImage=async input=>{rechecks++;return f.dependencies.amazon.getDraft(input.draftId);};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  assert.equal(repairs,1);assert.equal(rechecks,0);assert.match(f.service.get(task.id).items[0].error!,/定价.*售价上限内无法满足目标 ROI/);
+  assert.equal(repairs,1);assert.equal(rechecks,0);assert.equal(f.service.get(task.id).items[0].outcome?.code,'ROI_MAX_PRICE');
   assert.equal(f.service.get(task.id).items[0].repair?.phase,'FIELDS_PENDING');
 });
 
@@ -1145,7 +1176,7 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
     if(outcome==='unknown'&&p.claims.some((c:any)=>c.value==='Blue'))throw new TypeError('synthetic unknown');
     return chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Red'],appearance:[],claims:p.claims.map((c:any)=>({claimId:c.id,value:'Red',visibility:'visible'}))}))});
   }});
-  ai.saveConnection({id:'deepseek',apiKey:'synthetic-source-state-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-source-state-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
   f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{
     materializeSourceSnapshot(f.directory,f.product,input.variantIds);
@@ -1177,7 +1208,7 @@ test('release four-SKU synthetic sample separates rule, missing facts and UNKNOW
     const observed=color==='Blue'?'Red':color;
     return chat({kind:'source-image-consistency',assets:payload.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:[observed],appearance:[],claims:payload.claims.map((c:any)=>({claimId:c.id,value:observed,visibility:'visible'}))}))});
   }});
-  ai.saveConnection({id:'deepseek',apiKey:'synthetic-release-observation'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-release-observation'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
   f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{
     materializeSourceSnapshot(f.directory,f.product,input.variantIds);
@@ -1187,7 +1218,7 @@ test('release four-SKU synthetic sample separates rule, missing facts and UNKNOW
   f.dependencies.amazon.prepareDrafts=async raw=>{
     const result=await prepare(raw),draft=result.items[0].draft!;
     if(draft.variantId===f.product.variants[2].id){
-      draft.attributes={batteries_required:[{value:false}]};
+      draft.attributes={...draft.attributes,batteries_required:[{value:false}]};
       draft.localIssues=currentFactAuthority(f.product,realAmazonSchema(),f.target,draft.attributes).issues;
       assert.ok(draft.localIssues.some(issue=>issue.code==='FACT_AUTHORITY_REQUIRED'));
     }
@@ -1249,7 +1280,7 @@ test('a format-failed source sibling resumes from diagnostics after a healthy si
     sends++;const p=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text);
     return chat(p.claims.some((c:any)=>c.value==='Blue')?{bad:true}:{kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Red'],appearance:[],claims:[]}))});
   }});
-  ai.saveConnection({id:'deepseek',apiKey:'synthetic-sibling-recovery'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-sibling-recovery'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
   f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{materializeSourceSnapshot(f.directory,f.product,input.variantIds);for(const variantId of input.variantIds)await ai.prepareSourceConsistency({productId:input.productId,productRevision:input.productRevision,variantId},signal,fresh);};
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
@@ -1265,7 +1296,7 @@ test('legacy sourcesPrepared row recovers an OUTPUT_INVALID diagnostic locally a
   const f=fixture(t,'live');materializeSourceSnapshot(f.directory,f.product,[f.product.variants[0].id]);
   const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0;
   const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async()=>{sends++;return chat({bad:true});}});
-  ai.saveConnection({id:'deepseek',apiKey:'synthetic-recovery-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  ai.saveConnection({id:'deepseek',apiKey:'synthetic-recovery-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});
   const input={productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id},context=ai.sourceConsistencyContext(input);
   await assert.rejects(ai.observeSourceConsistency(context,()=>{}));const call=ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');
@@ -1417,7 +1448,9 @@ test(`legacy pricing resume locally recomputes current cost ${cost} ${spec} with
   await f.dependencies.prepareSourceConsistency!({productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]},new AbortController().signal,()=>{});
   row.sourceStamp=sourceStamp(f.product);
   const prepared=await f.dependencies.amazon.prepareDrafts({items:[{variantId:row.variantId}]}),draft=prepared.items[0].draft!;
-  draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};
+  // The historical failed quote had no actual offer; retaining the new fixture's
+  // generated offer while discarding its ownership would falsely make it manual.
+  draft.attributes={};draft.businessRules={revision:1,fields:{},notices:['售价上限内无法满足目标 ROI'],quote:null,bundleQuantity:1};
   draft.previewIssues=spec==='repair'?[]:[{code:'PLATFORM_KEEP',severity:'ERROR',message:'Keep platform error',attributeNames:[]} as any];
   f.drafts.set(draft.id,draft);
   row.draftId=draft.id;row.stage='IMAGES';row.status='FAILED';row.error='售价上限内无法满足目标 ROI';row.sourcesPrepared=true;
@@ -1681,12 +1714,15 @@ for(const action of ['pause','cancel','suspend','confirm','revoke'] as const)tes
 for(const action of ['pause','cancel','close','source'] as const)test(`Schema GET reservation survives in-flight ${action} and does not resume paid work`,async t=>{
   const f=await schemaWaitingFixture(t),counts=structuredClone(f.calls);let release!:()=>void;
   const started=new Promise<void>(resolve=>{f.dependencies.amazon.getSchema=async()=>{resolve();await new Promise<void>(r=>release=r);return {} as any;};});
-  t.mock.timers.tick(30_001);const observation=f.service.refreshWaiting();await started;
-  assert.equal(f.service.get(f.id).items[0].schemaRetry?.usedDelayedRounds,1);
-  let closing:Promise<void>|undefined,closed=false;
-  if(action==='pause')f.service.pause(f.id);else if(action==='cancel')f.service.cancel(f.id);else if(action==='close'){closing=f.service.close().then(()=>{closed=true;});await new Promise(r=>setImmediate(r));assert.equal(closed,false);}else f.product.revision++;
-  release();await observation;await closing;assert.deepEqual(f.calls,counts);
-  if(action!=='close')assert.notEqual(f.service.get(f.id).status,'QUEUED');
+  t.mock.timers.tick(30_001);const observation=f.service.refreshWaiting();
+  try {
+    await reachedStage(started,observation,()=>f.service.get(f.id));
+    assert.equal(f.service.get(f.id).items[0].schemaRetry?.usedDelayedRounds,1);
+    let closing:Promise<void>|undefined,closed=false;
+    if(action==='pause')f.service.pause(f.id);else if(action==='cancel')f.service.cancel(f.id);else if(action==='close'){closing=f.service.close().then(()=>{closed=true;});await new Promise(r=>setImmediate(r));assert.equal(closed,false);}else f.product.revision++;
+    release();await observation;await closing;assert.deepEqual(f.calls,counts);
+    if(action!=='close')assert.notEqual(f.service.get(f.id).status,'QUEUED');
+  } finally {release?.();await observation;}
 });
 test('restart revokes Schema grant and explicit resume retains consumed rounds',async t=>{
   const f=await schemaWaitingFixture(t);t.mock.timers.tick(30_001);await f.service.refreshWaiting();await f.service.close();

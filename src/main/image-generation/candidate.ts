@@ -25,7 +25,7 @@ async function readPrivateFile(directory: string, name: string, limit: number): 
 }
 
 /** Reopens only immutable managed candidate files and verifies their manifest, PNG bytes and native decode. */
-export async function readCandidateFiles(directory: string, rawId: string, decodePreview: (bytes: Buffer) => Buffer): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
+export async function readCandidateFiles(directory: string, rawId: string, decodePreview?: (bytes: Buffer) => Buffer): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
   const id = uuid(rawId);
   try {
     const root = await realpath(directory), candidateDirectory = privateDirectory(privateDirectory(privateDirectory(root, 'image-generation'), 'candidates'), id);
@@ -46,7 +46,7 @@ export async function readCandidateFiles(directory: string, rawId: string, decod
       return { id: uuid(asset.id), sha256: asset.sha256 };
     });
     if (new Set(sourceAssets.map(asset => asset.id)).size !== sourceAssets.length || (raw.mode === 'edit') !== (sourceAssets.length > 0)) throw new Error();
-    const shape = inspectRaster(bytes), previewShape = inspectRaster(preview), decoded = decodePreview(bytes), decodedPreview = decodePreview(preview);
+    const shape = inspectRaster(bytes), previewShape = inspectRaster(preview), decoded = decodePreview ? decodePreview(bytes) : preview, decodedPreview = decodePreview ? decodePreview(preview) : preview;
     if (shape.mimeType !== 'image/png' || shape.width !== raw.width || shape.height !== raw.height || previewShape.mimeType !== 'image/png'
       || inspectRaster(decoded).mimeType !== 'image/png' || inspectRaster(decodedPreview).mimeType !== 'image/png' || decoded.length > 4 * 1024 * 1024 || decodedPreview.length > 4 * 1024 * 1024) throw new Error();
     // Check the complete directory chain again after reads so substituted links cannot escape the candidate root.

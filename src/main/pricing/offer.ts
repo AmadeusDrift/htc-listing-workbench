@@ -1,11 +1,20 @@
 import type { JsonObject, JsonValue } from '../../shared/amazon-contracts.ts';
 import { actualListingPriceFailure, ListingQuoteError } from '../../shared/listing-rules.ts';
-import type { ActualPriceFailureCode, QuoteInput, PricingRules } from '../../shared/listing-rules.ts';
+import type { ActualPriceFailureCode, QuoteFailureCode, QuoteInput, PricingRules } from '../../shared/listing-rules.ts';
 import { isObject } from '../amazon/context.ts';
 
 export type ActualOfferCode = ActualPriceFailureCode | 'ACTUAL_OFFER_INVALID';
-export interface ActualOfferIssue { code: ActualOfferCode; message: string }
+export interface ActualOfferIssue { code: ActualOfferCode | QuoteFailureCode; message: string }
 export const ACTUAL_OFFER_CODES: readonly ActualOfferCode[] = ['ACTUAL_OFFER_INVALID','ACTUAL_PRICE_INVALID','ACTUAL_PRICE_CAP','ACTUAL_PRICE_ROI','ACTUAL_PRICE_MARGIN'];
+
+/** Missing offer or the untouched initial Haul skeleton contains no actual price. */
+export function hasActualOffer(attributes: JsonObject, marketplaceId: string): boolean {
+  if (!Object.hasOwn(attributes,'purchasable_offer')) return false;
+  const offers=attributes.purchasable_offer;
+  return !(Array.isArray(offers) && offers.length===1 && isObject(offers[0])
+    && offers[0].audience==='BZR' && offers[0].marketplace_id===marketplaceId
+    && Object.keys(offers[0]).every(key=>['audience','marketplace_id'].includes(key)));
+}
 
 /** Validate every supplied Haul schedule, including promotions when generation is off. */
 export function actualOfferIssue(attributes: JsonObject, marketplaceId: string, input: QuoteInput, rules: PricingRules, now = Date.now()): ActualOfferIssue | null {
@@ -44,7 +53,7 @@ export function actualOfferIssue(attributes: JsonObject, marketplaceId: string, 
   for (const price of prices) {
     let code: ActualPriceFailureCode | null;
     try { code = actualListingPriceFailure(input,rules,price.value,price.promotion); }
-    catch (error) { if (error instanceof ListingQuoteError) return invalid(price.path,error.message); throw error; }
+    catch (error) { if (error instanceof ListingQuoteError) return {code:error.code,message:error.message}; throw error; }
     if (code) {
       const reasons = { ACTUAL_PRICE_INVALID:'售价无效', ACTUAL_PRICE_CAP:`超过售价上限 $${rules.maxPrice.toFixed(2)}`,
         ACTUAL_PRICE_ROI:`按当前费表计算未满足 ROI > ${rules.targetRoi}`, ACTUAL_PRICE_MARGIN:'低于最低合格售价加已设置加价额' };

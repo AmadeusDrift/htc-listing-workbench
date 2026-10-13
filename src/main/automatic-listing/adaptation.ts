@@ -107,7 +107,7 @@ export function applyAdaptationRows(task:AutomaticListingTask,deps:AutomaticList
         row.repair={...row.repair,draftRevision:updated.revision,draftStamp:imageWorkflowDraftStamp(updated),remaining:[...new Set([...(newPricing?[newPricing]:[]),...withoutDeferredImageRemaining(updated,(row.repair.remaining??[]).filter(m=>m!==oldPricing)),...nonDeferredImageIssues(updated).map(issue=>issue.attributeNames.join('、')+'：'+issue.message)])].slice(0,100)};
       }
       const pricing=pricingOutcome(updated,rules);
-      if(pricing){row.outcome={version:1,...pricing,message:(updated.businessRules?.notices.join('；')||'当前定价仍不合格或资料不足').slice(0,2000),classifiedAt:now,scope:outcomeScope(task,row),draftId:updated.id,draftRevision:updated.revision};row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;}
+      if(pricing){row.outcome={version:1,...pricing,message:(pricingBlockingReason(updated,rules)||updated.businessRules?.notices.join('；')||'当前定价仍不合格或资料不足').slice(0,2000),classifiedAt:now,scope:outcomeScope(task,row),draftId:updated.id,draftRevision:updated.revision};row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;}
       if(row.outcome?.pricingReport&&!qualifiedPricing(updated,rules))throw new UserFacingError('旧利润淘汰尚无有效当前报价，不能恢复执行');
     }
     if(row.outcome?.code==='SKU_SELECTION_FILTERED'||row.outcome?.pricingReport){row.status='PENDING';delete row.outcome;}

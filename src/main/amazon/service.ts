@@ -940,6 +940,7 @@ export class AmazonService {
         throw new UserFacingError('Amazon Schema 版本或校验和已变化，请建立新草稿并重新校验和预览');
       }
       taskGuard?.(); this.currentProduct(record); this.requirePreview(this.persistence.record(record.draft.id), target); this.active(target.id);
+      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
       const declarationIssues=this.declarationIssues(record.draft);
       record.draft.localIssues = [...packageGraphIssues(record.draft,this.persistence.records().map(r=>r.draft)), ...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft), ...declarationIssues];
       if(declarationIssues.length){
@@ -955,6 +956,7 @@ export class AmazonService {
         const issues=this.declarationIssues(record.draft);
         if(issues.length){record.draft.localIssues.push(...issues);throw new UserFacingError('本地校验未通过，安全声明须核对后再提交');}
       };
+      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
       record.draft.state = 'SUBMITTING'; record.draft.requestId = null; record.request = this.request(record); this.event(record, 'submit', '已记录提交意图；本次写入不会自动重试'); this.persistence.beginWrite(hash, record); begun = true;
       let result: ApiResult;
       if (target.mode === 'demo') { guard(); result = { data: { sku: record.draft.sku, status: 'ACCEPTED', submissionId: `DEMO-${randomUUID()}`, issues: [] }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'putListingsItem'); }

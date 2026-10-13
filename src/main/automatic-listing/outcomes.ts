@@ -16,10 +16,9 @@ export function pricingOutcome(draft:AmazonDraft,rules:ListingRules):Pick<Automa
   const report=draft.businessRules;
   if(!report||!pricingEvidenceCurrent(draft,rules))return {kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
   const decision=report.pricingDecision!;
-  if(report.quote){
-    const issue=pricingQualificationIssue(draft,rules);
-    return issue?{kind:'NEEDS_INPUT',code:issue.code}:null;
-  }
+  const issue=pricingQualificationIssue(draft,rules);
+  if(!issue)return null;
+  if(report.quote || issue.code!==decision.code)return {kind:'NEEDS_INPUT',code:issue.code};
   return {kind:decision.status==='business_blocked'?'RULE_FILTERED':decision.status==='system_error'?'SYSTEM_REPAIR':'NEEDS_INPUT',code:decision.code,
     pricingReport:{...structuredClone(report),fields:{},notices:[]}};
 }

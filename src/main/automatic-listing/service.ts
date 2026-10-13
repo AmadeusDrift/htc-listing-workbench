@@ -328,7 +328,7 @@ export class AutomaticListingService {
               if(current){
                 const pricing=pricingOutcome(current,rules);
                 if(!pricing&&qualifiedPricing(current,rules)){view.noticeCode='PRICING_CHANGED';view.reconsideration='当前定价已在本地重算合格';view.message=view.reconsideration+'；原淘汰记录保留';}
-                else {view.kind=pricing?.kind??'NEEDS_INPUT';view.reasonCode=pricing?.code??'PRICING_EVIDENCE_STALE';view.eligible=false;view.message=current.businessRules?.notices.join('；')||outcome.message;}
+                else {view.kind=pricing?.kind??'NEEDS_INPUT';view.reasonCode=pricing?.code??'PRICING_EVIDENCE_STALE';view.eligible=false;view.message=pricingBlockingReason(current,rules)||current.businessRules?.notices.join('；')||outcome.message;}
               }else{
                 const draft=item.draftId?this.deps.amazon.getDraft(item.draftId):null;
                 const unchanged=outcome.scope.rulesStamp===fingerprint(rules)&&outcome.scope.sourceStamp===sourceStamp(product)&&outcome.scope.recipeStamp===recipe.stamp&&draft&&pricingEvidenceCurrent(draft,rules);
@@ -483,7 +483,7 @@ export class AutomaticListingService {
             delete row.pricingRefresh;
             const pricing=pricingOutcome(refreshed,this.deps.rules());
             if(pricing){
-              row.outcome={version:1,...pricing,message:(refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};
+              row.outcome={version:1,...pricing,message:(pricingBlockingReason(refreshed,this.deps.rules())||refreshed.businessRules?.notices.join('；')||row.error||'定价资料待确认').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:refreshed.id,draftRevision:refreshed.revision};
               row.error=row.outcome.message;row.status=pricing.kind==='RULE_FILTERED'?'SCREENED':'FAILED';continue;
             }
           }
@@ -752,7 +752,7 @@ export class AutomaticListingService {
       draft = prepared.draft; row.draftId = draft.id; this.save(task); this.checkpoint(task, row);
     }
     if (!this.matching(task, row, draft) || draft.productRevision !== row.productRevision) throw new UserFacingError('准备后的草稿范围与任务不一致');
-    if(draft.businessRules?.quote&&draft.businessRules.revision!==task.ruleRevision)throw new UserFacingError('上架规则已变化，请核对并重新计算已有草稿报价；未沿用旧报价');
+    if(draft.businessRules?.quote&&draft.businessRules.pricingDecision?.version!==3&&draft.businessRules.revision!==task.ruleRevision)throw new UserFacingError('上架规则已变化，请核对并重新计算已有草稿报价；未沿用旧报价');
     assertCurrentPricingForPaid(draft,this.deps.rules());
     const pricingIssue=pricingBlockingReason(draft,this.deps.rules());
     if(pricingIssue){row.stage='DRAFT';this.save(task);throw new UserFacingError(pricingIssue);}

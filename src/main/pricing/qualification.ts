@@ -1,8 +1,9 @@
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import type { ListingRules } from '../../shared/listing-rules.ts';
+import { ListingQuoteError, quoteListing } from '../../shared/listing-rules.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { assertPricingDecision } from './history.ts';
-import { actualOfferIssue } from './offer.ts';
+import { actualOfferIssue, hasActualOffer } from './offer.ts';
 import { pricingQuantityInputs, pricingRuleInputs, pricingSaleUnit } from './dependencies.ts';
 import { convertMeasurement } from '../amazon/field-mapping.ts';
 import { semanticJson } from '../amazon/preparation.ts';
@@ -40,10 +41,25 @@ export function pricingQualificationIssue(draft: AmazonDraft, rules: ListingRule
   if (pricingExempt(draft)) return null;
   if (!pricingEvidenceCurrent(draft,rules)) return {code:'PRICING_EVIDENCE_STALE',message:'定价依据缺失或相关输入已变化，请重新应用商品规则后核对实际报价'};
   const report=draft.businessRules!,decision=report.pricingDecision!;
-  if (decision.status !== 'quoted' || !report.quote) return {code:decision.code,message:report.notices.join('；')||'尚无合格的定价依据，请核对成本、包装与销售数量'};
+  const historicalIssue = {code:decision.code,message:report.notices.join('；')||'尚无合格的定价依据，请核对成本、包装与销售数量'};
+  // A failed automatic suggestion is not proof that a supplied manual offer fails.
+  // Unknown input/system failures still cannot establish usable cost and quantity.
+  if (!['quoted','business_blocked'].includes(decision.status)) return historicalIssue;
+  if (decision.evidence.saleUnit!=='confirmed' || draft.salesPlan && report.bundleQuantity!==draft.salesPlan.recipe.totalPieces)
+    return {code:'PRICING_EVIDENCE_STALE',message:'实际报价的销售数量或成本口径尚未确认'};
   const {costCny,dimensionsInches,weightPounds}=decision.inputs;
   if (costCny===null || dimensionsInches===null || weightPounds===null) return {code:'PRICING_EVIDENCE_STALE',message:'实际报价缺少完整成本或包装输入'};
-  return actualOfferIssue(draft.attributes,draft.marketplaceId,{costCny,dimensionsInches,weightPounds},rules.pricing,now);
+  if (decision.status==='business_blocked' && !hasActualOffer(draft.attributes,draft.marketplaceId)) return historicalIssue;
+  const input={costCny,dimensionsInches,weightPounds};
+  const actualIssue=actualOfferIssue(draft.attributes,draft.marketplaceId,input,rules.pricing,now);
+  if (!actualIssue || actualIssue.code==='ACTUAL_OFFER_INVALID' || actualIssue.code==='ACTUAL_PRICE_INVALID') return actualIssue;
+  if (decision.status==='business_blocked') {
+    // Distinguish a fixable manual price from a genuinely impossible normal price.
+    // This calculation uses only the original numeric rules; it does not create a report.
+    try { quoteListing(input,{...rules.pricing,promoEnabled:false}); }
+    catch (error) { if (error instanceof ListingQuoteError) return historicalIssue; throw error; }
+  }
+  return actualIssue;
 }
 /** Only blocks new work; never mutates a draft, paid journal or submission lock. */
 export function assertCurrentPricingForPaid(draft: AmazonDraft, rules: ListingRules, now = Date.now()): void {
@@ -51,6 +67,5 @@ export function assertCurrentPricingForPaid(draft: AmazonDraft, rules: ListingRu
   if (issue) throw new UserFacingError(issue.message);
 }
 export function qualifiedPricing(draft: AmazonDraft, rules: ListingRules): boolean {
-  return !!draft.businessRules?.quote && draft.businessRules.pricingDecision?.status==='quoted'
-    && pricingEvidenceCurrent(draft,rules) && pricingQualificationIssue(draft,rules)===null;
+  return !pricingExempt(draft) && pricingEvidenceCurrent(draft,rules) && pricingQualificationIssue(draft,rules)===null;
 }

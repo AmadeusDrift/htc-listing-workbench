@@ -36,7 +36,7 @@ void app.whenReady().then(async()=>{
  };
  for(const [name,fn] of Object.entries(handlers))handle(name,0,fn);handle('red:products:get',1,(id:string)=>f.store.getProduct(id));
  Object.assign(globalThis,{__batchHarness:{close:async()=>{await automatic.close();for(const fn of cleanup.splice(0).reverse())await fn();},setBatchAvailable:(enabled:boolean)=>{f.ai.setEnabled({id:'openrouter',enabled});f.ai.setEnabled({id:'openrouter-review',enabled});},snapshot:()=>({posts,gets,downstream,confirmations,results:f.ai.listResults(f.product.id),tasks:automatic.list()}),release:async()=>{ready=true;await automatic.refreshWaiting();await automatic.waitForIdle();},drain:()=>automatic.waitForIdle()}});
- const window=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{preload:resolve(process.env.RED_E2E_PRELOAD!),contextIsolation:true,nodeIntegration:false,sandbox:true}});
+ const window=new BrowserWindow({show:false,width:1440,height:1100,webPreferences:{backgroundThrottling:false,preload:resolve(process.env.RED_E2E_PRELOAD!),contextIsolation:true,nodeIntegration:false,sandbox:true}});
  await window.loadFile(resolve(process.env.RED_E2E_HTML!));
  let closed=false;app.on('will-quit',event=>{if(closed)return;event.preventDefault();void(async()=>{await automatic.close();for(const fn of cleanup.reverse())await fn();closed=true;app.quit();})();});
 });

@@ -4,6 +4,7 @@ import { ImagePlus,RefreshCw,ArrowRight } from 'lucide-react';
 import { DEFAULT_OPENROUTER_IMAGE_MODEL,OPENROUTER_IMAGE_MODELS } from '../shared/image-generation-contracts';
 import type { ImageGenerationConnection,ImageGenerationSize,ImageGenerationQuality } from '../shared/image-generation-contracts';
 import { ImageRiskSettings } from './ImageRiskSettings';
+import { AppearanceReviewSettings } from './AppearanceReviewSettings';
 import { CopyReviewSettings } from './CopyReviewSettings';
 import { errorText,formatDate } from './utils';
 import './image-generation-settings.css';
@@ -33,7 +34,7 @@ export function ImageGenerationSettings({visible,busy,onAiSettings}:{visible:boo
   useFormGuard({dirty:()=>dirty,save,discard:()=>{if(connection)apply(connection);setApiKey('');setError('');}});
   return <section className="settings-section image-generation-settings" aria-busy={pending}>
     <div className="settings-section-title"><ImagePlus size={20} aria-hidden="true"/><div><h3>图片与生图</h3><p>OpenRouter 图像生成与独立复核设置。</p></div><button type="button" className="button secondary" disabled={disabled||dirty} onClick={()=>void act(()=>window.red.getImageGenerationConnection(),'状态已刷新')}><RefreshCw size={15}/>刷新状态</button></div>
-    <ImageRiskSettings visible={visible} busy={busy}/><CopyReviewSettings visible={visible} busy={busy}/>
+    <ImageRiskSettings visible={visible} busy={busy}/><CopyReviewSettings visible={visible} busy={busy}/><AppearanceReviewSettings visible={visible} busy={busy}/>
     <form className="credential-form image-generation-form" aria-label="OpenRouter 生图连接配置" autoComplete="off" onSubmit={event=>{event.preventDefault();void save();}}>
       <div className="credential-heading"><h4>OpenRouter 图像生成</h4><span role="status">{pending?'正在处理…':!connection?'状态未读取':!connection.configured?'未配置':connection.enabled?'已启用':'已保存 · 未启用'}</span></div>
       <div className="image-generation-endpoint"><span>生图接口</span><code>https://openrouter.ai/api/v1/images</code></div>

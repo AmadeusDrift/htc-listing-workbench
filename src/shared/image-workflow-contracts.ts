@@ -95,6 +95,8 @@ export interface ImageWorkflowApi {
   approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowProgress>;
   getImageRiskSettings():Promise<ImageRiskSettings>;
   saveImageRiskSettings(input:ImageRiskSettings):Promise<ImageRiskSettings>;
+  getAppearanceReviewSettings():Promise<{enabled:boolean}>;
+  saveAppearanceReviewSettings(input:{enabled:boolean}):Promise<{enabled:boolean}>;
   getCopyReviewSettings():Promise<CopyReviewSettings>;
   saveCopyReviewSettings(input:CopyReviewSettings):Promise<CopyReviewSettings>;
   prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string; code?:AutomaticSourceIssueCode }[] }>;

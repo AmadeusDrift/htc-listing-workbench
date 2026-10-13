@@ -30,7 +30,7 @@ function fixture(sources: ProductDetail[], initial: AmazonDraft[] = []) {
   const batches: PrepareAmazonDraftsInput[] = [], completed: string[] = [], cancelled: string[] = [];
   const sourceRequests: Parameters<AutomaticPreparationApi['prepareAutomaticProductSources']>[0][] = [], cancelledSources: string[] = [];
   const api: AutomaticPreparationApi = {
-    async getImageRiskSettings(){return {enabled:true};},
+    async getAppearanceReviewSettings(){return {enabled:true};}, async saveAppearanceReviewSettings(value:{enabled:boolean}){return value;}, async getImageRiskSettings(){return {enabled:true};},
     async saveImageRiskSettings(value){return value;},
     async getCopyReviewSettings(){return {enabled:true};},
     async saveCopyReviewSettings(value){return value;},

@@ -161,6 +161,8 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
   if (imageWorkflow) {
     handle('red:image-risk:settings',0,()=>imageWorkflow.getRiskSettings());
     handle('red:image-risk:save',1,input=>imageWorkflow.saveRiskSettings(input));
+    handle('red:appearance-review:settings',0,()=>imageWorkflow.getAppearanceReviewSettings());
+    handle('red:appearance-review:save',1,input=>imageWorkflow.saveAppearanceReviewSettings(input));
     handle('red:copy-review:settings',0,()=>imageWorkflow.getCopyReviewSettings());
     handle('red:copy-review:save',1,input=>imageWorkflow.saveCopyReviewSettings(input));
     handle('red:automatic-product:unknown-retry',1,async input=>{const run=await imageWorkflow.approveUnknownRetry(input);return imageWorkflow.getProgressPresentation(run.draftId)!;});

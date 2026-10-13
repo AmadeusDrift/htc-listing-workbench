@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -29,7 +29,7 @@ async function launch() {
   page = await app.firstWindow(); page.on('pageerror', error => errors.push(error.message));
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].webContents.backgroundThrottling = false; });
   await expect(button('设置')).toBeEnabled(); await button('设置').click();
-  await settingsModule('ai');
+  await settingsModule('ai'); await vendor('deepseek');
 }
 async function snapshot(name) {
   await page.evaluate(async () => { await document.fonts.ready; await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); });
@@ -43,7 +43,7 @@ async function vendor(id) {
 try {
   await launch();
   await expect(page.getByLabel('AI 连接供应商', { exact: true })).toBeVisible({ timeout: 5000 });
-  await expect(page.getByLabel('AI 连接供应商', { exact: true }).locator('option')).toHaveText(['DeepSeek', '阿里云']);
+  await expect(page.getByLabel('AI 连接供应商', { exact: true }).locator('option')).toHaveText(['OpenRouter', 'DeepSeek', '阿里云']);
   const ai = page.getByRole('form', { name: 'AI 连接配置' });
   await expect(ai.getByLabel('API Key', { exact: true })).toHaveCount(1);
   // Existing users may already have different per-role credentials. Never unify silently.
@@ -56,7 +56,7 @@ try {
   });
   const legacy = await page.evaluate(() => window.red.listAiProviders());
   await button('操作记录').click(); await button('设置').click();
-  await settingsModule('ai');
+  await settingsModule('ai'); await vendor('deepseek');
   await expect(ai).toContainText('旧配置分别保存');
   assert.deepEqual(await page.evaluate(() => window.red.listAiProviders()), legacy);
   await ai.getByLabel('复用已有密钥来源', { exact: true }).selectOption('deepseek-review');
@@ -66,27 +66,27 @@ try {
   await expect(page.getByLabel('每日调用次数预设', { exact: true })).toHaveValue('100');
   await page.getByLabel('AI 用量服务', { exact: true }).selectOption('deepseek-review');
   await expect(page.getByLabel('每日调用次数预设', { exact: true })).toHaveValue('500');
-  pass('供应商只有两项；旧独立密钥不自动覆盖，明确选定后复用，无需重填，预算与功能设置保留');
+  pass('供应商含OpenRouter、DeepSeek与阿里云；旧独立密钥不自动覆盖，明确选定后复用，无需重填，预算与功能设置保留');
 
-  await ai.getByLabel('文案生成模型', { exact: true }).selectOption('deepseek-v4-pro');
-  await expect(ai.getByLabel('文案生成模型', { exact: true })).toBeEnabled();
-  await ai.getByLabel('文案复核模型', { exact: true }).selectOption('deepseek-flash');
-  await expect(ai.getByLabel('文案复核模型', { exact: true })).toBeEnabled();
-  await button('启用文案复核').click(); await expect(button('暂停文案复核')).toBeEnabled();
-  await button('暂停文案生成').click(); await expect(button('启用文案生成')).toBeEnabled();
-  await expect(button('暂停文案复核')).toBeEnabled();
+  await expect(ai.getByLabel('文案生成模型', { exact: true })).toHaveCount(0);
+  await expect(ai).toContainText('每个用途独立选择模型与思考强度');
+  await button('启用DeepSeek 复核').click(); await expect(button('暂停DeepSeek 复核')).toBeEnabled();
+  await button('暂停DeepSeek 文案').click(); await expect(button('启用DeepSeek 文案')).toBeEnabled();
+  await expect(button('暂停DeepSeek 复核')).toBeEnabled();
   const roles = (await page.evaluate(() => window.red.listAiProviders())).filter(profile => profile.id.startsWith('deepseek'));
   assert.deepEqual(roles.map(({ id, model, enabled }) => ({ id, model, enabled })), [
-    { id: 'deepseek', model: 'deepseek-v4-pro', enabled: false }, { id: 'deepseek-review', model: 'deepseek-flash', enabled: true },
+    { id: 'deepseek', model: 'deepseek-flash', enabled: false }, { id: 'deepseek-review', model: 'deepseek-v4-pro', enabled: true },
   ]);
   await ai.getByLabel('API Key', { exact: true }).fill(secret);
   await page.getByLabel('AI 用量服务', { exact: true }).selectOption('deepseek');
+  await expect(page.getByRole('button',{name:'继续编辑',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'继续编辑',exact:true}).click();
   await expect(ai.getByLabel('API Key', { exact: true })).toHaveValue(secret);
   await button('保存共享密钥').click(); await expect(ai.getByLabel('API Key', { exact: true })).toHaveValue('');
-  await expect(button('启用文案生成')).toBeEnabled(); await expect(button('暂停文案复核')).toBeEnabled();
+  await expect(button('启用DeepSeek 文案')).toBeEnabled(); await expect(button('暂停DeepSeek 复核')).toBeEnabled();
   assert.equal((await page.evaluate(() => window.red.listAiConnections())).find(connection => connection.id === 'deepseek').state, 'shared');
   await ai.scrollIntoViewIfNeeded(); await snapshot('connections-ai.png');
-  pass('DeepSeek 一次填写共享密钥；生成与复核独立选模型和启停，切换用量功能不清空输入');
+  pass('DeepSeek 一次填写共享密钥；生成与复核独立启停，模型改为逐用途设置，切换用量功能不清空输入');
 
   await vendor('aliyun');
   await expect(ai.getByLabel('AccessKey ID', { exact: true })).toHaveCount(1);
@@ -124,10 +124,13 @@ try {
   await expect(page.getByLabel('AI 连接供应商', { exact: true })).toHaveValue('deepseek');
   await expect(ai).toContainText('已共用凭据');
   await expect(ai.getByLabel('API Key', { exact: true })).toHaveValue('');
-  await expect(ai.getByLabel('文案复核模型', { exact: true })).toHaveValue('deepseek-v4-pro');
-  await expect(button('启用文案生成')).toBeEnabled(); await expect(button('暂停文案复核')).toBeEnabled();
+  assert.equal((await page.evaluate(()=>window.red.listAiProviders())).find(p=>p.id==='deepseek-review').model,'deepseek-v4-pro');
+  await expect(button('启用DeepSeek 文案')).toBeEnabled(); await expect(button('暂停DeepSeek 复核')).toBeEnabled();
   pass('供应商模板不含密钥，旧单功能配置可经原生文件选择导入共享连接，自动切换供应商且保留启停');
 
+  // This suite verifies credential persistence, not automatic sync. Disable entry-sync
+  // before storing synthetic live credentials so restart cannot attempt external I/O.
+  await page.evaluate(()=>window.red.saveMiaoshouPreferences({autoSyncOnInbox:false}));
   const miaoshou = page.getByRole('form', { name: '妙手连接配置' });
   await settingsModule('collection');
   await miaoshou.getByLabel('AppKey', { exact: true }).fill(client);
@@ -188,7 +191,7 @@ try {
     const form = page.getByRole('form', { name }); await form.scrollIntoViewIfNeeded();
     assert.ok(await form.evaluate(node => node.scrollWidth <= node.clientWidth + 1));
   }
-  await settingsModule('ai');
+  await settingsModule('ai'); await vendor('deepseek');
   await vendor('aliyun');
   const narrowAi = page.getByRole('form', { name: 'AI 连接配置' });
   await narrowAi.scrollIntoViewIfNeeded();

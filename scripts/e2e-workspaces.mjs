@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -70,13 +70,13 @@ try {
   await expect(page.locator('.automatic-product')).toHaveCount(2);
   await expect(page.getByTestId(`automatic-${box.id}`)).not.toHaveAttribute('open');
   await expect(page.getByRole('button', { name: '启动并自动发布', exact: true })).toBeDisabled();
-  await expect(page.getByRole('region', { name: '全局自动化连接', exact: true })).toContainText('请先完成全局连接配置');
-  await expect(page.getByRole('region', { name: '启动自动上架', exact: true })).toContainText('每件商品使用资料和来源图独立判断类目');
+  await expect(page.getByLabel('全局自动化连接', { exact: true })).toContainText('连接尚未就绪');
+  await expect(page.getByRole('region', { name: '启动自动上架', exact: true })).toContainText('按 SKU 读取来源事实与参考图');
   await page.getByTestId(`automatic-${box.id}`).locator('summary').click();
   await expect(page.getByTestId(`automatic-${box.id}`)).toContainText('图片');
   await page.getByTestId(`automatic-${box.id}`).getByRole('button', { name: '转手动补充资料' }).click();
   await expect(page.getByLabel('商品标题', { exact: true })).toHaveValue(box.title);
-  assert.equal(await lane(box.id), 'manual');
+  assert.equal(await lane(box.id), 'automatic', 'Opening a focused correction must preserve automatic queue placement');
   passed('真实 CSV 导入采集箱、来源预览、批量分流和自动区能力说明');
 
   await page.getByLabel('商品标题', { exact: true }).fill('折叠布艺收纳箱 · 已整理');
@@ -176,6 +176,8 @@ try {
   const motion = await disclosure.locator('summary').evaluate(el => ({ transition: getComputedStyle(el).transitionDuration, animation: getComputedStyle(el).animationName }));
   assert.ok(motion.transition.split(',').every(value => parseFloat(value) === 0)); assert.equal(motion.animation, 'none');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.evaluate(id=>window.red.moveWorkspaceProducts({productIds:[id],destination:'manual'}),box.id);
+  await page.reload();await expect(page.getByRole('button',{name:'新建商品',exact:true})).toBeEnabled();
   await resizeWindow(app, page, 1480, 960); await nav('手动上架');
   await page.getByTestId(`product-${box.id}`).click();
   await screenshot('htc-manual-1480.png');

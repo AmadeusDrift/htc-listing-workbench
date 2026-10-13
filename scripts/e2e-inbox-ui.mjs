@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -33,16 +33,18 @@ async function screenshot(name) {
 }
 try {
   await launch();
-  assert.deepEqual(await page.evaluate(() => window.red.getMiaoshouPreferences()), { autoSyncOnInbox: false });
+  assert.deepEqual(await page.evaluate(() => window.red.getMiaoshouPreferences()), { autoSyncOnInbox: true });
   await nav('设置');
   // Settings uses a module navigator; choose Miaoshou if its section is not initially visible.
   if (!(await page.getByLabel('妙手采集设置').isVisible())) await button('采集连接').click();
   await button('启用妙手演示模式').click();
-  await expect(page.getByLabel('进入采集箱时自动检查并导入')).not.toBeChecked();
+  await expect(page.getByLabel('进入采集箱时自动检查并导入')).toBeChecked();
+  await page.getByLabel('进入采集箱时自动检查并导入').uncheck();
+  await expect.poll(() => page.evaluate(() => window.red.getMiaoshouPreferences().then(p => p.autoSyncOnInbox))).toBe(false);
   await nav('采集箱'); await expect(page.locator('.collection-row')).toHaveCount(0);
   await button('同步妙手采集箱').click();
   await expect(page.locator('.collection-row')).toHaveCount(3, { timeout: 15000 });
-  check('默认不自动同步；手动一次同步导入全部演示商品');
+  check('默认开启自动同步；明确关闭后手动一次同步导入全部演示商品');
   const original = await page.evaluate(() => window.red.listProducts());
   await button('同步妙手采集箱').click();
   await expect.poll(() => page.evaluate(() => window.red.getMiaoshouSyncStatus().then(state => state.status))).toBe('completed');

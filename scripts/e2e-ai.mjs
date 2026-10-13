@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
@@ -32,7 +32,7 @@ try {
   await launch(); assert.deepEqual((await page.evaluate(() => Object.keys(window.red))).sort(), [...publicApi].sort());
   assert.ok((await page.evaluate(() => window.red.listAiProviders())).every(profile => !profile.enabled && !profile.configured));
   const capability = (await page.evaluate(() => window.red.listAiCapabilities())).find(item => item.capability === 'image-generation');
-  assert.equal(capability.available, false); assert.equal(capability.providerId, null); pass('narrow AI API, disabled defaults and honest image-generation placeholder');
+  assert.equal(capability.available, false); assert.equal(capability.providerId, null); pass('narrow AI API, disabled defaults and unavailable unconfigured image-generation capability');
   for (const id of ['aliyun-ocr', 'aidge-segmentation', 'deepseek', 'deepseek-review']) {
     await choose(join(dataRoot, `${id}.json`)); const profile = await page.evaluate(() => window.red.importAiProviderConfig());
     assert.equal(profile.id, id); assert.equal(profile.configured, true); assert.equal(profile.enabled, false); assert.ok(!JSON.stringify(profile).includes('fixture-'));

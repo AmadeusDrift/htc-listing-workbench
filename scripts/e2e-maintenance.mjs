@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -29,6 +29,7 @@ async function launch() {
   await selectSettingsModule(page, 'ai');
   await expect(page.getByRole('heading', { name: 'AI 连接、用量与上限', exact: true })).toBeVisible();
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
+  await profile('deepseek');
 }
 async function saved() {
   await page.getByRole('button', { name: '保存 AI 用量上限', exact: true }).click();
@@ -39,7 +40,9 @@ async function saved() {
 async function profile(id) {
   await page.getByLabel('AI 连接供应商', { exact: true }).selectOption(id.startsWith('deepseek') ? 'deepseek' : 'aliyun');
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
+  if (await page.getByRole('button', {name:'放弃修改',exact:true}).isVisible()) await page.getByRole('button', {name:'放弃修改',exact:true}).click();
   await page.getByLabel('AI 用量服务', { exact: true }).selectOption(id);
+  if (await page.getByRole('button', {name:'放弃修改',exact:true}).isVisible()) await page.getByRole('button', {name:'放弃修改',exact:true}).click();
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
 }
 try {
@@ -64,6 +67,7 @@ try {
   assert.equal(emptyReport.truncated, false);
   pass('local diagnostics work from settings on an empty workspace without creating assets or calling providers');
   await selectSettingsModule(page, 'ai');
+  await profile('deepseek');
 
   await page.getByLabel('每日调用次数预设', { exact: true }).selectOption('custom');
   await page.getByLabel('每日 Token 预设', { exact: true }).selectOption('custom');

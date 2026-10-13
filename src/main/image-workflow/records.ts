@@ -1,11 +1,13 @@
+export { imageWorkflowDraftStamp } from './approval-reuse.ts';
+export { selectImageReferences } from '../assets/reference-selection.ts';
 import { currentImageAdaptation, adaptedImageInputsMatch, assertPartialSourceReuse } from './adaptation.ts';
-import { isFullSchema } from '../listing-ai/full-schema.ts';
+import { isFullSchema } from "../listing-ai/native-values.ts";
 import { imageActualInputsMatch } from './context-compatibility.ts';
 import { validateWorkflowRejection, assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
 import { validateAiCall } from '../ai/validation.ts';
 import { assertProductConsistency } from '../source-image-consistency/proof.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import type { ProductDetail, Asset } from '../../shared/contracts.ts';
+import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { IMAGE_WORKFLOW_STAGES } from '../../shared/image-workflow-contracts.ts';
 import { CATEGORY_FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_FIELDS } from '../../shared/automatic-listing-contracts.ts';
@@ -13,31 +15,18 @@ import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY, IMAGE_TEXT_REVIEW_POLIC
 import type { ImageTextReviewPolicyVersion } from '../../shared/image-ai-contracts.ts';
 import type { ImageWorkflowRun, ImageWorkflowSlot, ImageSlotAttempt } from '../../shared/image-workflow-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { boundedText, date, integer, keys, sha256, uuid, uuidList, validateStoredAiResult } from '../ai/validation.ts';
+import { boundedText, date, integer, keys, sha256, uuid, uuidList } from "../ai/primitives.ts";
+import { validateStoredAiResult } from "../ai/validation.ts";
 import { LISTING_EVIDENCE_CONTRACT_VERSIONS } from '../../shared/listing-ai-contracts.ts';
 import type { ListingEvidenceContractVersion } from '../../shared/listing-ai-contracts.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { validateProductImageContext, validateImageSetPlan, assertImageSetPlan, validateCandidateImageIdentity } from '../ai/image-validation.ts';
 import { readImageRiskSettings, parseImageRiskSettings, riskPolicyCompatible } from './risk-settings.ts';
 import { readCopyReviewSettings, copyReviewPolicyCompatible } from '../listing-ai/review-settings.ts';
-import { imageApprovalDraftSnapshot, validateApprovalReuse, plainColorApprovalMatches } from './approval-reuse.ts';
+import { imageWorkflowDraftStamp, validateApprovalReuse, plainColorApprovalMatches } from './approval-reuse.ts';
 import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
-
-export function selectImageReferences(product: ProductDetail, variantId: string, derived: Set<string>, confirmed: (assetId: string, variantId: string) => boolean, allowUnboundSingleSku = false, sourceVariantIds = [variantId], maximum=sourceVariantIds.length>1?10:3): Asset[] {
-  if (!product.variants.some(v => v.id === variantId)) throw new UserFacingError('商品 SKU 已变化');
-  if(!sourceVariantIds.length||new Set(sourceVariantIds).size!==sourceVariantIds.length||sourceVariantIds.some(id=>!product.variants.some(v=>v.id===id)))throw new UserFacingError('销售组合来源 SKU 已变化');
-  const belongs=(asset:Asset,id:string)=>asset.variantIds.includes(id)?confirmed(asset.id,id):allowUnboundSingleSku&&product.variants.length===1&&asset.variantIds.length===0;
-  const refs = product.assets.filter(asset => !derived.has(asset.id) && sourceVariantIds.some(id=>belongs(asset,id))).sort((a,b) => Number(b.variantIds.length === 1) - Number(a.variantIds.length === 1) || Number(b.role === 'main') - Number(a.role === 'main') || a.createdAt.localeCompare(b.createdAt));
-  let bytes = 0;
-  const selected:Asset[]=[];
-  const add=(asset:Asset)=>{if(selected.some(value=>value.id===asset.id))return true;if(selected.length>=maximum||asset.byteSize>10*1024*1024||bytes+asset.byteSize>20*1024*1024)return false;selected.push(asset);bytes+=asset.byteSize;return true;};
-  for(const id of sourceVariantIds)if(!selected.some(asset=>belongs(asset,id))&&!refs.some(asset=>belongs(asset,id)&&add(asset)))throw new UserFacingError('销售组合的每个来源 SKU 均需确认参考图，当前缺图或超出参考预算');
-  for(const asset of refs)add(asset);
-  if (!selected.length) throw new UserFacingError('缺少可确定属于当前 SKU 的参考图，请先完成来源图片同步');
-  return selected;
-}
 
 function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
   const o = keys(raw, ['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets',
@@ -148,9 +137,6 @@ export function currentWorkflowPlanIds(run:ImageWorkflowRun):string[]{
   return run.slots?run.slots.flatMap(slot=>{const id=slot.attempts.at(-1)?.planResultId;return id?[id]:[];}):run.planResultIds.slice(-1);
 }
 /** Image URLs are filled by execution after adoption; all other listing changes invalidate the selection. */
-export function imageWorkflowDraftStamp(draft: AmazonDraft): string {
-  return listingFingerprint(JSON.parse(imageApprovalDraftSnapshot(draft)));
-}
 export function workflowRuns(db: DatabaseSync, draftId?: string): ImageWorkflowRun[] {
   // Scope before parsing/validating: a progress read must not revalidate every
   // other draft's contexts. Same-draft history remains complete for reuse proofs.

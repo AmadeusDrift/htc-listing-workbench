@@ -5,7 +5,10 @@ export const DEFAULT_OPENAI_IMAGE_MODEL: OpenAiImageModel = 'gpt-image-2.5-sunbu
 export const TYAI_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-4k-high', 'gpt-image-2-4k', 'gpt-image-2-4K', 'gpt-image-2-1k', 'gpt-image-2-逆向', 'gpt-image-2.5', 'gpt-image-2.5-sunburst-1k', 'gpt-image-2.5-flare-1k', 'gpt-image-2.5-sunburst-4k-max', 'gpt-image-2.5-flare-4k-max', 'gpt-image-2.5-逆向', 'gpt-image2-Pro4K', 'gemini-nano-banana-2.1', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview'] as const;
 export type TyaiImageModel = string;
 export const DEFAULT_TYAI_IMAGE_MODEL: TyaiImageModel = 'gpt-image-2.5-sunburst-4k-max';
-export type ImageGenerationProvider = 'openai' | 'tyai';
+/** Legacy values are read-only candidate provenance, never active connection choices. */
+export type ImageGenerationProvider = 'openai' | 'tyai' | 'openrouter';
+export const OPENROUTER_IMAGE_MODELS=['openai/gpt-image-2.5-sunburst','openai/gpt-image-2.5-flare'] as const;
+export const DEFAULT_OPENROUTER_IMAGE_MODEL=OPENROUTER_IMAGE_MODELS[0];
 export type ImageGenerationModel = OpenAiImageModel | TyaiImageModel;
 export type ImageGenerationQuality = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ImageGenerationSize = 'auto' | `${number}x${number}`;

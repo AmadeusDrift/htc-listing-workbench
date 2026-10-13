@@ -1,10 +1,12 @@
+import { requestOpenRouterJson } from './adapters/openrouter-chat.ts';
 import type { AiOutput, ContentSuggestionOutput, OcrOutput, SegmentationOutput } from '../../shared/ai-contracts.ts';
 import { signAcs3 } from './acs3.ts';
 import { AiError, httpError } from './errors.ts';
 import { emptyUsage, postJson } from './transport.ts';
 import type { AdapterContext, ProviderMetadata } from './transport.ts';
-import { boundedText, integer, keys, modelFor, object, requestId, validateOutput, validateTextOutput, validateUsage } from './validation.ts';
-import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from './validation.ts';
+import { boundedText, integer, keys, modelFor, object, requestId, validateUsage } from "./primitives.ts";
+import { validateBasicOutput as validateOutput, validateTextOutput } from "./basic-output-validation.ts";
+import type { AiCredentials, AliyunCredentials, DeepSeekCredentials, DeepSeekModel } from "./primitives.ts";
 import { MAX_VISION_REQUEST_BYTES, visionContent } from './vision.ts';
 import type { DeepSeekReferenceImage } from './vision.ts';
 import type { ListingNormalization } from '../../shared/listing-normalization-contracts.ts';
@@ -104,16 +106,22 @@ function safeSourceResponseText(text:string,credentials:AiCredentials):string {
 }
 /** Shared native DeepSeek protocol. The operation-specific parser owns the exact JSON schema. */
 export async function requestDeepSeekJson(payload: unknown, system: string, model: DeepSeekModel, credentials: DeepSeekCredentials, signal: AbortSignal, context: AdapterContext, maxTokens = 4096, images: readonly DeepSeekReferenceImage[] = []): Promise<ProviderMetadata & { content: unknown }> {
+  model=(context.purposeSnapshot?.model??model) as DeepSeekModel;
+  if(context.gateway==='openrouter')return requestOpenRouterJson(payload,system,model,credentials,signal,context,maxTokens,images);
   modelFor('deepseek', model);
   if (images.length && model !== 'deepseek-flash') throw new AiError('INVALID_CONFIG');
-  const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: context.thinking ? 'enabled' : 'disabled' }, ...(context.thinking?{reasoning_effort:'high'}:{temperature:0}), stream: false, max_tokens: context.thinking ? Math.max(maxTokens,32768) : maxTokens, response_format: { type: 'json_object' } });
+  const body = JSON.stringify({ model, messages: [{ role: 'system', content: `${system}\nReturn only a valid JSON object.` }, { role: 'user', content: images.length ? visionContent(payload,images) : JSON.stringify(payload) }], thinking: { type: context.thinking ? 'enabled' : 'disabled' }, ...(context.thinking?{reasoning_effort:context.effectiveEffort??'high'}:{temperature:0}), stream: false, max_tokens: context.thinking ? Math.max(maxTokens,32768) : maxTokens, response_format: { type: 'json_object' } });
   if (Buffer.byteLength(body) > MAX_VISION_REQUEST_BYTES) throw new AiError('IMAGE_INVALID');
   const sourceOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='source-image-consistency';
   const imageOperation=!!payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='image-plan';
   const diagnosticOperation=sourceOperation||imageOperation;
   let credentialEcho=false;
   const captureSource=(text:string)=>{try{const safe=safeSourceResponseText(text,credentials);credentialEcho ||= safe==='[omitted: credential echo]';context.onUntrustedOutput?.(safe,'provider-response-validation');}catch{/* Diagnostics never change response handling. */}};
-  const transport=diagnosticOperation?{...context,onInvalidResponseText:captureSource}:context;
+  const transport:AdapterContext={...context,...(diagnosticOperation?{onInvalidResponseText:captureSource}:{}),...(context.onProviderReceipt?{captureRawResponse:async(status:number,text:string)=>{
+    const safe=safeSourceResponseText(text,credentials);let raw:any;try{raw=JSON.parse(safe);}catch{raw=safe;}
+    const requestId=typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)?raw.id:null;
+    await context.onProviderReceipt!({gateway:'deepseek',endpoint:'/chat/completions',model,status,requestId,receivedAt:context.now().toISOString(),body:raw,costUsd:null});
+  }}:{})};
   let raw:unknown;
   try{raw=await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));}
   catch(error){

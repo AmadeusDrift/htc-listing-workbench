@@ -9,8 +9,8 @@ import { validateStoredAiResult,validateAiCall } from '../ai/validation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import { readImageRiskSettings } from '../image-workflow/risk-settings.ts';
-import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 
 /** Admission to recheck an existing candidate, never a new PASS or generation grant. */
 export function currentRiskRecheck(db:DatabaseSync|undefined,row:AutomaticListingItem,draft:AmazonDraft|undefined,run:ImageWorkflowRun|null|undefined,source:ProductDetail):boolean{

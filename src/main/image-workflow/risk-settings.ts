@@ -3,7 +3,7 @@ import type { ImageIpReviewOutput } from '../../shared/image-ai-contracts.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImageRiskSettings, ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { keys } from '../ai/validation.ts';
+import { keys } from "../ai/primitives.ts";
 
 const KEY='image_risk_interception_v1';
 export function readImageRiskSettings(db:DatabaseSync):ImageRiskSettings {

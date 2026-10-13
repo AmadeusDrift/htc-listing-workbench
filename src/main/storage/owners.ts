@@ -9,7 +9,7 @@ export const MODULE_TABLES:Readonly<Partial<Record<DataOwner,readonly string[]>>
   sales:['sku_naming_sequences','sku_naming_groups','sku_naming_identities'],
   catalog:['schema_cache','category_libraries','schema_fetch_operations'],
   listing:['listing_drafts','issues','content_versions','listing_completion_operations'],
-  ai:['ai_profiles','ai_calls','ai_results','ai_usage_policies','ai_usage_ledger'],
+  ai:['ai_profiles','ai_calls','ai_results','ai_usage_policies','ai_usage_ledger','ai_purpose_profiles','ai_provider_receipts','ai_image_requests'],
   images:['image_versions','image_selections','image_write_operations','image_workflow_runs'],
   assets:['assets','hosting_profiles','hosting_uploads'],
   publish:['amazon_write_locks','amazon_exchanges','amazon_calls','execution_tasks','listing_corrections','listing_correction_attempts'],

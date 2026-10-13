@@ -1,7 +1,7 @@
 import { SOURCE_COLOR_VALUES } from '../../shared/source-color-contracts.ts';
 import { SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
 import type { SourceClaimField, SourceComparisonProjection, SourceConsistencyContext, SourceConsistencyOutput, SourceConsistencyConclusion, SourceVisualClaim } from '../../shared/source-image-consistency-contracts.ts';
-import { boundedText, keys, uuid } from '../ai/validation.ts';
+import { boundedText, keys, uuid } from "../ai/primitives.ts";
 import { AiError } from '../ai/errors.ts';
 
 const COLORS:Record<string,string[]>={White:['off white','off-white','white','米白','白色','白'],Black:['black','黑色','黑'],Gray:['gray','grey','灰色','灰'],Silver:['silver','银色'],Gold:['gold','金色'],Copper:['copper','铜色'],Red:['red','红色','红'],Pink:['pink','粉色'],Orange:['orange','橙色'],Yellow:['yellow','黄色','黄'],Green:['green','绿色','绿'],Blue:['blue','蓝色','蓝'],Purple:['purple','紫色'],Brown:['brown','棕色'],Beige:['beige','米色'],Clear:['clear','transparent','透明'],Multicolor:['multicolor','multi-color','多彩','彩色']};

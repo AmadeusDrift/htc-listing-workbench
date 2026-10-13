@@ -4,7 +4,7 @@ import { open } from 'node:fs/promises';
 import type { IpcHandler } from './amazon-ipc.ts';
 import type { AiService } from './ai/service.ts';
 import type { WorkspaceStore } from './store.ts';
-import { parseFunctionSettings, providerId, vendorId } from './ai/validation.ts';
+import { parseFunctionSettings, providerId, vendorId } from "./ai/primitives.ts";
 import type { AiConnection } from '../shared/ai-connection-contracts.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { identifier } from '../shared/validation.ts';
@@ -31,6 +31,10 @@ export function installAiIpc(window: BrowserWindow, ai: AiService, store: Worksp
   handle('red:source-consistency:prepare',1,raw=>ai.prepareSourceConsistency(raw));
   handle('red:source-consistency:decide',1,raw=>ai.decideSourceConsistency(raw));
   handle('red:ai:connections', 0, () => ai.listConnections());
+  handle('red:ai:purpose-profiles',0,()=>ai.getPurposeProfiles());
+  handle('red:ai:usage-report',1,input=>ai.getUsageReport(input));
+  handle('red:ai:purpose-save',1,input=>ai.savePurposeProfile(input));
+  handle('red:ai:model-capabilities',0,()=>ai.getTextModelCapabilities());
   handle('red:ai:connection-save', 1, raw => {
     const connection = ai.saveConnection(raw);
     auditConnection('ai.connection.saved', '已保存供应商共用凭据，各功能保持原启用状态', connection);

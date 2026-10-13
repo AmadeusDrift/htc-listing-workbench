@@ -1,17 +1,19 @@
+import { isGenerationProvider } from "../ai/primitives.ts";
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiResult,AiCall } from '../../shared/ai-contracts.ts';
 import { createHash,randomUUID } from 'node:crypto';
 import type { SourceConsistencyContext,SourceConsistencyConclusion,SourceConsistencyOutput } from '../../shared/source-image-consistency-contracts.ts';
 import { SOURCE_CONSISTENCY_VERSION,SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistency-contracts.ts';
-import { keys,uuid,date,boundedText,sha256,validateAiCall,validateStoredAiResult } from '../ai/validation.ts';
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { keys, uuid, date, boundedText, sha256 } from "../ai/primitives.ts";
+import { validateAiCall, validateStoredAiResult } from "../ai/validation.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { readManagedImageSync } from '../ai/source.ts';
 import { validateSourceImageProvenance,assertSourceImageProvenance } from '../source-image-provenance.ts';
 import { assertUnambiguousRecordJson } from '../record-json.ts';
 import { readSourceImageReceipt,sourceImageMappings } from '../source-images.ts';
 import { validateAiUsageRecord } from '../ai/usage.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { validateConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
+import { validateConsistencyContext, consistencyScopeKey, consistencyDecisionKey } from "./contracts.ts";
 import { assertConsistencyOutput,reduceSourceConsistency,normalizeSourceObservations } from './comparison.ts';
 
 export const CONSISTENCY_TABLES={source_consistency_attempts:['id','record_json'],source_consistency_assessments:['id','record_json'],source_consistency_decisions:['id','record_json'],source_consistency_bindings:['id','record_json']};
@@ -63,7 +65,7 @@ export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsisten
 /** Called only in AiUsageLedger.reserve's transaction, before the transport sends bytes. */
 export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string}):void {
   const attempts=listConsistencyAttempts(db,context),latest=attempts.at(-1),n=(latest?.attemptNumber??(latest?1:0))+1;
-  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||prior.providerId!=='deepseek'||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(prior.errorCode??'')||n>MAX_SOURCE_ATTEMPTS)invalid();}
+  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||!isGenerationProvider(prior.providerId)||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(prior.errorCode??'')||n>MAX_SOURCE_ATTEMPTS)invalid();}
   const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyAttemptId(context,n),context,callId:call.id,sentAt:call.startedAt,...(n>1?{attemptNumber:n}:{})});
   db.prepare('INSERT INTO source_consistency_attempts VALUES(?,?)').run(record.id,JSON.stringify(record));
 }

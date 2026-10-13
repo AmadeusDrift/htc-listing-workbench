@@ -18,7 +18,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
   const [apiKey, setApiKey] = useState(''), [accessKeyId, setAccessKeyId] = useState(''), [accessKeySecret, setAccessKeySecret] = useState(''), [securityToken, setSecurityToken] = useState('');
   const [sourceId, setSourceId] = useState<AiProviderId | ''>('');
   const [notice, setNotice] = useState(''), [error, setError] = useState('');
-  const textVendor = vendor === 'deepseek', vendorName = textVendor ? 'DeepSeek' : '阿里云';
+  const textVendor = vendor !== 'aliyun', vendorName = vendor==='openrouter'?'OpenRouter':textVendor ? 'DeepSeek' : '阿里云';
   const disabled = busy || loading || working;
   const valid = textVendor ? apiKey.trim().length >= 8 : accessKeyId.trim().length >= 8 && accessKeySecret.trim().length >= 8 && (!securityToken.trim() || securityToken.trim().length >= 8);
   const configured = connection?.profiles.filter(profile => profile.configured) ?? [];
@@ -28,6 +28,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
   function clearSecrets() { setApiKey(''); setAccessKeyId(''); setAccessKeySecret(''); setSecurityToken(''); }
   function apply(value: AiConnection) {
     setConnection(value);
+    window.dispatchEvent(new Event('htc-ai-connections-changed'));
     setSourceId(previous => value.profiles.some(profile => profile.id === previous && profile.configured) ? previous : value.profiles.find(profile => profile.configured)?.id ?? '');
   }
   useEffect(() => {
@@ -45,7 +46,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
   async function save() {
     if (!valid) return;
     const input: AiConnectionInput = textVendor
-      ? { id: 'deepseek', apiKey: apiKey.trim() }
+      ? { id: vendor as 'deepseek'|'openrouter', apiKey: apiKey.trim() }
       : { id: 'aliyun', accessKeyId: accessKeyId.trim(), accessKeySecret: accessKeySecret.trim(), ...(securityToken.trim() ? { securityToken: securityToken.trim() } : {}) };
     await action(async () => {
       apply(await window.red.saveAiConnection(input)); clearSecrets();
@@ -87,16 +88,13 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
       })}>复用已有密钥</button>
     </div>}
     <section className="ai-functions" aria-label="AI 功能设置">
-      <div><h4>功能设置</h4><p className="settings-help">{textVendor ? '模型和启停分别保存，无需重新填写密钥。' : '各项功能可分别启用或暂停，无需重新填写密钥。'}</p></div>
+      <div><h4>功能设置</h4><p className="settings-help">{textVendor ? '每个用途独立选择模型与思考强度；此处仅管理功能启停。' : '各项功能可分别启用或暂停，无需重新填写密钥。'}</p></div>
       {connection?.profiles.map(profile => {
         const credential = connection.credentials.find(item => item.id === profile.id)!, presentation = credentialPresentation(credential);
         return <div className="ai-function-row" key={profile.id} data-ai-function={profile.id}>
         <div className="credential-heading"><strong>{AI_FUNCTION_NAMES[profile.id]}</strong><SettingsStatusBadge tone={presentation.tone}>{presentation.label}</SettingsStatusBadge></div>
         <div className="ai-function-controls">
-          {textVendor ? <label className="field"><span>模型</span><select aria-label={`${AI_FUNCTION_NAMES[profile.id]}模型`} value={profile.model} disabled={disabled} onChange={event => void configure(profile, { model: event.target.value })}>
-            <option value="deepseek-flash">deepseek-flash</option><option value="deepseek-v4-pro">deepseek-v4-pro</option>
-          </select></label> : <p className="settings-help">{profile.id === 'aliyun-ocr' ? '识别来源图片中的文字。' : profile.id==='aliyun-image-risk' ? '使用 aigcViolationDetection 检查生成图片；需开通图片审核增强版及访问权限。图片临时上传至阿里云检测空间，约 30 分钟后由服务清理。未检出风险不等于法律上的无侵权认定。' : '移除图片背景，保留商品主体。'}</p>}
-          {textVendor && <label className="field"><span>思考模式</span><select aria-label={`${AI_FUNCTION_NAMES[profile.id]}思考模式`} value={profile.thinking?'on':'off'} disabled={disabled} onChange={event=>void configure(profile,{thinking:event.target.value==='on'})}><option value="off">关闭</option><option value="on">开启</option></select><small>用于该功能的分类、识别或填写请求；开启后耗时和用量可能增加。</small></label>}
+          <p className="settings-help">{textVendor?'模型、思考强度和疑难目标在下方逐用途独立保存。此处仅控制连接功能的启停。':profile.model}</p>
           <button type="button" className="button secondary" disabled={disabled || !profile.configured && !credential.storedEnabled} onClick={() => void configure(profile, { enabled: !credential.storedEnabled })}>{credential.storedEnabled ? '暂停' : '启用'}{AI_FUNCTION_NAMES[profile.id]}</button>
         </div>
       </div>; })}

@@ -1,4 +1,4 @@
-import { listingFingerprint } from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 
 /** A local parse never changes the paid call's original terminal record. */

@@ -1,7 +1,9 @@
+export { isProductReference } from './source-reference-query.ts';
+import { isProductReference } from './source-reference-query.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { validateStoredImageWorkflowRun } from './image-workflow/records.ts';
-import { listingFingerprint } from './listing-ai/validation.ts';
+import { listingFingerprint } from "./json-fingerprint.ts";
 import { validateConsistencyDecision } from './source-image-consistency/history.ts';
 
 /** SAVEPOINT also works while getProduct is called inside a store transaction. */
@@ -70,8 +72,4 @@ export function bindProductReference(db:DatabaseSync,input:{productId:string;var
     confirmBinding(db,input.assetId,input.variantId,at);
     if(!scoped)db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),input.productId,'source-image.product-reference','商品参考图＋所选 SKU 规格',JSON.stringify({basis:'product-reference+selected-spec',...input}),at);
   });
-}
-
-export function isProductReference(db:DatabaseSync,productId:string,variantId:string,assetId:string):boolean {
-  return !!db.prepare("SELECT 1 FROM audit_events WHERE product_id=? AND action='source-image.product-reference' AND json_extract(detail_json,'$.variantId')=? AND json_extract(detail_json,'$.assetId')=?").get(productId,variantId,assetId);
 }

@@ -11,6 +11,7 @@ import { importImageFiles } from '../src/main/assets.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
+import { inheritLegacyPurposeSettings } from '../src/main/ai/purpose-routing.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
 import { assertImagePlan, assertImageTextReview, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
 import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
@@ -92,6 +93,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
   } });
   ai.saveConnection({ id: 'deepseek', apiKey: 'image-fixture-deepseek-key' });
   ai.saveFunctionSettings({ id: 'deepseek', model: 'deepseek-flash', enabled: true }); ai.saveFunctionSettings({ id: 'deepseek-review', model: 'deepseek-v4-pro', enabled: true });
+  inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);inheritLegacyPurposeSettings((ai as any).db,'deepseek-review','deepseek-v4-pro',false);
   ai.importProfile({ id: 'aliyun-ocr', accessKeyId: 'image-fixture-key', accessKeySecret: 'image-fixture-secret' }); ai.setEnabled({ id: 'aliyun-ocr', enabled: true });
   ai.importProfile({ id: 'aliyun-image-risk', accessKeyId: 'image-fixture-key', accessKeySecret: 'image-fixture-secret' }); ai.setEnabled({ id: 'aliyun-image-risk', enabled: true });
   const cleanups:(()=>Promise<void>)[]=[];
@@ -170,7 +172,7 @@ function productionWorkflow(f:Awaited<ReturnType<typeof fixture>>,failAfter?:num
     posts++;if(failAfter!==undefined&&posts>failAfter)throw new Error('Fixture lost generation response');
     const bytes=Buffer.from(f.bytes);bytes[32]=posts;return Response.json({data:[{b64_json:bytes.toString('base64')}]});
   }});
-  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+  generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation);
   if(!f.context.listing.contract){const listing=(workflow as any).listing as ListingAiService,current=listing.currentContext.bind(listing);listing.currentContext=(draft,product,generation)=>current(draft,product,generation,true);}
   f.cleanup(async()=>{await workflow.close();await generation.close();});
@@ -665,7 +667,7 @@ test('unreviewed seven-image history retains its own proof when later rechecked 
   const generation = new ImageGenerationService(f.directory, f.store, mockStorage, { decodePreview: bytes => bytes, fetch: async () => {
     const bytes = Buffer.from(f.bytes); bytes[32] = ++images; return Response.json({ data: [{ b64_json: bytes.toString('base64') }] });
   } });
-  generation.saveConnection({ model: 'gpt-image-2.5-sunburst', enabled: true, apiKey: 'fixture' });
+  generation.saveConnection({ model: 'openai/gpt-image-2.5-sunburst', enabled: true, apiKey: 'fixture-image-key' });
   const workflow = new ImageWorkflowService(f.directory, f.store, f.amazon, f.ai, generation, { listing: {
     complete: async () => ({ draft: f.amazon.getDraft(f.draft.id), aiCalls: 0, previewAttempts: 0, remaining: [] }),
     reviewCurrentForImages: (input, signal) => f.listing.reviewCurrentForImages(input, signal),
@@ -810,7 +812,7 @@ test('seven images through production AI adapters retain auditable slot provenan
   const f=await fixture(t);let imageCount=0;
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return new Response(JSON.stringify({data:[{b64_json:bytes.toString('base64')}]}));}});
-  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+  generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');
@@ -830,7 +832,7 @@ test('a saved generated candidate resumes only its missing text review after inv
     const bytes = Buffer.from(f.bytes); bytes[32] = ++imageCount;
     return Response.json({ data: [{ b64_json: bytes.toString('base64') }] });
   } });
-  generation.saveConnection({ model: 'gpt-image-2.5-sunburst', enabled: true, apiKey: 'test-only' });
+  generation.saveConnection({ model: 'openai/gpt-image-2.5-sunburst', enabled: true, apiKey: 'test-only' });
   const options = { listing: { complete: async () => ({ draft: f.draft, aiCalls: 0, previewAttempts: 0, remaining: [] }), reviewCurrentForImages: (input: Parameters<ListingAiService['reviewCurrentForImages']>[0], signal?: AbortSignal) => f.listing.reviewCurrentForImages(input, signal) } };
   const workflow = new ImageWorkflowService(f.directory, f.store, f.amazon, f.ai, generation, options);
   f.cleanup(async () => { await workflow.close(); await generation.close(); });
@@ -880,7 +882,7 @@ test('a source-image size, feature captions and optional scene copy survive the 
   });
   const prompts:string[]=[];
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async(_url,init)=>{prompts.push(String(init?.body));const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
-  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+  generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
@@ -898,7 +900,7 @@ test('equivalent draft saves resume unknown candidates without changing historic
     const f=await fixture(t);let posts=0,loseResponse=true;
     f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
     const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++posts;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
-    generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+    generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
     const send=generation.generateForWorkflow.bind(generation);
     generation.generateForWorkflow=async(...args)=>{const candidate=await send(...args);if(posts===2&&loseResponse){loseResponse=false;throw new AiError('TIMEOUT');}return candidate;};
     const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
@@ -1189,7 +1191,7 @@ test('copy-only repairs reuse exact seven-image approvals without paid calls and
   const f=await legacyFixture(t);let imageCount=0;
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++imageCount;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
-  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
+  generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'test-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');
@@ -1220,7 +1222,7 @@ test('interrupted IP rechecks reuse old approvals without calls but never overri
   const f=await fixture(t);let images=0;
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
-  generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'fixture'});
+  generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'fixture-image-key'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED');
@@ -1270,7 +1272,7 @@ test('Haul rules reuse seven frozen approvals and hosted URLs survive paused exe
   Object.assign(r.draft.schema.schema.properties,{is_value_stores_item:{type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}},manufacturer:{type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'}},required:['value']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']},marketplace_id:{type:'string'}},required:['value','unit']}}});
   r.draft.schema.checksum=createHash('md5').update(JSON.stringify(r.draft.schema.schema)).digest('base64');p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
   let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
-  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:r.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');const frozen=p.db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id).record_json,calls=f.requests.length;
@@ -1294,7 +1296,7 @@ for(const unknown of [false,true])test(`Haul partial seven-image continuation pr
   r.draft.listingProgram='haul';r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:market}];r.draft.attributes.purchasable_offer=[{audience:'BZR',currency:'USD',marketplace_id:market,our_price:[{schedule:[{value_with_tax:2.5}]}]}];
   (r.draft.schema.schema.properties as any).is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
   let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
-  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;if(unknown&&images===3)throw Error('synthetic lost response');return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;if(unknown&&images===3)throw Error('synthetic lost response');return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
   const listing={currentContext:(...args:Parameters<ListingAiService['currentContext']>)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input:any,signal?:AbortSignal)=>f.listing.reviewCurrentForImages(input,signal)};
   let workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});f.cleanup(async()=>{await workflow.close();await generation.close();});
   const plan=f.ai.imagePlan.bind(f.ai);let interrupted=false;f.ai.imagePlan=async(...args:Parameters<AiService['imagePlan']>)=>{if(!unknown&&args[0].slot?.index===3&&!interrupted){interrupted=true;throw new AiError('PROVIDER_ERROR');}return plan(...args);};
@@ -1303,22 +1305,22 @@ for(const unknown of [false,true])test(`Haul partial seven-image continuation pr
   // This synthetic image fixture has no procurement input; pricing guards are tested separately.
   const priced=p.record(fixed.id);delete priced.draft.businessRules.pricingDecision;priced.draft.businessRules.notices=[];p.putRecord(priced);
   await workflow.close();workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});
-  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');if(unknown)assert.equal(resumed.workflow.slots![2].attempts[0].state,'RETRYABLE_FAILURE');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?8:7);
+  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});assert.equal(resumed.workflow.status,unknown?'FAILED':'COMPLETED',resumed.workflow.error??'');if(unknown)assert.equal(resumed.workflow.slots![2].attempts[0].state,'UNKNOWN');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?3:7);
   await createWorkspaceBackup(f.directory,join(f.directory,'partial-rule-reuse.htcbackup'),'synthetic partial rules backup');
 });
 
-test('real image owner retains three unknown generation attempts through encrypted backup',async t=>{
+test('real image owner retains one unresolved generation attempt through encrypted backup',async t=>{
  const f=await fixture(t);let posts=0;
  f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
  const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{posts++;throw Error('synthetic lost response');}});
- generation.saveConnection({model:'gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
+ generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
  f.cleanup(async()=>{await workflow.close();await generation.close();});
  for(let n=0;n<4;n++)await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
- const run=workflow.getProgress(f.draft.id)!;assert.equal(posts,3);assert.equal(run.slots![0].attempts.length,3);
+ const run=workflow.getProgress(f.draft.id)!;assert.equal(posts,1);assert.equal(run.slots![0].attempts.length,1);
  const file=join(f.directory,'unknown-three.htcbackup');await createWorkspaceBackup(f.directory,file,'synthetic unknown image retry');
  const prepared=await prepareWorkspaceRestore(f.directory,file,'synthetic unknown image retry'),db=openDatabase(prepared.stagingDirectory);
- try{const saved=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json));assert.equal(saved.slots[0].attempts.length,3);assert.deepEqual(saved.slots[0].attempts.map((a:any)=>a.requestId),run.slots![0].attempts.map(a=>a.requestId));}finally{db.close();}
+ try{const saved=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(run.id)!.record_json));assert.equal(saved.slots[0].attempts.length,1);assert.deepEqual(saved.slots[0].attempts.map((a:any)=>a.requestId),run.slots![0].attempts.map(a=>a.requestId));}finally{db.close();}
 });
 
 test('empty seven-slot source refusal keeps an attributable result and no executable blueprint',async t=>{
@@ -1570,11 +1572,27 @@ test('R2 malformed usage cannot turn a confirmed credential echo into a formatti
  const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,randomUUID()),(e:any)=>e.diagnosticReason==='RESPONSE_SECRET_ECHO');assert.equal(f.requests.length-before,1);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
 });
 
-test('R2 exhausted planning budget has a specific visible message without a fourth fee',async t=>{
+for(const outcome of ['invalid','refusal','echo'] as const)test(`OpenRouter planning ${outcome} keeps its original bounded retry policy`,async t=>{
+ const f=await fixture(t),workflowId=randomUUID();
+ f.ai.saveConnection({id:'openrouter',apiKey:'openrouter-image-plan-fixture'});f.ai.setEnabled({id:'openrouter',enabled:true});
+ const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(operation=>operation!=='image-plan'?undefined:outcome==='invalid'?chat({kind:'image-plan',unexpected:true}):outcome==='echo'?new Response('openrouter-image-plan-fixture'):Response.json({choices:[{finish_reason:'stop',message:{refusal:'No',content:'{}'}}]}));
+ const reason=outcome==='invalid'?'IMAGE_PLAN_ATTEMPTS_EXHAUSTED':outcome==='echo'?'RESPONSE_SECRET_ECHO':'RESPONSE_NOT_CONTENT';
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(e:any)=>e.diagnosticReason===reason);
+ const count=f.requests.length;assert.equal(f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===workflowId).length,outcome==='invalid'?3:1);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(f.requests.length,count);
+});
+for(const gateway of ['deepseek','openrouter'] as const)test(`R2 ${gateway} exhausted planning budget has a specific visible message without a fourth fee`,async t=>{
  const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?chat({kind:'image-plan',unexpected:true}):undefined);
+ if(gateway==='openrouter'){
+   f.ai.saveConnection({id:'openrouter',apiKey:'openrouter-image-plan-fixture'});f.ai.setEnabled({id:'openrouter',enabled:true});
+   const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;
+   f.ai.savePurposeProfile({purposeId:'image_plan',expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ }
  const exhausted=(e:any)=>{assert.equal(e.code,'OUTPUT_INVALID');assert.equal(e.diagnosticReason,'IMAGE_PLAN_ATTEMPTS_EXHAUSTED');assert.match(e.message,/图片规划已达到 3 次尝试/);assert.match(e.message,/已保留原图和请求记录/);return true;};
- await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);const calls=f.ai.listCalls(),usage=f.ai.getUsageSummary('deepseek'),before=f.requests.length;
- await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);assert.equal(f.requests.length,before);assert.deepEqual(f.ai.listCalls(),calls);assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);const calls=f.ai.listCalls(),usage=f.ai.getUsageSummary(gateway),before=f.requests.length;
+ assert.equal(calls.filter(c=>c.presentationContext?.workflowId===workflowId).length,3);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),exhausted);assert.equal(f.requests.length,before);assert.deepEqual(f.ai.listCalls(),calls);assert.deepEqual(f.ai.getUsageSummary(gateway),usage);
 });
 
 test('R2 a restored refusal remains nonretryable without diagnostic files and overrides an older running snapshot',async t=>{

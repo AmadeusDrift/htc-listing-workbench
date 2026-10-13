@@ -9,8 +9,8 @@ import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 import { imageIpVerdict, validateCandidateImageIdentity, validateImageIpReview } from './image-validation.ts';
 import { emptyUsage, postJson } from './transport.ts';
 import type { AdapterContext } from './transport.ts';
-import { boundedText, integer, object, requestId, uuid } from './validation.ts';
-import type { AliyunCredentials } from './validation.ts';
+import { boundedText, integer, object, requestId, uuid } from "./primitives.ts";
+import type { AliyunCredentials } from "./primitives.ts";
 
 const HOST='green-cip.cn-shanghai.aliyuncs.com';
 function ok(raw:unknown):Record<string,unknown> {

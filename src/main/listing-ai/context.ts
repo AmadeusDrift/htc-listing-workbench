@@ -7,13 +7,14 @@ import type { CandidateField, ListingAiContext, ListingEvidence, ListingFieldCar
 import { buildFieldCatalog } from '../amazon/field-catalog.ts';
 import { AMAZON_COPY_POLICY_VERSION } from '../amazon/field-mapping.ts';
 import { skuDependentSourceFact, categoryAttributeField, selectedSkuCategoryAttributes, selectedSkuCategoryEvidence } from '../amazon/demo.ts';
-import { protectedAttribute } from '../ai/validation.ts';
+import { protectedAttribute } from "../ai/basic-output-validation.ts";
 import { UserFacingError } from '../../shared/errors.ts';
-import { listingFingerprint, validateListingContext } from './validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
+import { validateListingContext } from "./validation.ts";
 import { projectSalesProduct } from '../sales-plans/records.ts';
 import { evidenceRole } from './evidence-contract-v2.ts';
 import { FULL_SCHEMA_CONTRACT } from '../../shared/listing-ai-contracts.ts';
-import { isFullSchema } from './full-schema.ts';
+import { isFullSchema } from "./native-values.ts";
 
 function meaning(name: string): ListingEvidence['meaning'] {
   const n = name.toLowerCase().replace(/[\s_-]/g, '');

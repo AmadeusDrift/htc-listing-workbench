@@ -1,7 +1,7 @@
 import { SOURCE_COLOR_VALUES } from '../../shared/source-color-contracts.ts';
 import type { SourceColorContext } from '../../shared/source-color-contracts.ts';
 import { requestDeepSeekJson } from './adapters.ts';
-import type { DeepSeekCredentials } from './validation.ts';
+import type { DeepSeekCredentials } from "./primitives.ts";
 import type { AdapterContext } from './transport.ts';
 import type { DeepSeekReferenceImage } from './vision.ts';
 import { assertSourceColorOutput, validateSourceColorContext, validateSourceColorOutput } from './source-color-validation.ts';

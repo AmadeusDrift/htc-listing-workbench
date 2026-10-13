@@ -1,13 +1,13 @@
 import { plainColorValue } from './plain-colors.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
-import { isFullSchema,candidateNative } from './full-schema.ts';
+import { isFullSchema, candidateNative } from "./native-values.ts";
 import { assertStoredListingEvidence, assertStoredListingReview } from './stored-evidence.ts';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { LISTING_CANDIDATE_FIELDS } from '../../shared/listing-ai-contracts.ts';
 import { attributesObject } from '../amazon/context.ts';
-import { listingFingerprint } from './validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { validateSalesPlan } from '../sales-plans/records.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { adoptionSchema } from './schema-lineage.ts';

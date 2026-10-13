@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import type { LookupFunction } from 'node:net';
 import { isPublicIp } from '../hosting/public-probe.ts';
-import { ossImageUrl } from '../ai/validation.ts';
+import { ossImageUrl } from "../ai/basic-output-validation.ts";
 import { AiError, abortable, throwIfAborted } from '../ai/errors.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 

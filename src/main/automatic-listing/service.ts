@@ -38,7 +38,7 @@ import { publicError } from '../security.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
 import { fingerprint } from '../execution/records.ts';
 import { sourceStamp, validateAutomaticListingTask } from './records.ts';
-import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
+import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
 import type { ProductClassification } from '../../shared/category-ai-contracts.ts';
 import type { SalesListingPlan } from '../../shared/sales-plan-contracts.ts';
 import { projectSalesProduct, validateSalesPlan, validateSalesRecipe } from '../sales-plans/records.ts';

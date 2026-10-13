@@ -7,7 +7,7 @@ import { FAMILY_REBIND_EVENT_SUMMARY } from '../amazon/family-events.ts';
 import { relationshipAttributes } from '../sales-plans/families.ts';
 import { assertSalesPlanNamingIdentity } from '../sales-plans/history.ts';
 import { validateSalesPlan } from '../sales-plans/records.ts';
-import { listingFingerprint } from './validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { createHash } from 'node:crypto';
 
 const same=(a:unknown,b:unknown):boolean=>JSON.stringify(a)===JSON.stringify(b);

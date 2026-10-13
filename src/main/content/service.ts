@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ContentVersion } from '../../shared/content-contracts.ts';
 import { AiError, safeError } from '../ai/errors.ts';
 import type { AiService } from '../ai/service.ts';
-import { uuid } from '../ai/validation.ts';
+import { uuid } from "../ai/primitives.ts";
 import { openDatabase } from '../database.ts';
 import { RecordReader } from '../record-query.ts';
 import type { WorkspaceStore } from '../store.ts';

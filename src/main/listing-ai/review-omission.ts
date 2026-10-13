@@ -1,5 +1,6 @@
 import type { ListingAiContext, ListingFieldsOutput } from '../../shared/listing-ai-contracts.ts';
-import { isFullSchema, parseFullReview, assertFullReview, fullReference } from './full-schema.ts';
+import { isFullSchema } from "./native-values.ts";
+import { parseFullReview, assertFullReview, fullReference } from "./full-schema.ts";
 import { validateListingReviewOutput, assertListingEvidence } from './validation.ts';
 import { requireCompleteReview } from './review-coverage.ts';
 

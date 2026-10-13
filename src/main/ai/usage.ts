@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { AI_DAILY_CALL_MAX, AI_DAILY_TOKEN_MAX } from '../../shared/ai-contracts.ts';
 import type { AiCall, AiProviderId, AiUsage, AiUsagePolicy, AiUsageSummary } from '../../shared/ai-contracts.ts';
 import { AiError } from './errors.ts';
-import { date, integer, isDeepSeek, keys, providerId, uuid, validateAiCall, validateUsage } from './validation.ts';
+import { date, integer, isChatProvider, keys, providerId, uuid, validateUsage } from "./primitives.ts";
+import { validateAiCall } from "./validation.ts";
 
 const zeroUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
 export interface AiUsageRecord {
@@ -15,7 +16,7 @@ function limit(value: unknown, max: number): number | null { return value === nu
 export function validateAiUsagePolicy(raw: unknown): AiUsagePolicy {
   const o = keys(raw, ['providerId', 'dailyCallLimit', 'dailyTokenLimit']), id = providerId(o.providerId);
   const dailyCallLimit = limit(o.dailyCallLimit, AI_DAILY_CALL_MAX), dailyTokenLimit = limit(o.dailyTokenLimit, AI_DAILY_TOKEN_MAX);
-  if (!isDeepSeek(id) && dailyTokenLimit !== null) throw new AiError('INVALID_INPUT');
+  if (!isChatProvider(id) && dailyTokenLimit !== null) throw new AiError('INVALID_INPUT');
   return { providerId: id, dailyCallLimit, dailyTokenLimit };
 }
 export function validateStoredAiUsagePolicy(raw: unknown): StoredPolicy {
@@ -28,11 +29,11 @@ export function validateAiUsageRecord(raw: unknown): AiUsageRecord {
   const id = uuid(o.id), provider = providerId(o.providerId), startedAt = date(o.startedAt), finishedAt = o.finishedAt === null ? null : date(o.finishedAt), usage = validateUsage(o.usage);
   const reservedTokens = o.reservedTokens === null ? null : integer(o.reservedTokens, 0, Number.MAX_SAFE_INTEGER);
   if (o.day !== startedAt.slice(0, 10) || !['PENDING', 'REPORTED', 'UNKNOWN'].includes(String(o.state)) || typeof o.state !== 'string'
-    || (o.state === 'PENDING' ? finishedAt !== null || reservedTokens === null : finishedAt === null || finishedAt < startedAt)
+    || (o.state === 'PENDING' ? finishedAt !== null || reservedTokens === null&&!provider.startsWith('openrouter') : finishedAt === null || finishedAt < startedAt)
     || (o.state !== 'REPORTED' && (usage.promptTokens || usage.completionTokens || usage.processedImages))
-    || (isDeepSeek(provider) ? usage.processedImages !== 0 : usage.promptTokens !== 0 || usage.completionTokens !== 0 || reservedTokens !== 0)
-    || (isDeepSeek(provider) && o.state !== 'REPORTED' && reservedTokens !== null && reservedTokens < 512 + (provider === 'deepseek-review' ? 16384 : 4096))
-    || (reservedTokens === null && o.state !== 'UNKNOWN')) throw new AiError('INVALID_CONFIG');
+    || (isChatProvider(provider) ? usage.processedImages !== 0 : usage.promptTokens !== 0 || usage.completionTokens !== 0 || reservedTokens !== 0)
+    || (isChatProvider(provider) && o.state !== 'REPORTED' && reservedTokens !== null && reservedTokens < 512 + (provider === 'deepseek-review' ? 16384 : 4096))
+    || (reservedTokens === null && o.state !== 'UNKNOWN' && !(o.state==='PENDING'&&provider.startsWith('openrouter')))) throw new AiError('INVALID_CONFIG');
   return { id, providerId: provider, day: String(o.day), startedAt, finishedAt, state: o.state as AiUsageRecord['state'], reservedTokens, usage };
 }
 function readRows<T extends { id: string }>(db: DatabaseSync, table: 'ai_usage_ledger' | 'ai_usage_policies', validate: (raw: unknown) => T, filters: { providerId?: AiProviderId; day?: string; state?: AiUsageRecord['state'] } = {}): T[] {
@@ -43,12 +44,16 @@ function readRows<T extends { id: string }>(db: DatabaseSync, table: 'ai_usage_l
 function saveRecord(db: DatabaseSync, record: AiUsageRecord): void { const parsed = validateAiUsageRecord(record); db.prepare('INSERT INTO ai_usage_ledger(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(parsed.id, JSON.stringify(parsed)); }
 function add(a: number, b: number): number { return integer(a + b, 0, Number.MAX_SAFE_INTEGER); }
 /** Text UTF-8 bytes + 1024 tokens per vision image + 512 framing + max_tokens. Base64 is transport, not text. */
-export function requestTokenReservation(id: AiProviderId, body: string | Buffer): number {
-  if (!isDeepSeek(id)) return 0;
+export function requestTokenReservation(id: Exclude<AiProviderId,'openrouter'|'openrouter-review'>,body:string|Buffer):number;
+export function requestTokenReservation(id:AiProviderId,body:string|Buffer):number|null;
+export function requestTokenReservation(id: AiProviderId, body: string | Buffer): number|null {
+  if (!isChatProvider(id)) return 0;
   if (typeof body !== 'string') throw new AiError('INVALID_CONFIG');
-  const parsed = JSON.parse(body) as { max_tokens?: unknown; thinking?: {type?:string}; messages?: {content?: unknown}[] };
+  const parsed = JSON.parse(body) as { model?:string;questions?:unknown;state?:unknown;max_tokens?: unknown; thinking?: {type?:string}; messages?: {content?: unknown}[] };
+  if(id.startsWith('openrouter')&&parsed.questions&&parsed.state!==undefined&&['openai/gpt-6-luna-decisions','typesafe/jev-1.13'].includes(parsed.model??''))return null;
   const thinking=parsed.thinking?.type==='enabled';
-  const maximum = integer(parsed.max_tokens, 1, thinking?32768:16384);
+  const openrouter=id==='openrouter'||id==='openrouter-review';
+  const maximum = integer(parsed.max_tokens, 1, openrouter?128000:thinking?32768:16384);
   let setPlanning=false;
   let fullSchemaListing=false;
   if(id==='deepseek'&&maximum===16384)for(const message of parsed.messages??[])if(typeof message.content==='string'){
@@ -59,7 +64,7 @@ export function requestTokenReservation(id: AiProviderId, body: string | Buffer)
       try{const payload=JSON.parse(part.text);if(payload.operation==='image-plan'&&payload.setPolicy==='seven-product-v2'&&!payload.slot)setPlanning=true;}catch{/* Ordinary text is not a planning request. */}
     }
   }
-  if (maximum !== (thinking ? 32768 : id === 'deepseek-review'||setPlanning||fullSchemaListing ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
+  if (!openrouter && maximum !== (thinking ? 32768 : id === 'deepseek-review'||setPlanning||fullSchemaListing ? 16384 : 4096)) throw new AiError('INVALID_CONFIG');
   let imageTokens = 0;
   for (const message of parsed.messages ?? []) if (Array.isArray(message.content)) {
     for (const part of message.content) if (part.type === 'image_url') {
@@ -76,7 +81,7 @@ export function migrateLegacyAiUsage(db: DatabaseSync): void {
     const call = validateAiCall(JSON.parse(String(row.record_json))); if (call.id !== row.id) throw new AiError('INVALID_CONFIG');
     const known = call.status === 'SUCCEEDED' || call.usage.promptTokens + call.usage.completionTokens + call.usage.processedImages > 0;
     const finishedAt = call.finishedAt ?? call.startedAt;
-    saveRecord(db, { id: call.id, providerId: call.providerId, day: call.startedAt.slice(0, 10), startedAt: call.startedAt, finishedAt, state: known ? 'REPORTED' : 'UNKNOWN', reservedTokens: known || !isDeepSeek(call.providerId) ? 0 : null, usage: known ? call.usage : zeroUsage() });
+    saveRecord(db, { id: call.id, providerId: call.providerId, day: call.startedAt.slice(0, 10), startedAt: call.startedAt, finishedAt, state: known ? 'REPORTED' : 'UNKNOWN', reservedTokens: known || !isChatProvider(call.providerId) ? 0 : null, usage: known ? call.usage : zeroUsage() });
   }
 }
 export class AiUsageLedger {
@@ -114,7 +119,7 @@ export class AiUsageLedger {
     try {
       const summary = this.summary(call.providerId, call.startedAt), policy = summary.policy;
       if ((policy.dailyCallLimit !== null && summary.attempts >= policy.dailyCallLimit)
-        || (policy.dailyTokenLimit !== null && (summary.usedTokens === null || summary.usedTokens + reservation > policy.dailyTokenLimit))) throw new AiError('QUOTA_EXCEEDED');
+        || (policy.dailyTokenLimit !== null && (summary.usedTokens === null || reservation===null || summary.usedTokens + reservation > policy.dailyTokenLimit))) throw new AiError('QUOTA_EXCEEDED');
       saveRecord(this.db, { id: call.id, providerId: call.providerId, day: call.startedAt.slice(0, 10), startedAt: call.startedAt, finishedAt: null, state: 'PENDING', reservedTokens: reservation, usage: zeroUsage() });
       this.db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(call.id, JSON.stringify(call)); recordSend?.(call); this.db.exec('COMMIT'); return call;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -123,7 +128,7 @@ export class AiUsageLedger {
   settle(callId: string, known: boolean, usage: AiUsage, finishedAt: string): void {
     const row = this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(callId); if (!row) throw new AiError('INVALID_CONFIG');
     const record = validateAiUsageRecord(JSON.parse(String(row.record_json))); if (record.id !== callId) throw new AiError('INVALID_CONFIG');
-    saveRecord(this.db, { ...record, state: known ? 'REPORTED' : 'UNKNOWN', usage: known ? usage : zeroUsage(), finishedAt });
+    saveRecord(this.db, { ...record, reservedTokens:known&&record.reservedTokens===null?0:record.reservedTokens, state: known ? 'REPORTED' : 'UNKNOWN', usage: known ? usage : zeroUsage(), finishedAt });
   }
   recoverPending(): void {
     for (const record of readRows(this.db, 'ai_usage_ledger', validateAiUsageRecord, { state: 'PENDING' })) {
@@ -188,9 +193,9 @@ export function retainImagePlanningAttempts(current:DatabaseSync,snapshot:Databa
   const hasCalls=(db:DatabaseSync)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_calls'").get();
   if(!hasCalls(current)||!hasCalls(snapshot))return;
   const identity=(call:AiCall)=>({providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,
-    model:call.model,generation:call.generation,startedAt:call.startedAt,presentationContext:call.presentationContext});
+    model:call.model,generation:call.generation,startedAt:call.startedAt,presentationContext:call.presentationContext,purposeSnapshot:call.purposeSnapshot});
   for(const row of current.prepare(`SELECT id,record_json FROM ai_calls WHERE
-    json_extract(record_json,'$.providerId')='deepseek' AND json_extract(record_json,'$.model')='deepseek-flash'
+    json_extract(record_json,'$.providerId') IN ('deepseek','openrouter')
     AND json_extract(record_json,'$.presentationContext.kind')='image'
     AND json_type(record_json,'$.presentationContext.workflowId')='text'`).all()){
     const call=validateAiCall(JSON.parse(String(row.record_json)));

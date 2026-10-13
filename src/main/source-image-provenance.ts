@@ -1,8 +1,8 @@
 import { readManagedImageSync } from './ai/source.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import { keys, uuid, integer, sha256, date, boundedText } from './ai/validation.ts';
+import { keys, uuid, integer, sha256, date, boundedText } from "./ai/primitives.ts";
 import { readSourceImageReceipt, sourceImageMappings } from './source-images.ts';
-import { listingFingerprint } from './listing-ai/validation.ts';
+import { listingFingerprint } from "./json-fingerprint.ts";
 import { assertUnambiguousRecordJson } from './record-json.ts';
 import { UserFacingError } from '../shared/errors.ts';
 

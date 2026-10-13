@@ -1,6 +1,6 @@
 import { currentRiskRecheck } from './risk-adaptation.ts';
 import { readImageRiskSettings } from '../image-workflow/risk-settings.ts';
-import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
+import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
 import { nonDeferredImageIssues,pricingBlockingReason,withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
 import { inspectImageAdaptation,saveImageAdaptation } from '../image-workflow/adaptation.ts';
 import type { DatabaseSync } from 'node:sqlite';

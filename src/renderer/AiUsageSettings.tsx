@@ -5,6 +5,8 @@ import type { AiProviderId, AiUsagePolicy, AiUsageSummary } from '../shared/ai-c
 import type { TaskRunner } from './amazon-ui';
 import { errorText } from './utils';
 import { AiConnectionSettings } from './AiConnectionSettings';
+import { AiPurposeSettings } from './AiPurposeSettings';
+import { AiUsageReport } from './AiUsageReport';
 import { CALL_PRESETS, TOKEN_PRESETS, savedLimit, UsageLimitField } from './UsageLimitField';
 import { AI_FUNCTION_NAMES, AI_VENDOR_FUNCTIONS, aiVendorFor } from '../shared/ai-connection-contracts';
 import type { AiVendorId } from '../shared/ai-connection-contracts';
@@ -13,6 +15,7 @@ const names: Record<AiProviderId, string> = {
   'aliyun-ocr': '阿里云 OCR', 'aidge-segmentation': 'Aidge 图片分割',
   'aliyun-image-risk': '阿里云图片侵权风险检测',
   deepseek: 'DeepSeek 文案生成', 'deepseek-review': 'DeepSeek 文案复核',
+  openrouter:'OpenRouter 文案生成','openrouter-review':'OpenRouter 文案复核',
 };
 function limitValue(value: string, maximum: number): number | null | undefined {
   if (value.trim() === '') return null;
@@ -24,7 +27,7 @@ const count = (value: number) => value.toLocaleString('zh-CN');
 
 export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner }) {
   const api = window.red;
-  const [provider, setProvider] = useState<AiProviderId>('deepseek');
+  const [provider, setProvider] = useState<AiProviderId>('openrouter');
   const vendor = aiVendorFor(provider);
   const selectVendor = (id: AiVendorId) => setProvider(AI_VENDOR_FUNCTIONS[id][0]);
   const [summary, setSummary] = useState<AiUsageSummary | null>(null);
@@ -34,7 +37,7 @@ export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner 
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState('');
   const [loadError, setLoadError] = useState('');
-  const textProvider = provider === 'deepseek' || provider === 'deepseek-review';
+  const textProvider = provider === 'deepseek' || provider === 'deepseek-review' || provider.startsWith('openrouter');
   const callLimit = limitValue(calls.value, AI_DAILY_CALL_MAX);
   const tokenLimit = textProvider ? limitValue(tokens.value, AI_DAILY_TOKEN_MAX) : null;
   const valid = callLimit !== undefined && tokenLimit !== undefined;
@@ -82,7 +85,7 @@ export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner 
   return <section className="settings-section ai-settings" aria-label="AI 用量与上限">
     <div className="settings-section-title"><Gauge size={19} /><div><h3>AI 连接、用量与上限</h3><p>每家供应商只填一次密钥；功能、模型和用量上限分别设置。</p></div></div>
     <div className="ai-service-selector">
-      <label className="field"><span>供应商</span><select aria-label="AI 连接供应商" value={vendor} disabled={disabled} onChange={event => selectVendor(event.target.value as AiVendorId)}><option value="deepseek">DeepSeek</option><option value="aliyun">阿里云</option></select></label>
+      <label className="field"><span>供应商</span><select aria-label="AI 连接供应商" value={vendor} disabled={disabled} onChange={event => selectVendor(event.target.value as AiVendorId)}><option value="openrouter">OpenRouter</option><option value="deepseek">DeepSeek</option><option value="aliyun">阿里云</option></select></label>
     </div>
     <div className="ai-settings-columns">
     <div className="ai-connection-column"><AiConnectionSettings key={vendor} vendor={vendor} busy={disabled} run={run} onVendorChange={selectVendor} /></div>
@@ -115,5 +118,7 @@ export function AiUsageSettings({ busy, run }: { busy: boolean; run: TaskRunner 
     {notice && <p className="workflow-notice" role="status">{notice}</p>}
     </section>
     </div>
+    <AiPurposeSettings busy={busy}/>
+    <AiUsageReport/>
   </section>;
 }

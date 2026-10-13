@@ -1,4 +1,4 @@
-import {listingFingerprint} from '../listing-ai/validation.ts';
+import { listingFingerprint } from "../json-fingerprint.ts";
 import {validateStoredAiResult} from './validation.ts';
 import { resultHasOwner } from './result-owner.ts';
 import type { AiCall,AiResult } from '../../shared/ai-contracts.ts';

@@ -40,7 +40,7 @@ import { ensureFamilyParent, resolveSalesFamily } from './automatic-listing/fami
 import { ShipmentDocumentService } from './procurement/shipment-documents.ts';
 import { ListingRuleStore } from './listing-rules.ts';
 import { ListingAiService } from './listing-ai/service.ts';
-import { imageWorkflowDraftStamp } from './image-workflow/records.ts';
+import { imageWorkflowDraftStamp } from "./image-workflow/approval-reuse.ts";
 
 app.setName('HTC Workbench');
 app.enableSandbox();
@@ -95,6 +95,8 @@ async function start() {
   });
   const generationService = imageGeneration;
   ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability() });
+  const routingAi=ai;
+  generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
   content = new ReviewedContentService(dataRoot, db, ai);
   followup = new FollowupService(dataRoot, amazon);
@@ -146,7 +148,11 @@ async function start() {
       });
     },
     preflight: () => {
-      for (const id of ['deepseek','deepseek-review','aliyun-ocr',...(workflowService.getRiskSettings().enabled?['aliyun-image-risk']:[])]) {
+      for(const purpose of ['source_understanding','category_analysis','category_decision','listing_completion','image_plan','image_text_review'] as const){
+        const profile=aiService.purposeProfile(purpose,['source_understanding','category_analysis','category_decision','image_plan'].includes(purpose),purpose==='image_text_review');
+        if(!profile.configured||!profile.enabled)throw new UserFacingError(`用途 ${purpose} 的 ${profile.routing?.gateway} 连接尚未配置或启用，请在逐用途设置中核对`);
+      }
+      for (const id of ['aliyun-ocr',...(workflowService.getRiskSettings().enabled?['aliyun-image-risk']:[])]) {
         const profile = aiService.getProfile(id); if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用内容生成、内容复核、OCR 和侵权检测');
       }
       const generation = generationService.getConnection(); if (!generation.configured || !generation.enabled) throw new UserFacingError('请先在设置中配置并启用生图服务');

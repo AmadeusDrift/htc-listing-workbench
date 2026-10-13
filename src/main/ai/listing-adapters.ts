@@ -4,7 +4,7 @@ import { LISTING_CANDIDATE_FIELDS, LISTING_BOOLEAN_FIELDS } from '../../shared/l
 import { requestDeepSeekJson } from './adapters.ts';
 import type { AdapterResult } from './adapters.ts';
 import type { AdapterContext } from './transport.ts';
-import type { DeepSeekCredentials, DeepSeekModel } from './validation.ts';
+import type { DeepSeekCredentials, DeepSeekModel } from "./primitives.ts";
 import { listingModelPayload } from '../listing-ai/context.ts';
 import { assertListingEvidence, assertListingReview, CATEGORY_ATTRIBUTE_INFERENCE_RULES, ListingValidationError, validateListingFieldsOutput } from '../listing-ai/validation.ts';
 import { AiError } from './errors.ts';
@@ -14,7 +14,8 @@ import { normalizeListingCandidate, normalizeListingGeneration } from '../listin
 import { localFieldRejection } from '../listing-ai/rejection-reasons.ts';
 import type { FieldRejection } from '../../shared/rejection-presentation.ts';
 import type { ListingNormalizationEntry } from '../../shared/listing-normalization-contracts.ts';
-import { isFullSchema,parseFullGeneration,parseFullReview,assertFullReview,retainValidNativeCandidates } from '../listing-ai/full-schema.ts';
+import { isFullSchema } from "../listing-ai/native-values.ts";
+import { parseFullGeneration, parseFullReview, assertFullReview, retainValidNativeCandidates } from "../listing-ai/full-schema.ts";
 import { FULL_SCHEMA_CONTRACT } from '../../shared/listing-ai-contracts.ts';
 
 /** The operation owns kind; tolerate only the observed JSON-mode envelope alias. */

@@ -5,9 +5,9 @@ import type { AiResult } from '../../shared/ai-contracts.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
-import { imageWorkflowDraftStamp } from '../image-workflow/records.ts';
-import { listingFingerprint } from './validation.ts';
-import { isFullSchema } from './full-schema.ts';
+import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
+import { isFullSchema } from "./native-values.ts";
 
 export const LEGACY_THEME_REPAIR_VERSION='legacy-theme-parser/v1' as const;
 export interface LegacyThemeRepair {

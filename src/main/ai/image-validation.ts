@@ -8,11 +8,14 @@ import { LISTING_CANDIDATE_FIELDS, INFERABLE_CATEGORY_FIELDS } from '../../share
 import { PRODUCT_IMAGE_POLICY_VERSION, IMAGE_SET_POLICY } from '../../shared/image-ai-contracts.ts';
 import type { ImageSetPlan, ImageSetSlot } from '../../shared/image-ai-contracts.ts';
 import type { CandidateImageIdentity, CurrentListingCopy, GeneratedImageOcrOutput, ImagePlanOutput, ImageTextReviewOutput, ImageIpReviewOutput, ListingCurrentReviewOutput, ProductImageContext } from '../../shared/image-ai-contracts.ts';
-import { assertListingEvidence, assertListingReview, listingFingerprint, validateListingContext, validateListingReviewOutput } from '../listing-ai/validation.ts';
+import { assertListingEvidence, assertListingReview, validateListingContext, validateListingReviewOutput } from "../listing-ai/validation.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { AiError } from './errors.ts';
-import { boundedText, date, integer, keys, sha256, uuid, validateOutput } from './validation.ts';
+import { boundedText, date, integer, keys, sha256, uuid } from "./primitives.ts";
+import { validateBasicOutput as validateOutput } from "./basic-output-validation.ts";
 import { assertImageMeasurements, assertImagePromptMeasurements, imageEvidence, imageMeasurements, sourceDimensionEvidence, withoutImageMeasurements } from '../image-workflow/image-facts.ts';
-import { isFullSchema,parseFullReview } from '../listing-ai/full-schema.ts';
+import { isFullSchema } from "../listing-ai/native-values.ts";
+import { parseFullReview } from "../listing-ai/full-schema.ts";
 import { explicitCategoryConflicts } from '../listing-ai/full-schema-conflicts.ts';
 
 function fail(): never { throw new AiError('OUTPUT_INVALID'); }

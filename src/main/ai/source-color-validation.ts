@@ -6,7 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { UserFacingError } from '../../shared/errors.ts';
 import { AiError } from './errors.ts';
-import { boundedText, integer, keys, sha256, uuid, uuidList } from './validation.ts';
+import { boundedText, integer, keys, sha256, uuid, uuidList } from "./primitives.ts";
 
 export function validateSourceColorContext(raw: unknown): SourceColorContext {
   try {

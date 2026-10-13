@@ -7,10 +7,12 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { currentCopyEvidenceIssues } from './evidence-contract-v3.ts';
 import { PROSE_FIELDS, isProseField, proseEvidenceIssues } from './evidence-prose-v3.ts';
 import type { ProseEvidenceIssue } from './evidence-prose-v3.ts';
-import { assertListingEvidence, ListingValidationError, listingFingerprint, selectedSkuCategoryConflicts } from './validation.ts';
+import { assertListingEvidence, ListingValidationError, selectedSkuCategoryConflicts } from "./validation.ts";
+import { listingFingerprint } from "../json-fingerprint.ts";
 import { candidateTextValues } from '../amazon/field-mapping.ts';
 import { imageEvidence,imageListingSnapshot } from '../image-workflow/image-facts.ts';
-import { isFullSchema,nativeText,assertFullEvidence } from './full-schema.ts';
+import { isFullSchema, nativeText } from "./native-values.ts";
+import { assertFullEvidence } from "./full-schema.ts";
 import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
 import { translatedFabricEvidence } from './semantic-evidence.ts';
 

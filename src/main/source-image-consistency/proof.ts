@@ -7,8 +7,10 @@ import type { SourceConsistencyContext,SourceConsistencyView } from '../../share
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { WorkspaceStore } from '../store.ts';
 import { UserFacingError } from '../../shared/errors.ts';
-import { keys,uuid,integer,sha256,boundedText,validateAiCall,validateStoredAiResult } from '../ai/validation.ts';
-import { resolveConsistencyContext,consistencyScopeKey,consistencyDecisionKey } from './scope.ts';
+import { keys, uuid, integer, sha256, boundedText } from "../ai/primitives.ts";
+import { validateAiCall, validateStoredAiResult } from "../ai/validation.ts";
+import { resolveConsistencyContext } from "./scope.ts";
+import { consistencyScopeKey, consistencyDecisionKey } from "./contracts.ts";
 import { assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt,latestConsistencyAttempt } from './history.ts';
 
 import { SourceConsistencyError } from './errors.ts';

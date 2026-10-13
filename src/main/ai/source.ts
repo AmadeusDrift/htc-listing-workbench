@@ -6,7 +6,7 @@ import type { StoredAsset } from '../store.ts';
 import { managedAssetPath } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
 import { AiError, throwIfAborted } from './errors.ts';
-import { MAX_IMAGE_BYTES } from './validation.ts';
+import { MAX_IMAGE_BYTES } from "./primitives.ts";
 
 /** Synchronous final identity check at a transaction/send boundary; no asynchronous gap. */
 export function readManagedImageSync(directory:string,asset:StoredAsset):Buffer {

@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { AliyunCredentials } from './validation.ts';
+import type { AliyunCredentials } from "./primitives.ts";
 
 interface Acs3Request extends AliyunCredentials {
   host: string; action: string; version: string; query: Record<string, string>; body: Buffer; contentType?: string; now: Date; nonce: string;

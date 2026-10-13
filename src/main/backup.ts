@@ -3,6 +3,8 @@ import { MIGRATION_TABLES, assertMigrationJournal } from './storage/migrations.t
 import { SOURCE_TABLES } from './miaoshou/source-snapshots.ts';
 import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
 import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOperations,revokeSchemaInFlight } from './catalog/schema-operations.ts';
+import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
+import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles } from './ai/receipts.ts';
 import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
 import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
@@ -31,7 +33,8 @@ import { validateCategoryLibrary } from './catalog/records.ts';
 import { validateProcurementBatch } from './procurement/records.ts';
 import { assertAutomaticRejectionHistory } from './automatic-listing/rejection-history.ts';
 import { assertPresentationResultOwner } from './ai/presentation-history.ts';
-import { validateAiProfile, validateAiCall, validateStoredAiResult } from './ai/validation.ts';
+import { validateAiProfile } from "./ai/primitives.ts";
+import { validateAiCall, validateStoredAiResult } from "./ai/validation.ts";
 import { assertSourceColorHistory } from './ai/source-color-validation.ts';
 import { assertListingHistory } from './listing-ai/history.ts';
 import { AiUsageLedger, retainAiUsage, retainSourceColorAttempts, retainImagePlanningAttempts, validateAiUsageRecord, validateStoredAiUsagePolicy } from './ai/usage.ts';
@@ -109,6 +112,7 @@ export interface PreparedRestore { stagingDirectory: string; createdAt: string; 
 interface RestoreJournal { version: 1; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
 function digest(data: Buffer): string { return createHash('sha256').update(data).digest('hex'); }
 function managedBackupFile(root: string, path: string): string {
+  if(/^ai-receipts\/[a-f0-9]{64}\.json$/.test(path))return resolve(root,path);
   if (/^documents\/(?:item-labels\/[a-f0-9-]{36}\/[1-9]\d{0,2}|shipments\/[a-f0-9-]{36})\.pdf$/.test(path)) return resolve(root, path);
   return managedAssetPath(root, path);
 }
@@ -167,6 +171,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=22){Object.assign(approved,MIGRATION_TABLES);assertMigrationJournal(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
     if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
+    if(version>=25){Object.assign(approved,PURPOSE_TABLES,PROVIDER_RECEIPT_TABLES);assertPurposeHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -257,6 +262,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
       const assetPath = String(asset[key]); managedAssetPath(dirname(path), assetPath); paths.add(assetPath);
     }
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
+    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {

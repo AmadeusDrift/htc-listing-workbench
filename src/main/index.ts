@@ -25,7 +25,7 @@ import { AiService } from './ai/service.ts';
 import { ImageVersionService } from './image-versions/service.ts';
 import { decodeArtifact } from './image-versions/decoder.ts';
 import { ReviewedContentService } from './content/service.ts';
-import { CollectionBridge, collectionHostName } from './collection/service.ts';
+import { CollectionHistory } from './collection/history.ts';
 import { AppearanceStore, appearanceTitleBarOverlay } from './appearance.ts';
 import { ImageGenerationService } from './image-generation/service.ts';
 import { normalizeGeneratedImage } from './image-generation/normalize.ts';
@@ -72,7 +72,7 @@ let labelSettings: ItemLabelSettings | undefined;
 let skuNaming: SkuNamingService | undefined;
 let shipmentDocuments: ShipmentDocumentService | undefined;
 let content: ReviewedContentService | undefined;
-let collection: CollectionBridge | undefined;
+let collection: CollectionHistory | undefined;
 let miaoshou: MiaoshouService | undefined;
 let miaoshouImages: MiaoshouImageService | undefined;
 let window: BrowserWindow | undefined;
@@ -111,8 +111,7 @@ async function start() {
       try { listingFollowup.schedule(draft.id); } catch { db.recordWorkspaceEvent('listing.followup.schedule_failed', '有一条已提交记录尚未登记跟进，请核对上架结果'); }
     }
   }
-  collection = new CollectionBridge(dataRoot, db, { nativeHostExecutable: resolve(__dirname, '../dist-native/HTC.CollectionHost.exe'), nativeHostName: collectionHostName(),
-    onReceived: event => { if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send('red:collection:received', event); } });
+  collection = new CollectionHistory(db);
   miaoshou = new MiaoshouService(dataRoot, db, safeStorage);
   const miaoshouService = miaoshou;
   miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreview, {
@@ -183,7 +182,6 @@ async function start() {
       } finally { signal.removeEventListener('abort', cancel); }
     },
   });
-  await collection.start();
   await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
   const buildRoot = resolve(__dirname, '../dist');
   // Only files present in the renderer build are addressable by the app protocol.

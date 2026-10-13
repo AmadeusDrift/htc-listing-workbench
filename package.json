@@ -1,6 +1,6 @@
 {
   "name": "htc-listing-workbench",
-  "version": "2.0.0",
+  "version": "2.5.0",
   "private": true,
   "description": "HTC 独立商品上架工作台",
   "type": "module",
@@ -10,13 +10,13 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs && node scripts/build-native-host.mjs && node scripts/build-extension.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
     "start": "node scripts/start.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "test:e2e": "node scripts/e2e.mjs",
     "test:e2e:amazon": "node scripts/e2e-amazon.mjs",
-    "check": "npm run typecheck && npm test && npm run build && npm run test:e2e && npm run test:e2e:amazon && npm run test:e2e:workspaces && npm run test:e2e:execution && npm run test:e2e:ai && npm run test:e2e:maintenance && npm run test:e2e:extension && npm run test:e2e:collection && npm run test:e2e:miaoshou && npm run test:e2e:inbox && npm run test:e2e:connections && npm run test:e2e:ui-feedback && npm run test:e2e:workspace-samples && npm run test:e2e:image-generation && npm run test:e2e:automatic-images && npm run test:e2e:automatic-listing",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:e2e && npm run test:e2e:amazon && npm run test:e2e:workspaces && npm run test:e2e:execution && npm run test:e2e:ai && npm run test:e2e:maintenance && npm run test:e2e:miaoshou && npm run test:e2e:inbox && npm run test:e2e:connections && npm run test:e2e:ui-feedback && npm run test:e2e:workspace-samples && npm run test:e2e:image-generation && npm run test:e2e:automatic-images && npm run test:e2e:automatic-listing",
     "package": "node scripts/package.mjs",
     "test:e2e:workspaces": "node scripts/e2e-workspaces.mjs",
     "test:e2e:execution": "node scripts/e2e-execution.mjs",

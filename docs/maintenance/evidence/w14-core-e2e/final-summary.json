@@ -1,0 +1,154 @@
+{
+  "base": "9a4e690",
+  "productionFix": "bfb34e7",
+  "at": "2026-10-13T18:34:32.649Z",
+  "passed": true,
+  "scripts": 13,
+  "checks": 104,
+  "externalRequests": 0,
+  "results": [
+    {
+      "script": "scripts/e2e.mjs",
+      "checks": 10,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/e2e-debug.log",
+      "report": "artifacts/e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-amazon.mjs",
+      "checks": 8,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 1,
+      "log": "artifacts/core-e2e-logs/amazon-rerun.log",
+      "report": "artifacts/amazon-e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-workspaces.mjs",
+      "checks": 7,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/workspaces-verified.log",
+      "report": "artifacts/workspaces-e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-execution.mjs",
+      "checks": 7,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/execution-final.log",
+      "report": "artifacts/execution-e2e-report.json",
+      "scope": "real main services and preload/IPC; fake service boundaries"
+    },
+    {
+      "script": "scripts/e2e-ai.mjs",
+      "checks": 14,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 3,
+      "log": "artifacts/core-e2e-logs/ai-final.log",
+      "report": "artifacts/ai-e2e-report.json",
+      "scope": "real main services and preload/IPC; fake service boundaries"
+    },
+    {
+      "script": "scripts/e2e-maintenance.mjs",
+      "checks": 8,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/maintenance-final.log",
+      "report": "artifacts/maintenance-e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-miaoshou.mjs",
+      "checks": 4,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/miaoshou.log",
+      "report": "artifacts/miaoshou-e2e.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-inbox-ui.mjs",
+      "checks": 8,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/inbox-ui-rerun.log",
+      "report": "artifacts/inbox-ui-e2e.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-connections.mjs",
+      "checks": 9,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/connections-final-verified.log",
+      "report": "artifacts/connections-e2e.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-ui-feedback.mjs",
+      "checks": 4,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/ui-feedback-final.log",
+      "report": "artifacts/ui-feedback-e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-workspace-samples.mjs",
+      "checks": 7,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 2,
+      "log": "artifacts/core-e2e-logs/workspace-samples-rerun.log",
+      "report": "artifacts/workspace-samples-e2e-report.json",
+      "scope": "production Electron renderer/preload/IPC"
+    },
+    {
+      "script": "scripts/e2e-automatic-listing-ui.mjs",
+      "checks": 13,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 1,
+      "log": "artifacts/core-e2e-logs/automatic-listing-ui-final.log",
+      "report": ".test-data/automatic-listing-ui-iZojdL/result.json",
+      "scope": "component-only"
+    },
+    {
+      "script": "scripts/e2e-automatic-pipeline.mjs",
+      "checks": 5,
+      "exitCode": 0,
+      "externalRequests": 0,
+      "blockedUnexpectedAttempts": 0,
+      "guardedSessions": 1,
+      "log": "artifacts/core-e2e-logs/automatic-pipeline-final.log",
+      "report": "artifacts/automatic-pipeline-e2e-report.json",
+      "scope": "real main services and preload/IPC; fake service boundaries"
+    }
+  ]
+}

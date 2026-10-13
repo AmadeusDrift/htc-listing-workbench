@@ -72,7 +72,7 @@ export interface ListingFieldAdoption {
   changes: { field: CandidateField; before: JsonValue | null; after: JsonValue; evidence: ListingEvidence[] }[];
 }
 export interface ListingAiApi {
-  completeAmazonFields(input: SuggestAmazonFieldsInput): Promise<{ draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[]; rejections?: {resultId:string;callId:string;details:import('./rejection-presentation.ts').FieldRejections}[] }>;
+  completeAmazonFields(input: SuggestAmazonFieldsInput): Promise<{ draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[]; issues?: import('./workflow-context-contracts.ts').BusinessIssue[]; rejections?: {resultId:string;callId:string;details:import('./rejection-presentation.ts').FieldRejections}[] }>;
   suggestAmazonFields(input: SuggestAmazonFieldsInput): Promise<AiResult>;
   reviewAmazonFields(input: ReviewAmazonFieldsInput): Promise<AiResult>;
   adoptAmazonFields(input: AdoptAmazonFieldsInput): Promise<AmazonDraft>;

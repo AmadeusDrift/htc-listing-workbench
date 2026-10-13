@@ -11,8 +11,7 @@ test('real listing AI service uses the purpose OpenRouter key, model, effort and
   context.fetch=async(url:unknown,init:RequestInit)=>{requests.push({url:String(url),key:new Headers(init.headers).get('authorization'),body:JSON.parse(String(init.body))});return fetcher(url,init);};
   f.ai.saveConnection({id:'openrouter',apiKey:'openrouter-fixture-own-key'});
   f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
-  const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='listing_generation')!;
-  f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
+  for(const p of f.ai.getPurposeProfiles().filter(p=>['listing_generation','listing_title','listing_bullets','listing_description','listing_search_terms'].includes(p.purposeId)))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
   f.ai.disconnectConnection('deepseek');
   const result=await f.listing.suggest(f.reference);
   assert.equal(requests.length,1);assert.equal(requests[0].url,'https://openrouter.ai/api/v1/chat/completions');
@@ -27,8 +26,7 @@ test('DeepSeek purpose keeps its own credential and sends selected actual reason
   const f=await fixture(t),context=(f.ai as any).context,fetcher=context.fetch,requests:any[]=[];
   context.fetch=async(url:unknown,init:RequestInit)=>{requests.push({url:String(url),key:new Headers(init.headers).get('authorization'),body:JSON.parse(String(init.body))});return fetcher(url,init);};
   f.ai.saveConnection({id:'deepseek',apiKey:'deepseek-fixture-own-key'});
-  const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='listing_generation')!;
-  f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'max'}});
+  for(const p of f.ai.getPurposeProfiles().filter(p=>['listing_generation','listing_title','listing_bullets','listing_description','listing_search_terms'].includes(p.purposeId)))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'max'}});
   const result=await f.listing.suggest(f.reference);
   assert.equal(result.providerId,'deepseek');assert.equal(requests[0].url,'https://api.deepseek.com/chat/completions');
   assert.equal(requests[0].key,'Bearer deepseek-fixture-own-key');assert.equal(requests[0].body.reasoning_effort,'max');assert.deepEqual(requests[0].body.thinking,{type:'enabled'});

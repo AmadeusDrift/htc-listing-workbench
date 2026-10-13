@@ -1,10 +1,15 @@
 import {reviewProductAppearance} from './appearance-adapter.ts';
 import {validatePurposeSnapshot as validateAppearancePurposeSnapshot} from './purpose-routing.ts';
 import { resolvePurpose,listPurposeProfiles,savePurposeProfile,inheritLegacyPurposeSettings } from './purpose-routing.ts';
+import { fieldPurposeGroups,beginFieldGroup,findFieldGroup,readFieldGroup,saveFieldGroup,groupFields } from './field-purpose-groups.ts';
+import type { FieldPurposeAssignment,FieldGroupOperation } from './field-purpose-groups.ts';
+import { assembleFieldOutputs } from '../listing-ai/group-output.ts';
+import { parseFullGeneration,retainValidNativeCandidates } from '../listing-ai/full-schema.ts';
+import { transaction } from '../application/transaction.ts';
 import { readAiUsageReport } from './usage-report.ts';
 import { TEXT_MODEL_CAPABILITIES } from './model-capabilities.ts';
 import { saveProviderReceipt,readProviderReceipt } from './receipts.ts';
-import type { AiPurposeId,SaveAiPurposeInput } from '../../shared/ai-purpose-contracts.ts';
+import type { AiPurposeId,SaveAiPurposeInput,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { freezeSourceForProduct } from '../products/public.ts';
 import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import {validateListingContext} from '../listing-ai/validation.ts';
@@ -100,6 +105,10 @@ interface PreparedRequest {
   invoke(credentials: AiCredentials, context: AdapterContext): Promise<AdapterResult>;
   assertFresh(): Promise<void>;
   assertBeforeSend?(): void;
+}
+interface DurableFieldCall {
+  id?:string;assignments:FieldPurposeAssignment[];part?:NonNullable<AiResult['fieldGroupPart']>;
+  sent?:(call:AiCall)=>void;result?:(result:AiResult)=>void;
 }
 type TextSnapshot = { payload: TextPayload; sources: { result: AiResult; asset: StoredAsset }[] };
 type StoredSuggestion = AiResult & { variantId: string; sourceSha256: string; output: ContentSuggestionOutput };
@@ -310,7 +319,7 @@ export class AiService {
     if(!output.candidates.some(c=>!originalOutput.candidates.some(old=>old.field===c.field)))return;
     const sourceSha256=listingFingerprint(context),originalSha256=listingFingerprint(original);
     const prior=this.listResults(original.productId).find(r=>r.fieldCandidateRecovery?.originalSha256===originalSha256&&r.sourceSha256===sourceSha256);if(prior)return prior;
-    const {fieldRejections:_r,...base}=original;
+    const {fieldRejections:_r,fieldGroupAssembly:_assembly,...base}=original;
     const result=validateStoredAiResult({...base,id:randomUUID(),sourceResultIds:[original.id],output,listingContext:context,sourceSha256,fieldCandidateRecovery:{parserVersion:'field-reference-recovery/v1',originalResult:original,originalSha256,recoveredAt:new Date().toISOString()}});
     this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));return result;
   }
@@ -443,15 +452,86 @@ export class AiService {
   }
   /** Trusted main-process entry only. Shares credentials, request control and usage accounting. */
   async listingFields(context: ListingAiContext, assertContextFresh: () => Promise<void>, review?: { suggestionId: string; candidate: ListingFieldsOutput }, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
-    this.ensureOpen();this.assertListingSource(context); const profile = this.activePurpose(review?'copy_review':completion?'listing_completion':'listing_generation',false,!!review);
-    return this.start(profile, { productId: context.productId, productRevision: context.productRevision }, { operation: review ? 'amazon-fields-review' : 'amazon-fields', context, review }, async activeSignal => {
+    this.ensureOpen();this.assertListingSource(context);
+    if(review)return this.listingFieldsOnce(context,assertContextFresh,this.activePurpose('copy_review',false,true),review,signal,completion);
+    const groups=fieldPurposeGroups(this.db,context,!!completion),existing=findFieldGroup(this.db,context,completion?.callId);
+    if(!existing&&groups.length===1)return this.listingFieldsOnce(context,assertContextFresh,this.frozenPurposeProfile(groups[0].purpose),undefined,signal,completion,{assignments:groups[0].assignments});
+    if(!groups.length)throw new AiError('INVALID_INPUT');
+    const operation=existing??beginFieldGroup(this.db,context,groups,completion?.callId);
+    return this.runFieldGroups(operation,context,assertContextFresh,signal,completion);
+  }
+  hasListingFieldGroup(callId:string):boolean{return !!readFieldGroup(this.db,callId);}
+  private frozenPurposeProfile(routing:AiPurposeSnapshot):AiProfile{
+    const id:AiProviderId=routing.gateway==='openrouter'?'openrouter':'deepseek',profile=this.assertProfile(id);
+    return{...profile,model:routing.model,thinking:!['none','not_applicable'].includes(routing.effectiveEffort),routing};
+  }
+  private async runFieldGroups(initial:FieldGroupOperation,context:ListingAiContext,assertFresh:()=>Promise<void>,signal?:AbortSignal,completion?:CompletionRequest):Promise<AiResult>{
+    await assertFresh();signal?.throwIfAborted();
+    let operation=readFieldGroup(this.db,initial.id)!;
+    if(operation.resultId){const result=this.getResult(operation.resultId);if(!result)throw new AiError('SOURCE_CHANGED');return result;}
+    for(const member of operation.members)if(!member.sent)this.frozenPurposeProfile(member.purpose);
+    const all=operation.members.flatMap(m=>m.assignments);
+    for(let index=0;index<operation.members.length;index++){
+      operation=readFieldGroup(this.db,initial.id)!;const member=operation.members[index];
+      if(member.resultId){const saved=this.getResult(member.resultId);if(!saved)throw new AiError('SOURCE_CHANGED');continue;}
+      if(member.sent){
+        const recovered=await this.recoverGroupedField(operation,index,context);
+        if(recovered)continue;
+        const error=new AiError('INTERRUPTED');error.message=`字段分组 ${member.assignments.map(a=>a.field).join('、')} 的原请求尚未完成本地回收；已保留成果和费用，未复制重发`;throw error;
+      }
+      const fields=groupFields(context,member.assignments,all),profile=this.frozenPurposeProfile(member.purpose);
+      await this.listingFieldsOnce(context,assertFresh,profile,undefined,signal,undefined,{
+        id:member.callId,assignments:member.assignments,part:{operationId:operation.id,fields},
+        sent:call=>{
+          const current=readFieldGroup(this.db,initial.id)!,part=current.members[index];if(part.sent)throw new AiError('INTERRUPTED');part.sent=true;saveFieldGroup(this.db,current);
+          if(index===0&&completion)this.completionJournal.markSent(completion,call);
+        },
+        result:result=>{const current=readFieldGroup(this.db,initial.id)!;current.members[index].resultId=result.id;saveFieldGroup(this.db,current);},
+      });
+    }
+    await assertFresh();signal?.throwIfAborted();
+    return transaction(this.db,()=>{
+      const current=readFieldGroup(this.db,initial.id)!;if(current.resultId)return this.getResult(current.resultId)!;
+      const sources=current.members.map(m=>this.getResult(m.resultId!)!);if(sources.some(s=>!s||s.output.kind!=='amazon-fields'))throw new AiError('SOURCE_CHANGED');
+      const {fieldGroupPart:_part,fieldRejections:_rejections,listingNormalization:_normalization,localRecovery:_recovery,...base}=sources[0];
+      const result=validateAiResult({...base,id:randomUUID(),output:assembleFieldOutputs(sources.map(s=>s.output as ListingFieldsOutput),context),fieldGroupAssembly:{version:1,operationId:current.id,sources,assembledAt:this.timestamp()}});
+      this.db.prepare('INSERT INTO ai_results VALUES(?,?)').run(result.id,JSON.stringify(result));current.resultId=result.id;saveFieldGroup(this.db,current);
+      if(completion)this.completionJournal.recordResult(completion,result);return result;
+    });
+  }
+  private async recoverGroupedField(operation:FieldGroupOperation,index:number,context:ListingAiContext):Promise<boolean>{
+    const member=operation.members[index],call=this.getCall(member.callId);
+    if(!call||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID'||!call.finishedAt||!isFullSchema(context))return false;
+    const fields=groupFields(context,member.assignments,operation.members.flatMap(m=>m.assignments));
+    const rawOutputs=readInvalidAiOutputs(this.directory,call,'amazon-fields');
+    const receipt=await readProviderReceipt(this.db,this.directory,call.id) as any,choice=receipt?.body?.choices?.[0];
+    if(choice?.finish_reason==='stop'&&!choice.message?.refusal&&!choice.message?.tool_calls&&typeof choice.message?.content==='string')try{rawOutputs.push(JSON.parse(choice.message.content));}catch{/* Original bytes remain available for inspection. */}
+    for(const rawOutput of rawOutputs){
+      let result:AiResult;
+      try{
+        const output=retainValidNativeCandidates(parseFullGeneration(rawOutput,context),context);
+        if([...output.candidates,...output.missing].some(f=>!fields.includes(f.field)))continue;
+        const recoveredAt=this.finishedAt(call.finishedAt);
+        result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:context,sourceSha256:operation.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',fieldGroupPart:{operationId:operation.id,fields},localRecovery:{parserVersion:'full-schema-recovery/v2',operationId:operation.id,contextSha256:operation.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
+      }catch{continue;}
+      return transaction(this.db,()=>{
+        const current=readFieldGroup(this.db,operation.id)!;if(current.members[index].resultId)return true;
+        this.db.prepare('INSERT INTO ai_results VALUES(?,?)').run(result.id,JSON.stringify(result));current.members[index].resultId=result.id;saveFieldGroup(this.db,current);return true;
+      });
+    }
+    return false;
+  }
+  private async listingFieldsOnce(context:ListingAiContext,assertContextFresh:()=>Promise<void>,profile:AiProfile,review?:{suggestionId:string;candidate:ListingFieldsOutput},signal?:AbortSignal,completion?:CompletionRequest,durable?:DurableFieldCall):Promise<AiResult>{
+    const providerContext=structuredClone(context);
+    if(durable?.part){providerContext.fields=providerContext.fields.filter(f=>durable.part!.fields.includes(f.name));if(providerContext.repairRequest){providerContext.repairRequest.issues=providerContext.repairRequest.issues.filter(i=>durable.part!.fields.includes(i.field));providerContext.repairRequest.currentValues=Object.fromEntries(Object.entries(providerContext.repairRequest.currentValues).filter(([key])=>durable.part!.fields.includes(key)));}}
+    return this.start(profile, { productId: context.productId, productRevision: context.productRevision }, { operation: review ? 'amazon-fields-review' : 'amazon-fields', context, review,...(durable?{assignments:durable.assignments,part:durable.part}:{} ) }, async activeSignal => {
       const assertFresh = async () => { throwIfAborted(activeSignal); await assertContextFresh(); throwIfAborted(activeSignal);this.assertListingSource(context); };
       await assertFresh();
       return { variantId: context.variantId, assetId: null, assetSha256: null, sourceResultIds: review ? [review.suggestionId] : [], sourceSha256: listingFingerprint(context), listingContext: context, assertFresh,
         invoke: (credentials, adapterContext) => review
           ? reviewListingFields(context, review.candidate, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext)
-          : suggestListingFields(context, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
-    }, signal, completion);
+          : suggestListingFields(providerContext, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
+    }, signal, completion,durable);
   }
   /** Reviews a current copy snapshot directly; no synthetic generation or renderer entry point. */
   async reviewCurrentListing(context: ListingAiContext, copy: CurrentListingCopy[], assertContextFresh: () => Promise<void>, signal?: AbortSignal): Promise<AiResult> {
@@ -791,11 +871,11 @@ export class AiService {
   private activePurpose(purpose:AiPurposeId,vision=false,review=false):AiProfile{
     const profile=this.purposeProfile(purpose,vision,review);this.assertProfile(profile.id,profile.generation);return profile;
   }
-  private start(profile: AiProfile, input: { productId: string; productRevision: number }, source: unknown, prepare: (signal: AbortSignal) => Promise<PreparedRequest>, signal?: AbortSignal, completion?:CompletionRequest): Promise<AiResult> {
+  private start(profile: AiProfile, input: { productId: string; productRevision: number }, source: unknown, prepare: (signal: AbortSignal) => Promise<PreparedRequest>, signal?: AbortSignal, completion?:CompletionRequest,durable?:DurableFieldCall): Promise<AiResult> {
     this.ensureOpen();
     const key = requestKey({ profile, input, source, ...(completion?{completion}:{}), product: this.product(input.productId, input.productRevision) });
     return this.requests.run(key, profile.id, async activeSignal => {
-      const id = completion?.callId ?? randomUUID(); let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
+      const id = durable?.id??completion?.callId ?? randomUUID(); let call: AiCall | undefined, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       let untrustedOutput: { value: unknown } | undefined, rejectionStage: AiOutputRejectionStage = 'operation-output-validation';
       try {
         throwIfAborted(activeSignal);
@@ -822,7 +902,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = this.usage.reserve({ id, ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>3)throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
+            call = this.usage.reserve({ id, ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>3)throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },
@@ -834,13 +914,14 @@ export class AiService {
         throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        const result = validateAiResult({ id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
+        if(durable?.part&&reply.output.kind==='amazon-fields'&&[...reply.output.candidates,...reply.output.missing].some(f=>!durable.part!.fields.includes(f.field)))throw new AiError('OUTPUT_INVALID');
+        const result = validateAiResult({ ...(durable?.part?{fieldGroupPart:durable.part}:{}), id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: this.finishedAt(call.startedAt), reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
           if(prepared.listingContext)this.assertListingSource(prepared.listingContext);
           this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id, JSON.stringify(result));
           this.saveCall({ ...call, requestId: metadata.requestId, usage: metadata.usage, status: 'SUCCEEDED', finishedAt: result.createdAt });
-          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(result.sourceConsistencyContext)recordConsistencyAssessment(this.db,result); if(completion)this.completionJournal.recordResult(completion,result); this.db.exec('COMMIT'); return result;
+          this.usage.settle(id, metadata.usageKnown, metadata.usage, result.createdAt); if(result.sourceConsistencyContext)recordConsistencyAssessment(this.db,result); if(completion)this.completionJournal.recordResult(completion,result);durable?.result?.(result); this.db.exec('COMMIT'); return result;
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       } catch (error) {
         const schemaReceived=isSchemaTransientError(error)&&rejectionStage==='source-freshness'&&!!call;

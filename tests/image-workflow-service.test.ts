@@ -31,7 +31,7 @@ import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.t
 import type { ProductImageContext } from '../src/shared/image-ai-contracts.ts';
 import type { ListingAiContext, ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
-import { OpenAiImageAdapter } from '../src/main/image-generation/adapter.ts';
+import { OpenRouterImageAdapter } from '../src/main/ai/adapters/openrouter-images.ts';
 import { canResumeImageWorkflow } from '../src/shared/image-workflow-contracts.ts';
 import { currentImageListingSnapshot } from '../src/main/image-workflow/image-facts.ts';
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
@@ -711,8 +711,8 @@ test('a lost paid response reconciles a durable candidate after restart and resu
 });
 test('a paid 502 response checks recovery and preserves the unknown lock after restart',async t=>{
   const f=await fixture(t);let posts=0,reconciliations=0;
-  const adapter=new OpenAiImageAdapter({fetch:async()=>{posts++;return Response.json({error:{message:'gateway failed'}},{status:502});}});
-  f.generation.generateForWorkflow=async()=>{await adapter.generate({apiKey:'local-fixture-key',model:'gpt-image-2.5-sunburst',prompt:'Source product',size:'1024x1024',quality:'high',background:'opaque',references:[]},new AbortController().signal);throw new Error('Unexpected generation success');};
+  const adapter=new OpenRouterImageAdapter({fetch:async()=>{posts++;return Response.json({error:{message:'gateway failed'}},{status:502});}});
+  f.generation.generateForWorkflow=async()=>{await adapter.generate({apiKey:'local-fixture-key',model:'openai/gpt-image-2.5-sunburst',prompt:'Source product',size:'1024x1024',quality:'high',background:'opaque',references:[]},new AbortController().signal);throw new Error('Unexpected generation success');};
   f.generation.reconcileWorkflowGeneration=async()=>{reconciliations++;return null;};
   const first=await f.run();assert.equal(first.workflow.slots![0].status,'UNKNOWN');assert.equal(posts,1);
   await f.service.close();const restarted=f.reopen();

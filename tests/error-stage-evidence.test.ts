@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { providerError } from '../src/main/image-generation/adapter.ts';
+import { providerError } from '../src/main/image-generation/errors.ts';
 import { publicError } from '../src/main/security.ts';
 
 for(const status of [400,403,429,500,502])test(`image HTTP ${status} retains safe numeric evidence and result certainty`,()=>{

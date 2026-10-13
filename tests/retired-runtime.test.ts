@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync,existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { installCollectionIpc } from '../src/main/collection-ipc.ts';
 
@@ -16,4 +16,10 @@ test('W13 main build and packaged app do not require native host or browser exte
   const pkg=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
   assert.doesNotMatch(pkg.scripts.build,/native-host|extension|dotnet/);
   const main=readFileSync(new URL('../src/main/index.ts',import.meta.url),'utf8');assert.doesNotMatch(main,/new CollectionBridge|collection\.start\(/);
+});
+
+test('W13 official and old relay generation transports have no runtime source fallback',()=>{
+  for(const name of ['adapter','tyai-adapter','gemini-adapter','relay-request','catalog'])assert.equal(existsSync(new URL(`../src/main/image-generation/${name}.ts`,import.meta.url)),false,name);
+  const history=readFileSync(new URL('../src/main/image-generation/history-reader.ts',import.meta.url),'utf8');
+  assert.doesNotMatch(history,/apiKey|method:\s*['"]POST|checkModel|generate\(/);
 });

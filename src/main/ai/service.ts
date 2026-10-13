@@ -1,3 +1,4 @@
+import { decideListingEnums } from './enum-decisions.ts';
 import { runCopyReview,readCopyReview,copyReviewReason,copyReviewResult } from './copy-review-upgrade.ts';
 import {reviewProductAppearance} from './appearance-adapter.ts';
 import {validatePurposeSnapshot as validateAppearancePurposeSnapshot} from './purpose-routing.ts';
@@ -552,6 +553,7 @@ export class AiService {
       return { variantId: context.variantId, assetId: null, assetSha256: null, sourceResultIds: review ? [review.suggestionId] : [], sourceSha256: listingFingerprint(context), listingContext: context, assertFresh,
         invoke: (credentials, adapterContext) => review
           ? reviewListingFields(context, review.candidate, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext)
+          : profile.routing?.purposeId==='enum_decision' ? decideListingEnums(providerContext,credentials as DeepSeekCredentials,activeSignal,adapterContext)
           : suggestListingFields(providerContext, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
     }, signal, completion,durable);
   }

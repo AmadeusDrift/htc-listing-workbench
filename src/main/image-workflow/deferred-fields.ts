@@ -62,6 +62,14 @@ export function pricingBlockingReason(draft: AmazonDraft, rules?: ListingRules):
   return notices.length?`定价未通过：${notices.join('；')}。请核对实际成本、包装参数或定价设置后重新准备草稿；系统不会自动提高售价上限或降低目标 ROI。`:null;
 }
 
+/** Remove only an exact historical pricing explanation after current qualification.
+ * Returns a new runtime view; frozen completion results and reports stay untouched. */
+export function withoutHistoricalPricingRemaining(draft: AmazonDraft, remaining: string[], rules: ListingRules): string[] {
+  if (pricingBlockingReason(draft,rules)!==null) return [...remaining];
+  const historical=pricingBlockingReason(draft);
+  return historical ? remaining.filter(message=>message!==historical) : [...remaining];
+}
+
 /** Only call where an image workflow or execution already owns the planned image slots. */
 export function isDeferredImageIssue(draft: AmazonDraft, issue: ListingIssue, plannedImages = 7): boolean {
   if (!['LOCAL_required','90220'].includes(issue.code) || issue.attributeNames.length !== 1) return false;

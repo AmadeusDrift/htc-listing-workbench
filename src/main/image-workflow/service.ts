@@ -14,7 +14,8 @@ import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { withoutDeferredImageRemaining, legacyContentRepairFields, pricingBlockingReason, nonDeferredImageIssues, categoryRepairFields } from './deferred-fields.ts';
+import { withoutDeferredImageRemaining, withoutHistoricalPricingRemaining, legacyContentRepairFields, pricingBlockingReason, nonDeferredImageIssues, categoryRepairFields } from './deferred-fields.ts';
+import { readListingRules } from '../listing-rules.ts';
 import { FIELD_REPAIR_POLICY_VERSION, CATEGORY_FIELD_REPAIR_POLICY_VERSION } from '../../shared/automatic-listing-contracts.ts';
 import { join } from 'node:path';
 import { open, unlink } from 'node:fs/promises';
@@ -528,12 +529,13 @@ export class ImageWorkflowService {
           const refreshed=await this.listing.complete({draftId:initial.id,draftRevision:initial.revision},signal,cached.operationId);
           result={...refreshed,aiCalls:result.aiCalls+refreshed.aiCalls};initial=refreshed.draft;
           run.contentPreparation={...cached,state:'DONE',draftRevision:initial.revision,draftSha256:imageWorkflowDraftStamp(initial),remaining:refreshed.remaining};this.save(run);
-          if(refreshed.remaining.length)throw new UserFacingError(('商品字段尚未修复完成，停止生图：'+refreshed.remaining.join('；')).slice(0,2000));
+          result.remaining=withoutHistoricalPricingRemaining(initial,refreshed.remaining,readListingRules(this.db));
+          if(result.remaining.length)throw new UserFacingError(('商品字段尚未修复完成，停止生图：'+result.remaining.join('；')).slice(0,2000));
         }
       }
       if(run.imageContext)this.assertCurrentEvidence(initial,run.imageContext,run.setPlan,currentWorkflowPlanIds(run));
       if(!run.imageContext&&run.contentPreparation?.state!=='STARTED')this.amazon.assertPricingForPaid(initial.id);
-      const pricing=pricingBlockingReason(initial);if(pricing)throw new UserFacingError(pricing);
+      const pricing=pricingBlockingReason(initial,readListingRules(this.db));if(pricing)throw new UserFacingError(pricing);
       const connection=reuse?null:this.generation.getConnection();
       if(!reuse&&(!connection?.configured||!connection.enabled))throw new UserFacingError('请在设置中配置并启用生图服务，然后继续自动准备');
       const generationScope=reuse?null:this.generation.configurationScope(),configStamp=listingFingerprint(connection);
@@ -562,6 +564,7 @@ export class ImageWorkflowService {
       if(run.imageContext&&!this.currentContextMatches(run,initial))throw new UserFacingError('来源颜色证据已变化，原图片上下文与已付费请求已保留；请复核现有图片，不能替换未完成的规划');
       if(!run.imageContext){
         if(run.contentPreparation?.draftRevision===initial.revision)result.remaining=run.contentPreparation.remaining;
+        result.remaining=withoutHistoricalPricingRemaining(result.draft,result.remaining,readListingRules(this.db));
         const cachedCopy=()=>{
           const draft=this.amazon.getDraft(run.draftId),snapshot=currentImageListingSnapshot(draft,this.currentContext(draft,this.store.getProduct(run.productId),this.amazon.executionTargetScope(draft.targetId).generation));
           const candidates=this.ai.listResults(run.productId).filter(value=>value.output.kind==='listing-current-review'&&value.listingContext&&listingFingerprint(value.listingContext)===listingFingerprint(snapshot.context)&&listingFingerprint(value.output.currentListingCopy)===listingFingerprint(snapshot.currentListingCopy)&&this.ai.getCall(value.callId)?.status==='SUCCEEDED');
@@ -600,8 +603,9 @@ export class ImageWorkflowService {
             copy=copyReviewEnabled?cachedCopy():undefined;
           }
         }
-        result.remaining=withoutDeferredImageRemaining(result.draft,result.remaining);
-        const pricingAfter=pricingBlockingReason(result.draft);if(pricingAfter)throw new UserFacingError(pricingAfter);
+        const pricingRules=readListingRules(this.db);
+        result.remaining=withoutDeferredImageRemaining(result.draft,withoutHistoricalPricingRemaining(result.draft,result.remaining,pricingRules));
+        const pricingAfter=pricingBlockingReason(result.draft,pricingRules);if(pricingAfter)throw new UserFacingError(pricingAfter);
         if(result.remaining.length)throw new UserFacingError(('商品字段尚未修复完成，停止生图：'+result.remaining.join('；')).slice(0,2000));
         if(copyReviewEnabled){
         if(!copy){copy=await this.listing.reviewCurrentForImages({draftId:run.draftId,draftRevision:result.draft.revision},signal);result.aiCalls++;}

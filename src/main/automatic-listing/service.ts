@@ -46,7 +46,7 @@ import { canResumeImageWorkflow, hasSevenApprovedImages, AUTOMATIC_SOURCE_ISSUES
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import type { MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import { sourceImageMappingDiagnosis } from '../image-workflow/sources.ts';
-import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining } from '../image-workflow/deferred-fields.ts';
+import { categoryRepairFields, newlyRepairableFields, nonDeferredImageIssues, pricingBlockingReason, withoutDeferredImageRemaining, withoutHistoricalPricingRemaining } from '../image-workflow/deferred-fields.ts';
 import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow, AutomaticRuleEvidence } from '../../shared/automatic-listing-contracts.ts';
 import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, qualifiedPricing, recipeKey } from './outcomes.ts';
 import { previewSalesRecipes } from '../sales-plans/planning.ts';
@@ -94,10 +94,10 @@ const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED']
 const imageReady = hasSevenApprovedImages;
 const errorMessage = (error: unknown): string => publicError(error).slice(0, 2000);
 const frozenSourcesMessage = '同商品已有就绪 SKU，来源版本已冻结。请在“来源图片”下载所需图片，并在“图片工作区 → 关联 SKU”确认对应关系；其他已就绪 SKU 全部提交后，可继续本任务恢复未开始的 SKU。若仍有未完成草稿，请先完成或取消原任务，再建立新任务。';
-function fieldRepairRemaining(draft: AmazonDraft, remaining: string[] = []): string[] {
+function fieldRepairRemaining(draft: AmazonDraft, rules: ListingRules, remaining: string[] = []): string[] {
   const issues = nonDeferredImageIssues(draft);
-  const pricing=pricingBlockingReason(draft);
-  return [...new Set([...(pricing?[pricing]:[]), ...withoutDeferredImageRemaining(draft,remaining), ...issues.map(issue => `${issue.attributeNames.join('、') || issue.code}：${issue.message}`)])].slice(0,100).map(message=>message.slice(0,2000));
+  const pricing=pricingBlockingReason(draft,rules);
+  return [...new Set([...(pricing?[pricing]:[]), ...withoutDeferredImageRemaining(draft,withoutHistoricalPricingRemaining(draft,remaining,rules)), ...issues.map(issue => `${issue.attributeNames.join('、') || issue.code}：${issue.message}`)])].slice(0,100).map(message=>message.slice(0,2000));
 }
 const incompleteFields = (remaining: string[]) => new UserFacingError(`字段修复后仍有待处理项，已停止图片复核：${remaining.join('；')}`);
 const repairLimit = (row: AutomaticListingItem): number => 2 + (row.repairPolicyMigration?.grantedAttempts ?? 0) + (row.sourceColorRepair?.grantedAttempts ?? 0) + (row.categoryFieldRepair?.grantedAttempts ?? 0) + (row.legacyThemeRepair?.grantedAttempts ?? 0);
@@ -474,7 +474,7 @@ export class AutomaticListingService {
             const proof=row.pricingRefresh??{draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),previousDraftRevision:old.revision,previousDraftStamp:imageWorkflowDraftStamp(old),previousReason:pricingBlockingReason(old)};
             if(refreshed.revision!==proof.draftRevision||imageWorkflowDraftStamp(refreshed)!==proof.draftStamp)throw new UserFacingError('本地定价恢复后草稿已变化，保留原检查点待核对');
             if(row.repair&&row.repair.draftRevision===proof.previousDraftRevision&&row.repair.draftStamp===proof.previousDraftStamp){
-              const remaining=fieldRepairRemaining(refreshed,(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
+              const remaining=fieldRepairRemaining(refreshed,this.deps.rules(),(row.repair.remaining??[]).filter(message=>message!==proof.previousReason));
               if(row.repair.phase==='FIELDS_PENDING'&&!remaining.length&&!row.repairAttempts){
                 this.deps.execution.cancel(row.executionTaskIds.at(-1)!);row.repair=null;
               }else row.repair={...row.repair,remaining,draftRevision:refreshed.revision,draftStamp:imageWorkflowDraftStamp(refreshed),
@@ -907,7 +907,8 @@ export class AutomaticListingService {
         throw error;
       }
       const draft='draft' in result?result.draft:result;
-      const remaining=localRefresh?[...new Set([...('draft' in result?result.remaining:[]),...fieldRepairRemaining(draft)])]:fieldRepairRemaining(draft,'draft' in result?result.remaining:[]);
+      const rules=this.deps.rules(),returnedRemaining='draft' in result?result.remaining:[];
+      const remaining=localRefresh?[...new Set([...withoutHistoricalPricingRemaining(draft,returnedRemaining,rules),...fieldRepairRemaining(draft,rules)])]:fieldRepairRemaining(draft,rules,returnedRemaining);
       row.repair=repair={...repair,phase:remaining.length?'FIELDS_PENDING':'RECHECK_PENDING',remaining,draftRevision:draft.revision,draftStamp:imageWorkflowDraftStamp(draft)};this.save(task);this.checkpoint(task,row);
     }
     if (repair.phase === 'FIELDS_STARTED') {
@@ -923,7 +924,12 @@ export class AutomaticListingService {
     }
     if (!this.matching(task,row,current) || current.revision !== repair.draftRevision || imageWorkflowDraftStamp(current) !== repair.draftStamp || submitted(current)) throw new UserFacingError('字段修复后草稿发生变化，请核对异常商品');
     // Older checkpoints may have been saved without checking the field repair outcome.
-    const unresolved = fieldRepairRemaining(current, repair.remaining);
+    const currentPricingRules=this.deps.rules();
+    const unresolved = fieldRepairRemaining(current, currentPricingRules, repair.remaining);
+    if (!unresolved.length && repair.phase==='FIELDS_PENDING' && repair.remaining?.length
+      && !withoutHistoricalPricingRemaining(current,repair.remaining,currentPricingRules).length) {
+      row.repair=repair={...repair,phase:'RECHECK_PENDING',remaining:[]};this.save(task);
+    }
     if (unresolved.length && repair.phase !== 'FIELDS_PENDING') {
       row.repair = repair = { ...repair, phase: 'FIELDS_PENDING', remaining: unresolved }; this.save(task);
     }
@@ -933,7 +939,7 @@ export class AutomaticListingService {
       if(localRefresh&&row.repairAttempts>=repairLimit(row)&&!(row.repairAttempts===4&&row.repairPolicyMigration&&row.sourceColorRepair&&row.categoryFieldPolicyVersion&&!row.categoryFieldRepair&&!row.legacyThemeRepair))throw incompleteFields(repair.remaining??[]);
       assertCurrentPricingForPaid(current,this.deps.rules());
       const pricingIssue=pricingBlockingReason(current,this.deps.rules());if(pricingIssue)throw new UserFacingError(pricingIssue);
-      if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
+      if (!this.deps.repairFields) throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current,this.deps.rules()));
       this.checkpoint(task,row);
       const assertRepairScope=()=>{
         const latest=this.deps.amazon.getDraft(current.id);
@@ -960,7 +966,7 @@ export class AutomaticListingService {
         if(localRefresh)throw incompleteFields(repair.remaining??[]);
         if(canMigrateCategory(row,current))row.categoryFieldRepair={version:CATEGORY_FIELD_REPAIR_POLICY_VERSION,previousAttempts:row.repairAttempts as 2|3|4,grantedAttempts:1,grantedAt:new Date().toISOString(),fields:categoryRepairFields(current,repair.remaining)};
         else if(!evidenceSha256||evidenceSha256===row.sourceColorEvidenceSha256||row.sourceColorRepair)
-          throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current));
+          throw incompleteFields(repair.remaining?.length ? repair.remaining : fieldRepairRemaining(current,this.deps.rules()));
         else row.sourceColorRepair={evidenceSha256,previousAttempts:row.repairAttempts as 2|3|4,grantedAttempts:1,grantedAt:new Date().toISOString()};
       }
       row.categoryFieldPolicyVersion=CATEGORY_FIELD_REPAIR_POLICY_VERSION;
@@ -974,7 +980,7 @@ export class AutomaticListingService {
       row.repair = { ...repair, phase: 'FIELDS_STARTED',...(operationId?{operationId}:{}) }; this.save(task);
       const result = await this.deps.repairFields(current.id,this.controller!.signal,operationId);
       current = 'draft' in result ? result.draft : result;
-      const remaining = fieldRepairRemaining(current,'draft' in result ? result.remaining : []);
+      const remaining = fieldRepairRemaining(current,this.deps.rules(),'draft' in result ? result.remaining : []);
       // A known incomplete result is safe to retry; an interrupted unknown result is not.
       row.repair = repair = { ...row.repair!, phase: remaining.length ? 'FIELDS_PENDING' : 'RECHECK_PENDING', remaining,
         draftRevision: current.revision, draftStamp: imageWorkflowDraftStamp(current) }; this.save(task);

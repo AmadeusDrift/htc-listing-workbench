@@ -25,6 +25,9 @@ async function setup(t: TestContext, count = 21, dependencies: MiaoshouDependenc
     }
     if (body.commonCollectBoxDetailId === failId) return new Response('bad response', { status: 502 });
     const value = detailFixture(); value.data.editCommonCollectBoxDetail.commonCollectBoxDetailId = String(body.commonCollectBoxDetailId); value.data.editCommonCollectBoxDetail.title = detailTitle;
+    const supplierId=String(100000+Number(String(body.commonCollectBoxDetailId).split('-').at(-1)));
+    value.data.editCommonCollectBoxDetail.sourceList[0].sourceItemId=supplierId;
+    value.data.editCommonCollectBoxDetail.sourceList[0].sourceItemUrl=`https://detail.1688.com/offer/${supplierId}.html`;
     return new Response(JSON.stringify(value));
   };
   const deps = { fetch: fetcher, rateLimitClock: testMiaoshouClock(), ...dependencies }; let service = new MiaoshouService(directory, store, storage, deps); service.importConfig(credentials);
@@ -36,10 +39,11 @@ async function settled(service: MiaoshouService) {
   assert.fail('sync did not settle');
 }
 
-test('inbox preference defaults off, persists across restart and only gates automatic entry', async t => {
+test('inbox preference defaults on, preserves an explicit off value and only gates automatic entry', async t => {
   const f = await setup(t, 2);
   assert.equal(typeof f.service.getPreferences, 'function');
-  assert.deepEqual(await f.service.getPreferences(), { autoSyncOnInbox: false });
+  assert.deepEqual(await f.service.getPreferences(), { autoSyncOnInbox: true });
+  await f.service.savePreferences({autoSyncOnInbox:false});
   assert.equal(await f.service.syncInbox({ trigger: 'enter' }), null);
   assert.equal(f.calls.length, 0);
   await f.service.savePreferences({ autoSyncOnInbox: true }); await f.restart();

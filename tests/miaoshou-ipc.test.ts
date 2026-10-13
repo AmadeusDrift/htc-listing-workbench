@@ -18,7 +18,9 @@ test('Miaoshou IPC supports file and direct entry, rejects invalid configs and r
   });
   const call = async (name: string, ...args: unknown[]) => callbacks.get(`red:miaoshou:${name}`)!(...args);
   try {
-    assert.equal(callbacks.size, 24); assert.deepEqual(await call('config-import'), { cancelled: true });
+    assert.equal(callbacks.size, 26); assert.deepEqual(await call('config-import'), { cancelled: true });
+    await assert.rejects(call('source-adoption-preview','bad-id'));
+    await assert.rejects(call('source-adopt',{productId:'bad-id'}));
     const saved = await call('config-save', { appKey: 'direct-application-key', appSecret: 'direct-secret-content' });
     assert.ok(saved && typeof saved === 'object' && 'configured' in saved);
     assert.equal(saved.configured, true); assert.equal(JSON.stringify(saved).includes('direct-secret-content'), false);

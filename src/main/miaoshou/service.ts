@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readSourceAdoption, previewSourceAdoption, adoptSource } from '../products/public.ts';
+import { readSourceSnapshot } from './source-snapshots.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { SecretStorage } from '../amazon/vault.ts';
 import { openDatabase } from '../database.ts';
@@ -56,7 +58,6 @@ export class MiaoshouService {
     this.sync = new MiaoshouSync(this.db, { scope: () => this.syncScope(), now: () => this.date().toISOString(),
       importProduct: (product, scope) => {
         const current = this.syncScope(); if (current.accountScope !== scope.accountScope || current.mode !== scope.mode) return fail('CHANGED');
-        if (this.existingImport(product.remoteId, scope)) return 'existing';
         return this.persistProduct(product, automaticMiaoshouMapping(product), scope).duplicate ? 'existing' : 'added';
       },
       list: async (pageNo, pageSize, signal) => (await this.request('list', { pageNo, pageSize }, (raw, mode, sanitize) => normalizeList(raw, pageNo, pageSize, mode, sanitize, true), signal)).value,
@@ -133,10 +134,6 @@ export class MiaoshouService {
     this.ensureOpen(); const input = exact(raw, ['previewId', 'mapping'], 'INPUT'), previewId = uuid(input.previewId); this.prune(this.date().getTime());
     const preview = this.previews.get(previewId); if (!preview || preview.generation !== this.generation || preview.mode !== this.mode) return fail('PREVIEW');
     const mapping = parseMapping(input.mapping, preview.product);
-    if (preview.synced) {
-      const existing = this.existingImport(preview.product.remoteId, { accountScope: preview.accountScope, mode: preview.mode });
-      if (existing) return { productId: existing.productId, duplicate: true, warnings: ['此来源商品已导入，来源更新仅暂存；已有商品、人工修改与原始导入记录均保留。'], skuCount: existing.snapshot.skus.length, imageCount: existing.snapshot.images.length };
-    }
     return this.persistProduct(preview.product, mapping, preview);
   }
   private persistProduct(product: MiaoshouProduct, mapping: MiaoshouMapping, scope: SyncScope): MiaoshouImportResult {
@@ -182,6 +179,8 @@ export class MiaoshouService {
     });
   }
   private sourceUpdate(receipt: MiaoshouReceipt): MiaoshouProduct | null {
+    const adopted=readSourceAdoption(this.db,receipt.productId);
+    if(adopted&&adopted.latestSnapshotId!==adopted.adoptedSnapshotId)return readSourceSnapshot(this.db,adopted.latestSnapshotId)!.receipt.snapshot;
     const row = this.db.prepare('SELECT record_json FROM miaoshou_sync_items WHERE id=?').get(syncItemId(syncScopeId(receipt), receipt.snapshot.remoteId));
     const snapshot = row ? validateSyncItem(JSON.parse(String(row.record_json))).snapshot : null;
     const content = ({ capturedAt: _capturedAt, ...value }: MiaoshouProduct) => JSON.stringify(value);
@@ -190,6 +189,13 @@ export class MiaoshouService {
   getSourceUpdate(rawId: unknown): MiaoshouProduct | null {
     this.ensureOpen(); const id = uuid(rawId); this.store.getProduct(id);
     const receipt = this.getReceipt(id); return receipt ? this.sourceUpdate(receipt) : null;
+  }
+  previewSourceAdoption(rawId:unknown){this.ensureOpen();return previewSourceAdoption(this.db,uuid(rawId));}
+  adoptSource(raw:unknown){
+    this.ensureOpen();const input=exact(raw,['productId','expectedRevision','snapshotId','confirmReplaceManual'],'INPUT');
+    if(!Number.isSafeInteger(input.expectedRevision)||Number(input.expectedRevision)<1||typeof input.snapshotId!=='string'||!/^[a-f0-9]{64}$/.test(input.snapshotId)||typeof input.confirmReplaceManual!=='boolean')return fail('INPUT');
+    adoptSource(this.db,{productId:uuid(input.productId),expectedRevision:Number(input.expectedRevision),snapshotId:input.snapshotId,confirmReplaceManual:input.confirmReplaceManual});
+    return this.store.getProduct(String(input.productId));
   }
   startSync(raw: unknown) { return this.sync.start(raw); }
   pauseSync() { return this.sync.pause(); }

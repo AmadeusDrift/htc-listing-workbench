@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { transaction } from '../application/transaction.ts';
 import type { MiaoshouList, MiaoshouProduct } from '../../shared/miaoshou-contracts.ts';
 import type { MiaoshouSyncPage, MiaoshouSyncStatus } from '../../shared/miaoshou-sync-contracts.ts';
 import { exact, fail, MiaoshouError, remoteId } from './validation.ts';
@@ -118,15 +119,15 @@ export class MiaoshouSync {
         try {
           const snapshot = ['ready','unchanged'].includes(item.status) && item.snapshot ? item.snapshot : await this.deps.detail(item.remoteId, signal); this.assertActive(signal);
           run = this.run(run.id)!;
+          transaction(this.db,()=>{
           const importResult = run.importToInbox ? this.deps.importProduct?.(snapshot, run) : undefined;
           if (run.importToInbox && !importResult) return fail('STORAGE');
           const completed: SyncItem = { ...item, snapshot, fetchedModified: item.remoteModified, title: snapshot.title || item.title, status: item.status === 'unchanged' ? 'unchanged' : 'ready', updatedAt: this.deps.now(), errorCode: null, ...(importResult ? { importResult } : {}) };
           if (importResult) {
             const next = { ...run, imported: (run.imported ?? 0) + (importResult === 'added' ? 1 : 0), existing: (run.existing ?? 0) + (importResult === 'existing' ? 1 : 0), updatedAt: this.deps.now() };
-            this.db.exec('BEGIN IMMEDIATE');
-            try { this.saveItem(completed); this.saveRun(next); this.db.exec('COMMIT'); run = next; }
-            catch (error) { this.db.exec('ROLLBACK'); throw error; }
+            this.saveItem(completed); this.saveRun(next); run = next;
           } else this.saveItem(completed);
+          });
           if (run.importToInbox) await new Promise<void>(resolve => setImmediate(resolve));
         } catch (error) {
           this.assertActive(signal);

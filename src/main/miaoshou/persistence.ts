@@ -1,9 +1,12 @@
+import { transaction } from '../application/transaction.ts';
+import { sourceIdentity, saveSourceSnapshot, readSourceSnapshot } from './source-snapshots.ts';
+import { readSourceAdoption, adoptReceivedSource, adoptedSourceReceipt } from '../products/source-adoption.ts';
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { MiaoshouImportResult, MiaoshouMapping, MiaoshouProduct, MiaoshouReceipt } from '../../shared/miaoshou-contracts.ts';
 import type { WorkspaceStore } from '../store.ts';
 import { assertUnambiguousRecordJson } from '../record-json.ts';
-import { fail, fingerprint, importWarnings, localPrice, MiaoshouError, selectedImageIds, uuid, validateMiaoshouReceipt } from './validation.ts';
+import { fail, fingerprint, importWarnings, MiaoshouError, selectedImageIds, uuid, validateMiaoshouReceipt } from './validation.ts';
 import { normalizeSourceAttributeV1 } from './source-attribute-normalization-v1.ts';
 
 export { validateMiaoshouReceipt } from './validation.ts';
@@ -37,6 +40,7 @@ export function assertMiaoshouHistory(db: DatabaseSync): void {
 }
 export function getReceipt(db: DatabaseSync, rawProductId: unknown): MiaoshouReceipt | null {
   const productId = uuid(rawProductId);
+  const adopted=adoptedSourceReceipt(db,productId);if(adopted)return adopted;
   try {
     const rows = db.prepare("SELECT id,record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.productId')=?").all(productId);
     if (!rows.length) return null; if (rows.length !== 1) return fail('STORAGE');
@@ -46,59 +50,35 @@ export function getReceipt(db: DatabaseSync, rawProductId: unknown): MiaoshouRec
     return receipt;
   } catch (error) { if (error instanceof MiaoshouError) throw error; return fail('STORAGE'); }
 }
-function originalSpec(product: MiaoshouProduct, mapping: MiaoshouMapping, sourceKey: string): string {
-  const selected = mapping.skus.find(s => s.sourceKey === sourceKey)!;
-  const names = product.dimensions.flatMap(d => { const value = d.values.find(v => v.id === selected.dimensions[d.id]); return value ? [`${d.name}: ${value.name}`] : []; });
-  if (!names.length) return `来源 SKU ${sourceKey}（规格待核对）`;
-  const unresolved = product.dimensions.some(d => d.values.length && !selected.dimensions[d.id]);
-  return names.join(' / ') + (unresolved ? '（部分规格待核对）' : '');
-}
 function result(receipt: MiaoshouReceipt, duplicate: boolean): MiaoshouImportResult {
   return { productId: receipt.productId, duplicate, warnings: importWarnings(receipt.snapshot, receipt.mapping), skuCount: receipt.snapshot.skus.length, imageCount: receipt.snapshot.images.length };
 }
-/** One connection owns the full local transaction; WorkspaceStore.importProducts is intentionally not nested. */
-export function persistImport(db: DatabaseSync, store: WorkspaceStore, snapshot: MiaoshouProduct, mapping: MiaoshouMapping,
-  accountScope: string, mode: 'demo' | 'live', receivedAt: string, assertNewImport?: (value: unknown) => void): MiaoshouImportResult {
-  const contentFingerprint = fingerprint(snapshot, mapping, accountScope, mode);
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const duplicates = db.prepare("SELECT id,record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.fingerprint')=?").all(contentFingerprint);
-    if (duplicates.length > 1) return fail('STORAGE');
-    if (duplicates.length) {
-      const prior = validateMiaoshouReceipt(JSON.parse(String(duplicates[0].record_json)));
-      if (prior.id !== duplicates[0].id || prior.fingerprint !== contentFingerprint) return fail('STORAGE');
-      assertMiaoshouFactHistory(db, prior);
-      store.getProduct(prior.productId); db.exec('COMMIT'); return result(prior, true);
-    }
-    const productId = randomUUID(), title = snapshot.title || `妙手商品 ${snapshot.remoteId}`, sourceUrl = snapshot.sources.find(source => source.sourceItemUrl)?.sourceItemUrl ?? '';
-    const facts = snapshot.attributes.map(attribute => ({ id: randomUUID(), ...normalizeSourceAttributeV1(attribute) }));
-    const entries = facts.flatMap((fact, attributeIndex) => fact.ruleIds.length ? [{ factId: fact.id, attributeIndex, rawName: snapshot.attributes[attributeIndex].name,
-      rawValue: snapshot.attributes[attributeIndex].value, name: fact.name, value: fact.value, ruleIds: fact.ruleIds }] : []);
-    const receipt = validateMiaoshouReceipt({ id: randomUUID(), productId, fingerprint: contentFingerprint, accountScope, mode, receivedAt, snapshot, mapping,
-      skuMappings: snapshot.skus.map(s => ({ sourceKey: s.key, localVariantId: randomUUID(), imageIds: selectedImageIds(snapshot, mapping, s.key) })),
-      ...(entries.length ? { factNormalizations: { version: 'source-attribute-normalization/v1', entries } } : {}) });
-    const receiptJson = JSON.stringify(receipt);
-    // Expanded per-SKU image references must still fit the encrypted backup record limit.
-    if (Buffer.byteLength(receiptJson, 'utf8') > 4 * 1024 * 1024) return fail('TOO_LARGE');
-    // The service checks credentials after conversion, before any business write.
-    // Duplicate history returns above; the guard must not rewrite snapshots or traces.
-    assertNewImport?.({ facts, receipt });
-    db.prepare('INSERT INTO products VALUES (?,?,?,?,?,?,?,?,?)').run(productId, title, sourceUrl, snapshot.description, 'draft', mode === 'demo' ? 'sample' : 'import', 1, receivedAt, receivedAt);
-    db.prepare('INSERT INTO product_workspaces(product_id,lane,updated_at) VALUES (?,?,?)').run(productId, 'inbox', receivedAt);
-    const insertSku = db.prepare('INSERT INTO variants VALUES (?,?,?,?,?,?,?,?,?,?)');
-    snapshot.skus.forEach((sku, index) => {
-      const id = receipt.skuMappings[index].localVariantId, spec = originalSpec(snapshot, mapping, sku.key);
-      const price = mapping.priceField !== 'none' && mapping.currency === 'CNY' ? localPrice(sku[mapping.priceField]) : '';
-      insertSku.run(id, productId, `MS-${id.replaceAll('-', '').toUpperCase()}`, spec, '', price, null, spec, price, index);
-    });
-    const sourceRef = sourceUrl && sourceUrl.length <= 2000 ? sourceUrl : `妙手公共采集箱:${snapshot.remoteId}`;
-    const insertFact = db.prepare('INSERT INTO facts VALUES (?,?,?,?,?,?,?,?)');
-    facts.forEach((fact, index) => insertFact.run(fact.id, productId, fact.name, fact.value, 'import', sourceRef, 'source_confirmed', index));
-    db.prepare('INSERT INTO miaoshou_receipts(id,record_json) VALUES (?,?)').run(receipt.id, receiptJson);
-    db.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?,?)').run(randomUUID(), productId, 'miaoshou.imported', `从妙手${mode === 'demo' ? '演示采集箱' : '公共采集箱'}导入「${title}」`, JSON.stringify({ receiptId: receipt.id, mode, remoteId: snapshot.remoteId, skuCount: snapshot.skus.length }), receivedAt);
-    db.exec('COMMIT'); return result(receipt, false);
-  } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* Preserve the original controlled failure. */ }
-    if (error instanceof MiaoshouError) throw error; return fail('STORAGE');
-  }
+/** M01 persists immutable source; M02 owns the master writes in the same local transaction. */
+export function persistImport(db:DatabaseSync,_store:WorkspaceStore,snapshot:MiaoshouProduct,mapping:MiaoshouMapping,
+  accountScope:string,mode:'demo'|'live',receivedAt:string,assertNewImport?:(value:unknown)=>void):MiaoshouImportResult {
+  try{return transaction(db,()=>{
+    const contentFingerprint=fingerprint(snapshot,mapping,accountScope,mode),identity=sourceIdentity(snapshot,accountScope,mode);
+    const originals=db.prepare("SELECT record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.accountScope')=? AND json_extract(record_json,'$.mode')=?").all(accountScope,mode)
+      .map(row=>validateMiaoshouReceipt(JSON.parse(String(row.record_json)))).filter(receipt=>sourceIdentity(receipt.snapshot,accountScope,mode)===identity);
+    if(originals.length>1)return fail('STORAGE');
+    const original=originals[0],productId=original?.productId??randomUUID();
+    let prior=original?readSourceAdoption(db,productId):null;
+    if(original&&!prior){assertMiaoshouFactHistory(db,original);prior=adoptReceivedSource(db,saveSourceSnapshot(db,original),null,true);}
+    const known=original?db.prepare("SELECT id FROM source_snapshots WHERE json_extract(record_json,'$.receipt.fingerprint')=?").get(contentFingerprint):null;
+    if(known){adoptReceivedSource(db,readSourceSnapshot(db,String(known.id))!,prior,false,receivedAt);return result(adoptedSourceReceipt(db,productId)??original,true);}
+    const previous=original?(adoptedSourceReceipt(db,productId)??original):null;
+    const facts=snapshot.attributes.map(attribute=>({id:randomUUID(),...normalizeSourceAttributeV1(attribute)}));
+    const entries=facts.flatMap((fact,index)=>fact.ruleIds.length?[{factId:fact.id,attributeIndex:index,rawName:snapshot.attributes[index].name,rawValue:snapshot.attributes[index].value,name:fact.name,value:fact.value,ruleIds:fact.ruleIds}]:[]);
+    const receipt=validateMiaoshouReceipt({id:randomUUID(),productId,fingerprint:contentFingerprint,accountScope,mode,receivedAt,snapshot,mapping,
+      skuMappings:snapshot.skus.map(s=>({sourceKey:s.key,localVariantId:previous?.skuMappings.find(m=>m.sourceKey===s.key)?.localVariantId??randomUUID(),imageIds:selectedImageIds(snapshot,mapping,s.key)})),
+      ...(entries.length?{factNormalizations:{version:'source-attribute-normalization/v1',entries}}:{})});
+    const json=JSON.stringify(receipt);if(Buffer.byteLength(json,'utf8')>4*1024*1024)return fail('TOO_LARGE');
+    assertNewImport?.({facts,receipt});
+    const source=saveSourceSnapshot(db,receipt),state=adoptReceivedSource(db,source,prior);
+    if(!original)db.prepare('INSERT INTO miaoshou_receipts(id,record_json) VALUES(?,?)').run(receipt.id,json);
+    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),productId,'miaoshou.imported',original?'已接收来源新版本；人工和已处理资料受保护':'从妙手接收商品',JSON.stringify({receiptId:receipt.id,sourceSnapshotId:source.id,adopted:state.adoptedSnapshotId===source.id,mode,remoteId:snapshot.remoteId,skuCount:snapshot.skus.length}),receivedAt);
+    const output=result(receipt,!!original);
+    if(state.adoptedSnapshotId!==source.id)output.warnings.push('来源新版本已保存，人工修改或已处理商品保持原版本；请核对后明确采用。');
+    return output;
+  });}catch(error){if(error instanceof MiaoshouError)throw error;return fail('STORAGE');}
 }

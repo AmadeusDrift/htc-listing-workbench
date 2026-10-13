@@ -1,3 +1,4 @@
+import {validateAppearanceCheckpoint} from './appearance-review.ts';
 export { imageWorkflowDraftStamp } from './approval-reuse.ts';
 export { selectImageReferences } from '../assets/reference-selection.ts';
 import { currentImageAdaptation, adaptedImageInputsMatch, assertPartialSourceReuse } from './adaptation.ts';
@@ -63,7 +64,7 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
 
 export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['appearanceReviewEnabled','sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -74,13 +75,14 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
     const slot=keys(value,['index','purpose','status','contextSha256','attempts','approvedAssetId','approvedSha256','error']);
     if(slot.index!==index+1||slot.purpose!==(index===0?'main':'detail')||!['PENDING','RUNNING','PASSED','FAILED','BLOCKED','UNKNOWN'].includes(String(slot.status))||!Array.isArray(slot.attempts)||slot.attempts.length>maxAttempts)invalid();
     const attempts=(slot.attempts as unknown[]).map((value,at):ImageSlotAttempt=>{
-      const a=keys(value,['number','requestId','state','planResultId','candidateId','ipReviewResultId','ocrResultId','reviewResultId','error'],['riskPolicy','textReviewPolicyVersion','approvalPolicy','riskBypass']);
+      const a=keys(value,['number','requestId','state','planResultId','candidateId','ipReviewResultId','ocrResultId','reviewResultId','error'],['appearanceReview','riskPolicy','textReviewPolicyVersion','approvalPolicy','riskBypass']);
       if(a.number!==at+1||!['PLANNING','READY','GENERATING','GENERATED','PASSED','RETRYABLE_FAILURE','BLOCKED','UNKNOWN'].includes(String(a.state)))invalid();
       if(a.textReviewPolicyVersion!==undefined&&(!['image-text-review/v1',IMAGE_TEXT_REVIEW_POLICY_VERSION].includes(String(a.textReviewPolicyVersion))||!a.ocrResultId))invalid();
       let riskBypass:ImageSlotAttempt['riskBypass'];
       if(a.riskBypass!==undefined){const bypass=keys(a.riskBypass,['at','candidate']);riskBypass={at:date(bypass.at),candidate:validateCandidateImageIdentity(bypass.candidate)};if(o.riskInterceptionEnabled!==false||riskBypass.candidate.id!==a.candidateId)invalid();}
       if(a.approvalPolicy!==undefined&&(index===0||!['ip-only-detail/v1','risk-disabled-detail/v1'].includes(String(a.approvalPolicy))||a.approvalPolicy==='ip-only-detail/v1'&&!a.ipReviewResultId||a.approvalPolicy==='risk-disabled-detail/v1'&&!riskBypass))invalid();
-      const parsed:ImageSlotAttempt={...(a.riskPolicy===undefined?{}:{riskPolicy:parseImageRiskSettings(a.riskPolicy)}),...(a.approvalPolicy===undefined?{}:{approvalPolicy:a.approvalPolicy as ImageSlotAttempt['approvalPolicy']}),...(riskBypass?{riskBypass}:{}),number:at+1,requestId:uuid(a.requestId),state:a.state as ImageSlotAttempt['state'],planResultId:maybeId(a.planResultId),candidateId:maybeId(a.candidateId),ipReviewResultId:maybeId(a.ipReviewResultId),ocrResultId:maybeId(a.ocrResultId),reviewResultId:maybeId(a.reviewResultId),error:message(a.error),...(a.textReviewPolicyVersion===undefined?{}:{textReviewPolicyVersion:a.textReviewPolicyVersion as ImageTextReviewPolicyVersion})};
+      const parsed:ImageSlotAttempt={...(a.appearanceReview===undefined?{}:{appearanceReview:validateAppearanceCheckpoint(a.appearanceReview)}),...(a.riskPolicy===undefined?{}:{riskPolicy:parseImageRiskSettings(a.riskPolicy)}),...(a.approvalPolicy===undefined?{}:{approvalPolicy:a.approvalPolicy as ImageSlotAttempt['approvalPolicy']}),...(riskBypass?{riskBypass}:{}),number:at+1,requestId:uuid(a.requestId),state:a.state as ImageSlotAttempt['state'],planResultId:maybeId(a.planResultId),candidateId:maybeId(a.candidateId),ipReviewResultId:maybeId(a.ipReviewResultId),ocrResultId:maybeId(a.ocrResultId),reviewResultId:maybeId(a.reviewResultId),error:message(a.error),...(a.textReviewPolicyVersion===undefined?{}:{textReviewPolicyVersion:a.textReviewPolicyVersion as ImageTextReviewPolicyVersion})};
+      if(parsed.appearanceReview&&(parsed.appearanceReview.candidate.id!==parsed.candidateId||parsed.appearanceReview.planResultId!==parsed.planResultId||parsed.state==='PASSED'&&parsed.appearanceReview.state==='PENDING'))invalid();
       if(parsed.riskPolicy&&(!parsed.riskPolicy.enabled||!parsed.ipReviewResultId))invalid();
       if(parsed.candidateId&&!parsed.planResultId||parsed.ipReviewResultId&&!parsed.candidateId||parsed.ocrResultId&&!parsed.ipReviewResultId&&!riskBypass||parsed.reviewResultId&&!parsed.ocrResultId||parsed.state==='PASSED'&&(!parsed.reviewResultId&&!parsed.approvalPolicy||parsed.error)||parsed.state==='PLANNING'&&parsed.candidateId)invalid();
       if(at<(slot.attempts as unknown[]).length-1&&parsed.state!=='RETRYABLE_FAILURE')invalid();return parsed;
@@ -124,6 +126,8 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   if(o.imageRecipeSha256!==undefined)run.imageRecipeSha256=sha256(o.imageRecipeSha256);
   if(o.riskInterceptionEnabled!==undefined)run.riskInterceptionEnabled=o.riskInterceptionEnabled as boolean;
   if(o.copyReviewEnabled!==undefined)run.copyReviewEnabled=o.copyReviewEnabled as boolean;
+  if(o.appearanceReviewEnabled!==undefined){if(typeof o.appearanceReviewEnabled!=='boolean')invalid();run.appearanceReviewEnabled=o.appearanceReviewEnabled as boolean;}
+  if(run.appearanceReviewEnabled!==undefined)for(const slot of run.slots??[])if(slot.status==='PASSED'&&(!slot.attempts.at(-1)?.appearanceReview||run.appearanceReviewEnabled&&slot.attempts.at(-1)?.appearanceReview?.state!=='DONE'))invalid();
   for(const slot of run.slots??[])if(slot.status==='PASSED'&&slot.attempts.at(-1)?.riskBypass?.candidate.sha256!==undefined&&slot.attempts.at(-1)!.riskBypass!.candidate.sha256!==slot.approvedSha256)invalid();
   if(o.approvalReuse!==undefined)run.approvalReuse=validateApprovalReuse(o.approvalReuse,run);
   if(o.rejection!==undefined)run.rejection=validateWorkflowRejection(o.rejection);
@@ -186,6 +190,10 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   if(issues.length)throw new UserFacingError(issues.join('；').slice(0,2000));
   assertCurrentImageCategoryExclusions(current,{base:run.imageContext,setPlan:run.setPlan,plans:currentWorkflowPlanIds(run).flatMap(id=>{const result=getResult(id);return result?[result]:[];})});
   if(run.imageContext){if(run.setPlan)assertImageSetPlan(run.setPlan,run.imageContext);validateProductImageContext(run.imageContext);assertCurrentCopyEvidence(run.imageContext.currentListingCopy,current);}
+  if(run.appearanceReviewEnabled)for(const slot of run.slots??[]){
+    const checkpoint=slot.attempts.at(-1)?.appearanceReview,id=checkpoint?.resultIds.at(-1),row=id?db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id):undefined,result=row?validateStoredAiResult(JSON.parse(String(row.record_json))):undefined;
+    if(checkpoint?.state!=='DONE'||result?.output.kind!=='image-appearance-review'||result.output.verdict!=='PASS'||result.output.candidate.sha256!==slot.approvedSha256||result.output.planResultId!==slot.attempts.at(-1)?.planResultId)throw new UserFacingError('外观复核尚未通过，候选与原复核依据已保留');
+  }
   const selected=run.slots?run.slots.map(slot=>({id:slot.approvedAssetId!,sha256:slot.approvedSha256!})):[{id:run.approvedAssetId!,sha256:run.approvedSha256!}];
   for(const item of selected){const asset = db.prepare('SELECT product_id,sha256 FROM assets WHERE id=?').get(item.id);
     if (!asset || asset.product_id !== product.id || asset.sha256 !== item.sha256 || !db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(item.id, draft.variantId)) throw new UserFacingError('自动图片成果或 SKU 关联已变化');}

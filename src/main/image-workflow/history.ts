@@ -69,6 +69,16 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
             const previous=source&&index===run.sourceReuse!.slotAttempts[slot.index-1]?undefined:slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
             if(listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
           }
+          const appearance=attempt.appearanceReview;
+          if(appearance){
+            if(appearance.state==='NOT_PERFORMED'&&run.appearanceReviewEnabled!==false)invalid();
+            for(const [i,id] of appearance.resultIds.entries()){
+              const result=owned(id,'image-appearance-review'),expectedSnapshot=i===0?appearance.snapshot:appearance.snapshot?.upgrade?{...appearance.snapshot.upgrade,upgradePurposeId:null,upgrade:null}:null;
+              if(!expectedSnapshot||listingFingerprint(calls.get(result.callId)?.purposeSnapshot)!==listingFingerprint(expectedSnapshot))invalid();
+              if(result.output.kind!=='image-appearance-review'||result.output.planResultId!==plan?.id||listingFingerprint(result.output.candidate)!==listingFingerprint(appearance.candidate)||result.output.previousResultId!==(appearance.resultIds[i-1]??null)||i>0&&results.get(appearance.resultIds[i-1])?.output.kind==='image-appearance-review'&&(results.get(appearance.resultIds[i-1])!.output as import('../../shared/appearance-review-contracts.ts').AppearanceReviewOutput).verdict!=='UNCERTAIN')invalid();
+            }
+            if(attempt.state==='PASSED'&&run.appearanceReviewEnabled){const last=appearance.resultIds.at(-1),output=last?results.get(last)?.output:undefined;if(appearance.state!=='DONE'||output?.kind!=='image-appearance-review'||output.verdict!=='PASS'||appearance.candidate.sha256!==slot.approvedSha256)invalid();}
+          }
           const ip=attempt.ipReviewResultId?owned(attempt.ipReviewResultId,'image-ip-review'):undefined;
           if(ip&&(ip.output.kind!=='image-ip-review'||ip.output.candidate.id!==attempt.candidateId||ip.output.planResultId!==plan?.id||listingFingerprint(ip.sourceResultIds)!==listingFingerprint([...imageCopySourceIds(ip.imageContext!),plan?.id])))invalid();
           const ocr=attempt.ocrResultId?owned(attempt.ocrResultId,'generated-image-ocr'):undefined;

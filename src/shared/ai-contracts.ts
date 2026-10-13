@@ -1,3 +1,4 @@
+import type {AppearanceReviewOutput} from './appearance-review-contracts.ts';
 import type { SourceConsistencyContext,SourceConsistencyOutput } from './source-image-consistency-contracts.ts';
 import type { ProductRecordQuery, RecordPage, RecordPageOptions } from './record-query-contracts.ts';
 import type { CategoryDecision } from './category-ai-contracts.ts';
@@ -86,7 +87,7 @@ export interface TextReviewOutput {
   sourceSha256: string; policyVersion: typeof TEXT_REVIEW_POLICY_VERSION;
   verdict: 'PASS' | 'NEEDS_CHANGES' | 'BLOCKED'; checks: ContentReviewCheck[]; issues: ContentReviewIssue[];
 }
-export type AiOutput = OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
+export type AiOutput = AppearanceReviewOutput | OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
   fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1';originalResult:unknown;originalSha256:string;recoveredAt:string};
   imagePlanRecovery?: { repair?:{previousPlanId:string;issues:string[]}; parserVersion:'image-plan-recovery/v1'|'image-plan-recovery/v2'; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };

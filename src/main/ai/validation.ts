@@ -1,3 +1,4 @@
+import {validateAppearanceReview} from '../image-workflow/appearance-review.ts';
 export * from './primitives.ts';
 export { protectedAttribute,validateTextOutput,validateTextReviewOutput,ossImageUrl } from './basic-output-validation.ts';
 import { validateBasicOutput } from './basic-output-validation.ts';
@@ -51,6 +52,7 @@ export function validateOutput(raw: unknown): AiOutput {
   if (kind === 'category-decision') return validateCategoryDecision(raw);
   if (kind === 'image-plan') return validateImagePlan(raw);
   if (kind === 'generated-image-ocr') return validateGeneratedImageOcr(raw);
+  if (kind === 'image-appearance-review') return validateAppearanceReview(raw);
   if (kind === 'image-text-review') return validateImageTextReview(raw);
   if (kind === 'image-ip-review') return validateImageIpReview(raw);
   if (kind === 'listing-current-review') return validateListingCurrentReview(raw);
@@ -63,7 +65,7 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   const variantId = o.variantId === null ? null : uuid(o.variantId), assetId = o.assetId === null ? null : uuid(o.assetId), sourceResultIds = uuidList(o.sourceResultIds, 10);
   const assetSha256 = o.assetSha256 === null ? null : boundedText(o.assetSha256, 64);
   const listingKind = output.kind === 'amazon-fields' || output.kind === 'amazon-fields-review' || output.kind === 'listing-current-review';
-  const imageKind = output.kind === 'image-plan' || output.kind === 'generated-image-ocr' || output.kind === 'image-text-review' || output.kind === 'image-ip-review';
+  const imageKind = output.kind === 'image-appearance-review' || output.kind === 'image-plan' || output.kind === 'generated-image-ocr' || output.kind === 'image-text-review' || output.kind === 'image-ip-review';
   const expectedProvider = output.kind === 'source-image-consistency' || output.kind === 'source-color' ? 'deepseek' : output.kind === 'category-decision' ? output.phase === 'judge' ? 'deepseek-review' : 'deepseek' : imageKind ? output.kind === 'image-plan' ? 'deepseek' : output.kind === 'generated-image-ocr' ? 'aliyun-ocr' : output.kind === 'image-ip-review' ? 'aliyun-image-risk' : 'deepseek-review' : listingKind ? output.kind === 'amazon-fields' ? 'deepseek' : 'deepseek-review' : null;
   if (o.reviewState !== 'unreviewed' || (expectedProvider ? (expectedProvider==='deepseek'?!isGenerationProvider(id):expectedProvider==='deepseek-review'?!isReviewProvider(id):id!==expectedProvider) : output.kind !== CAPABILITIES[id]) || (assetSha256 !== null && !/^[a-f0-9]{64}$/.test(assetSha256))) invalid();
   if (isChatProvider(id) || imageKind ? (!variantId || assetId !== null || assetSha256 !== null) : (variantId !== null || !assetId || !assetSha256 || sourceResultIds.length)) invalid();
@@ -121,9 +123,10 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
     if (output.kind === 'image-plan') { if (sourceResultIds.length < offset || sourceResultIds.length > offset + 1) invalid(); assertImagePlan(output, imageContext,evidenceOptions); }
     if (output.kind === 'generated-image-ocr' && sourceResultIds.length !== offset) invalid();
     if (output.kind === 'image-ip-review' && (sourceResultIds.length!==offset+1 || sourceResultIds[offset]!==output.planResultId || imageContext.policyVersion!==PRODUCT_IMAGE_POLICY_VERSION))invalid();
+    if (output.kind === 'image-appearance-review' && (sourceResultIds.length !== offset + (output.previousResultId ? 2 : 1) || sourceResultIds[offset] !== output.planResultId || output.previousResultId && sourceResultIds[offset+1] !== output.previousResultId || output.checks.some(c=>c.referenceAssetIds.some(id=>!imageContext.referenceAssets.some(a=>a.assetId===id))))) invalid();
     if (output.kind === 'image-text-review' && (sourceResultIds.length !== offset + 2 || sourceResultIds[offset] !== output.planResultId || sourceResultIds[offset+1] !== output.ocrResultId)) invalid();
   }
-  if (imageContext && imageContext.policyVersion !== 'product-image/v1' && output.kind === 'image-plan' && !textModelCapability(id==='openrouter'?'openrouter':'deepseek',String(o.model)).vision) invalid();
+  if (imageContext && imageContext.policyVersion !== 'product-image/v1' && (output.kind === 'image-plan'||output.kind === 'image-appearance-review') && !textModelCapability(id==='openrouter'?'openrouter':'deepseek',String(o.model)).vision) invalid();
   const sourceConsistencyContext=output.kind==='source-image-consistency'?validateConsistencyContext(o.sourceConsistencyContext):undefined;
   if(output.kind!=='source-image-consistency'&&(o.sourceConsistencyContext!==undefined||o.sourceConsistencyRequestBytes!==undefined))invalid();
   if(sourceConsistencyContext&&output.kind==='source-image-consistency'){

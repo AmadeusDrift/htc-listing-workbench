@@ -9,7 +9,7 @@ export interface DeepSeekReferenceImage {
 /** Only managed, locally read bytes cross the provider boundary; no provider-side URL fetch. */
 export function visionContent(payload: unknown, images: readonly DeepSeekReferenceImage[]) {
   let bytes = 0;
-  if (!images.length || images.length > 10 || new Set(images.map(image => image.assetId)).size !== images.length) throw new AiError('IMAGE_INVALID');
+  if (!images.length || images.length > (payload&&typeof payload==='object'&&'operation' in payload&&payload.operation==='image-appearance-review'?11:10) || new Set(images.map(image => image.assetId)).size !== images.length) throw new AiError('IMAGE_INVALID');
   const parts = images.map(image => {
     bytes += image.bytes.length;
     if (!image.bytes.length || image.bytes.length > 10 * 1024 * 1024 || bytes > 20 * 1024 * 1024 || createHash('sha256').update(image.bytes).digest('hex') !== image.sha256) throw new AiError('IMAGE_INVALID');

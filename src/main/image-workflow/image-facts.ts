@@ -34,7 +34,7 @@ export function imageEvidence(context:ProductImageContext):ListingAiContext['evi
   const selected=new Set(context.setPlan?.dimensionEvidenceIds??[]);
   return [...sourceImageEvidence(context),...(context.referenceMeasurements??[]).filter(item=>selected.has(item.id)).map(item=>({id:item.id,name:'Printed dimensions in source image (OCR + visual reading)',value:item.text,meaning:'general' as const,source:'source_confirmed' as const}))];
 }
-function sourceImageEvidence(context:ProductImageContext):ListingAiContext['evidence']{return [...context.listing.evidence.filter(item=>!isDefaultMeasurement(item.name)),...(context.sourceMeasurements??[]).map(({id,name,value})=>({id,name,value,meaning:'general' as const,source:'source_confirmed' as const}))];}
+function sourceImageEvidence(context:ProductImageContext):ListingAiContext['evidence']{return [...context.listing.evidence.filter(item=>!isDefaultMeasurement(item.name)&&!(describesOtherObject(item.name+' '+item.value)&&imageMeasurements(item.value).length)),...(context.sourceMeasurements??[]).map(({id,name,value})=>({id,name,value,meaning:'general' as const,source:'source_confirmed' as const}))];}
 export function sourceDimensionEvidence(context:ProductImageContext){return sourceImageEvidence(context).filter(item=>{
   if(isDefaultMeasurement(item.name+' '+item.value)||describesOtherObject(item.name+' '+item.value))return false;
   return /尺寸|长|宽|高|厚|直径|length|width|height|diameter|dimensions?|\bsize\b|Selected SKU specification/i.test(item.name+' '+item.value)&&imageMeasurements(item.value).some(value=>value.kind==='length'&&value.value>0);
@@ -54,7 +54,7 @@ export function assertImagePromptMeasurements(prompt:string,context:Pick<Listing
   const look=String.raw`(?:perspective(?:\s+feel)?|look|lens\s+look)`;
   const direction=String.raw`(?:Camera(?:\s+look)?\s*:\s*`+focal+String.raw`\s+`+modifier+String.raw`(?:lens|`+look+String.raw`)|Camera\s+look\s+of\s+(?:an?\s+)?`+focal+String.raw`\s+`+modifier+String.raw`lens|`+focal+String.raw`\s+`+modifier+look+String.raw`)`;
   const clause=new RegExp(String.raw`(^|[,;；，。\n]|(?<!\d)\.(?!\d))\s*`+direction+String.raw`(?=\s*(?:[,;.；，。\n]|$))`,'gi');
-  assertImageMeasurements(prompt.replace(clause,'$1 '),context);
+  assertImageMeasurements(withoutRenderExclusions(prompt.replace(clause,'$1 ')),context);
 }
 /** Defaults are listing-only. Source measurements keep their original evidence and authority. */
 export function imageListingSnapshot(draft:AmazonDraft,listing:ListingAiContext,copy:CurrentListingCopy[]):{context:ListingAiContext;currentListingCopy:CurrentListingCopy[]} {
@@ -77,4 +77,12 @@ export function currentImageListingSnapshot(draft:AmazonDraft,context:ListingAiC
     return values.length?[{field:field.name,values}]:[];
   });
   return imageListingSnapshot(draft,context,copy);
+}
+
+/** Exclusions are not factual claims. Only a complete negative rendering clause is removed;
+ * arbitrary adjacent prose remains on the strict measurement validation path. */
+export function withoutRenderExclusions(text:string):string {
+  const measurement=String.raw`\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)*\s*(?:kg|mg|g|cm|mm|inches|inch|in|lb|oz|克|千克|厘米|毫米)`;
+  const exclusion=String.raw`(?:(?:do\s+not|never)\s+(?:render|draw|show|display|label|print)\s+(?:(?:product|package)\s+)?(?:weight|dimensions?|size|length|width|height)\s*[:：]?\s*|(?:不要|禁止|不)(?:绘制|画|显示|标注|呈现)(?:商品|产品|包装)?(?:重量|尺寸|长度|宽度|高度)\s*[:：]?\s*)`+measurement;
+  return text.replace(new RegExp(String.raw`(^|[;；。\n]|(?<!\d)\.(?!\d))\s*`+exclusion+String.raw`\s*(?=$|[;；。\n]|(?<!\d)\.(?!\d))`,'gi'),'$1 Excluded unverified measurement');
 }

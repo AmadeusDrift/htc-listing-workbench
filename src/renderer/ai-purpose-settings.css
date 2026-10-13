@@ -1,0 +1,4 @@
+.ai-purpose-copy { display: grid; grid-template-columns: minmax(180px, 1fr) auto; align-items: end; gap: 10px 12px; margin-top: 12px; }
+.ai-purpose-copy .small-copy { grid-column: 1 / -1; margin: 0; }
+.ai-purpose-copy select { width: 100%; min-width: 0; }
+@media (max-width: 820px) { .ai-purpose-copy { grid-template-columns: minmax(0, 1fr); } .ai-purpose-copy > button { justify-self: start; } }

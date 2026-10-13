@@ -15,6 +15,7 @@ test('W13 collection preparation stays retired even when an old bridge is suppli
 test('W13 main build and packaged app do not require native host or browser extension outputs',()=>{
   const pkg=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
   assert.doesNotMatch(pkg.scripts.build,/native-host|extension|dotnet/);
+  assert.doesNotMatch(readFileSync(new URL('../scripts/snapshot-release.mjs',import.meta.url),'utf8'),/csc\.exe|Microsoft\.NET|compilerSha256/);
   const main=readFileSync(new URL('../src/main/index.ts',import.meta.url),'utf8');assert.doesNotMatch(main,/new CollectionBridge|collection\.start\(/);
 });
 

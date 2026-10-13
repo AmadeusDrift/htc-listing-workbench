@@ -24,8 +24,8 @@ interface Props {
   onShipping?: (batchId: string) => void;
 }
 const requiredCapabilities = [
-  { capability: 'text', label: 'DeepSeek 文案与图片规划' }, { capability: 'text-review', label: 'DeepSeek 独立复核' },
-  { capability: 'image-generation', label: '生图接口' }, { capability: 'ocr', label: '阿里云 OCR' },
+  { capability: 'text', label: '文案与图片规划用途' }, { capability: 'text-review', label: '复核用途' },
+  { capability: 'image-generation', label: 'OpenRouter 生图接口' }, { capability: 'ocr', label: '阿里云 OCR' },
   { capability: 'image-risk', label: '阿里云图片侵权检测' },
 ] as const;
 
@@ -131,7 +131,7 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
       </fieldset>
       <details open={!connectionsReady} className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities} data-state={loadingCapabilities ? undefined : connectionsReady ? 'ready' : 'pending'}>
         <summary>{loadingCapabilities ? '正在检查全局连接…' : connectionsReady ? '全局连接已就绪 · 查看连接与复核设置' : '连接尚未就绪 · 需要处理'}</summary>
-        <div><p>按 SKU 读取来源事实与参考图；首图无字检查始终需要 DeepSeek 独立复核。</p></div>
+        <div><p>按 SKU 读取来源事实与参考图；首图无字检查始终使用“图片文字核对”用途所选模型。各用途按已保存的渠道与思考强度执行。</p></div>
         {!loadingCapabilities && !capabilityError && !!missingCapabilities.length && <p className="small-copy">待配置或启用：{missingCapabilities.map(value => value.label).join('、')}</p>}
         {!loadingCapabilities&&!capabilityError&&<p className="small-copy">文案复核：{copyReviewEnabled?'已开启':'已关闭，仍生成文案并补齐必填字段'}。图片风险拦截：{riskEnabled?'已开启':'已关闭，首图仍检查无字'}。<button type="button" className="text-button" onClick={()=>onSettings('images')}>修改图片设置</button></p>}
         {capabilityError && <p role="alert">连接状态读取失败：{capabilityError}</p>}

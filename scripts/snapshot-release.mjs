@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { cp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { cli, digest, inventory, jsonDigest, runFile } from './release-verification.mjs';
+import { installedDependencyRoot } from './release-dependencies.mjs';
+import { cli, inventory, jsonDigest, runFile } from './release-verification.mjs';
 import { assertClean, buildReceipt, createSnapshot, verifySource } from './release-source.mjs';
 import { buildFiles } from './release-package.mjs';
 
@@ -11,8 +12,9 @@ const args = cli(['--source-repo', '--output']), repo = args['--source-repo'];
 assert.equal(process.platform, 'win32', 'Windows build required');
 const { snapshot, source } = await createSnapshot(repo, args['--output']);
 const startedAt = new Date().toISOString();
-const dependencies = await inventory(join(repo, 'node_modules'));
-await cp(join(repo, 'node_modules'), join(snapshot, 'node_modules'), { recursive: true, force: false, errorOnExist: true });
+const dependencyRoot=installedDependencyRoot(repo);
+const dependencies = await inventory(dependencyRoot);
+await cp(dependencyRoot, join(snapshot, 'node_modules'), { recursive: true, force: false, errorOnExist: true });
 assert.equal(jsonDigest(await inventory(join(snapshot, 'node_modules'))), jsonDigest(dependencies), 'Dependency copy mismatch');
 const lock = JSON.parse(await readFile(join(snapshot, 'package-lock.json'), 'utf8'));
 for (const [path, entry] of Object.entries(lock.packages)) {
@@ -36,10 +38,10 @@ await verifySource(repo, snapshot); await assertClean(repo);
 assert.equal(jsonDigest(await inventory(join(snapshot, 'node_modules'))), jsonDigest(dependencies), 'Build modified dependency inputs');
 const runtimeVersion = JSON.parse(await readFile(join(snapshot, 'node_modules/electron/package.json'), 'utf8')).version;
 assert.equal(runtimeVersion, (await readFile(join(snapshot, 'node_modules/electron/dist/version'), 'utf8')).trim());
-const compiler = join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
+const toolchain=Object.fromEntries(await Promise.all(['typescript','vite','esbuild'].map(async name=>[name,JSON.parse(await readFile(join(snapshot,'node_modules',name,'package.json'),'utf8')).version])));
 const build = { schema: 'htc-build/v1', sourceCommit: source.commit, sourceDigest: source.sourceDigest, lockSha256: source.lockSha256,
   command: 'npm run build', node: process.version, npm: npmVersion, platform: process.platform, architecture: process.arch,
-  compilerSha256: digest(await readFile(compiler)), startedAt, finishedAt: new Date().toISOString(), dependenciesDigest: jsonDigest(dependencies),
+  toolchain, startedAt, finishedAt: new Date().toISOString(), dependenciesDigest: jsonDigest(dependencies),
   runtime: { version: runtimeVersion, files: await inventory(join(snapshot, 'node_modules/electron/dist')) }, files: await buildFiles(snapshot) };
 await writeFile(join(snapshot, buildReceipt), JSON.stringify(build, null, 2) + '\n', { flag: 'wx' });
 console.log(JSON.stringify({ snapshot, sourceCommit: source.commit, sourceTree: source.tree, sourceDigest: source.sourceDigest, buildDigest: jsonDigest(build) }, null, 2));

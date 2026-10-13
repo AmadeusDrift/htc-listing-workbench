@@ -7,7 +7,7 @@ export const MODULE_TABLES:Readonly<Partial<Record<DataOwner,readonly string[]>>
   source:['collection_receipts','collection_captures','miaoshou_receipts','miaoshou_sync_runs','miaoshou_sync_items','source_snapshots'],
   product:['products','variants','facts','variant_assets','product_workspaces','source_image_provenance','source_consistency_attempts','source_consistency_assessments','source_consistency_decisions','source_consistency_bindings','product_source_adoptions','product_fact_scopes'],
   sales:['sku_naming_sequences','sku_naming_groups','sku_naming_identities'],
-  catalog:['schema_cache','category_libraries'],
+  catalog:['schema_cache','category_libraries','schema_fetch_operations'],
   listing:['listing_drafts','issues','content_versions','listing_completion_operations'],
   ai:['ai_profiles','ai_calls','ai_results','ai_usage_policies','ai_usage_ledger'],
   images:['image_versions','image_selections','image_write_operations','image_workflow_runs'],

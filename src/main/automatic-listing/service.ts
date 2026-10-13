@@ -11,6 +11,7 @@ import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { pricingQualificationIssue } from '../pricing/qualification.ts';
 import { freezeSourceForProduct } from '../products/source-adoption.ts';
 import { transaction } from '../application/transaction.ts';
+import { readSchemaOperation, saveSchemaOperation, planSchemaAttempt, reserveSchemaAttempt } from '../catalog/schema-operations.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
@@ -128,6 +129,7 @@ export class AutomaticListingService {
     try {
       for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
         const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+        for(const row of task.items)if(row.schemaRetry){const operation=readSchemaOperation(this.db,task.id,row.key,row.schemaRetry.scope);if(operation)Object.assign(row.schemaRetry,operation.budget);}
         assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
@@ -142,10 +144,13 @@ export class AutomaticListingService {
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
+    transaction(db,()=>{
+    for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
     assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
+    });
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
@@ -596,12 +601,15 @@ export class AutomaticListingService {
     const retry=row.schemaRetry!;
     const eligible=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&this.grants.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
     if(!eligible()||retry.state!=='WAITING')return false;
-    if(Date.now()>=Date.parse(retry.deadlineAt)||retry.usedDelayedRounds>=3){retry.state='EXHAUSTED';row.status='FAILED';row.error='Schema 有限重试已用尽或超过 10 分钟，原进度和次数保留';this.save(task);return false;}
-    if(Date.now()<Date.parse(retry.dueAt))return false;
+    const next=planSchemaAttempt(retry,Date.now());
+    if(next.kind==='exhausted'){Object.assign(retry,next.budget);row.status='FAILED';row.error='Schema 有限重试已用尽或超过 10 分钟，原进度和次数保留';this.save(task);return false;}
+    if(next.kind==='waiting')return false;
     try {
       this.assertScope(task,row);
       if(retry.scope!==this.schemaScope(task,row,retry.selection))throw new UserFacingError('Schema 重试范围已变化，原进度保留');
-      retry.usedDelayedRounds++;retry.state='IN_FLIGHT';retry.dueAt=new Date(Math.min(Date.parse(retry.deadlineAt),Date.now()+([30_000,90_000,180_000][retry.usedDelayedRounds]??0))).toISOString();this.save(task);
+      const reserved=reserveSchemaAttempt(this.db,task.id,row.key,retry,Date.now());Object.assign(retry,reserved.budget);
+      if(reserved.kind!=='ready'){if(reserved.kind==='exhausted'){row.status='FAILED';row.error='Schema 有限重试已用尽，原进度和次数保留';this.save(task);}return false;}
+      this.save(task);
       const revision=task.revision;
       try {await this.deps.amazon.getSchema!(retry.selection);}
       catch(error){

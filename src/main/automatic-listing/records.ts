@@ -1,4 +1,4 @@
-import { selection } from '../amazon/context.ts';
+import { validateSchemaRetry } from '../catalog/schema-operations.ts';
 import { validateWorkflowRejection } from '../image-workflow/rejection.ts';
 import { SOURCE_CONSISTENCY_OUTCOMES } from '../../shared/source-image-consistency-contracts.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
@@ -45,16 +45,7 @@ function item(raw: unknown): AutomaticListingItem {
     draftId: value.draftId === null ? null : identifier(value.draftId), executionTaskIds: (value.executionTaskIds as unknown[]).map(identifier),
     imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts, 21), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
-  if(value.schemaRetry!==undefined){
-    const r=record(value.schemaRetry,'Schema 重试',['version','scope','selection','originalStage','firstFailureAt','dueAt','deadlineAt','usedDelayedRounds','state','reason']);
-    if(Object.keys(r).length!==10||r.version!==1||r.reason!=='SCHEMA_TRANSIENT'||!['WAITING','IN_FLIGHT','SUCCEEDED','EXHAUSTED'].includes(String(r.state))
-      ||!['SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION'].includes(String(r.originalStage)))fail();
-    const selected=record(r.selection,'Schema 选择',['targetId','productType','parentageLevel','requirements','locale']);
-    if(Object.keys(selected).length!==5)fail();
-    result.schemaRetry={version:1,scope:hash(r.scope),selection:selection(selected),originalStage:r.originalStage as AutomaticListingItem['stage'],firstFailureAt:date(r.firstFailureAt),dueAt:date(r.dueAt),deadlineAt:date(r.deadlineAt),usedDelayedRounds:counter(r.usedDelayedRounds,3),state:r.state as NonNullable<AutomaticListingItem['schemaRetry']>['state'],reason:'SCHEMA_TRANSIENT'};
-    const retry=result.schemaRetry,first=Date.parse(retry.firstFailureAt),due=Date.parse(retry.dueAt),deadline=Date.parse(retry.deadlineAt);
-    if(deadline!==first+600_000||due<first||due>deadline||retry.state==='IN_FLIGHT'&&!retry.usedDelayedRounds)fail();
-  }
+  if(value.schemaRetry!==undefined)result.schemaRetry=validateSchemaRetry(value.schemaRetry);
   if(value.pricingRefresh!==undefined){
     const refresh=record(value.pricingRefresh,'本地定价检查点',['draftRevision','draftStamp','previousDraftRevision','previousDraftStamp','previousReason']);
     if(Object.keys(refresh).length!==5||!result.draftId)fail();

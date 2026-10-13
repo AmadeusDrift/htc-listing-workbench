@@ -2,6 +2,7 @@ import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, in
 import { MIGRATION_TABLES, assertMigrationJournal } from './storage/migrations.ts';
 import { SOURCE_TABLES } from './miaoshou/source-snapshots.ts';
 import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
+import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOperations,revokeSchemaInFlight } from './catalog/schema-operations.ts';
 import { retainSchemaRetryBudgets } from './automatic-listing/schema-retry-budget.ts';
 import { retainSchemaResponseCalls } from './ai/usage.ts';
 import { CONSISTENCY_TABLES,CONSISTENCY_VALIDATORS,assertConsistencyHistory,retainConsistencyAttempts } from './source-image-consistency/history.ts';
@@ -165,6 +166,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 21) {Object.assign(approved,CORRECTION_TABLES);approved.amazon_write_locks=[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id'];assertCorrectionHistory(database);}
     if(version>=22){Object.assign(approved,MIGRATION_TABLES);assertMigrationJournal(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
+    if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
       const actual = database.prepare('SELECT name,hidden FROM pragma_table_xinfo(?)').all(name);
@@ -335,6 +337,7 @@ function snapshotRetention(path: string): BackupRetention {
 function disconnectSnapshot(path: string): void {
   const database = openDatabase(dirname(path));
   try {
+    revokeSchemaInFlight(database);
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE;');
     database.exec('UPDATE amazon_targets SET credential_ref=NULL;');
     invalidateCorrectionAuthorizations(database);
@@ -387,6 +390,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
     retainSchemaRetryBudgets(current,snapshot);
+    restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
     retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);

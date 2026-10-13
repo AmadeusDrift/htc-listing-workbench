@@ -26,16 +26,16 @@ export function AuditView({ events, products, busy, onRefresh }: { events: Audit
   </section>;
 }
 
-export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTargetsChanged, appearance, request }: { settings: AppSettings; busy: boolean; onOpenFolder: () => void; targets: AmazonTarget[]; run: TaskRunner; onTargetsChanged: () => Promise<void>; appearance: AppearanceController; request: { module: SettingsModule; token: number } }) {
+export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTargetsChanged, appearance, request, guarded }: { settings: AppSettings; busy: boolean; onOpenFolder: () => void; targets: AmazonTarget[]; run: TaskRunner; onTargetsChanged: () => Promise<void>; appearance: AppearanceController; request: { module: SettingsModule; token: number }; guarded: (action: () => void) => void }) {
   const modules = settingsModules;
   const [selected, setSelected] = useState<string>(request.module);
   useEffect(() => { setSelected(request.module); }, [request]);
   return <section className="utility-panel settings-panel"><div className="section-heading"><div><h2>工作区设置</h2><p>按模块管理连接、商品规则与本地数据。</p></div><span className="version-badge">HTC <span>{settings.appVersion}</span></span></div>
-    <div className="settings-layout"><nav className="settings-nav" aria-label="设置模块">{modules.map(([id,label]) => <button type="button" id={`settings-nav-${id}`} key={id} aria-current={selected === id ? 'page' : undefined} onClick={() => setSelected(id)}>{label}</button>)}</nav>
-    <label className="field settings-module-select"><span>设置模块</span><select value={selected} onChange={event => setSelected(event.target.value)}>{modules.map(([id,label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+    <div className="settings-layout"><nav className="settings-nav" aria-label="设置模块">{modules.map(([id,label]) => <button type="button" id={`settings-nav-${id}`} key={id} aria-current={selected === id ? 'page' : undefined} onClick={() => guarded(() => setSelected(id))}>{label}</button>)}</nav>
+    <label className="field settings-module-select"><span>设置模块</span><select value={selected} onChange={event => { const next = event.target.value; guarded(() => setSelected(next)); }}>{modules.map(([id,label]) => <option key={id} value={id}>{label}</option>)}</select></label>
     <div className="settings-module-content">
     <div hidden={selected !== 'appearance'} aria-label="外观设置"><AppearanceSettings appearance={appearance} /></div>
-    <div hidden={selected !== 'images'} aria-label="图片接口设置"><ImageGenerationSettings visible={selected === 'images'} busy={busy} onAiSettings={() => setSelected('ai')} /></div>
+    <div hidden={selected !== 'images'} aria-label="图片接口设置"><ImageGenerationSettings visible={selected === 'images'} busy={busy} onAiSettings={() => guarded(() => setSelected('ai'))} /></div>
     {selected === 'hosting' && <div aria-label="图片托管设置"><HostingSettings busy={busy} /></div>}
     {selected === 'labels' && <div aria-label="商品标签设置"><ItemLabelSettings busy={busy} /></div>}
     {selected === 'sku' && <div aria-label="SKU 命名设置"><SkuNamingSettings targets={targets} busy={busy} run={run} /></div>}

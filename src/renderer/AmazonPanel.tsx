@@ -87,7 +87,8 @@ export function AmazonPanel(props: Props) {
     void api.listAmazonDrafts(product.id).then(rows => {
       if (cancelled) return;
       setDrafts(rows);
-      const selected = rows.find(row => row.id === props.initialDraftId) ?? rows[0];
+      const selected = props.initialDraftId ? rows.find(row => row.id === props.initialDraftId) : rows[0];
+      if (props.initialDraftId && !selected) setNotice('目标草稿已不存在；未打开其他草稿。请返回来源页面刷新。');
       if (selected) actionsRef.current.accept(selected);
       else { setDraft(null); updateRaw('{}'); }
     }).catch(cause => { if (!cancelled) setNotice(errorText(cause)); }).finally(() => { if (!cancelled) setLoading(false); });

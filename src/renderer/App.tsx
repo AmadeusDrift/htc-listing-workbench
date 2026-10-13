@@ -1,6 +1,8 @@
 import { AlertCircle, Box, CheckCircle2, ChevronRight, FileInput, FolderOpen, Inbox, LoaderCircle, Monitor, Plus, ShieldCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSettings, AssetRole, AuditEvent, ListingReadiness, ProductDetail, ProductSummary } from '../shared/contracts';
+import { FormGuardContext } from './FormGuard';
+import { createFormGuardRegistry } from './form-guard-registry';
 import { ProductEditor } from './ProductEditor';
 import { ProductList } from './ProductList';
 import { AuditView, SettingsView } from './SupportingViews';
@@ -26,6 +28,7 @@ type PendingAction = () => void | Promise<unknown>;
 
 export default function App() {
   const api = window.red;
+  const formGuards = useRef(createFormGuardRegistry()).current;
   const appearance = useAppearance();
   const [settingsRequest, setSettingsRequest] = useState<{ module: SettingsModule; token: number }>({ module: 'amazon', token: 0 });
   const [products, setProducts] = useState<ProductSummary[]>([]);
@@ -137,7 +140,7 @@ export default function App() {
 
   useEffect(() => {
     const protect = (event: BeforeUnloadEvent) => {
-      if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty()) { event.preventDefault(); event.returnValue = ''; }
+      if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty() || formGuards.dirty()) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', protect);
     return () => window.removeEventListener('beforeunload', protect);
@@ -176,13 +179,13 @@ export default function App() {
       });
       if (result !== true) return false;
     }
-    if (amazonGuard.current?.dirty()) return amazonGuard.current.save();
-    return true;
+    if (amazonGuard.current?.dirty() && !await amazonGuard.current.save()) return false;
+    return formGuards.save();
   }
 
   function guarded(action: PendingAction) {
     if (lockedRef.current) return;
-    if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty()) {
+    if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty() || formGuards.dirty()) {
       pendingRef.current = action;
       setError(null);
       setShowGuard(true);
@@ -203,6 +206,7 @@ export default function App() {
   function continueAfterDiscard() {
     if (lockedRef.current) return;
     amazonGuard.current?.discard();
+    formGuards.discard();
     if (savedRef.current) commitProduct(savedRef.current);
     const action = pendingRef.current;
     pendingRef.current = null;
@@ -356,6 +360,16 @@ export default function App() {
     guarded(() => { setShippingBatchId(batchId); setView('shipping'); });
   }
 
+  function openProduct(id: string, initialTab: EditorTab = 'info', draftId?: string) {
+    guarded(() => perform('正在打开商品…', async () => {
+      const detail = await api.getProduct(id);
+      if (draftId && !(await api.listAmazonDrafts(id)).some(row => row.id === draftId)) {
+        setError('目标草稿已不存在，请返回来源页面刷新；未打开其他草稿。'); return;
+      }
+      commitProduct(detail); setTab(initialTab); setInitialDraftId(draftId); setWorkflowRequest(null); setView('manual');
+    }));
+  }
+
   function moveProducts(ids: string[], lane: WorkspaceLane, open = false, initialTab: EditorTab = 'info', draftId?: string) {
     guarded(() => perform('正在更新商品去向…', async () => {
       await api.moveWorkspaceProducts({ productIds: ids, destination: lane });
@@ -378,7 +392,7 @@ export default function App() {
 
   if (!api) return <div className="desktop-notice"><span className="brand-logo">H<span /></span><Monitor size={34} strokeWidth={1.4} /><h1>请从 HTC 桌面应用打开</h1><p>此工作台需要桌面环境来读取本机商品资料。<br />请启动 HTC 桌面应用后继续。</p></div>;
 
-  return <div className="desktop-shell"><DesktopTitleBar version={appVersion} appearance={appearance} /><div className="app-shell htc-workspaces">
+  return <FormGuardContext.Provider value={formGuards}><div className="desktop-shell"><DesktopTitleBar version={appVersion} appearance={appearance} /><div className="app-shell htc-workspaces">
     <WorkspaceNavigation view={view} busy={Boolean(busy)} counts={{ inbox: inboxProducts.length, manual: manualProducts.length, automatic: automaticProducts.length }} targets={amazonTargets} onNavigate={navigate} onExamples={loadExamples} onConnectionSettings={() => openSettings('amazon')} />
     <div className="main-shell">
       <header className="topbar"><div className="breadcrumb"><span>工作空间</span><ChevronRight size={13} /><strong>{viewLabels[view]}</strong></div><span className="topbar-local"><span className="topbar-location"><FolderOpen size={14} />本地工作区<span className="topbar-divider" />HTC</span><strong className="app-version" aria-label="当前应用版本">{appVersion ? `v${appVersion}` : '版本读取中'}</strong></span></header>
@@ -393,9 +407,9 @@ export default function App() {
         {appearance.error && view !== 'settings' && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>外观设置未保存：{appearance.error}</span><button type="button" className="button secondary" onClick={() => openSettings('appearance')}>查看外观设置</button></div>}
         {!initialized ? <div className="loading-state"><LoaderCircle className="spin" size={25} /><p>正在读取本地商品资料…</p></div>
           : view === 'inbox' ? <InboxPage products={products} placements={placements} busy={Boolean(busy)} onImport={importProducts} onExamples={() => loadWorkspaceExamples('inbox')} onMove={moveProducts} onChanged={refreshProducts} onOpenSettings={() => openSettings('collection')} />
-          : view === 'automatic' ? <AutomaticPage onShipping={openShipping} products={automaticProducts} targets={amazonTargets} busy={Boolean(busy)} onExamples={() => loadWorkspaceExamples('automatic')} onInbox={() => navigate('inbox')} onSettings={openSettings} onManual={(id, draftId) => moveProducts([id], 'manual', true, draftId ? 'checks' : 'info', draftId)} />
-          : view === 'results' ? <ResultsPage products={products} drafts={resultDrafts} busy={Boolean(busy)} run={perform} onRefresh={() => { void perform('正在刷新上架记录…', refreshResults); }} onOpen={(id, draftId) => moveProducts([id], 'manual', true, 'checks', draftId)} />
-          : view === 'product-data' ? <ProductDataPage targets={amazonTargets} busy={Boolean(busy)} onOpen={id => moveProducts([id], 'manual', true)} onProcurement={() => navigate('procurement')} onSettings={() => openSettings('amazon')} />
+          : view === 'automatic' ? <AutomaticPage onShipping={openShipping} products={automaticProducts} targets={amazonTargets} busy={Boolean(busy)} onExamples={() => loadWorkspaceExamples('automatic')} onInbox={() => navigate('inbox')} onSettings={openSettings} onManual={(id, draftId) => openProduct(id, draftId ? 'checks' : 'info', draftId)} />
+          : view === 'results' ? <ResultsPage products={products} drafts={resultDrafts} busy={Boolean(busy)} run={perform} onRefresh={() => { void perform('正在刷新上架记录…', refreshResults); }} onOpen={(id, draftId) => openProduct(id, 'checks', draftId)} />
+          : view === 'product-data' ? <ProductDataPage targets={amazonTargets} busy={Boolean(busy)} onOpen={id => openProduct(id)} onProcurement={() => navigate('procurement')} onSettings={() => openSettings('amazon')} />
           : view === 'procurement' || view === 'shipping' || view === 'catalog' ? <OperationsPage key={view} section={view} initialBatchId={view === 'shipping' ? shippingBatchId : undefined} targets={amazonTargets} busy={Boolean(busy)} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onDirtyChange={setAmazonDirty} onShipping={openShipping} onProcurement={() => navigate('procurement')} />
           : view === 'manual' ? <div className="manual-workspace"><WorkflowRail mode="manual" tab={tab} step={workflowRequest?.step} busy={Boolean(busy)} onSelect={(next, step) => { if (product) guarded(() => { setTab(next); setWorkflowRequest({ step, token: Date.now() }); }); }} />
             {manualProducts.length > 0 ? <div className="workbench-layout"><ProductList products={manualProducts} selectedId={product?.id} busy={Boolean(busy)} onSelect={selectProduct} />
@@ -404,13 +418,13 @@ export default function App() {
             </div> : <EmptyWorkspace onCreate={createProduct} onImport={importProducts} busy={Boolean(busy)} />}
           </div>
           : view === 'audit' ? <AuditView events={audit} products={products} busy={Boolean(busy)} onRefresh={() => { void perform('正在刷新记录…', async () => setAudit(await api.listAudit())); }} />
-          : settings ? <SettingsView settings={settings} targets={amazonTargets} run={perform} onTargetsChanged={refreshAmazonTargets} appearance={appearance} request={settingsRequest} busy={Boolean(busy)} onOpenFolder={() => { void perform('正在打开数据文件夹…', () => api.openDataFolder()); }} /> : null}
+          : settings ? <SettingsView settings={settings} targets={amazonTargets} run={perform} onTargetsChanged={refreshAmazonTargets} appearance={appearance} request={settingsRequest} guarded={guarded} busy={Boolean(busy)} onOpenFolder={() => { void perform('正在打开数据文件夹…', () => api.openDataFolder()); }} /> : null}
       </main>
       <div className={`activity-bar ${busy ? 'working' : ''}`} role="status">{busy ? <><LoaderCircle size={13} className="spin" /><span>{busy}</span></> : <><span className="live-dot" /><span>资料自动保留在本机</span></>}<span className="activity-right">HTC / {viewLabels[view]}</span></div>
     </div>
     {toast && <div className="toast" role="status"><CheckCircle2 size={18} /><span>{toast}</span><button type="button" className="icon-button small" aria-label="关闭成功提示" onClick={() => setToast(null)}><X size={15} /></button></div>}
     {showGuard && <UnsavedDialog busy={Boolean(busy)} error={error} onCancel={cancelGuard} onSave={() => { void continueAfterSave(); }} onDiscard={continueAfterDiscard} />}
-  </div></div>;
+  </div></div></FormGuardContext.Provider>;
 }
 
 function EmptyWorkspace({ onCreate, onImport, busy }: { onCreate: () => void; onImport: () => void; busy: boolean }) {
@@ -434,5 +448,5 @@ function UnsavedDialog({ busy, error, onCancel, onSave, onDiscard }: { busy: boo
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
-  }}><div className="dialog-icon"><AlertCircle size={24} /></div><h2 id="unsaved-title">有未保存的修改</h2><p id="unsaved-description">保存当前商品的修改后再继续，或返回编辑。选择放弃修改会恢复到上次保存的内容。</p>{error && <p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button type="button" className="button danger-quiet" disabled={busy} onClick={onDiscard}>放弃修改</button><div><button ref={cancelRef} type="button" className="button secondary" disabled={busy} onClick={onCancel}>继续编辑</button><button type="button" className="button primary" disabled={busy} onClick={onSave}>{busy ? <LoaderCircle className="spin" size={15} /> : null}保存后继续</button></div></div></div></div>;
+  }}><div className="dialog-icon"><AlertCircle size={24} /></div><h2 id="unsaved-title">有未保存的修改</h2><p id="unsaved-description">保存当前表单的修改后再继续，或返回编辑。选择放弃修改会恢复到上次保存的内容。</p>{error && <p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button type="button" className="button danger-quiet" disabled={busy} onClick={onDiscard}>放弃修改</button><div><button ref={cancelRef} type="button" className="button secondary" disabled={busy} onClick={onCancel}>继续编辑</button><button type="button" className="button primary" disabled={busy} onClick={onSave}>{busy ? <LoaderCircle className="spin" size={15} /> : null}保存后继续</button></div></div></div></div>;
 }

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useFormGuard } from './FormGuard';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Hash, Plus, RefreshCw, Star, Trash2 } from 'lucide-react';
 import { defaultSkuNamingSettings, parseSkuNamingSettings, previewSkuNaming } from '../shared/sku-naming';
 import type { SkuNamingApi, SkuNamingBinding, SkuNamingSettings as NamingSettings, SkuNamingTemplate } from '../shared/sku-naming';
@@ -14,10 +15,11 @@ export function SkuNamingSettings({ busy, run, targets, api: suppliedApi }: Prop
   const [dirty, setDirty] = useState(false), [working, setWorking] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [newStore, setNewStore] = useState(''), [newPrefix, setNewPrefix] = useState('');
   const [previewStore, setPreviewStore] = useState('U2'), [previewDate, setPreviewDate] = useState('2026-10-08'), [previewSequence, setPreviewSequence] = useState(1);
+  const savedSettings = useRef<NamingSettings | null>(null);
   const selected = settings?.templates.find(template => template.id === selectedId);
   useEffect(() => {
     let active = true;
-    void api.getSkuNamingSettings().then(value => { if (active) { setSettings(value); setSelectedId(value.defaultTemplateId); } }, cause => { if (active) setError(errorText(cause)); });
+    void api.getSkuNamingSettings().then(value => { if (active) { savedSettings.current = value; setSettings(value); setSelectedId(value.defaultTemplateId); } }, cause => { if (active) setError(errorText(cause)); });
     return () => { active = false; };
   }, [api]);
   useEffect(() => {
@@ -52,24 +54,30 @@ export function SkuNamingSettings({ busy, run, targets, api: suppliedApi }: Prop
   }
   async function reload() {
     setWorking(true); setError(''); setNotice('');
-    try { const value = await api.getSkuNamingSettings(); setSettings(value); setSelectedId(value.defaultTemplateId); setDirty(false); }
+    try { const value = await api.getSkuNamingSettings(); savedSettings.current = value; setSettings(value); setSelectedId(value.defaultTemplateId); setDirty(false); }
     catch (cause) { setError(errorText(cause)); }
     finally { setWorking(false); }
   }
   async function save() {
-    if (!settings || working) return;
+    if (!settings || working) return false;
+    let success = false;
     setWorking(true); setError(''); setNotice('');
     try {
       const valid = parseSkuNamingSettings(settings);
       await run('正在保存 SKU 命名规则…', async () => {
         try {
           const saved = await api.saveSkuNamingSettings(valid);
-          setSettings(saved); setDirty(false); setNotice(`规则版本 ${saved.revision} 已保存，新商品组将使用此设置。`);
+          savedSettings.current = saved; success = true; setSettings(saved); setDirty(false); setNotice(`规则版本 ${saved.revision} 已保存，新商品组将使用此设置。`);
         } catch (cause) { setError(errorText(cause)); throw cause; }
       });
     } catch (cause) { setError(errorText(cause)); }
     finally { setWorking(false); }
+    return success;
   }
+  useFormGuard({ dirty: () => dirty, save, discard: () => {
+    if (savedSettings.current) { setSettings(savedSettings.current); setSelectedId(savedSettings.current.defaultTemplateId); }
+    setDirty(false); setError('');
+  } });
   if (!settings || !selected) return <section className="settings-section"><p role={error ? 'alert' : 'status'}>{error || '正在读取 SKU 命名规则…'}</p>{error && <button type="button" className="button secondary" onClick={() => void reload()}>重新读取</button>}</section>;
   const codes = [...new Set(settings.templates.flatMap(template => Object.keys(template.prefixes)))].sort();
   const previewCode = Object.hasOwn(selected.prefixes, previewStore) ? previewStore : Object.keys(selected.prefixes)[0];

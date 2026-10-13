@@ -1,3 +1,7 @@
+import { AutomaticBatchStatus } from './AutomaticBatchStatus';
+import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-contracts';
+import { usePageState } from './navigation-context';
+import type { ProblemContext } from './navigation-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PauseCircle, Play, RefreshCw, XCircle } from 'lucide-react';
 import type { AutomaticAdaptationPreview, AutomaticListingStatus, AutomaticListingTask } from '../shared/automatic-listing-contracts';
@@ -7,15 +11,17 @@ import { errorText } from './utils';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
 import { AutomaticProductGroups, OutcomeCount } from './AutomaticProductGroups';
 import { buildAutomaticProductGroups, summarizeAutomaticItems } from './automatic-product-groups';
+import { formatAutomaticTaskDate } from './automatic-task-date';
 
 const statusLabels: Record<AutomaticListingStatus, string> = { CREATED:'已创建', QUEUED:'等待执行', RUNNING:'运行中', WAITING:'等待平台或服务返回', PAUSED:'已暂停', NEEDS_ATTENTION:'需要处理', COMPLETED:'任务完成', CANCELLED:'已取消' };
 function tone(status: AutomaticListingStatus): SettingsStatusTone { return status === 'COMPLETED' ? 'success' : status === 'NEEDS_ATTENTION' ? 'danger' : status === 'PAUSED' ? 'warning' : status === 'CANCELLED' ? 'neutral' : 'info'; }
-interface Props { products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string): void; onShipping?: (batchId: string) => void }
+interface Props { products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
 
 export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onShipping }: Props) {
   const api = window.red;
+  const [batchSummary,setBatchSummary]=useState<TaskBatchSummary|null>(null),[batchError,setBatchError]=useState('');
   const [tasks, setTasks] = useState<AutomaticListingTask[]>([]);
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = usePageState('automatic:task', '');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
   const [adaptation,setAdaptation]=useState<AutomaticAdaptationPreview|null>(null);
@@ -32,7 +38,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    if (startedTask) { version.current++; setTask(startedTask); setSelectedId(startedTask.id); setTasks(values => [startedTask, ...values.filter(value => value.id !== startedTask.id)]);
+    if (startedTask) { setBatchSummary(null); version.current++; setTask(startedTask); setSelectedId(startedTask.id); setTasks(values => [startedTask, ...values.filter(value => value.id !== startedTask.id)]);
       // Starting a task moves attention here; scroll to it and pulse once.
       const element = panel.current;
       if (element) { element.classList.remove('jump-highlight'); void element.offsetWidth; element.classList.add('jump-highlight'); element.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
@@ -46,7 +52,9 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         const values = await api.listAutomaticListingTasks();
         const id = selectedId || values[0]?.id;
         const detail = id ? await api.getAutomaticListingTask(id) : null;
-        if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); }
+        let batch:TaskBatchSummary|null=null,batchFailure='';
+        if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
+        if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
       finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, 2000); } }
     };
@@ -79,6 +87,13 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     return () => { active = false; };
   }, [api, task?.id, previewRevision, refresh]);
 
+  async function changeMode(mode:ListingExecutionMode){
+    if(!task||busy||actionPending.current)return;
+    actionPending.current=true;version.current++;setPending('mode');setError('');
+    try{const updated=await api.setAutomaticExecutionMode({taskId:task.id,mode});if(mounted.current){setTask(updated);setBatchSummary(current=>current?{...current,mode}:null);}}
+    catch(cause){if(mounted.current)setError(errorText(cause));}
+    finally{actionPending.current=false;version.current++;if(mounted.current){setPending('');setRefresh(value=>value+1);}}
+  }
   async function applyAdaptation(){
     if(!task||!adaptation||busy||actionPending.current)return;
     actionPending.current=true;version.current++;setPending('adaptation');setError('');
@@ -96,17 +111,20 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
-  const taskRevisionSignature=JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt]));
+  const taskRevisionSignature=useMemo(()=>JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])),[tasks]);
+  const taskOptions=useMemo(()=>tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {formatAutomaticTaskDate(value.createdAt)}</option>),[tasks]);
   useEffect(()=>{window.dispatchEvent(new Event('automatic-listing-changed'));},[taskRevisionSignature]);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);
   return <section ref={panel} className="amazon-workflow automatic-task-panel" aria-label="自动上架任务">
-    <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} />刷新任务</button></div>
+    <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending) || loading} title={busy?'当前有操作进行中':pending?'正在处理任务操作':loading?'正在读取已保存任务':undefined} onClick={() => { setLoading(true); setRefresh(value => value + 1); }}><RefreshCw size={15} />{loading ? '正在读取任务…' : '刷新任务'}</button></div>
     {readError && <p className="workflow-notice" role="alert">任务读取未完成：{readError}</p>}
     {loading && <p className="small-copy" role="status">正在读取已保存任务…</p>}
-    {!!tasks.length && <label className="field"><span>选择自动上架任务</span><select aria-label="选择自动上架任务" value={task?.id ?? selectedId} disabled={Boolean(pending)} onChange={event => { setSelectedId(event.target.value); setTask(null); setLoading(true); }}>{tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {new Date(value.createdAt).toLocaleString('zh-CN', { hour12:false })}</option>)}</select></label>}
+    {!!tasks.length && <label className="field"><span>选择自动上架任务</span><select aria-label="选择自动上架任务" value={task?.id ?? selectedId} disabled={Boolean(pending)} onChange={event => { setSelectedId(event.target.value); setTask(null); setBatchSummary(null); setLoading(true); }}>{taskOptions}</select></label>}
     {!loading && !task && !tasks.length && <p className="small-copy">还没有任务。选好商品、目标和托管服务器后，从上方启动。</p>}
     {task && <div data-testid={`automatic-task-${task.id}`}>
       <div className="workflow-actions automatic-task-heading"><Badge tone={tone(task.status)}>{statusLabels[task.status]}</Badge><strong>{task.targetName} · {task.mode === 'demo' ? '本地演示' : '真实 Haul'} · {task.productType}</strong><span className="small-copy">规则版本 {task.ruleRevision}</span></div>
+      {batchError&&<p role="alert" className="workflow-notice">Batch 状态读取失败：{batchError}；请刷新任务。</p>}
+      {batchSummary&&<AutomaticBatchStatus summary={batchSummary} status={task.status} disabled={busy||!!pending} onMode={mode=>{void changeMode(mode);}}/>}
       <div className="automatic-task-scope" aria-label="当前任务范围"><span>来源商品链接<strong>{groups.length}</strong></span><span>来源规格<strong>{groups.every(group => group.sourceVariantCount !== null) ? groups.reduce((sum, group) => sum + (group.sourceVariantCount ?? 0), 0) : loadingSources ? '读取中' : '未完整读取'}</strong></span><span>本次销售 SKU<strong>{task.items.length}</strong></span></div>
       <progress className="automatic-task-progress" aria-label="流程已完成 SKU" value={outcomes.completed} max={Math.max(task.items.length,1)} />
       <p className="small-copy automatic-task-counts" role="status"><OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="success" label="流程完成" value={outcomes.completed} suffix={` / ${task.items.length} 个销售 SKU`} /> · <OutcomeCount tone="info" label="准备标签" value={outcomes.labels} /> · <OutcomeCount tone="info" label="处理中" value={outcomes.running} /> · <OutcomeCount tone="info" label="等待服务" value={outcomes.waiting} /> · <OutcomeCount tone="neutral" label="待执行" value={outcomes.pending} /></p>
@@ -124,7 +142,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
       </div>}
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
-      <AutomaticProductGroups key={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={onManual} onShipping={onShipping} />
+      <AutomaticProductGroups key={task.id} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}
   </section>;
 }

@@ -1,3 +1,4 @@
+import {createBatchReferencePort} from './hosting/batch-references.ts';
 import { assertConsistencyView } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { app, BrowserWindow, dialog, nativeTheme, net, protocol, safeStorage, session } from 'electron';
@@ -25,7 +26,7 @@ import { AiService } from './ai/service.ts';
 import { ImageVersionService } from './image-versions/service.ts';
 import { decodeArtifact } from './image-versions/decoder.ts';
 import { ReviewedContentService } from './content/service.ts';
-import { CollectionBridge, collectionHostName } from './collection/service.ts';
+import { CollectionHistory } from './collection/history.ts';
 import { AppearanceStore, appearanceTitleBarOverlay } from './appearance.ts';
 import { ImageGenerationService } from './image-generation/service.ts';
 import { normalizeGeneratedImage } from './image-generation/normalize.ts';
@@ -65,6 +66,7 @@ let execution: ExecutionService | undefined;
 let ai: AiService | undefined;
 let images: ImageVersionService | undefined;
 let imageGeneration: ImageGenerationService | undefined;
+let batchReferences:ReturnType<typeof createBatchReferencePort>|undefined;
 let imageWorkflow: ImageWorkflowService | undefined;
 let automatic: AutomaticListingService | undefined;
 let labels: ItemLabelService | undefined;
@@ -72,7 +74,7 @@ let labelSettings: ItemLabelSettings | undefined;
 let skuNaming: SkuNamingService | undefined;
 let shipmentDocuments: ShipmentDocumentService | undefined;
 let content: ReviewedContentService | undefined;
-let collection: CollectionBridge | undefined;
+let collection: CollectionHistory | undefined;
 let miaoshou: MiaoshouService | undefined;
 let miaoshouImages: MiaoshouImageService | undefined;
 let window: BrowserWindow | undefined;
@@ -94,7 +96,8 @@ async function start() {
     downloadDependencies: { nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) },
   });
   const generationService = imageGeneration;
-  ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability() });
+  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>net.fetch(url,{...init,bypassCustomProtocolHandlers:true})})});
+  ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
@@ -111,8 +114,7 @@ async function start() {
       try { listingFollowup.schedule(draft.id); } catch { db.recordWorkspaceEvent('listing.followup.schedule_failed', '有一条已提交记录尚未登记跟进，请核对上架结果'); }
     }
   }
-  collection = new CollectionBridge(dataRoot, db, { nativeHostExecutable: resolve(__dirname, '../dist-native/HTC.CollectionHost.exe'), nativeHostName: collectionHostName(),
-    onReceived: event => { if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send('red:collection:received', event); } });
+  collection = new CollectionHistory(db);
   miaoshou = new MiaoshouService(dataRoot, db, safeStorage);
   const miaoshouService = miaoshou;
   miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreview, {
@@ -127,6 +129,7 @@ async function start() {
   const workflowService = imageWorkflow, listingService = new ListingAiService(db, amazon, ai,()=>workflowService.getCopyReviewSettings().enabled), amazonService = amazon, aiService = ai, formatSettings = labelSettings, catalogService = catalog, namingService=skuNaming, executionService=execution;
   automatic = new AutomaticListingService(dataRoot, {
     store: db, amazon, hosting, images: imageWorkflow, execution, followup, procurement, labels,
+    batch:aiService.batchTasks,batchPlan:()=>aiService.taskBatchPlan(),
     rules: () => { const rules = new ListingRuleStore(dataRoot); try { return rules.get(); } finally { rules.close(); } },
     labelFormat: () => formatSettings.get(),
     sourceReceipt: productId => miaoshouService.getReceipt(productId),
@@ -183,7 +186,6 @@ async function start() {
       } finally { signal.removeEventListener('abort', cancel); }
     },
   });
-  await collection.start();
   await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
   const buildRoot = resolve(__dirname, '../dist');
   // Only files present in the renderer build are addressable by the app protocol.
@@ -238,10 +240,9 @@ async function start() {
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => { if (url.split('#')[0] !== expectedUrl) event.preventDefault(); });
   mainWindow.webContents.on('will-attach-webview', event => event.preventDefault());
-  mainWindow.webContents.on('will-prevent-unload', event => {
-    const choice = dialog.showMessageBoxSync(mainWindow, { type: 'question', title: '还有未保存的修改', message: '关闭工作台会放弃当前未保存的修改。',
-      buttons: ['继续编辑', '放弃修改并关闭'], defaultId: 0, cancelId: 0, noLink: true });
-    if (choice === 1) event.preventDefault();
+  mainWindow.webContents.on('will-prevent-unload', () => {
+    // The renderer owns every explicit-save form; keep close prevented until its guard resolves.
+    mainWindow.webContents.send('red:unsaved-close-requested');
   });
   installIpc(mainWindow, db, dataRoot, expectedUrl, amazon, hosting, execution, ai, images, content, async prepared => {
     await automatic?.close(); automatic = undefined;
@@ -254,7 +255,7 @@ async function start() {
     await miaoshou?.close(); miaoshou = undefined;
     await collection?.close(); collection = undefined;
     await images?.close(); images = undefined; content?.close(); content = undefined;
-    await ai?.close(); ai = undefined; await imageGeneration?.close(); imageGeneration = undefined;
+    await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined;
     await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined;
     amazon?.close(); amazon = undefined; store?.close(); store = undefined;
     try {
@@ -308,7 +309,7 @@ else {
       await automatic?.close(); automatic = undefined;
       skuNaming?.close(); skuNaming = undefined;
       await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
-      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
+      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
       finally {
         await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
         try { await snapshotWorkspaceDatabase(dataRoot); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }

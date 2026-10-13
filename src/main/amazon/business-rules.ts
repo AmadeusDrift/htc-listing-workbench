@@ -1,3 +1,4 @@
+import { factsForVariant } from '../../shared/fact-scopes.ts';
 import { isDeepStrictEqual } from 'node:util';
 import type { AmazonSchema, AmazonTarget, JsonObject, JsonValue, SourceFieldMapping } from '../../shared/amazon-contracts.ts';
 import type { ProductDetail, Variant } from '../../shared/contracts.ts';
@@ -21,6 +22,8 @@ export interface BusinessRuleInput {
   product: ProductDetail; variant: Variant; schema: AmazonSchema; target: AmazonTarget; attributes: JsonObject;
   measurements: ConfirmedMeasurements; costCny: number | null; now: Date;
   previousBusinessReport?: BusinessRuleReport;
+  /** Unprojected scope metadata for rejecting unbound packaging prose. */
+  sourceQuantityProduct?: ProductDetail;
   saleUnit?: { totalPieces:number; totalCostCny:number|null };
   /** Supplied by the sales recipe boundary; component packages do not prove a mixed/bundled package. */
   packageMatchesSaleUnit?: boolean;
@@ -31,6 +34,8 @@ export interface BusinessRuleInput {
 
 /** Deterministic business inputs. Original source records are never modified. */
 export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules): { attributes: JsonObject; report: BusinessRuleReport } {
+  const quantityProduct=input.sourceQuantityProduct??input.product;
+  input={...input,product:{...input.product,facts:factsForVariant(input.product,input.variant.id)}};
   const { schema, target, product, variant } = input, p = rules.product;
   const attributes = structuredClone(input.attributes), properties = isObject(schema.schema.properties) ? schema.schema.properties : {};
   const report: BusinessRuleReport = { revision: rules.revision, fields: {}, notices: [], quote: null, bundleQuantity: 1 };
@@ -47,8 +52,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const sourceFields = ['brand','manufacturer','country_of_origin','import_designation','model_number','model_name','part_number','condition_type',
     'gpsr_safety_attestation','batteries_required','required_product_compliance_certificate','number_of_items'];
   for (const field of sourceFields) {
-    if (!Object.hasOwn(properties, field) || field === 'number_of_items' && product.variants.length !== 1) continue;
-    const facts = product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === field && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
+    if (!Object.hasOwn(properties, field)) continue;
+    const facts = product.facts.filter(fact => (field!=='number_of_items'||product.variants.length===1||fact.scope!==undefined) && sourceFieldName(fact.name, 'haul') === field && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
     if (!facts.length) continue;
     explicitFields.add(field);
     if (Object.hasOwn(attributes, field)) continue;
@@ -182,9 +187,9 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const itemCount = first('number_of_items')?.value;
   const existingCount = typeof itemCount === 'number' && Number.isSafeInteger(itemCount) && itemCount > 0 ? itemCount : null;
   const hasCount = Object.hasOwn(attributes, 'unit_count') || Object.hasOwn(attributes, 'number_of_items') || blocked.unitCount !== undefined || explicitFields.has('number_of_items');
-  const sourceUnits = input.saleUnit ? sourceQuantity(`${input.saleUnit.totalPieces} pc`) : productSourceQuantity(product,variant);
-  const quantityFacts = product.variants.length === 1 ? product.facts.filter(fact => sourceFieldName(fact.name, 'haul') === 'number_of_items'
-    && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state)) : [];
+  const sourceUnits = input.saleUnit ? sourceQuantity(`${input.saleUnit.totalPieces} pc`) : productSourceQuantity(quantityProduct,variant);
+  const quantityFacts = product.facts.filter(fact => (product.variants.length===1||fact.scope==='common'||fact.scope==='variant') && sourceFieldName(fact.name, 'haul') === 'number_of_items'
+    && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
   const quantityFactValues = quantityFacts.map(fact => Object.hasOwn(properties, 'number_of_items')
     ? sourceFactValue(schema, 'number_of_items', fact.value.trim()) : fact.value.trim());
   // A blocked count cannot be promoted by the quantity parser's default 1 pc.

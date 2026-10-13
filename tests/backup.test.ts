@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID, scryptSync } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { createHash, createCipheriv, randomBytes, randomUUID, scryptSync } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore, discardPreparedRestore, recoverInterruptedRestore } from '../src/main/backup.ts';
@@ -143,11 +143,9 @@ test('加密备份不包含 SQLite 空闲页中已删除的 Amazon 返回数据'
   db.exec('DELETE FROM schema_cache'); db.close();
   assert.ok((await readFile(join(directory, 'red.sqlite'))).includes(Buffer.from(sentinel)));
   const info = await createWorkspaceBackup(directory, file, 'test passphrase 123'); assert.equal(info.expiresAt, null);
-  const bytes = await readFile(file), offset = Buffer.byteLength('HTC-BACKUP-1\n'), headerEnd = offset + 28;
-  const key = scryptSync('test passphrase 123', bytes.subarray(offset, offset + 16), 32, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
-  const cipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(offset + 16, headerEnd)); cipher.setAAD(bytes.subarray(0, headerEnd)); cipher.setAuthTag(bytes.subarray(-16));
-  const manifest = JSON.parse(gunzipSync(Buffer.concat([cipher.update(bytes.subarray(headerEnd, -16)), cipher.final()])).toString('utf8')); key.fill(0);
-  assert.equal(Buffer.from(manifest.database, 'base64').includes(Buffer.from(sentinel)), false);
+  const prepared = await prepareWorkspaceRestore(join(root, 'restored'), file, 'test passphrase 123');
+  assert.equal((await readFile(join(prepared.stagingDirectory, 'red.sqlite'))).includes(Buffer.from(sentinel)), false);
+  await discardPreparedRestore(join(root, 'restored'), prepared);
 });
 
 test('重复文件名不能覆盖旧备份或破坏它的到期清理登记', async t => {
@@ -204,7 +202,7 @@ test('升级前真实 v2 加密备份可恢复，旧导入商品默认人工区'
   const [id] = store.importProducts(parseImport('productKey,title,sku,purchasePrice\na,旧版导入商品,LEGACY-BACKUP,0.0350', 'csv'));
   const original = store.getProduct(id), manual = store.createProduct(); store.close();
   const legacy = new DatabaseSync(join(source, 'red.sqlite'));
-  legacy.exec('DROP TABLE module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE listing_completion_operations; DROP TABLE sku_naming_identities; DROP TABLE sku_naming_groups; DROP TABLE sku_naming_sequences; DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE collection_captures; DROP TABLE collection_receipts; DROP TABLE ai_usage_ledger; DROP TABLE ai_usage_policies; DROP TABLE product_workspaces; DROP TABLE hosting_profiles; DROP TABLE hosting_uploads; DROP TABLE execution_tasks; DROP TABLE image_write_operations; DROP TABLE image_versions; DROP TABLE image_selections; DROP TABLE content_versions; DROP TABLE ai_profiles; DROP TABLE ai_calls; DROP TABLE ai_results; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; PRAGMA user_version=2; PRAGMA journal_mode=DELETE;'); legacy.close();
+  legacy.exec('DROP TABLE module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS product_fact_models; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE IF EXISTS ai_field_groups; DROP TABLE IF EXISTS image_reference_pins; DROP TABLE IF EXISTS ai_copy_review_upgrades; DROP TABLE listing_completion_operations; DROP TABLE sku_naming_identities; DROP TABLE sku_naming_groups; DROP TABLE sku_naming_sequences; DROP TABLE miaoshou_sync_items; DROP TABLE miaoshou_sync_runs; DROP TABLE miaoshou_receipts; DROP TABLE collection_captures; DROP TABLE collection_receipts; DROP TABLE ai_usage_ledger; DROP TABLE ai_usage_policies; DROP TABLE product_workspaces; DROP TABLE hosting_profiles; DROP TABLE hosting_uploads; DROP TABLE execution_tasks; DROP TABLE image_write_operations; DROP TABLE image_versions; DROP TABLE image_selections; DROP TABLE content_versions; DROP TABLE ai_profiles; DROP TABLE ai_calls; DROP TABLE ai_results; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; PRAGMA user_version=2; PRAGMA journal_mode=DELETE;'); legacy.close();
   await writeBackupFixture(source, file);
   const prepared = await prepareWorkspaceRestore(target, file, 'test passphrase 123');
   await commitWorkspaceRestore(target, prepared);

@@ -144,6 +144,22 @@ export class HostingService {
       } finally { await handle.close(); }
     } catch (error) { if (error instanceof HostingError) throw error; throw new HostingError('LOCAL_FILE_MISSING'); }
   }
+  /** Internal M09 port for source/candidate references. It never adopts an asset for listing. */
+  async uploadReferenceVersion(profileId: string, generation: number, version: import('./reference-pins.ts').ReferenceVersion, bytes: Buffer, signal = new AbortController().signal): Promise<string> {
+    this.ensureOpen(); const profile = this.assertProfile(profileId, generation);
+    if (bytes.length !== version.byteSize || createHash('sha256').update(bytes).digest('hex') !== version.sha256) throw new HostingError('LOCAL_FILE_CHANGED');
+    const raster = inspectRaster(bytes); if (raster.mimeType !== version.mimeType) throw new HostingError('LOCAL_FILE_CHANGED');
+    const relativePath = `references/${version.sha256}.${version.mimeType === 'image/png' ? 'png' : 'jpg'}`;
+    const remotePath = `${profile.remoteRoot === '/' ? '' : profile.remoteRoot}/${relativePath}`, url = new URL(relativePath, profile.publicBaseUrl).href;
+    const credentials = this.vault.read(profile.id, profile.generation);
+    throwIfAborted(signal);
+    const size = await abortable(this.transport.size(profile, credentials, remotePath, signal), signal);
+    // An existing immutable version is never overwritten, even if it is damaged.
+    if (size !== null && size !== bytes.length) throw new HostingError('SIZE_MISMATCH');
+    if (size === null && await abortable(this.transport.upload(profile, credentials, remotePath, bytes, signal), signal) !== bytes.length) throw new HostingError('SIZE_MISMATCH');
+    await abortable(this.probe({url,sha256:version.sha256,byteSize:version.byteSize,mimeType:version.mimeType}, signal), signal);
+    this.assertProfile(profile.id, generation); throwIfAborted(signal); return url;
+  }
   async upload(raw: HostingUploadInput, signal?: AbortSignal): Promise<HostedAsset> {
     this.ensureOpen(); const input = parseUploadInput(raw), profile = this.assertProfile(input.profileId, input.generation), asset = this.eligibleAsset(input.assetId);
     return this.start(input, profile, asset, true, signal);

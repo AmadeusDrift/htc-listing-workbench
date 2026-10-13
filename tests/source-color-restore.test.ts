@@ -1,3 +1,4 @@
+import {inheritLegacyPurposeSettings} from '../src/main/ai/purpose-routing.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,7 +40,7 @@ async function fixture(t:test.TestContext) {
       const body=JSON.parse(String(options?.body)),content=body.messages[1].content,payload=JSON.parse(content[0].text);
       return chat({kind:'source-color',verdict:'DETERMINED',colors:['Silver'],reason:'Visible product body.',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)});
     }});
-    ai.saveConnection({id:'deepseek',apiKey:'fixture-only-color-restore'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+    ai.saveConnection({id:'deepseek',apiKey:'fixture-only-color-restore'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
     return {store,amazon,hosting,ai,listing:new ListingAiService(store,amazon,ai,()=>false)};
   };
   let session:ReturnType<typeof open>|undefined=open();

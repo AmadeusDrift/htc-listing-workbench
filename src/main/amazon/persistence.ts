@@ -1,4 +1,6 @@
+import { writeOwnedSetting } from '../storage/settings.ts';
 import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
+import { protectedDraftIds } from '../retention-references.ts';
 import { transaction } from '../application/transaction.ts';
 import { freezeSourceForProduct } from '../products/source-adoption.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -102,7 +104,7 @@ export class AmazonPersistence {
     const row = previous ? { ...(previous.lastAcceptedAt > next.lastAcceptedAt ? previous : next),
       firstAcceptedAt: previous.firstAcceptedAt < next.firstAcceptedAt ? previous.firstAcceptedAt : next.firstAcceptedAt,
       lastAcceptedAt: previous.lastAcceptedAt > next.lastAcceptedAt ? previous.lastAcceptedAt : next.lastAcceptedAt } : next;
-    this.db.prepare('INSERT INTO amazon_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run(key, JSON.stringify(row));
+    writeOwnedSetting(this.db,'publish',key, JSON.stringify(row));
   }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] {
     const entries = this.db.prepare('SELECT key,value_json FROM amazon_settings WHERE key GLOB ? AND length(value_json)<=4096 LIMIT 20001').all(`${ACCEPTED_SKU_PREFIX}*`);
@@ -129,7 +131,7 @@ export class AmazonPersistence {
     const row = this.db.prepare("SELECT value_json FROM amazon_settings WHERE key='data_policy'").get();
     return row ? JSON.parse(String(row.value_json)) : { retentionDays: 180, logRetentionDays: 365, lastCleanupAt: null };
   }
-  savePolicy(policy: AmazonDataPolicy): void { this.db.prepare("INSERT INTO amazon_settings(key,value_json) VALUES('data_policy',?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json").run(JSON.stringify(policy)); }
+  savePolicy(policy: AmazonDataPolicy): void { writeOwnedSetting(this.db,'maintenance','data_policy',JSON.stringify(policy)); }
   cleanup(now: number): CleanupResult {
     const policy = this.policy(); const cutoff = new Date(now - policy.retentionDays * 86_400_000).toISOString();
     const logCutoff = new Date(now - Math.max(365, policy.logRetentionDays) * 86_400_000).toISOString();
@@ -140,12 +142,21 @@ export class AmazonPersistence {
         let record: DraftRecord; try { record = parseRecord(row.record_json); } catch { continue; }
         this.rememberAcceptedSku(record);
       }
-      this.db.prepare('DELETE FROM amazon_exchanges WHERE created_at < ?').run(cutoff);
-      this.db.prepare('DELETE FROM issues WHERE draft_id IN (SELECT id FROM listing_drafts WHERE created_at < ?)').run(cutoff);
-      retireCompletionDrafts(this.db,cutoff);
-      const removedDrafts = Number(this.db.prepare('DELETE FROM listing_drafts WHERE created_at < ?').run(cutoff).changes);
-      const removedSchemas = Number(this.db.prepare('DELETE FROM schema_cache WHERE fetched_at < ?').run(cutoff).changes);
-      const removedCalls = Number(this.db.prepare('DELETE FROM amazon_calls WHERE created_at < ?').run(logCutoff).changes);
+      const protectedIds = protectedDraftIds(this.db);
+      retireCompletionDrafts(this.db, cutoff, protectedIds);
+      for (const row of this.db.prepare('SELECT id,draft_id FROM amazon_exchanges WHERE created_at < ?').all(cutoff)) {
+        if (!protectedIds.has(String(row.draft_id))) this.db.prepare('DELETE FROM amazon_exchanges WHERE id=?').run(row.id);
+      }
+      let removedDrafts = 0;
+      for (const row of this.db.prepare('SELECT id FROM listing_drafts WHERE created_at < ?').all(cutoff)) {
+        if (protectedIds.has(String(row.id))) continue;
+        this.db.prepare('DELETE FROM issues WHERE draft_id=?').run(row.id);
+        removedDrafts += Number(this.db.prepare('DELETE FROM listing_drafts WHERE id=?').run(row.id).changes);
+      }
+      const removedSchemas = Number(this.db.prepare('DELETE FROM schema_cache WHERE fetched_at < ? AND checksum NOT IN (SELECT schema_checksum FROM listing_drafts)').run(cutoff).changes);
+      // Unknown writes can have old/unattributed call events: keep all such evidence.
+      const unknown = this.db.prepare("SELECT 1 FROM amazon_write_locks WHERE state IN ('UNKNOWN','SUBMITTING','SENDING') LIMIT 1").get();
+      const removedCalls = unknown || protectedIds.size ? 0 : Number(this.db.prepare('DELETE FROM amazon_calls WHERE created_at < ?').run(logCutoff).changes);
       this.savePolicy({ ...policy, logRetentionDays: Math.max(365, policy.logRetentionDays), lastCleanupAt: new Date(now).toISOString() });
       this.db.exec('COMMIT'); result = { removedDrafts, removedSchemas, removedCalls };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

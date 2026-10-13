@@ -1,3 +1,4 @@
+import {inheritLegacyPurposeSettings} from '../src/main/ai/purpose-routing.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
 import { ListingRuleStore } from '../src/main/listing-rules.ts';
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
@@ -26,7 +27,7 @@ async function fixture(t:test.TestContext){
   const f=consistencyFixture(t),hosting=new HostingService(f.directory,f.store,mockStorage);let count=0;
   let respond=(p:any):Response|Promise<Response>=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:p.claims.map((c:any)=>({claimId:c.id,value:c.axis==='color'?'Blue':'Round',visibility:'visible'}))}))});
   const dependencies={fetch:async(_url:any,options?:RequestInit)=>{count++;const content=JSON.parse(String(options?.body)).messages[1].content;return respond(JSON.parse(content[0].text));}};
-  const ai=new AiService(f.directory,f.store,hosting,mockStorage,dependencies);ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});
+  const ai=new AiService(f.directory,f.store,hosting,mockStorage,dependencies);ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanup.push(async()=>{await ai.close();await hosting.close();});
   return{...f,hosting,ai,dependencies,count:()=>count,respond:(fn:typeof respond)=>{respond=fn;},observe:()=>ai.observeSourceConsistency(f.context(),()=>{})};
 }
@@ -79,7 +80,7 @@ test('shared source thumbnail keeps a contradiction on its specific sibling attr
 
 test('disabled profile and final presend checkpoint consume no attempt and resume safely',async t=>{
   const f=await fixture(t);f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:false});await assert.rejects(f.observe());
-  f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});await assert.rejects(f.ai.observeSourceConsistency(f.context(),()=>{},undefined,()=>{throw new Error('synthetic paused before send');}));
+  f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((f.ai as any).db,'deepseek','deepseek-flash',false);await assert.rejects(f.ai.observeSourceConsistency(f.context(),()=>{},undefined,()=>{throw new Error('synthetic paused before send');}));
   assert.equal(f.count(),0);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,0);await f.observe();assert.equal(f.count(),1);
 });
 

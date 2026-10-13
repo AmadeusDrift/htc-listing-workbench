@@ -10,6 +10,7 @@ export interface CopyReviewSettings { enabled:boolean }
 export const IMAGE_WORKFLOW_STAGES = ['content', 'planning', 'generating', 'ip-check', 'ocr', 'reviewing', 'adopting', 'complete'] as const;
 export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
 export interface ImageSlotAttempt {
+  appearanceReview?:import('./appearance-review-contracts.ts').AppearanceReviewCheckpoint;
   riskPolicy?:ImageRiskSettings;
   number:number; requestId:string;
   state:'PLANNING'|'READY'|'GENERATING'|'GENERATED'|'PASSED'|'RETRYABLE_FAILURE'|'BLOCKED'|'UNKNOWN';
@@ -27,6 +28,8 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  /** Absent means historical, not retroactively reviewed. */
+  appearanceReviewEnabled?:boolean;
   /** Derivation under the same task; original context and paid attempt prefixes remain owned by the source run. */
   sourceReuse?:{derivationRunId:string;sourceRunId:string;sourceRunHash:string;sourceProductRevision:number;sourceContext:ProductImageContext;slotAttempts:number[];slotContexts:(string|null)[]};
   /** Local authorization receipt; never changes image contexts or paid attempts. */
@@ -37,7 +40,7 @@ export interface ImageWorkflowRun {
   /** Original automatic-row budget when its workflow checkpoint was absent. */
   legacyImageAttempts?:number;
   id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
-  status: 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
+  status: 'WAITING_BATCH' | 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
   stage: ImageWorkflowStage; attempt: number; maxAttempts: number;
   contextSha256: string | null; draftSha256: string | null;
   referenceAssets: { id: string; sha256: string }[];
@@ -86,12 +89,14 @@ export const AUTOMATIC_SOURCE_ISSUES = {
 } as const;
 export type AutomaticSourceIssueCode = keyof typeof AUTOMATIC_SOURCE_ISSUES;
 /** Read-only IPC projection; never persist resultUnknown in an ImageWorkflowRun. */
-export type ImageWorkflowProgress = ImageWorkflowRun & {resultUnknown?:boolean;sourceRiskSummary?:string;riskEvidence?:{slot:number;summary:string}[]};
+export type ImageWorkflowProgress = ImageWorkflowRun & {sourceTrace?:{selectedSku:unknown;referenceAssets:{assetId:string;sha256:string;variantId:string|null}[];transport:string;requestBytes:number|null;callId:string|null;resultId:string|null;providerReceiptId:string|null;modelObservation:import('./image-ai-contracts.ts').ImagePlanOutput['productUnderstanding']|null};resultUnknown?:boolean;sourceRiskSummary?:string;riskEvidence?:{slot:number;summary:string}[]};
 export interface ImageWorkflowApi {
   getAutomaticImageCandidatePreview(input:{draftId:string;slot:number;candidateId:string}):Promise<AutomaticImageCandidatePreview>;
   approveUnknownImageRetry(input:{draftId:string;slot:number;requestId:string}):Promise<ImageWorkflowProgress>;
   getImageRiskSettings():Promise<ImageRiskSettings>;
   saveImageRiskSettings(input:ImageRiskSettings):Promise<ImageRiskSettings>;
+  getAppearanceReviewSettings():Promise<{enabled:boolean}>;
+  saveAppearanceReviewSettings(input:{enabled:boolean}):Promise<{enabled:boolean}>;
   getCopyReviewSettings():Promise<CopyReviewSettings>;
   saveCopyReviewSettings(input:CopyReviewSettings):Promise<CopyReviewSettings>;
   prepareAutomaticProductSources(input: { productId: string; productRevision: number; variantIds: string[] }): Promise<{ product: ProductDetail; missing: { variantId: string; message: string; code?:AutomaticSourceIssueCode }[] }>;

@@ -5,13 +5,13 @@ import { SOURCE_TABLES } from '../miaoshou/source-snapshots.ts';
 import { initializeSchemaOperations } from '../catalog/schema-operations.ts';
 import { initializePurposeProfiles } from '../ai/purpose-routing.ts';
 
-export const MODULE_SCHEMA_VERSION=26;
+export const MODULE_SCHEMA_VERSION=30;
 export const MIGRATION_TABLES={module_migration_journal:['version','name','applied_at']};
 const migrations=[{version:22,name:'module-foundation',apply(db:DatabaseSync){
   db.exec('CREATE TABLE module_migration_journal(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
 }},{version:23,name:'source-versions-and-adoption',apply(db:DatabaseSync){
   for(const table of Object.keys(SOURCE_TABLES))db.exec(`CREATE TABLE ${table}(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)`);
-}},{version:24,name:'catalog-schema-operations',apply:initializeSchemaOperations},{version:25,name:'ai-purpose-routing-and-receipts',apply(db:DatabaseSync){initializePurposeProfiles(db);db.exec('CREATE TABLE ai_provider_receipts(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); CREATE TABLE ai_image_requests(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:26,name:'openrouter-batch-identities',apply(db:DatabaseSync){db.exec('CREATE TABLE ai_batches(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); CREATE TABLE ai_batch_items(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}}];
+}},{version:24,name:'catalog-schema-operations',apply:initializeSchemaOperations},{version:25,name:'ai-purpose-routing-and-receipts',apply(db:DatabaseSync){initializePurposeProfiles(db);db.exec('CREATE TABLE ai_provider_receipts(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); CREATE TABLE ai_image_requests(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:26,name:'openrouter-batch-identities',apply(db:DatabaseSync){db.exec('CREATE TABLE ai_batches(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL); CREATE TABLE ai_batch_items(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:27,name:'listing-purpose-groups',apply(db:DatabaseSync){db.exec('CREATE TABLE ai_field_groups(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:28,name:'image-reference-pins',apply(db:DatabaseSync){db.exec('CREATE TABLE image_reference_pins(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:29,name:'copy-review-upgrades',apply(db:DatabaseSync){db.exec('CREATE TABLE ai_copy_review_upgrades(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}},{version:30,name:'product-fact-scope-models',apply(db:DatabaseSync){db.exec('CREATE TABLE product_fact_models(id TEXT PRIMARY KEY NOT NULL REFERENCES products(id) ON DELETE CASCADE,record_json TEXT NOT NULL)');}}];
 export function assertMigrationJournal(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   if(version<22)return;

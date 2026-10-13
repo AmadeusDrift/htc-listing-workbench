@@ -1,4 +1,3 @@
-import { pricingAttributeInputs } from '../src/main/amazon/pricing-inputs.ts';
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { SourceConsistencyError } from '../src/main/source-image-consistency/proof.ts';
 import { sceneSet } from './fixtures/image-set.ts';
@@ -32,7 +31,7 @@ import { PRODUCT_IMAGE_POLICY_VERSION } from '../src/shared/image-ai-contracts.t
 import type { ProductImageContext } from '../src/shared/image-ai-contracts.ts';
 import type { ListingAiContext, ListingEvidence } from '../src/shared/listing-ai-contracts.ts';
 import { listingFingerprint } from '../src/main/listing-ai/validation.ts';
-import { OpenAiImageAdapter } from '../src/main/image-generation/adapter.ts';
+import { OpenRouterImageAdapter } from '../src/main/ai/adapters/openrouter-images.ts';
 import { canResumeImageWorkflow } from '../src/shared/image-workflow-contracts.ts';
 import { currentImageListingSnapshot } from '../src/main/image-workflow/image-facts.ts';
 import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
@@ -134,6 +133,7 @@ async function fixture(t: test.TestContext, options: { riskScore?:number|null; r
   };
   await confirmSourceConsistencyFixture(root,store,product.id);
   const service = new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never});
+  service.saveAppearanceReviewSettings({enabled:false}); // These historical-policy fixtures have no visual review provider.
   t.after(async()=>{release(); await service.close(); amazon.close(); store.close(); await rm(root,{recursive:true,force:true});});
   return {root,store,amazon,product,draft,familyPlan,service,calls,listing,ai,generation,generationInputs,release,began,reopen:()=>new ImageWorkflowService(root,store,amazon,ai as never,generation as never,{listing:listing as never}),run:()=>service.complete({draftId:draft.id,draftRevision:amazon.getDraft(draft.id).revision})};
 }
@@ -151,21 +151,21 @@ test('a paid image plan remains stored when pricing changes during its response 
   const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
-    const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot)rules.save(rules.get());return result;};
+    r.draft.listingProgram='haul';r.draft.businessRules=priced.report;r.draft.attributes={...r.draft.attributes,...priced.attributes};p.putRecord(r);f.amazon.assertPricingForPaid(r.draft.id);
+    const plan=f.ai.imagePlan;f.ai.imagePlan=async context=>{const result=await plan(context);if(context.slot){const changed=rules.get();changed.pricing.inboundCost+=0.1;rules.save(changed);}return result;};
     const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/定价/);
     assert.ok(result.workflow.slots?.[0].attempts[0].planResultId);assert.equal(result.workflow.slots?.[0].attempts[0].state,'READY');assert.ok(!f.calls.includes('generate'));
   }finally{rules.close();}
 });
 
 
-test('stale v2 pricing permits local UNKNOWN reconciliation but never starts the next paid check',async t=>{
+test('stale current pricing permits local UNKNOWN reconciliation but never starts the next paid check',async t=>{
   const f=await fixture(t,{lostResponse:true}),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence,r=p.record(f.draft.id),rules=new ListingRuleStore(f.root);
   try{
     const priced=applyBusinessRules({product:f.product,variant:f.product.variants[0],schema:realAmazonSchema(),target:f.amazon.getTarget(f.draft.targetId),attributes:{},measurements:{},costCny:2.4,now:new Date()},rules.get());
-    r.draft.listingProgram='haul';r.draft.businessRules={...priced.report,fields:{}};if(r.draft.businessRules.pricingDecision?.version===2)r.draft.businessRules.pricingDecision.attributeInputs=pricingAttributeInputs(r.draft.attributes);p.putRecord(r);
+    r.draft.listingProgram='haul';r.draft.businessRules=priced.report;r.draft.attributes={...r.draft.attributes,...priced.attributes};p.putRecord(r);f.amazon.assertPricingForPaid(r.draft.id);
     const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'UNKNOWN');
-    const count=f.calls.length;rules.save(rules.get());const result=await f.run();
+    const count=f.calls.length,changed=rules.get();changed.pricing.inboundCost+=0.1;rules.save(changed);const result=await f.run();
     assert.equal(result.workflow.id,first.workflow.id);assert.equal(result.workflow.slots![0].attempts[0].state,'GENERATED');
     assert.equal(result.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].requestId);
     assert.match(result.workflow.error!,/定价/);assert.equal(f.calls.length,count);
@@ -677,7 +677,7 @@ test('old completed workflows remain readable but cannot be reused as a vision-r
   const f=await fixture(t), first=await f.run();
   const db=openDatabase(f.root);
   try {
-    const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+    const {appearanceReviewEnabled:_appearance,listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,imagePolicyVersion:_version,ipReviewResultIds:_ip,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
     Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
     // Keep the other six paid assets identifiable as generated history when simulating a one-image legacy run.
     const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};
@@ -711,8 +711,8 @@ test('a lost paid response reconciles a durable candidate after restart and resu
 });
 test('a paid 502 response checks recovery and preserves the unknown lock after restart',async t=>{
   const f=await fixture(t);let posts=0,reconciliations=0;
-  const adapter=new OpenAiImageAdapter({fetch:async()=>{posts++;return Response.json({error:{message:'gateway failed'}},{status:502});}});
-  f.generation.generateForWorkflow=async()=>{await adapter.generate({apiKey:'local-fixture-key',model:'gpt-image-2.5-sunburst',prompt:'Source product',size:'1024x1024',quality:'high',background:'opaque',references:[]},new AbortController().signal);throw new Error('Unexpected generation success');};
+  const adapter=new OpenRouterImageAdapter({fetch:async()=>{posts++;return Response.json({error:{message:'gateway failed'}},{status:502});}});
+  f.generation.generateForWorkflow=async()=>{await adapter.generate({apiKey:'local-fixture-key',model:'openai/gpt-image-2.5-sunburst',prompt:'Source product',size:'1024x1024',quality:'high',background:'opaque',references:[]},new AbortController().signal);throw new Error('Unexpected generation success');};
   f.generation.reconcileWorkflowGeneration=async()=>{reconciliations++;return null;};
   const first=await f.run();assert.equal(first.workflow.slots![0].status,'UNKNOWN');assert.equal(posts,1);
   await f.service.close();const restarted=f.reopen();
@@ -992,13 +992,27 @@ test('a saved successful second copy repair survives a later source OCR failure 
   f.ai.recognize=recognize;await f.service.close();const restarted=f.reopen();
   try{const count=f.calls.length;const result=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(repairs,2);assert.equal(f.calls.slice(count).includes('content-review'),false);assert.equal(f.calls.slice(count).includes('content'),false);}finally{await restarted.close();}
 });
-test('concurrent approval of the same unknown request records authorization only once',async t=>{
+test('concurrent legacy approvals cannot reopen an unresolved request',async t=>{
   const f=await fixture(t,{generationError:true}),first=await f.run(),requestId=first.workflow.slots![0].attempts[0].requestId;
   const input={draftId:f.draft.id,slot:1,requestId},before=f.calls.length;
   const outcomes=await Promise.allSettled([f.service.approveUnknownRetry(input),f.service.approveUnknownRetry(input)]);
-  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,1);
+  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,0);
+  assert.equal(f.service.getProgress(f.draft.id)!.slots![0].attempts[0].state,'UNKNOWN');
   assert.equal(f.calls.length,before);assert.equal(f.service.getProgress(f.draft.id)!.slots![0].attempts.length,1);
-  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-retry-authorized'").get()?.n,1);}finally{db.close();}
+  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-retry-authorized'").get()?.n,0);}finally{db.close();}
+});
+test('legacy recovery command adopts the original local candidate once without a new generation',async t=>{
+  const f=await fixture(t,{lostResponse:true}),first=await f.run(),attempt=first.workflow.slots![0].attempts[0];
+  assert.equal(attempt.state,'UNKNOWN');const before=f.calls.length;
+  const input={draftId:f.draft.id,slot:1,requestId:attempt.requestId};
+  const outcomes=await Promise.allSettled([f.service.approveUnknownRetry(input),f.service.approveUnknownRetry(input)]);
+  assert.equal(outcomes.filter(result=>result.status==='fulfilled').length,1);
+  const recovered=f.service.getProgress(f.draft.id)!;
+  assert.equal(recovered.slots![0].attempts[0].state,'GENERATED');
+  assert.equal(recovered.slots![0].attempts[0].candidateId,attempt.requestId);
+  assert.equal(recovered.slots![0].attempts.length,1);assert.equal(f.calls.length,before);
+  assert.equal(recovered.status,'INTERRUPTED');
+  const db=openDatabase(f.root);try{assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE action='image.workflow.unknown-result-recovered'").get()?.n,1);}finally{db.close();}
 });
 test('unknown retry at the attempt limit preserves the unresolved record without a paid request',async t=>{
   const f=await fixture(t,{generationError:true});
@@ -1175,7 +1189,7 @@ test('W11 completed legacy single-image risk is checked before complete or reche
  const f=await fixture(t,{riskScore:95,riskLevel:'low'});
  f.service.saveRiskSettings({enabled:true,scoreThreshold:99,levelThreshold:'high'});
  const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
- const {listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
+ const {appearanceReviewEnabled:_appearance,listingEvidenceContractVersion:_evidenceContract,categoryFieldPolicyVersion:_categoryPolicy,categoryFieldRepair:_categoryRepair,copyReviewResultId:_copyReview,contentPreparation:_contentPreparation,imageRecipeSha256:_recipe,copyRepairAttempts:_repairs,approvalReuse:_reuse,slots:_slots,slotPolicy:_policy,imageContext:_context,activeSlot:_active,setPlan:_set,setPlanResultId:_setId,...legacy}=first.workflow;
  Object.assign(legacy,{attempt:1,maxAttempts:1,planResultIds:first.workflow.planResultIds.slice(0,1),candidateIds:first.workflow.candidateIds.slice(0,1),ipReviewResultIds:first.workflow.ipReviewResultIds!.slice(0,1),ocrResultIds:first.workflow.ocrResultIds.slice(0,1),reviewResultIds:first.workflow.reviewResultIds.slice(0,1)});
  const db=openDatabase(f.root);try{const retained={...structuredClone(first.workflow),id:randomUUID(),createdAt:'2020-01-01T00:00:00.000Z',updatedAt:'2020-01-01T00:00:00.000Z'};db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(retained.id,JSON.stringify(retained));db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(legacy.id);db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)').run(legacy.id,JSON.stringify(legacy));}finally{db.close();}
  f.service.saveRiskSettings({enabled:true,scoreThreshold:90,levelThreshold:'high'});

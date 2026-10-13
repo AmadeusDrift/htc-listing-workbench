@@ -1,4 +1,6 @@
 import { parseSync } from 'rolldown/utils';
+import { scanSql, ownershipViolations } from './sql-ownership.mjs';
+import { dataOwner } from '../src/main/storage/owners.ts';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, relative, dirname } from 'node:path';
 
@@ -14,9 +16,12 @@ function walk(dir) {
 }
 walk(root);
 const graph = new Map(files.map(file => [file, new Set()]));
-const writes = [], unresolved = [];
+const writes = [], unresolved = [], sqlInventory={writes:[],opaque:[],tableSets:[]};
 for (const file of files) {
   const source = readFileSync(file, 'utf8');
+  const sql=scanSql(relative(root,file).replaceAll('\\','/'),source);
+  sqlInventory.writes.push(...sql.writes);sqlInventory.opaque.push(...sql.opaque);sqlInventory.tableSets.push(...sql.tableSets);
+  for(const entry of sql.writes)for(const write of entry.writes)writes.push({file:entry.file,line:entry.line,command:entry.command,...write});
   const parsed = parseSync(file, source);
   if (parsed.errors.length) throw Error(`Cannot parse ${file}: ${JSON.stringify(parsed.errors)}`);
   const edge = node => {
@@ -33,12 +38,6 @@ for (const file of files) {
     if (['ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source && node.exportKind !== 'type'
       && (!node.specifiers?.length || node.specifiers.some(e => e.exportKind !== 'type'))) edge(node.source);
     if (node.type === 'ImportExpression') edge(node.source);
-    if (node.type === 'Literal' && typeof node.value === 'string' || node.type === 'TemplateLiteral') {
-      const sql = source.slice(node.start, node.end);
-      for (const match of sql.matchAll(/\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+([a-z_][a-z_0-9]*)/gi)) {
-        writes.push({ file: relative(root, file).replaceAll('\\', '/'), line: source.slice(0, node.start).split('\n').length, table: match[1] });
-      }
-    }
     for (const value of Object.values(node)) {
       if (Array.isArray(value)) { for (const child of value) if (child?.type) visit(child); }
       else if (value?.type) visit(value);
@@ -60,5 +59,7 @@ function connect(file) {
   if (component.length > 1 || graph.get(file).has(file)) cycles.push(component.sort());
 }
 for (const file of files) if (!index.has(file)) connect(file);
-console.log(JSON.stringify({ files: files.length, cycles, unresolvedDynamicImports: unresolved, sqlWriteCandidates: writes }, null, 2));
-if (process.argv.includes('--strict') && (cycles.length || unresolved.length)) process.exitCode = 1;
+const registry=JSON.parse(readFileSync(new URL('./sql-writer-registry.json',import.meta.url),'utf8'));
+const sqlOwnershipErrors=ownershipViolations(sqlInventory,registry,table=>table==='amazon_settings'?'settings-key':dataOwner(table));
+console.log(JSON.stringify({ sqlOwnershipErrors, opaqueSql:sqlInventory.opaque, files: files.length, cycles, unresolvedDynamicImports: unresolved, sqlWriteCandidates: writes }, null, 2));
+if (process.argv.includes('--strict') && (cycles.length || unresolved.length || sqlOwnershipErrors.length)) process.exitCode = 1;

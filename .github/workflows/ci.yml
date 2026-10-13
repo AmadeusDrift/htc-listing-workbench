@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, '2.5.0版本更新的内容', 'integration/htc-250-parallel']
   pull_request:
   workflow_dispatch:
 
@@ -22,3 +22,4 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: node --test --test-concurrency=4 --test-timeout=180000 tests/*.test.ts
+      - run: npm run build

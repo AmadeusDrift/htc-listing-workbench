@@ -1,3 +1,5 @@
+import { usePageState } from './navigation-context';
+import type { ProblemContext } from './navigation-context';
 import { FileCheck2, ChevronDown } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { ProductSummary } from '../shared/contracts';
@@ -7,9 +9,9 @@ import { productGaps } from './workspace-model';
 import { AutomaticPreparationPanel } from './AutomaticPreparationPanel';
 import type { SettingsModule } from './settings-navigation';
 
-interface Props { products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean; onExamples: () => void; onInbox: () => void; onSettings: (module?: SettingsModule) => void; onManual: (id: string, draftId?: string) => void; onShipping?: (batchId: string) => void }
+interface Props { products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean; onExamples: () => void; onInbox: () => void; onSettings: (module?: SettingsModule) => void; onManual: (id: string, draftId?: string, context?: ProblemContext) => void; onShipping?: (batchId: string) => void }
 export function AutomaticPage({ products, targets, busy, onExamples, onInbox, onSettings, onManual, onShipping }: Props) {
-  const [targetId, setTargetId] = useState(''), [queue, setQueue] = useState<AutomaticListingQueue | null>(null);
+  const [targetId, setTargetId] = usePageState('automatic:target', ''), [queue, setQueue] = useState<AutomaticListingQueue | null>(null);
   const [queueLoading, setQueueLoading] = useState(false), [queueError, setQueueError] = useState(''), [queueReload, setQueueReload] = useState(0);
   const productsKey = JSON.stringify(products.map(product => [product.id, product.updatedAt]));
   useEffect(() => { const update = () => setQueueReload(value => value + 1); window.addEventListener('automatic-listing-changed', update); return () => window.removeEventListener('automatic-listing-changed', update); }, []);

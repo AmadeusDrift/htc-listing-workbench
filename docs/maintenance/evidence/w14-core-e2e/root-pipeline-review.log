@@ -1,0 +1,5 @@
+PASS Haul uses confirmed synthetic CNY/package facts and the real current pricing algorithm; no standard fallback
+PASS Native cancellation performs no upload/submission
+PASS Native start completes real local FTP upload, URL fill, fake Amazon preview/submission/readback and sales-unit procurement binding
+PASS Synthetic Haul listing completes without requesting labels; labels remain an independent on-demand action
+PASS Only explicit prepare-labels requests a fake PDF; downloaded label integrity is verified by production label service

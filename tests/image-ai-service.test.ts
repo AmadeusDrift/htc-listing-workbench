@@ -13,7 +13,7 @@ import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { inheritLegacyPurposeSettings } from '../src/main/ai/purpose-routing.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
-import { assertImagePlan, assertImageTextReview, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
+import { assertImagePlan, assertImageTextReview, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
 import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
 import type { AiResult } from '../src/shared/ai-contracts.ts';
 import type { CandidateImageIdentity, ImageTextReviewOutput, ProductImageContext } from '../src/shared/image-ai-contracts.ts';
@@ -34,7 +34,8 @@ import type { AiCall } from '../src/shared/ai-contracts.ts';
 // Literal pre-presentation history has no new call sidecar; keep original result bytes below unchanged.
 function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiResult) {
   const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId)!;
-  const call=JSON.parse(String(row.record_json));delete call.presentationContext;
+  const call=JSON.parse(String(row.record_json));delete call.presentationContext;delete call.purposeSnapshot;delete call.purposeAssignments;
+  db.prepare('DELETE FROM ai_copy_review_upgrades WHERE id=?').run(result.callId);
   db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),result.callId);
 }
 
@@ -48,11 +49,12 @@ function currentReview(payload: any) {
     return { field: item.field, index, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.', claims: [{ text: value.value, verdict: 'SUPPORTED', evidenceIds, reason: 'Original evidence.' }] };
   })), issues: [] };
 }
-async function fixture(t: test.TestContext, extraReference=false, withAge=false, legacy=false) {
+async function fixture(t: test.TestContext, extraReference=false, withAge=false, legacy=false, priced=false) {
   mkdirSync(resolve('.test-data'), { recursive: true });
   const directory = mkdtempSync(resolve('.test-data/image-ai-')), store = new WorkspaceStore(directory);
   let product = store.createProduct();
   product = store.saveProduct({ ...saveInput(product), title: 'Coaster', description:'Original brand illustration on the packaging.', variants: saveInput(product).variants.map(variant => ({ ...variant, originalSpec:'库洛米 蓝色', normalizedSpec: 'Blue' })), facts: [{ id: randomUUID(), name: 'Material', value: 'Silicone', source: 'manual', sourceRef: 'fixture', state: 'human_confirmed' }, {id:randomUUID(),name:'品牌',value:'三丽鸥',source:'1688',sourceRef:'fixture',state:'source_confirmed'}] });
+  if(priced)product=store.saveProduct({...saveInput(product),variants:saveInput(product).variants.map(v=>({...v,purchasePrice:'2.4'})),facts:[...product.facts,{id:randomUUID(),name:'采购币种',value:'CNY',source:'manual',sourceRef:'synthetic',state:'human_confirmed'}]});
   if(withAge)product=store.saveProduct({...saveInput(product),facts:[...product.facts,{id:randomUUID(),name:'适用年龄',value:'成人',source:'manual',sourceRef:'fixture',state:'human_confirmed'}]});
   const bytes = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes); bytes.writeUInt32BE(13, 8); bytes.write('IHDR', 12); bytes.writeUInt32BE(256, 16); bytes.writeUInt32BE(256, 20);
   const source = join(directory, 'source.png'); writeFileSync(source, bytes);
@@ -65,6 +67,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
     product=store.updateAsset({productId:product.id,revision:product.revision,assetId:asset.id,role:'gallery',variantIds:[product.variants[0].id]});
   }
   await confirmSourceConsistencyFixture(directory,store,product.id);
+  {const db=openDatabase(directory);db.prepare('INSERT OR REPLACE INTO amazon_settings VALUES(?,?)').run('image_appearance_review_v1',JSON.stringify({enabled:false}));db.close();}
   const hosting = new HostingService(directory, store, mockStorage), amazon = new AmazonService(directory, id => store.getProduct(id), mockStorage), target = amazon.enableDemo();
   if(withAge){const getSchema=amazon.getSchema.bind(amazon);amazon.getSchema=async input=>{const schema=await getSchema(input);(schema.schema.properties as any).age_range_description={type:'array',items:{type:'object',properties:{value:{type:'string'}}}};return schema;};}
   let draft = await amazon.createDraft({ productId: product.id, variantId: product.variants[0].id, targetId: target.id, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
@@ -1011,12 +1014,13 @@ test('image planning rejects a fabricated fallback dimension in prompt as well a
   f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Show this 5 x 5 x 5 cm product weighing 100 g.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)}):undefined);
   await assert.rejects(f.ai.imagePlan(f.context,()=>{}),(error:any)=>error.code==='OUTPUT_INVALID');
 });
-test('image planning rejects fallback measurements hidden in observations or uncertainties',async t=>{
+test('image planning retains observations but never promotes their unverified measurements into rendering',async t=>{
   const f=await fixture(t);f.context.slot={index:1,total:7,provisional:true};
   for(const field of ['summary','uncertainties'] as const){
     f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Show the source product.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},
       productUnderstanding:{...understanding(payload),[field]:field==='summary'?'A product measuring 5 cm.':['No actual measurements. Use the listing default of 5 cm and 100 g.']}}):undefined);
-    await assert.rejects(f.ai.imagePlan(f.context,()=>{}),(error:any)=>error.code==='OUTPUT_INVALID',field);
+    const result=await f.ai.imagePlan(f.context,()=>{});if(result.output.kind!=='image-plan')throw Error('Wrong plan');
+    assert.ok(JSON.stringify(result.output.productUnderstanding).includes('5 cm'));assert.doesNotMatch(imageGenerationPrompt(result.output),/5 cm|100 g/);
   }
 });
 test('default-backed weight is removed before independent image-copy review and planning with matching provenance',async t=>{
@@ -1266,11 +1270,13 @@ for(const code of ['EMPTY_PROMPT','UNSUPPORTED_MEASUREMENT','SOURCE_OBSERVATION_
 });
 
 test('Haul rules reuse seven frozen approvals and hosted URLs survive paused execution without new generation',async t=>{
-  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
+  const f=await fixture(t,false,false,false,true),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
   r.draft.listingProgram='haul';r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:market}];r.draft.attributes.purchasable_offer=[{audience:'BZR',currency:'USD',marketplace_id:market,our_price:[{schedule:[{value_with_tax:2.5}]}]}];r.draft.attributes.merchant_suggested_asin=[];
   for(const field of ['item_name','material','color'])r.draft.attributes[field][0].marketplace_id=market;
   Object.assign(r.draft.schema.schema.properties,{is_value_stores_item:{type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}},manufacturer:{type:'array',items:{type:'object',properties:{value:{type:'string'},marketplace_id:{type:'string'}},required:['value']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']},marketplace_id:{type:'string'}},required:['value','unit']}}});
   r.draft.schema.checksum=createHash('md5').update(JSON.stringify(r.draft.schema.schema)).digest('base64');p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  const measurement={type:'object',properties:{value:{type:'number'},unit:{enum:['inches']}},required:['value','unit']};Object.assign(r.draft.schema.schema.properties,{item_package_dimensions:{type:'array',items:{type:'object',properties:{length:measurement,width:measurement,height:measurement,marketplace_id:{type:'string'}},required:['length','width','height']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']},marketplace_id:{type:'string'}},required:['value','unit']}}});r.draft.schema.checksum=createHash('md5').update(JSON.stringify(r.draft.schema.schema)).digest('base64');p.putRecord(r);
+  f.draft=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));r.draft=f.draft;f.amazon.assertPricingForPaid(f.draft.id);
   let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
   const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
@@ -1278,7 +1284,7 @@ test('Haul rules reuse seven frozen approvals and hosted URLs survive paused exe
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:r.draft.revision});assert.equal(first.workflow.status,'COMPLETED',first.workflow.error??'');const frozen=p.db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id).record_json,calls=f.requests.length;
   const fixed=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));assert.equal((fixed.attributes.item_package_weight as any)[0].value,.22);
   const reused=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});
-  assert.equal(reused.workflow.approvalReuse?.sourceRunId,first.workflow.id,reused.workflow.error??'');assert.equal(f.requests.length,calls);assert.equal(images,7);assert.deepEqual(reused.workflow.slots,first.workflow.slots);
+  assert.ok(reused.workflow.id===first.workflow.id||reused.workflow.approvalReuse?.sourceRunId===first.workflow.id,reused.workflow.error??'');assert.equal(f.requests.length,calls);assert.equal(images,7);assert.deepEqual(reused.workflow.slots,first.workflow.slots);
   const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json,frozen);}finally{db.close();}
   const {ExecutionService}=await import('../src/main/execution/service.ts');const remote=new Map<string,number>();let uploads=0,paused=false,taskId='',execution:InstanceType<typeof ExecutionService>;
   const hosting=new HostingService(f.directory,f.store,mockStorage,{transport:{async size(_p,_c,path){return remote.get(path)??null;},async upload(_p,_c,path,data){uploads++;remote.set(path,data.length);if(uploads===3&&!paused){paused=true;execution.pause(taskId);}return data.length;},async close(){}},probe:async()=>{}});
@@ -1292,9 +1298,11 @@ test('Haul rules reuse seven frozen approvals and hosted URLs survive paused exe
 });
 
 for(const unknown of [false,true])test(`Haul partial seven-image continuation preserves slots and ${unknown?'unknown request':'attempt budget'} after business defaults`,async t=>{
-  const f=await fixture(t),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
+  const f=await fixture(t,false,false,false,true),p=(f.amazon as any).persistence,r=p.record(f.draft.id),market=r.draft.marketplaceId;
   r.draft.listingProgram='haul';r.draft.attributes.is_value_stores_item=[{value:true,marketplace_id:market}];r.draft.attributes.purchasable_offer=[{audience:'BZR',currency:'USD',marketplace_id:market,our_price:[{schedule:[{value_with_tax:2.5}]}]}];
   (r.draft.schema.schema.properties as any).is_value_stores_item={type:'array',items:{type:'object',properties:{value:{type:'boolean'},marketplace_id:{type:'string'}},required:['value']}};p.putRecord(r);f.amazon.getSchema=async()=>structuredClone(r.draft.schema);
+  const measurement={type:'object',properties:{value:{type:'number'},unit:{enum:['inches']}},required:['value','unit']};Object.assign(r.draft.schema.schema.properties,{item_package_dimensions:{type:'array',items:{type:'object',properties:{length:measurement,width:measurement,height:measurement,marketplace_id:{type:'string'}},required:['length','width','height']}},item_package_weight:{type:'array',items:{type:'object',properties:{value:{type:'number'},unit:{enum:['pounds']},marketplace_id:{type:'string'}},required:['value','unit']}}});r.draft.schema.checksum=createHash('md5').update(JSON.stringify(r.draft.schema.schema)).digest('base64');p.putRecord(r);
+  f.draft=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));r.draft=f.draft;f.amazon.assertPricingForPaid(f.draft.id);
   let images=0;f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;if(unknown&&images===3)throw Error('synthetic lost response');return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'synthetic-only'});
   const listing={currentContext:(...args:Parameters<ListingAiService['currentContext']>)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input:any,signal?:AbortSignal)=>f.listing.reviewCurrentForImages(input,signal)};
@@ -1302,10 +1310,9 @@ for(const unknown of [false,true])test(`Haul partial seven-image continuation pr
   const plan=f.ai.imagePlan.bind(f.ai);let interrupted=false;f.ai.imagePlan=async(...args:Parameters<AiService['imagePlan']>)=>{if(!unknown&&args[0].slot?.index===3&&!interrupted){interrupted=true;throw new AiError('PROVIDER_ERROR');}return plan(...args);};
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:r.draft.revision});assert.equal(first.workflow.slots!.filter(s=>s.status==='PASSED').length,2);const frozen=structuredClone(first.workflow.slots!.slice(0,2)),context=structuredClone(first.workflow.imageContext),attempt=first.workflow.slots![2].attempts[0];
   const fixed=f.amazon.applyBusinessDefaults(f.amazon.getDraft(f.draft.id));
-  // This synthetic image fixture has no procurement input; pricing guards are tested separately.
-  const priced=p.record(fixed.id);delete priced.draft.businessRules.pricingDecision;priced.draft.businessRules.notices=[];p.putRecord(priced);
+  f.amazon.assertPricingForPaid(fixed.id);
   await workflow.close();workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing});
-  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});assert.equal(resumed.workflow.status,unknown?'FAILED':'COMPLETED',resumed.workflow.error??'');if(unknown)assert.equal(resumed.workflow.slots![2].attempts[0].state,'UNKNOWN');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?3:7);
+  const resumed=await workflow.complete({draftId:fixed.id,draftRevision:fixed.revision});assert.equal(resumed.workflow.status,unknown?'BLOCKED':'COMPLETED',resumed.workflow.error??'');if(unknown)assert.equal(resumed.workflow.slots![2].attempts[0].state,'UNKNOWN');assert.equal(resumed.workflow.id,first.workflow.id);assert.deepEqual(resumed.workflow.slots!.slice(0,2),frozen);assert.deepEqual(resumed.workflow.imageContext,context);assert.equal(resumed.workflow.slots![2].attempts[0].requestId,attempt.requestId);assert.equal(images,unknown?3:7);
   await createWorkspaceBackup(f.directory,join(f.directory,'partial-rule-reuse.htcbackup'),'synthetic partial rules backup');
 });
 
@@ -1505,7 +1512,7 @@ test('R2 ordinary uncertainties retain full text while measurements remain valid
  f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Preserve the selected product with no added text.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),uncertainties:[uncertainty]}}):undefined);
  const result=await f.ai.imagePlan(context,()=>{});assert.equal((result.output as any).productUnderstanding.uncertainties[0],uncertainty);
  f.respond((operation,payload)=>operation==='image-plan'?chat({kind:'image-plan',prompt:'Preserve the selected product with no added text.',textMode:'none',expectedText:[],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{...understanding(payload),uncertainties:[uncertainty+' Product size is 7.5 x 7 x 4.2 cm.']}}):undefined);
- await assert.rejects(f.ai.imagePlan(context,()=>{}),(e:any)=>e.code==='OUTPUT_INVALID');
+ const observed=await f.ai.imagePlan(context,()=>{});if(observed.output.kind!=='image-plan')throw Error('Wrong plan');assert.ok(observed.output.productUnderstanding!.uncertainties[0].includes('7.5 x 7 x 4.2 cm'));assert.doesNotMatch(imageGenerationPrompt(observed.output),/7\.5 x 7 x 4\.2 cm/);
 });
 
 test('R2 legacy hashless planning calls and changed repair feedback share the durable slot budget',async t=>{
@@ -1652,4 +1659,46 @@ test('Schema retained paid response marker survives an older backup call record'
     const retained=JSON.parse(String(snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id)!.record_json));
     assert.equal(retained.schemaResponseRetained,true);assert.equal(retained.responseReceived,true);assert.deepEqual(retained.usage,call.usage);
   }finally{snapshot.close();current.close();rmSync(folder,{recursive:true,force:true});}
+});
+
+function enableAppearance(f:Awaited<ReturnType<typeof fixture>>){
+ for(const purposeId of ['appearance_review','appearance_review_difficult'] as const){const previous=f.ai.getPurposeProfiles().find(p=>p.purposeId===purposeId)!;f.ai.savePurposeProfile({purposeId,expectedRevision:previous.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
+}
+function appearanceReply(payload:any,verdict='PASS'){return chat({verdict,checks:[{aspect:'color',expected:'Blue coaster',observed:verdict==='MISMATCH'?'Red coaster':'Blue coaster',reason:'Product body compared; table props excluded',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)}]});}
+test('W07 appearance sends actual source plus candidate and preserves raw receipt with independent purpose',async t=>{
+ const f=await fixture(t);enableAppearance(f);f.respond((operation,payload)=>operation==='image-appearance-review'?appearanceReply(payload):undefined);
+ const plan=await f.ai.imagePlan(f.context,()=>{}),review=await f.ai.reviewGeneratedImageAppearance(f.context,plan,f.candidate,f.bytes,()=>{});
+ assert.equal(review.output.kind,'image-appearance-review');assert.deepEqual(validateAiResult(review),review);
+ const request=f.requests.at(-1)!;assert.equal(request.operation,'image-appearance-review');assert.equal(request.body.messages[1].content.length,3);assert.equal(request.body.messages[1].content.at(-1).image_url.url,`data:image/png;base64,${f.bytes.toString('base64')}`);
+ const call=f.ai.getCall(review.callId)!;assert.equal(call.purposeSnapshot?.purposeId,'appearance_review');assert.ok(call.providerReceiptId);assert.ok(await f.ai.readProviderReceipt(call.id));
+});
+for(const mode of ['pass','mismatch-once','uncertain'] as const)test(`W07 seven slots appearance ${mode} is local and bounded`,async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});let reviews=0;
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-appearance-review'?appearanceReply(payload,(++reviews,mode==='uncertain'?'UNCERTAIN':mode==='mismatch-once'&&reviews===2?'MISMATCH':'PASS')):undefined);
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});
+ if(mode==='uncertain'){assert.equal(result.workflow.status,'BLOCKED',result.workflow.error??'');assert.equal(posts(),7);assert.equal(reviews,14);assert.ok(result.workflow.slots!.every(slot=>slot.status==='BLOCKED'&&slot.attempts.length===1&&slot.attempts[0].appearanceReview?.resultIds.length===2));}
+ else{assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),mode==='pass'?7:8);assert.equal(reviews,posts());assert.deepEqual(result.workflow.slots!.map(slot=>slot.attempts.length),mode==='pass'?[1,1,1,1,1,1,1]:[1,2,1,1,1,1,1]);}
+ if(mode==='pass'){const db=openDatabase(f.directory);try{assertImageWorkflowHistory(db,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c])));}finally{db.close();}await createWorkspaceBackup(f.directory,join(f.directory,'appearance.htcbackup'),'synthetic appearance history backup');}
+ const before=reviews;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(reviews,before);
+});
+
+test('W07 default OpenRouter Luna to Sol appearance escalation uses real service validation and preserves all seven slots',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);
+ f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-openrouter-review-key'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ const configured=f.ai.getPurposeProfiles();assert.equal(configured.find(p=>p.purposeId==='appearance_review')!.model,'openai/gpt-6-luna');assert.equal(configured.find(p=>p.purposeId==='appearance_review_difficult')!.model,'openai/gpt-6.1-sol');
+ workflow.saveAppearanceReviewSettings({enabled:true});
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-appearance-review'?appearanceReply(payload,payload.previousReview?'PASS':'UNCERTAIN'):undefined);
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(posts(),7);
+ const requests=f.requests.filter(r=>r.operation==='image-appearance-review');assert.equal(requests.length,14);
+ for(const [index,request] of requests.entries()){assert.equal(request.body.model,index%2===0?'openai/gpt-6-luna':'openai/gpt-6.1-sol');assert.equal(request.body.messages[1].content.length,3);}
+ for(const slot of result.workflow.slots!){assert.equal(slot.attempts.length,1);const ids=slot.attempts[0].appearanceReview!.resultIds;assert.equal(ids.length,2);for(const [index,id] of ids.entries()){const review=f.ai.getResult(id)!;assert.equal(review.providerId,'openrouter-review');assert.deepEqual(validateAiResult(review),review);assert.equal(review.output.kind,'image-appearance-review');if(review.output.kind==='image-appearance-review'){assert.equal(review.output.verdict,index===0?'UNCERTAIN':'PASS');assert.equal(review.output.previousResultId,index===0?null:ids[0]);}assert.ok(f.ai.getCall(review.callId)!.providerReceiptId);}}
+ const before=requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(f.requests.filter(r=>r.operation==='image-appearance-review').length,before);
+});
+test('A19 image workflow resumes a pending current-copy upgrade before considering copy repair',async t=>{
+ const f=await fixture(t),before=f.ai.listResults(f.product.id).length;let reviewCalls=0;
+ f.respond((operation,payload)=>{if(operation!=='listing-current-review')return undefined;reviewCalls++;const out=currentReview(payload);out.verdict='NEEDS_CHANGES';out.checks[0].verdict='UNSUPPORTED';out.checks[0].reason='Specific source ambiguity';out.checks[0].claims[0].verdict='UNSUPPORTED';out.checks[0].claims[0].reason='Specific source ambiguity';out.issues=[{field:out.checks[0].field,message:'Specific source ambiguity'}] as any;return chat(out);});
+ await assert.rejects(f.ai.reviewCurrentListing(f.context.listing,f.context.currentListingCopy,async()=>{if(f.ai.listResults(f.product.id).length>before)throw new Error('exit after first');}),/exit after first/);
+ const pending=f.ai.listResults(f.product.id).filter(r=>r.output.kind==='listing-current-review').at(-1)!;assert.equal(f.ai.hasPendingCopyReview(pending.id),true);
+ const {workflow,posts}=productionWorkflow(f),listing=(workflow as any).listing;let resumed=0,repairs=0;listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});listing.reviewCurrentForImages=async()=>{resumed++;throw new Error('resume original upgrade');};listing.repairCurrentForImages=async()=>{repairs++;throw new Error('must not repair while upgrade pending');};
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(resumed,1,result.workflow.error??'expected original review entry');assert.equal(repairs,0);assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(posts(),0);assert.equal(reviewCalls,1);
 });

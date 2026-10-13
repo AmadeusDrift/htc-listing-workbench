@@ -1,3 +1,4 @@
+import { usePageState } from './navigation-context';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Download, RefreshCw, Search, Square } from 'lucide-react';
 import type { AmazonTarget } from '../shared/amazon-contracts';
@@ -11,7 +12,7 @@ interface Props {
   targets: AmazonTarget[];
   busy: boolean;
   onOpen(productId: string): void;
-  onProcurement(): void;
+  onProcurement(context: { targetId: string; sku?: string }): void;
   onSettings(): void;
 }
 type Filter = '' | 'buyable' | 'attention';
@@ -43,19 +44,19 @@ function Metric({ name, rows, read, source }: {
 const count = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString();
 export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettings }: Props) {
   const live = targets.filter(target => target.mode === 'live');
-  const [selection, setSelection] = useState('');
+  const [selection, setSelection] = usePageState('data:selection', '');
   const target = live.find(item => item.id === selection) ?? live.find(item => item.configured) ?? live[0];
   const targetId = target?.id ?? '';
   const [snapshot, setSnapshot] = useState<ProductDataSnapshot | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState('');
-  const [query, setQuery] = useState(''), [filter, setFilter] = useState<Filter>(''), [page, setPage] = useState(0);
+  const [query, setQuery] = usePageState('data:query', ''), [filter, setFilter] = usePageState<Filter>('data:filter', ''), [page, setPage] = usePageState('data:page', 0);
   const currentTarget = useRef(targetId), currentSnapshot = useRef(snapshot), requestId = useRef(0), mounted = useRef(false), acting = useRef(false);
   currentTarget.current = targetId; currentSnapshot.current = snapshot;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestId.current++; }; }, []);
   useEffect(() => {
     let active = true, reading = false;
     const scope = targetId;
-    requestId.current++; acting.current = false; setSnapshot(null); currentSnapshot.current = null; setError(''); setPage(0); setLoading(Boolean(scope));
+    requestId.current++; acting.current = false; setSnapshot(null); currentSnapshot.current = null; setError(''); setLoading(Boolean(scope));
     async function read(initial = false) {
       if (!scope || reading || acting.current) return;
       reading = true;
@@ -102,7 +103,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
   const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / 100) - 1));
   return <section className="operations-page product-data-page">
     <div className="ops-toolbar">
-      <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => setSelection(event.target.value)}>
+      <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => { setSelection(event.target.value); setPage(0); }}>
         {!live.length && <option value="">尚未连接正式店铺</option>}{live.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select></label>
       <Badge tone="info">仅本软件上传的商品</Badge>
@@ -133,14 +134,14 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
     </div>
     <div className="ops-panel">
       <div className="ops-actions"><div className="ops-grow"><h2>按商品规格查看</h2><p>颜色、尺寸按 SKU 分别列出；同一店铺、站点的同一 SKU 只统计一次。</p></div>
-        <button type="button" className="button secondary" disabled={busy} onClick={onProcurement}>去采购备货<ArrowUpRight size={15} /></button></div>
+        <button type="button" className="button secondary" disabled={busy} onClick={() => onProcurement({ targetId })}>去采购备货<ArrowUpRight size={15} /></button></div>
       <div className="ops-actions">
         <label className="workspace-search ops-grow"><Search size={16} /><input aria-label="搜索商品数据" value={query} maxLength={300} placeholder="搜索商品、SKU 或 ASIN" onChange={event => { setQuery(event.target.value); setPage(0); }} /></label>
         <label>显示范围<select value={filter} onChange={event => { setFilter(event.target.value as Filter); setPage(0); }}><option value="">全部情况</option><option value="buyable">可以销售</option><option value="attention">需要处理</option></select></label><span>{rows.length} 个规格</span>
       </div>
       {!rows.length ? <div className="ops-empty"><strong>{loading ? '正在读取本机记录…' : query || filter ? '没有符合筛选条件的商品' : '等待第一件正式上传的商品'}</strong>
         <p>通过本软件正式提交后自动加入跟踪清单，再点“从 Amazon 同步数据”读取平台结果。</p></div>
-        : <><div className="ops-table-wrap"><table><thead><tr><th>商品 / SKU</th><th>上架情况</th><th>近 7 / 30 天销量</th><th>可售 / 待入库库存</th><th>补货参考</th><th>操作</th></tr></thead>
+        : <><div data-scroll-key="product-data-table" className="ops-table-wrap"><table><thead><tr><th>商品 / SKU</th><th>上架情况</th><th>近 7 / 30 天销量</th><th>可售 / 待入库库存</th><th>补货参考</th><th>操作</th></tr></thead>
           <tbody>{rows.slice(safePage * 100, (safePage + 1) * 100).map(row => {
             const state = rowStatus(row);
             return <tr key={row.sku}><td><div className="ops-product">{row.coverUrl && <img src={row.coverUrl} alt="商品图" />}<div><strong>{row.title}</strong><small>{row.sku}</small><small>{row.listing.value?.asin ?? 'ASIN 待确认'}</small><small>开始跟踪 {formatDate(row.salesSince, true)}</small></div></div></td>
@@ -152,7 +153,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
               <td>{row.trackingIssue ? '— / —' : count(row.inventory.value?.fulfillable) + ' / ' + count(row.inventory.value?.inbound)}<small>{observationNote(row.inventory)}</small>
                 {row.inventory.status === 'error' && row.inventory.fetchedAt && <small>上次成功 {formatDate(row.inventory.fetchedAt, true)}</small>}</td>
               <td>暂未启用<small>待确定补货周期与规则</small></td>
-              <td><button type="button" className="button secondary" disabled={busy} onClick={() => onOpen(row.productId)}>查看商品</button></td></tr>;
+              <td><button type="button" className="button secondary" disabled={busy} onClick={() => onOpen(row.productId)}>查看商品</button><button type="button" className="button secondary" disabled={busy} onClick={() => onProcurement({ targetId, sku: row.sku })}>采购此 SKU</button></td></tr>;
           })}</tbody></table></div>
           {rows.length > 100 && <div className="ops-pagination"><button type="button" className="button secondary" disabled={!safePage || busy} onClick={() => setPage(safePage - 1)}>上一页</button><span>{safePage + 1} / {Math.ceil(rows.length / 100)} 页</span><button type="button" className="button secondary" disabled={(safePage + 1) * 100 >= rows.length || busy} onClick={() => setPage(safePage + 1)}>下一页</button></div>}</>}
     </div>

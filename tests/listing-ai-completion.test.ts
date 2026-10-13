@@ -136,10 +136,10 @@ for (const secondReviewPass of [true, false]) test(`negative item verdict alias 
     return chat(review);
   });
   const result = await f.listing.complete(f.reference);
-  assert.equal(result.aiCalls, 4); assert.equal(f.requests.length, 4); assert.equal(reviews, 2);
+  assert.equal(result.aiCalls, secondReviewPass?3:6); assert.equal(f.requests.length, secondReviewPass?3:6); assert.equal(reviews, secondReviewPass?2:4);
   assert.ok(result.previewAttempts <= 3);
-  const repair = JSON.parse(f.requests[2].messages[1].content).repairRequest;
-  assert.ok(repair.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW' && entry.message === 'Remove the unsupported wording.'));
+  if(!secondReviewPass){const repair = JSON.parse(f.requests[3].messages[1].content).repairRequest;
+  assert.ok(repair.issues.some((entry: any) => entry.code === 'CONTENT_REVIEW' && entry.message === 'Remove the unsupported wording.'));}
   assert.equal(result.draft.fieldAdoptions?.length ?? 0, secondReviewPass ? 1 : 0);
   if (secondReviewPass) {
     assert.deepEqual(result.remaining, []);

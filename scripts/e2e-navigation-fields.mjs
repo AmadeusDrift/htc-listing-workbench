@@ -1,0 +1,23 @@
+import { validateAttributes } from '../src/main/amazon/schema.ts';
+import { _electron as electron } from 'playwright';
+import { expect } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
+import { mkdir,mkdtemp,writeFile } from 'node:fs/promises';
+import { join,resolve } from 'node:path';
+await mkdir(resolve('.test-data'),{recursive:true});const root=await mkdtemp(resolve('.test-data/navigation-fields-'));
+const schema={type:'object',properties:{rows:{type:'array',items:{type:'object',properties:{value:{type:'string',enum:['first','changed second']},enabled:{type:'boolean'},count:{type:'integer'}}}},extra_complete_schema_field:{type:'string'}}};
+const initial={rows:[{value:'first',enabled:false,count:0},{value:'second',enabled:true,count:1}]};
+const issues=validateAttributes(schema,initial);assert.equal(issues[0].message.startsWith('rows.1.value'),true);assert.deepEqual(issues[0].attributeNames,['rows']);
+const renderer=String.raw`
+import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {SchemaFields} from '../../src/renderer/SchemaFields';import {IssueList} from '../../src/renderer/AmazonPanel';import '../../src/renderer/styles.css';import '../../src/renderer/flat-theme.css';
+function Fixture(){const [attributes,setAttributes]=useState(${JSON.stringify(initial)}),[locate,setLocate]=useState(),[error,setError]=useState('');window.fixture={attributes};const schema=${JSON.stringify(schema)},issues=${JSON.stringify(issues)};return <><IssueList title="真实本地校验" issues={issues} demo={false} empty="" onLocate={path=>setLocate({path,token:Date.now()})}/><button onClick={()=>setAttributes({...attributes,rows:attributes.rows.slice(0,1)})}>删除第二行</button><p role="alert">{error}</p><SchemaFields schema={schema} attributes={attributes} disabled={false} onChange={setAttributes} locate={locate} onLocateError={setError}/></>};createRoot(document.getElementById('root')).render(<Fixture/>);`;
+await writeFile(join(root,'fixture.tsx'),renderer);await build({entryPoints:[join(root,'fixture.tsx')],bundle:true,outfile:join(root,'fixture.js'),platform:'browser',format:'iife',jsx:'automatic',logLevel:'silent'});
+await writeFile(join(root,'index.html'),'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><body><div id="root"></div><script src="fixture.js"></script></body></html>');
+await writeFile(join(root,'main.cjs'),`const{app,BrowserWindow,session}=require('electron');app.setPath('userData',${JSON.stringify(join(root,'profile'))});app.whenReady().then(()=>{session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_,done)=>done({cancel:true}));new BrowserWindow({width:1200,height:900,show:false,webPreferences:{contextIsolation:false,nodeIntegration:false,backgroundThrottling:false}}).loadFile(${JSON.stringify(join(root,'index.html'))});});app.on('window-all-closed',()=>app.quit());`);
+const require=createRequire(import.meta.url),env={...process.env,RED_E2E:'1',RED_DATA_DIR:join(root,'data')};delete env.ELECTRON_RUN_AS_NODE;let app;
+try{app=await electron.launch({executablePath:require('electron'),args:[join(root,'main.cjs')],cwd:resolve('.'),env,timeout:35000});const page=await app.firstWindow();page.setDefaultTimeout(8000);
+ await expect(page.getByLabel('Amazon 字段 extra_complete_schema_field',{exact:true})).toBeVisible();await page.getByLabel('查找类目字段').fill('extra');await page.getByRole('button',{name:'定位 /rows/1/value',exact:true}).click();await expect(page.getByLabel('Amazon 字段 rows[1].value',{exact:true})).toBeFocused();await page.getByLabel('Amazon 字段 rows[1].value',{exact:true}).selectOption(JSON.stringify('changed second'));const value=await page.evaluate(()=>window.fixture.attributes);assert.equal(value.rows[0].value,'first');assert.equal(value.rows[1].value,'changed second');assert.equal(value.rows[0].enabled,false);assert.equal(value.rows[0].count,0);
+ await page.getByRole('button',{name:'删除第二行',exact:true}).click();await page.getByRole('button',{name:'定位 /rows/1/value',exact:true}).click();await expect(page.getByRole('alert')).toContainText('目标字段或数组行已不存在');await expect(page.getByLabel('Amazon 字段 rows[0].value',{exact:true})).not.toBeFocused();console.log('PASS real validateAttributes to IssueList to SchemaFields: second enum row, full schema, native false/0 and removed target');
+}finally{await app?.close();}

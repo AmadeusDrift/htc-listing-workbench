@@ -24,11 +24,13 @@ test('copy review setting saves independently, refreshes automatic status and pr
     const fixture = window.fixture = { copy: true, risk: true, copySaves: 0, riskSaves: 0, changes: 0, fail: false, hold: false, release: null };
     window.addEventListener('copy-review-settings-changed', () => fixture.changes++);
     window.red = {
+      getAppearanceReviewSettings:async()=>({enabled:true}), saveAppearanceReviewSettings:async value=>value,
+      getAutomaticBatchPlan:async()=>({version:1,credentialScope:'a'.repeat(64),purposes:[],coverage:[]}),
       getCopyReviewSettings: async () => ({enabled: fixture.copy}),
       saveCopyReviewSettings: async value => { fixture.copySaves++; if(fixture.fail) throw Error('测试：保存失败'); if(fixture.hold) await new Promise(resolve => fixture.release = resolve); fixture.copy = value.enabled; return {enabled: fixture.copy}; },
       getImageRiskSettings: async () => ({enabled: fixture.risk}),
       saveImageRiskSettings: async value => { fixture.riskSaves++; fixture.risk = value.enabled; return {enabled: fixture.risk}; },
-      getImageGenerationConnection: async () => ({provider:'openai',activeProvider:'openai',model:'gpt-image-2.5-sunburst',enabled:false,size:'auto',quality:'auto',configured:false,credentialState:'absent',accessCheck:'not-checked'}),
+      getImageGenerationConnection: async () => ({provider:'openrouter',activeProvider:'openrouter',model:'openai/gpt-image-2.5-sunburst',enabled:false,size:'auto',quality:'auto',configured:false,credentialState:'absent',accessCheck:'not-checked'}),
       getImageGenerationModels: async () => ({models:[]}),
       listAiCapabilities: async () => ['text','image-generation','ocr','image-risk'].map(capability=>({capability,available:true})),
       getListingRules: async () => defaultListingRules(), listFtpProfiles: async () => [], listAutomaticListingTasks: async () => []
@@ -55,7 +57,7 @@ test('copy review setting saves independently, refreshes automatic status and pr
   await copySwitch.click();
   await expect(copySwitch).not.toBeChecked();
   await expect(automatic).toContainText('文案复核：已关闭');
-  await expect(automatic).toContainText('待配置或启用：DeepSeek 独立复核');
+  await expect(automatic).toContainText('待配置或启用：复核用途');
   await expect(automatic).toContainText('首图无字检查');
   await expect(riskSwitch).toBeChecked();
   assert.deepEqual(await page.evaluate(() => {

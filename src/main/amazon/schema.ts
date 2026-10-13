@@ -75,7 +75,7 @@ function issue(error: ErrorObject): ListingIssue {
     type: '字段类型不正确', additionalProperties: '含有 Schema 未定义的字段', if: '条件要求未满足', uniqueItems: '选择器指定的字段组合重复',
     minUniqueItems: '唯一字段组合数量不足', maxUniqueItems: '唯一字段组合数量超过限制', minUtf8ByteLength: 'UTF-8 字节长度不足', maxUtf8ByteLength: 'UTF-8 字节长度超过限制' };
   return { code: `LOCAL_${error.keyword}`, message: `${[...path, ...(property ? [property] : [])].join('.') || 'attributes'}：${labels[error.keyword] || '不满足当前 Schema 约束'}`,
-    severity: 'ERROR', attributeNames: name ? [name] : [], category: name?.includes('image') ? 'image' : 'field', source: 'local', autoFixable: false };
+    severity: 'ERROR', attributeNames: name ? [name] : [], attributePaths: [error.instancePath + (property !== undefined ? '/' + property.replaceAll('~', '~0').replaceAll('/', '~1') : '')], category: name?.includes('image') ? 'image' : 'field', source: 'local', autoFixable: false };
 }
 export function validateAttributes(schema: JsonObject, attributes: JsonObject, metaSchema: JsonObject = {}, maxIssues = 100): ListingIssue[] {
   try {

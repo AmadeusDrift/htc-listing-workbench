@@ -1,3 +1,4 @@
+import { factsForVariant } from '../../shared/fact-scopes.ts';
 import { createHash } from 'node:crypto';
 import type { SalesListingPlan, SalesRecipe } from '../../shared/sales-plan-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -49,7 +50,7 @@ export function validateSalesPlan(raw:unknown):SalesListingPlan {
 }
 /** A listing view of source data, never a mutation of the collected product or supplier SKU. */
 export function projectSalesProduct(product:ProductDetail, plan:SalesListingPlan|undefined, anchorVariantId:string):ProductDetail {
-  if(!plan) return product;
+  if(!plan) return {...product,facts:factsForVariant(product,anchorVariantId)};
   const sale=validateSalesPlan(plan);
   if(!sale.recipe.components.some(c=>c.variantId===anchorVariantId)) throw new UserFacingError('销售组合与来源规格不一致');
   for(const component of sale.recipe.components){
@@ -60,8 +61,10 @@ export function projectSalesProduct(product:ProductDetail, plan:SalesListingPlan
   const variant=projected.variants.find(v=>v.id===anchorVariantId)!;
   variant.sku=sale.sku;variant.purchasePrice=sale.recipe.totalCostCny===null?'':String(sale.recipe.totalCostCny);
   variant.normalizedSpec=parent?'同款同规格变体系列':sale.recipe.specification;
-  const unchangedPackage=!parent&&sale.recipe.components.length===1&&sale.recipe.components[0].quantity===sale.recipe.components[0].sourcePackPieces&&product.variants.length===1;
-  projected.facts=projected.facts.filter(f=>(unchangedPackage||!skuDependentSourceFact(f.name))&&!/^颜色|^色系|^color$|^colour$/iu.test(f.name));
+  const samePackage=!parent&&sale.recipe.components.length===1&&sale.recipe.components[0].quantity===sale.recipe.components[0].sourcePackPieces;
+  const unchangedPackage=samePackage&&product.variants.length===1;
+  const componentIds=new Set(sale.recipe.components.map(c=>c.variantId));
+  projected.facts=projected.facts.filter(f=>(f.scope===undefined||f.scope==='common'||f.scope==='variant'&&componentIds.size===1&&componentIds.has(f.variantId!))).filter(f=>(unchangedPackage||samePackage&&f.scope!==undefined||!skuDependentSourceFact(f.name))&&!/^颜色|^色系|^color$|^colour$/iu.test(f.name));
   const add=(name:string,value:string)=>{
     const digest=createHash('sha256').update(`${sale.namingGroupId}:${name}`).digest('hex');
     const id=`${digest.slice(0,8)}-${digest.slice(8,12)}-4${digest.slice(13,16)}-a${digest.slice(17,20)}-${digest.slice(20,32)}`;

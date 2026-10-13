@@ -1,3 +1,4 @@
+import { AI_PURPOSE_LABELS } from '../shared/ai-purpose-contracts.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { app, dialog, ipcMain, nativeImage, shell } from 'electron';
 import type { BrowserWindow } from 'electron';
@@ -31,7 +32,7 @@ import { installMiaoshouIpc } from './miaoshou-ipc.ts';
 import type { MiaoshouService } from './miaoshou/service.ts';
 import type { MiaoshouImageService } from './miaoshou/images.ts';
 import { installCollectionIpc } from './collection-ipc.ts';
-import type { CollectionBridge } from './collection/service.ts';
+import type { CollectionHistoryPort } from './collection/history.ts';
 import { ListingAiService } from './listing-ai/service.ts';
 import { ListingRuleStore } from './listing-rules.ts';
 import { AppearanceStore } from './appearance.ts';
@@ -53,7 +54,7 @@ export function decodePreview(bytes: Buffer): Buffer {
   const scale = Math.min(1, 640 / Math.max(width, height));
   return image.resize({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), quality: 'good' }).toPNG();
 }
-export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionBridge, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService): void {
+export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionHistoryPort, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService): void {
   let active = 0, restoring = false, shuttingDownForRestore = false;
   function handle(channel: string, argumentCount: number, callback: (...args: unknown[]) => unknown) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -141,7 +142,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
   installExecutionIpc(window, hosting, execution, store, handle);
   if (automatic) installAutomaticListingIpc(automatic, handle, {
     confirm: async task => {
-      const detail = `${task.targetName} · ${task.sellerId} · ${task.marketplaceId}\n商品类型：${task.productType} · 图床：${task.profileId}\n备货：每个 SKU ${task.items[0].stockSets} 个销售单位\n\n${task.items.slice(0,50).map(row => row.sku).join('\n')}${task.items.length > 50 ? '\n……其余 SKU 见任务清单' : ''}\n\n将自动完成资料、图片、侵权与 OCR 复核、上传、校验${task.mode === 'live' ? '及正式发布' : '及本地演示'}。通过后继续回读并建立备货批次；商品标签在需要时单独准备；异常商品会停止并显示原因。`;
+      const detail = `执行模式：${task.executionMode==='deferred_batch'?'延迟批量（Batch）':'即时上架'}\n${task.batchPlan?.coverage.map(row=>`${AI_PURPOSE_LABELS[row.purposeId as keyof typeof AI_PURPOSE_LABELS]??({image_generation:'图片生成',aliyun_ocr:'阿里 OCR',aliyun_image_risk:'阿里图片风险检测'} as Record<string,string>)[row.purposeId]??row.purposeId}：${row.mode==='deferred_batch'?'Batch':'普通执行'} · ${row.reason}`).join('\n')??''}\n仅可 Batch 步骤使用批量计价；不承诺整任务 24 小时完成。\n\n${task.targetName} · ${task.sellerId} · ${task.marketplaceId}\n商品类型：${task.productType} · 图床：${task.profileId}\n备货：每个 SKU ${task.items[0].stockSets} 个销售单位\n\n${task.items.slice(0,50).map(row => row.sku).join('\n')}${task.items.length > 50 ? '\n……其余 SKU 见任务清单' : ''}\n\n将自动完成资料、图片、侵权与 OCR 复核、上传、校验${task.mode === 'live' ? '及正式发布' : '及本地演示'}。通过后继续回读并建立备货批次；商品标签在需要时单独准备；异常商品会停止并显示原因。`;
       const answer = await dialog.showMessageBox(window, { type: 'question', title: '启动完整自动上架流程', message: `启动 ${task.items.length} 个 SKU 的自动流程？`, detail,
         buttons: ['取消', task.mode === 'live' ? '启动并自动发布' : '启动本地演示'], defaultId: 0, cancelId: 0, noLink: true });
       return answer.response === 1;
@@ -161,6 +162,8 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
   if (imageWorkflow) {
     handle('red:image-risk:settings',0,()=>imageWorkflow.getRiskSettings());
     handle('red:image-risk:save',1,input=>imageWorkflow.saveRiskSettings(input));
+    handle('red:appearance-review:settings',0,()=>imageWorkflow.getAppearanceReviewSettings());
+    handle('red:appearance-review:save',1,input=>imageWorkflow.saveAppearanceReviewSettings(input));
     handle('red:copy-review:settings',0,()=>imageWorkflow.getCopyReviewSettings());
     handle('red:copy-review:save',1,input=>imageWorkflow.saveCopyReviewSettings(input));
     handle('red:automatic-product:unknown-retry',1,async input=>{const run=await imageWorkflow.approveUnknownRetry(input);return imageWorkflow.getProgressPresentation(run.draftId)!;});
@@ -219,7 +222,20 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
       return () => { restoring = false; resumeCollection?.(); if (!shuttingDownForRestore) { operations?.followup.resume(); automatic?.start(); labelServices?.labels.resume(); } };
     },
     performRestore: async prepared => { shuttingDownForRestore = true; await performRestore(prepared); },
-    beforeBackup: () => { amazon.cleanupData(); },
+    beginBackup: () => {
+      if (active > 1 || execution.busy || automatic?.busy || labelServices?.labels.hasActiveWork() || ai.busy || imageGeneration?.busy || imageWorkflow?.busy || images.busy || miaoshou?.busy || miaoshouImages?.busy || operations?.catalog.busy || operations?.followup.busy || operations?.productData?.busy) throw new UserFacingError('还有操作正在执行；请先暂停并等待当前步骤结束，再进行备份或清理');
+      const releases: (() => void)[] = [];
+      try {
+        const collectionLease = collection?.pauseForRestore(); if (collectionLease) releases.push(collectionLease);
+        if (automatic) releases.push(automatic.holdForMaintenance());
+        if (operations?.followup) releases.push(operations.followup.holdForMaintenance());
+        if (labelServices) releases.push(labelServices.labels.holdForMaintenance());
+      } catch (error) { for (const release of releases.reverse()) release(); throw error; }
+      restoring = true; let released = false;
+      // IPC is locked during the lease. Release restores only the prior timer switches,
+      // never task states or grants, and cannot start a previously paused task.
+      return () => { if (released) return; released = true; restoring = false; for (const release of releases.reverse()) release(); };
+    },
     audit: (action, summary, detail) => store.recordWorkspaceEvent(action, summary, detail),
   });
 }

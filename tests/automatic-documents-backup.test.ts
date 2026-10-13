@@ -16,6 +16,19 @@ import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { simplePdf } from './fixtures/simple-pdf.ts';
 
+test('changing a manual shipment keeps old attachments historical and new imports tied to the current ID',async t=>{
+  const root=await mkdtemp(join(resolve('.test-data'),'shipment-history-')),id=randomUUID();
+  const batch={id,shipment:{confirmationId:'FBA12345',status:'LINKED_UNVERIFIED',linkedAt:new Date().toISOString()}};
+  const docs=new ShipmentDocumentService(root,{get:()=>structuredClone(batch)} as never);t.after(()=>docs.close());
+  const input=join(root,'carton.pdf');await writeFile(input,simplePdf());
+  const old=await docs.importDocument(id,input);batch.shipment.confirmationId='FBA67890';
+  const current=await docs.importDocument(id,input),all=docs.list(id);
+  assert.equal(all.find(row=>row.id===old.id)?.shipmentId,'FBA12345');
+  assert.equal(all.filter(row=>row.shipmentId===batch.shipment.confirmationId).length,1);
+  assert.equal(current.status,'LINKED_UNVERIFIED');assert.equal(old.status,'LINKED_UNVERIFIED');
+  assert.deepEqual(await readFile(await docs.file(old.id)),simplePdf());
+});
+
 test('v16 backup retains verified document bytes and pauses unfinished parent/label work', async t => {
   await mkdir(resolve('.test-data'),{recursive:true});const root=await mkdtemp(resolve('.test-data/automatic-documents-backup-')), source=join(root,'source'),destination=join(root,'restored');
   const store=new WorkspaceStore(source), product=store.createProduct(), target={id:'store-one',name:'Test',sellerId:'seller',marketplaceId:'ATVPDKIKX0DER',mode:'live',configured:true,paused:false,locale:'en_US'};
@@ -34,8 +47,8 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const currentScreen=structuredClone(screened);currentScreen.id=randomUUID();
   const confirmed=structuredClone(product);confirmed.facts=['包装长度','包装宽度','包装高度','包装重量'].map((name,i)=>({id:randomUUID(),name,value:i===3?'100 g':'5 cm',state:'human_confirmed',source:'manual',sourceRef:'Synthetic backup evidence'}));
   const currentResult=applyBusinessRules({product:confirmed,variant:confirmed.variants[0],schema:realAmazonSchema(),target:target as never,attributes:{},measurements:{},costCny:100,now:new Date()},defaultListingRules()),currentReport=currentResult.report;
-  assert.equal(currentReport.pricingDecision?.version,2);assert.equal(currentReport.pricingDecision?.status,'business_blocked');
-  const currentOutcome=currentScreen.items[0].outcome!;if(currentOutcome.kind!=='RULE_FILTERED')throw Error('fixture');const currentPricing=pricingOutcome({businessRules:currentReport,attributes:currentResult.attributes,marketplaceId:target.marketplaceId} as never,defaultListingRules());assert.equal(currentPricing?.kind,'RULE_FILTERED');assert.equal(currentPricing?.code,currentReport.pricingDecision?.code);currentOutcome.code=currentPricing!.code;currentOutcome.pricingReport=currentPricing!.pricingReport;
+  assert.equal(currentReport.pricingDecision?.version,3);assert.equal(currentReport.pricingDecision?.status,'business_blocked');
+  const currentOutcome=currentScreen.items[0].outcome!;if(currentOutcome.kind!=='RULE_FILTERED')throw Error('fixture');const currentPricing=pricingOutcome({listingProgram:'haul',businessRules:currentReport,attributes:currentResult.attributes,marketplaceId:target.marketplaceId} as never,defaultListingRules());assert.equal(currentPricing?.kind,'RULE_FILTERED');assert.equal(currentPricing?.code,currentReport.pricingDecision?.code);currentOutcome.code=currentPricing!.code;currentOutcome.pricingReport=currentPricing!.pricingReport;
   const currentBytes=JSON.stringify(currentScreen),legacyBytes=JSON.stringify(screened);
   const history=openDatabase(source);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(currentScreen.id,currentBytes);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(screened.id,JSON.stringify(screened));history.close();
   const [batch]=procurement.ensureAutomaticBatch(task.id,[draft.id],{[draft.id]:5});
@@ -49,7 +62,7 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   const db=openDatabase(source);const queued={...ready,status:'REQUESTING',files:[]};db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(queued),ready.id);db.close();
   const archive=join(root,'backup.htcbackup');await createWorkspaceBackup(source,archive,'automatic-backup-test-2026');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'automatic-backup-test-2026'));
   const restored=openDatabase(destination);
-  try {assert.equal(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(currentScreen.id)!.record_json),currentBytes);assert.equal(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(screened.id)!.record_json),legacyBytes);const job=JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.equal(job.status,'PAUSED');assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(screened.id)!.record_json)),screened);const interrupted=JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels').get()!.record_json));assert.equal(interrupted.status,'FAILED');assert.equal(interrupted.errorCode,'INTERRUPTED');assert.equal(interrupted.paused,true);}
+  try {assert.equal(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(currentScreen.id)!.record_json),currentBytes);assert.equal(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(screened.id)!.record_json),legacyBytes);const job=JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.equal(job.status,'PAUSED');assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(screened.id)!.record_json)),screened);const interrupted=JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels').get()!.record_json));assert.equal(interrupted.status,'FAILED');assert.equal(interrupted.errorCode,'REQUEST_UNKNOWN');assert.equal(interrupted.id,queued.id);assert.equal(interrupted.attempts,queued.attempts);assert.equal(interrupted.requestId,queued.requestId);assert.equal(interrupted.paused,true);}
   finally {restored.close();}
   assert.deepEqual(await readFile(join(destination,document.relativePath)),simplePdf());
   await writeFile(join(source,document.relativePath),Buffer.from('corrupt'));

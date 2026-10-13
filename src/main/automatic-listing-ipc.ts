@@ -18,6 +18,9 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
   });
   handle('red:automatic-listing:adaptation-preview',1,id=>service.previewAdaptationForUi(identifier(id)));
   handle('red:automatic-listing:adaptation-apply',1,input=>service.applyAdaptation(input));
+  handle('red:automatic-listing:batch-summary',1,id=>service.batchSummary(identifier(id)));
+  handle('red:automatic-listing:execution-mode',1,input=>service.setExecutionMode(input));
+  handle('red:automatic-listing:batch-plan',0,()=>service.getBatchPlan());
   handle('red:automatic-listing:list', 0, () => service.list());
   handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));

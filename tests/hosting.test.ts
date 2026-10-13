@@ -234,3 +234,23 @@ test('a permanent FTP 550 directory permission error fails without an automatic 
   assert.equal(record.errorCode, 'REMOTE_DIRECTORY_FAILED'); assert.equal(f.calls.sleep.length, 0); assert.equal(f.calls.probe, 0);
   assert.deepEqual(remote.counts(), { directoryAttempts: 1, uploads: 0, connections: 1 });
 });
+
+test('W07 reference FTP uses immutable full hash path and never creates listing upload',async t=>{
+ const f=await fixture(t),asset=f.store.getAssetRecord(f.input.assetId)!;
+ const version={assetId:asset.id,sha256:asset.sha256,sourceKind:'source' as const,sourceVersion:'synthetic-v1',originalPath:asset.originalPath,byteSize:asset.byteSize,mimeType:'image/png' as const};
+ const url=await f.service.uploadReferenceVersion('alpha',f.input.generation,version,f.bytes);
+ assert.ok(url.includes(`/references/${asset.sha256}.png`));assert.equal(f.service.listUploads().length,0);assert.equal(f.calls.upload,1);
+ assert.equal(await f.service.uploadReferenceVersion('alpha',f.input.generation,version,f.bytes),url);assert.equal(f.calls.upload,1);
+});
+test('W07 existing reference version with wrong remote size is never overwritten',async t=>{
+ let writes=0;const f=await fixture(t,{transport:{async size(){return 1;},async upload(){writes++;return 33;},async close(){}}}),asset=f.store.getAssetRecord(f.input.assetId)!;
+ await assert.rejects(f.service.uploadReferenceVersion('alpha',f.input.generation,{assetId:asset.id,sha256:asset.sha256,sourceKind:'source',sourceVersion:'synthetic-v1',originalPath:asset.originalPath,byteSize:asset.byteSize,mimeType:'image/png'},f.bytes));assert.equal(writes,0);
+});
+import {ReferencePinService} from '../src/main/hosting/reference-pins.ts';
+import {createReferenceVersionReader} from '../src/main/hosting/reference-version-reader.ts';
+test('W07 M09 managed source reader and pin use fake FTP without listing adoption',async t=>{
+ const f=await fixture(t),db=openDatabase(f.directory),asset=f.store.getAssetRecord(f.input.assetId)!;db.exec('CREATE TABLE IF NOT EXISTS image_reference_pins(id TEXT PRIMARY KEY,record_json TEXT NOT NULL)');
+ try{const pins=new ReferencePinService(db,{readVersion:createReferenceVersionReader(f.directory,f.store,{readCandidate:async()=>{throw Error('no candidate fallback');}}),uploadVersion:(version,bytes,signal)=>f.service.uploadReferenceVersion('alpha',f.input.generation,version,bytes,signal),probe:async()=>{}});
+ const before=f.store.getProduct(f.product.id),pin=await pins.prepare({operationId:randomUUID(),assetId:asset.id,sha256:asset.sha256,purpose:'source-reference'});assert.equal(pins.validateReference(pins.reference(pin.id)),true);assert.equal(f.service.listUploads().length,0);assert.deepEqual(f.store.getProduct(f.product.id),before);assert.equal(f.calls.upload,1);
+ }finally{db.close();}
+});

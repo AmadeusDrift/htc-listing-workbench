@@ -5,15 +5,15 @@ import { digest, inventory, jsonDigest, manifestName, reserveOutput, verifyInven
 import { buildReceipt, verifySource } from './release-source.mjs';
 import { noticesText } from './licenses.mjs';
 
-export const buildDirectories = ['dist', 'dist-electron', 'dist-native', 'dist-extension'];
+export const buildDirectories = ['dist', 'dist-electron'];
 export const requiredRuntime = ['electron.exe', 'version', 'icudtl.dat', 'resources.pak', 'chrome_100_percent.pak', 'chrome_200_percent.pak', 'snapshot_blob.bin', 'v8_context_snapshot.bin', 'ffmpeg.dll', 'd3dcompiler_47.dll', 'dxcompiler.dll', 'dxil.dll', 'vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll', 'LICENSE', 'LICENSES.chromium.html', 'locales/en-US.pak', 'resources/default_app.asar'];
 export function candidateGuide(pkg, source) {
-  return `# HTC 候选制品（未启用）\n\n版本 ${pkg.version}；源码 ${source.commit}。\n\n此目录为独立验收候选，不替换当前安装包或启动器。完整性与来源见“${manifestName}”。\n由源码 scripts/verify-package.mjs 校验；由 scripts/e2e-release-candidate.mjs 在新隔离目录验收。不要直接启动本目录 EXE 进行离线验收：RED_E2E 只隐藏窗口，不禁网。\n\n采集插件位于“采集插件”，合成导入格式位于“导入模板”。历史业务/验收资料不随包分发。\n`;
+  return `# HTC 候选制品（未启用）\n\n版本 ${pkg.version}；源码 ${source.commit}。\n\n此目录为独立验收候选，不替换当前安装包或启动器。完整性与来源见“${manifestName}”。\n由源码 scripts/verify-package.mjs 校验；由 scripts/e2e-release-candidate.mjs 在新隔离目录验收。不要直接启动本目录 EXE 进行离线验收：RED_E2E 只隐藏窗口，不禁网。\n\n旧浏览器/C#采集接入已停用，历史回执仍可读取。妙手合成导入格式位于“导入模板”。历史业务/验收资料不随包分发。\n`;
 }
 export async function buildFiles(snapshot) {
   const result = [];
   for (const dir of buildDirectories) result.push(...(await inventory(join(snapshot, dir))).map(f => ({ ...f, path: `${dir}/${f.path}` })));
-  for (const file of ['dist/index.html', 'dist-electron/main.cjs', 'dist-electron/preload.cjs', 'dist-native/HTC.CollectionHost.exe', 'dist-extension/manifest.json', 'dist-extension/worker.js', 'dist-extension/popup.js', 'dist-extension/popup.html', 'dist-extension/popup.css']) assert.ok(result.some(f => f.path === file), `Missing build input: ${file}`);
+  for (const file of ['dist/index.html', 'dist-electron/main.cjs', 'dist-electron/preload.cjs']) assert.ok(result.some(f => f.path === file), `Missing build input: ${file}`);
   return result;
 }
 export async function verifyBuild(repo, snapshot) {
@@ -43,9 +43,6 @@ export async function assembleCandidate({ snapshot, runtime, output, pkg, notice
   await rename(join(output, 'electron.exe'), join(output, 'HTC.exe'));
   const appRoot = join(output, 'resources/app'); await mkdir(appRoot);
   for (const directory of ['dist', 'dist-electron']) await cp(join(snapshot, directory), join(appRoot, directory), { recursive: true, force: false, errorOnExist: true, filter: file => !file.endsWith('.map') });
-  await mkdir(join(appRoot, 'dist-native'));
-  await cp(join(snapshot, 'dist-native/HTC.CollectionHost.exe'), join(appRoot, 'dist-native/HTC.CollectionHost.exe'), { force: false, errorOnExist: true });
-  await cp(join(snapshot, 'dist-extension'), join(output, '采集插件'), { recursive: true, force: false, errorOnExist: true });
   await cp(join(snapshot, 'samples'), join(output, '导入模板'), { recursive: true, force: false, errorOnExist: true });
   await writeFile(join(appRoot, 'package.json'), JSON.stringify({ name: pkg.name, version: pkg.version, productName: 'HTC Workbench', main: pkg.main, private: true }, null, 2) + '\n', { flag: 'wx' });
   await writeFile(join(output, 'THIRD_PARTY_NOTICES.txt'), notices, { flag: 'wx' });
@@ -75,9 +72,9 @@ export async function verifyCandidate(repo, snapshot, candidate) {
   }
   for (const file of build.runtime.files) matches(file, file.path === 'electron.exe' ? 'HTC.exe' : file.path);
   for (const file of build.files) {
-    if (file.path.endsWith('.map') || file.path === 'dist-native/Program.g.cs') continue;
-    if (file.path.startsWith('dist-native/') && file.path !== 'dist-native/HTC.CollectionHost.exe') continue;
-    matches(file, file.path.startsWith('dist-extension/') ? file.path.replace('dist-extension/', '采集插件/') : `resources/app/${file.path}`);
+    if (file.path.endsWith('.map')) continue;
+    assert.ok(file.path.startsWith('dist/')||file.path.startsWith('dist-electron/'),'Retired collection artifacts are not package inputs');
+    matches(file, `resources/app/${file.path}`);
   }
   for (const file of source.files.filter(f => f.path.startsWith('samples/'))) matches(file, file.path.replace('samples/', '导入模板/'));
   const pkg = JSON.parse(await readFile(join(snapshot, 'package.json'), 'utf8'));
@@ -86,12 +83,6 @@ export async function verifyCandidate(repo, snapshot, candidate) {
   assert.equal(await readFile(join(candidate, 'THIRD_PARTY_NOTICES.txt'), 'utf8'), await noticesText(join(snapshot, 'node_modules')), 'Notices mismatch');
   assert.deepEqual(manifest.application, { name: pkg.name, version: pkg.version, platform: 'win32', architecture: build.architecture });
   assert.deepEqual(JSON.parse(await readFile(join(candidate, 'resources/app/package.json'), 'utf8')), { name: pkg.name, version: pkg.version, productName: 'HTC Workbench', main: pkg.main, private: true });
-  const extension = JSON.parse(await readFile(join(candidate, '采集插件/manifest.json'), 'utf8'));
-  assert.deepEqual(extension.permissions, ['activeTab', 'scripting', 'nativeMessaging']);
-  assert.equal(extension.host_permissions, undefined); assert.equal(extension.version_name, pkg.version);
-  const identitySource = await readFile(join(snapshot, 'src/shared/collection-identity.ts'), 'utf8');
-  assert.ok(extension.key && identitySource.includes(extension.key), 'Extension key differs from committed identity');
-  const worker = await readFile(join(candidate, '采集插件/worker.js'), 'utf8');
-  for (const marker of ['htc-fixture-source', '127.0.0.1', '.test_']) assert.ok(!worker.includes(marker), `Test extension marker: ${marker}`);
+  assert.ok(files.every(file=>!file.path.startsWith('采集插件/')&&!file.path.startsWith('resources/app/dist-native/')),'Retired collection runtime must not ship');
   return { manifest, manifestSha256: digest(bytes), filesDigest: jsonDigest(files), files: files.length };
 }

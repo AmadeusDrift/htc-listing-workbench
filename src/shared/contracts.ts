@@ -41,6 +41,9 @@ export interface Variant extends VariantInput {
   sourcePurchasePrice: string;
 }
 export interface Fact {
+  /** Absent only for historical unscoped records. */
+  scope?: 'common' | 'variant' | 'unknown';
+  variantId?: string;
   id: string;
   name: string;
   value: string;
@@ -72,6 +75,8 @@ export interface ProductSummary {
   updatedAt: string;
 }
 export interface ProductDetail {
+  /** Read-only durable scope model; absence retains legacy interpretation. */
+  readonly factScopeModelVersion?: 1;
   id: string;
   title: string;
   sourceUrl: string;
@@ -137,6 +142,7 @@ export interface ExportResult { cancelled: boolean; path?: string }
 
 /** Narrow IPC boundary. File system paths are selected by native dialogs, never submitted by the renderer. */
 export interface RedApi extends SourceConsistencyApi, AmazonApi, BackupApi, WorkspaceApi, HostingApi, ExecutionApi, AiApi, ImageVersionApi, ContentApi, DiagnosticApi, CollectionApi, MiaoshouApi, ListingRulesApi, CatalogApi, ProcurementApi, FollowupApi, ProductDataApi, AppearanceApi, ImageGenerationApi, ImageWorkflowApi, AutomaticListingApi, ItemLabelApi, ShipmentDocumentApi, SkuNamingApi {
+  onUnsavedCloseRequested(listener: () => void): () => void;
   listProducts(): Promise<ProductSummary[]>;
   getProduct(id: string): Promise<ProductDetail>;
   createProduct(): Promise<ProductDetail>;

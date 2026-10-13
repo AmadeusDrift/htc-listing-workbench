@@ -1,9 +1,9 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { ListingCorrections, selfPackageDeletion } from './corrections.ts';
 import { PROGRAM_RELATION_FIELDS, packageGraphIssues, unitPackageAttributes } from './program-relations.ts';
 import { isSchemaTransientError } from './schema-retry.ts';
 import { sameSchemaValidation } from './schema-compatibility.ts';
-import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
-import { validateAutomaticListingTask } from '../automatic-listing/records.ts';
+import { automaticTaskResults } from '../automatic-listing/task-results.ts';
 import { hasGenericBrand } from '../image-workflow/policy-reevaluation.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -24,7 +24,7 @@ import type { DraftRecord } from './persistence.ts';
 import { compileAttributesSchema, validateAttributes } from './schema.ts';
 import { nonDeferredImageIssues } from '../image-workflow/deferred-fields.ts';
 import { AmazonTransport, AmazonTransportError } from './transport.ts';
-import type { AmazonDependencies, ApiResult } from './transport.ts';
+import type { AmazonDependencies, ApiResult, LabelDownloadScope } from './transport.ts';
 import type { ProductDataKind } from './read-data.ts';
 import { CredentialVault, parseCredentials } from './vault.ts';
 import type { SecretStorage } from './vault.ts';
@@ -43,6 +43,7 @@ import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
 import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
 import { assertStoredPricingForPaid } from './pricing-guard.ts';
+import { qualifyActualOffer } from '../pricing/public.ts';
 import { assertCurrentPricingForPaid, pricingQualificationIssue } from '../pricing/qualification.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
 import { confirmedPurchaseCurrency } from './business-currency.ts';
@@ -165,7 +166,7 @@ export class AmazonService {
       const {after}=selfPackageDeletion(d.attributes,d.sku,d.marketplaceId),before=clone(r);d.attributes=after;d.revision++;d.previewedAt=null;r.preview=null;
       d.localIssues=[...packageGraphIssues(d,this.persistence.records().map(r=>r.draft)),...validateAttributes(d.schema.schema,after,d.schema.metaSchema),...listingProgramIssues(d.listingProgram,d.schema,after),...imageIssues(after),...copyPolicyIssues(d),...this.declarationIssues(d)];
       d.state=d.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';r.request=this.request(r);this.event(r,'save','按旧 AI 精确采纳依据删除独立 SKU 包装自引用；原响应、采纳记录和预算保留，旧预览失效');this.persistence.putRecord(r);
-      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
+      appendAuditEvent(db,randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
     });}finally{this.busy.delete(r.draft.id);}
   }
   private at(): string { return new Date(this.now()).toISOString(); }
@@ -196,6 +197,9 @@ export class AmazonService {
     this.ensureOpen(); return this.transport.createMarketplaceItemLabels(this.active(targetId), body, beforeSend);
   }
   async downloadItemLabel(url: string): Promise<Buffer> { this.ensureOpen(); return this.transport.downloadItemLabel(url); }
+  restoreItemLabelDownloads(scope:LabelDownloadScope,documents:{uri:string;expiration:number}[]):void {
+    this.ensureOpen();this.transport.restoreItemLabelDownloads(this.active(scope.targetId),scope,documents);
+  }
   private active(id: string): AmazonTarget {
     const target = this.getTarget(id);
     if (!target.configured) throw new UserFacingError('店铺授权当前不可用，请在设置中检查凭据状态');
@@ -311,6 +315,10 @@ export class AmazonService {
   }
   listDrafts(productId: string): AmazonDraft[] { this.ensureOpen(); return this.persistence.records(textField(productId, '商品 ID', 100)).map(record => this.vault.redact(record.draft)); }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }
+  getActualQuoteDetails(id:string) {
+    const draft=this.getDraft(id),rules=readListingRules(this.persistence.db);
+    return {...qualifyActualOffer(draft,rules,this.now()),draftId:draft.id,draftRevision:draft.revision,sku:draft.sku,ruleRevision:rules.revision,sourceRevision:draft.productRevision,bundleQuantity:draft.businessRules?.bundleQuantity??null};
+  }
   getDraft(id: string): AmazonDraft { this.ensureOpen(); return this.vault.redact(this.persistence.record(textField(id, '草稿 ID', 100)).draft); }
   /** A definitive INVALID response permits repair; absence of a response never does. Main process only. */
   wasSubmissionRejected(id: string): boolean {
@@ -437,7 +445,7 @@ export class AmazonService {
         record.draft={...draft,schema,attributes,salesPlan:plan,revision:draft.revision+1,state:'DRAFT',localIssues:issues,previewIssues:[],previewedAt:null,requestId:null};
         record.preview=null;record.previewResponse=null;record.request=this.request(record);
         const at=this.at();record.draft.updatedAt=at;record.draft.events.push({at,operation:'save',state:'DRAFT',requestId:null,summary:FAMILY_REBIND_EVENT_SUMMARY});this.persistence.putRecord(record);
-        this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.family.rebound',FAMILY_REBIND_EVENT_SUMMARY,
+        appendAuditEvent(this.persistence.db,randomUUID(),draft.productId,'listing.family.rebound',FAMILY_REBIND_EVENT_SUMMARY,
           JSON.stringify({draftId:draft.id,before,after:record}),record.draft.updatedAt);
         return clone(record.draft);
       });
@@ -479,7 +487,7 @@ export class AmazonService {
     const currency = confirmedPurchaseCurrency(product.facts, Boolean(validReceipt && (receipt.snapshot.sources.some(s=>s.source==='1688') || receipt.mapping.currency === 'CNY' && receipt.mapping.priceField !== 'none')));
     const costCny = currency.cny ? salesPlan ? salesPlan.recipe.totalCostCny : sourceQuotedCost(variant,validReceipt?receipt:null) : null;
     const matchingPackage=!salesPlan || salesPlan.recipe.components.length===1 && salesPlan.recipe.components[0].quantity===salesPlan.recipe.components[0].sourcePackPieces;
-    const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, now: new Date(this.now()),
+    const result = applyBusinessRules({ product, variant, target, schema, attributes, costCny, previousBusinessReport, sourceQuantityProduct:sourceSnapshot??this.getProduct(product.id), now: new Date(this.now()),
       declarationScope:selectedDeclarationScope(salesPlan?(sourceSnapshot??this.getProduct(product.id)):product,variant.id,salesPlan?.recipe.components),
       ...(salesPlan?{saleUnit:salesPlan.recipe,baseSku:salesPlan.baseSku}:{}), packageMatchesSaleUnit: matchingPackage,
       measurements: matchingPackage ? miaoshouMeasurementsForVariant(this.persistence.db, product.id, variant.id, target.mode) : {} }, readListingRules(this.persistence.db));
@@ -700,7 +708,7 @@ export class AmazonService {
     record.draft=draft;record.preview=null;record.request=this.request(record);
     this.event(record,'local_validation','用户适配当前来源与规则；保留原属性、图片和平台响应，本地重新校验');
     const afterRecord=clone(record);
-    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
+    appendAuditEvent(db,randomUUID(),draft.productId,'listing.task-adapted','旧草稿原地适配',JSON.stringify({version:1,before,afterRevision:draft.revision,beforeRecord,afterRecord,beforeSha256:createHash('sha256').update(JSON.stringify(beforeRecord)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(afterRecord)).digest('hex')}),draft.updatedAt);
     db.prepare('UPDATE listing_drafts SET request_json=?,schema_checksum=?,validation_json=?,state=?,record_json=?,updated_at=? WHERE id=?').run(JSON.stringify(record.request),draft.schema.checksum,JSON.stringify(draft.localIssues),draft.state,JSON.stringify(record),draft.updatedAt,draft.id);
     return clone(draft);
   }
@@ -714,21 +722,16 @@ export class AmazonService {
       if(op.state!=='DONE'||op.scopedRepair||op.draftId!==draft.id||op.safetyScopeHash!==completionSafetyScope(draft)||op.draftRevision!==draft.revision||op.draftStamp!==completionDraftStamp(draft)||journal.unknown(op.id))throw new UserFacingError('规格硬度纠正检查点不匹配，保留原记录');
       if(journal.list(draft.id).some(other=>other.id!==op.id&&!['DONE','RETIRED'].includes(other.state)))throw new UserFacingError('仍有未完成字段请求，未纠正规格硬度');
       if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.submitStarted')=1").get(draft.id))throw new UserFacingError('已有提交意图，未纠正规格硬度');
-      const owners=db.prepare("SELECT t.record_json FROM automatic_listing_tasks t WHERE EXISTS(SELECT 1 FROM json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=?)").all(draft.id).map(saved=>validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
-      for(const task of owners)for(const row of task.items.filter(row=>row.draftId===draft.id)){
-        if(task.targetId!==draft.targetId||task.sellerId!==draft.sellerId||task.marketplaceId!==draft.marketplaceId||task.mode!==draft.mode||row.productId!==draft.productId||row.productRevision!==draft.productRevision||row.variantId!==draft.variantId||row.sku!==draft.sku||row.batchId||row.status==='DONE'||(row.repair&&(row.repair.operationId!==op.id||row.repair.draftRevision!==draft.revision||row.repair.draftStamp!==imageWorkflowDraftStamp(draft)||!['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING'].includes(row.repair.phase))))throw new UserFacingError('自动任务规格硬度检查点不匹配，保留原记录');
-      }
+      const taskResult=automaticTaskResults.prepare(db,{kind:'selected-firmness',before:draft,operationId:op.id});
       const before=clone(record);
       draft.attributes.special_feature=clone(proof.after);draft.revision++;draft.previewedAt=null;record.preview=null;
       draft.localIssues=[...listingProgramIssues(draft.listingProgram,draft.schema,draft.attributes),...validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema),...imageIssues(draft.attributes),...copyPolicyIssues(draft),...this.declarationIssues(draft)];
       draft.state=draft.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';record.request=this.request(record);
       op.remaining=revalidate(draft);op.draftRevision=draft.revision;op.draftStamp=completionDraftStamp(draft);
       this.event(record,'save','按当前选中规格独立纠正旧软毛特点；保留原始事实、AI响应及预算');journal.save(op);
-      for(const task of owners.filter(task=>task.items.some(row=>row.draftId===draft.id&&row.repair))){for(const row of task.items.filter(row=>row.draftId===draft.id)){
-        if(row.repair){row.repair.draftRevision=draft.revision;row.repair.draftStamp=imageWorkflowDraftStamp(draft);row.repair.remaining=clone(op.remaining);}
-      }task.revision++;task.updatedAt=draft.updatedAt;validateAutomaticListingTask(task);db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),task.id);}
+      taskResult.commit(draft,op.remaining);
       this.persistence.putRecord(record);
-      const after=clone(record);db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.selected-firmness-corrected','当前规格硬度本地纠正',JSON.stringify({version:1,operationId:op.id,proof,before,after,beforeSha256:createHash('sha256').update(JSON.stringify(before)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(after)).digest('hex')}),draft.updatedAt);
+      const after=clone(record);appendAuditEvent(db,randomUUID(),draft.productId,'listing.selected-firmness-corrected','当前规格硬度本地纠正',JSON.stringify({version:1,operationId:op.id,proof,before,after,beforeSha256:createHash('sha256').update(JSON.stringify(before)).digest('hex'),afterSha256:createHash('sha256').update(JSON.stringify(after)).digest('hex')}),draft.updatedAt);
       return clone(draft);
     });}finally{this.busy.delete(record.draft.id);}
   }
@@ -745,10 +748,7 @@ export class AmazonService {
       if(journal.list(draft.id).some(other=>other.id!==op.id&&!['DONE','RETIRED'].includes(other.state)))throw new UserFacingError('仍有未完成字段请求，未迁移品牌');
       const db=this.persistence.db;
       if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_extract(i.value,'$.submitStarted')=1").get(draft.id))throw new UserFacingError('已有提交意图，未迁移品牌');
-      const owners=db.prepare("SELECT t.id,t.record_json FROM automatic_listing_tasks t WHERE EXISTS(SELECT 1 FROM json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=?)").all(draft.id).map(saved=>validateAutomaticListingTask(JSON.parse(String(saved.record_json))));
-      for(const task of owners)for(const row of task.items.filter(row=>row.draftId===draft.id)){
-        if(task.targetId!==draft.targetId||task.sellerId!==draft.sellerId||task.marketplaceId!==draft.marketplaceId||task.mode!==draft.mode||row.productId!==draft.productId||row.productRevision!==draft.productRevision||row.variantId!==draft.variantId||row.sku!==draft.sku||!row.repair||row.repair.operationId!==op.id||row.repair.draftRevision!==draft.revision||row.repair.draftStamp!==imageWorkflowDraftStamp(draft)||!['FIELDS_PENDING','FIELDS_STARTED','RECHECK_PENDING'].includes(row.repair.phase))throw new UserFacingError('自动任务品牌迁移检查点不匹配，保留原记录');
-      }
+      const taskResult=automaticTaskResults.prepare(db,{kind:'fixed-brand',before:draft,operationId:op.id});
       const before=clone(record),variant=product.variants.find(v=>v.id===draft.variantId)!;
       const resolved=this.businessDefaults(product,variant,this.active(draft.targetId),draft.schema,draft.attributes,'haul',draft.businessRules,draft.salesPlan);
       if(!resolved.report?.fields.brand||!resolved.attributes.brand)throw new UserFacingError('固定品牌规则依据缺失');
@@ -765,9 +765,9 @@ export class AmazonService {
       draft.revision++;draft.previewedAt=null;record.preview=null;record.request=this.request(record);
       this.event(record,'save','独立本地固定品牌规则迁移为 Generic；保留主题权限、历史响应及次数');
       op.draftRevision=draft.revision;op.draftStamp=completionDraftStamp(draft);journal.save(op);
-      for(const task of owners){for(const row of task.items.filter(row=>row.draftId===draft.id)){row.repair!.draftRevision=draft.revision;row.repair!.draftStamp=imageWorkflowDraftStamp(draft);}task.revision++;task.updatedAt=draft.updatedAt;validateAutomaticListingTask(task);db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),task.id);}
+      taskResult.commit(draft);
       this.persistence.putRecord(record);
-      db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),draft.productId,'listing.fixed-brand-migrated','固定 Generic 独立本地迁移',JSON.stringify({version:1,operationId:op.id,before,after:clone(record)}),draft.updatedAt);
+      appendAuditEvent(db,randomUUID(),draft.productId,'listing.fixed-brand-migrated','固定 Generic 独立本地迁移',JSON.stringify({version:1,operationId:op.id,before,after:clone(record)}),draft.updatedAt);
       return clone(draft);
     });}finally{this.busy.delete(record.draft.id);}
   }
@@ -817,7 +817,7 @@ export class AmazonService {
         const record = this.checked(input); this.mutable(record); this.currentProduct(record); assertFresh();
         if (adoption.fromRevision !== record.draft.revision || adoption.toRevision !== record.draft.revision + 1) throw new UserFacingError('采纳修订不匹配');
         const feedback={preview:clone(record.draft.previewIssues),listing:clone(record.draft.listingIssues)};
-        if(preserveFeedback)this.persistence.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
+        if(preserveFeedback)appendAuditEvent(this.persistence.db,randomUUID(),record.draft.productId,'listing.local-field-recovery','原响应本地重评前的草稿与反馈留档',JSON.stringify({draftId:record.draft.id,sourceResultId:adoption.suggestionResultId,before:record}),new Date().toISOString());
         for(const field of PROGRAM_RELATION_FIELDS)if(adoption.fields.includes(field)||semanticJson(attributes[field]??null)!==semanticJson(record.draft.attributes[field]??null))throw new UserFacingError('关系字段由程序管理，不能采用 AI 候选');
         const supplied = attributesObject(attributes), cleanup=cleanHaulAttributes(record.draft.listingProgram,supplied), normalized=cleanup.attributes;
         const scopedOperation=new CompletionJournal(this.persistence.db).list(input.id).find(op=>op.scopedRepair&&op.rounds.some(round=>round.candidate.resultId===adoption.suggestionResultId));
@@ -932,16 +932,22 @@ export class AmazonService {
     if (confirmed !== true) throw new UserFacingError('正式提交需要原生确认对话框确认');
     const record = this.checked(input); this.enter(record.draft.id); let begun = false;
     const hash = listingHash(record.draft, record.draft.sku);
+    const assertSubmissionPricing=()=>{
+      const issue=pricingQualificationIssue(record.draft,readListingRules(this.persistence.db),this.now());if(!issue)return;
+      record.draft.state='BLOCKED';record.preview=null;record.draft.previewedAt=null;
+      record.draft.localIssues=[...record.draft.localIssues.filter(old=>old.code!==issue.code),localIssue(issue.code,issue.message)];this.persistence.putRecord(record);
+      throw new UserFacingError(issue.message);
+    };
     try {
       taskGuard?.(); this.mutable(record); assertListingProgram(record.draft.listingProgram, record.draft.schema, record.draft.attributes); const target = this.active(record.draft.targetId); this.currentProduct(record); this.requirePreview(record, target);
-      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
+      assertSubmissionPricing();
       const current = await this.getSchema({ ...record.draft.schema, forceRefresh: true });
       if (current.checksum !== record.draft.schema.checksum || current.version !== record.draft.schema.version || JSON.stringify(current.metaSchema) !== JSON.stringify(record.draft.schema.metaSchema)) {
         record.preview = null; record.draft.previewedAt = null; record.draft.state = 'BLOCKED'; record.draft.localIssues = [localIssue('SCHEMA_CHANGED', 'Amazon Schema 已变化，请建立新草稿并重新预览')]; this.persistence.putRecord(record);
         throw new UserFacingError('Amazon Schema 版本或校验和已变化，请建立新草稿并重新校验和预览');
       }
       taskGuard?.(); this.currentProduct(record); this.requirePreview(this.persistence.record(record.draft.id), target); this.active(target.id);
-      assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
+      assertSubmissionPricing();
       const declarationIssues=this.declarationIssues(record.draft);
       record.draft.localIssues = [...packageGraphIssues(record.draft,this.persistence.records().map(r=>r.draft)), ...listingProgramIssues(record.draft.listingProgram, current, record.draft.attributes), ...validateAttributes(current.schema, record.draft.attributes, current.metaSchema), ...imageIssues(record.draft.attributes), ...copyPolicyIssues(record.draft), ...declarationIssues];
       if(declarationIssues.length){

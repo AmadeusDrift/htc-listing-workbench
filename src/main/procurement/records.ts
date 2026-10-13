@@ -32,7 +32,7 @@ export function shipmentId(value: unknown): string {
   return result;
 }
 function validateLine(raw: unknown): ProcurementLine {
-  const v = record(raw, '备货行', ['id','draftId','productId','variantId','title','spec','sku','targetId','targetName','sellerId','marketplaceId','sourceUrl','sourceItemId','sourceSkuKey','sourceUrlBasis','imageAssetId','sourceImageUrl','sourcePurchasePrice','currency','asin','fnsku','checkedAt','purchaseQuantity','stockQuantity','purchasePrice','purchaseUnit','priceConfirmed','labelStatus','salesRecipe']);
+  const v = record(raw, '备货行', ['id','draftId','productId','variantId','title','spec','sku','targetId','targetName','sellerId','marketplaceId','sourceUrl','sourceItemId','sourceSkuKey','sourceUrlBasis','imageAssetId','sourceImageUrl','sourcePurchasePrice','currency','asin','fnsku','checkedAt','purchaseQuantity','stockQuantity','purchasePrice','purchaseUnit','priceConfirmed','labelStatus','salesRecipe','basis']);
   if (!['product','miaoshou','item-id','missing'].includes(String(v.sourceUrlBasis)) || !['CNY','unknown'].includes(String(v.currency)) || !ITEM_LABEL_STATUSES.includes(v.labelStatus as never) || typeof v.priceConfirmed !== 'boolean') throw new UserFacingError('备货行状态无效');
   const result: ProcurementLine = { id: identifier(v.id), draftId: identifier(v.draftId), productId: identifier(v.productId), variantId: identifier(v.variantId),
     title: text(v.title, '商品名称', 500, true), spec: text(v.spec, '规格', 2000), sku: text(v.sku, 'SKU', 100, true),
@@ -43,6 +43,11 @@ function validateLine(raw: unknown): ProcurementLine {
     purchaseQuantity: quantity(v.purchaseQuantity), stockQuantity: quantity(v.stockQuantity), purchasePrice: price(v.purchasePrice), purchaseUnit: text(v.purchaseUnit, '采购单位', 40), priceConfirmed: v.priceConfirmed, labelStatus: v.labelStatus as ProcurementLine['labelStatus'] };
   if (result.priceConfirmed && !result.purchasePrice) throw new UserFacingError('确认采购价前需要填写价格');
   if(v.salesRecipe!==undefined)result.salesRecipe=validateSalesRecipe(v.salesRecipe);
+  if(v.basis!==undefined){
+    const b=record(v.basis,'采购依据版本',['productRevision','sourceHash','recipeHash','observationHash']);
+    if(!Number.isSafeInteger(b.productRevision)||Number(b.productRevision)<1||!['sourceHash','recipeHash','observationHash'].every(key=>(key!=='sourceHash'&&b[key]===null)||typeof b[key]==='string'&&/^[a-f0-9]{64}$/.test(b[key] as string)))throw new UserFacingError('采购依据版本无效');
+    result.basis={productRevision:Number(b.productRevision),sourceHash:b.sourceHash as string,recipeHash:b.recipeHash as string|null,observationHash:b.observationHash as string|null};
+  }
   if ((result.sourceUrlBasis === 'missing') !== !result.sourceUrl) throw new UserFacingError('来源链接与依据不一致');
   return result;
 }

@@ -1,3 +1,6 @@
+import { ImageSlotProgress } from './ImageSlotProgress';
+import type { ProblemContext } from './navigation-context';
+import { ActualQuoteDetailsPanel } from './ActualQuoteDetailsPanel';
 import { ListingCorrectionPanel } from './ListingCorrectionPanel';
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, ClipboardCheck, Code2, FileCheck2, Layers3, RefreshCw, Save, Search, Send, ShieldCheck } from 'lucide-react';
@@ -13,6 +16,8 @@ import type { WorkflowStep } from './WorkflowRail';
 
 interface Props {
   initialDraftId?: string;
+  problemContext?: ProblemContext;
+  onReturnToSource?: () => void;
   workflowRequest: { step: WorkflowStep; token: number } | null;
   product: ProductDetail; targets: AmazonTarget[]; busy: boolean; run: TaskRunner;
   guarded: (action: () => void | Promise<unknown>) => void;
@@ -26,6 +31,7 @@ export function AmazonPanel(props: Props) {
   const [drafts, setDrafts] = useState<AmazonDraft[]>([]);
   const [draft, setDraft] = useState<AmazonDraft | null>(null);
   const [raw, setRaw] = useState('{}');
+  const [fieldLocation, setFieldLocation] = useState<{path: string; token: number}>();
   const [editorMode, setEditorMode] = useState<'fields' | 'json'>('fields');
   const [targetId, setTargetId] = useState('');
   const [variantId, setVariantId] = useState(product.variants[0]?.id ?? '');
@@ -87,7 +93,8 @@ export function AmazonPanel(props: Props) {
     void api.listAmazonDrafts(product.id).then(rows => {
       if (cancelled) return;
       setDrafts(rows);
-      const selected = rows.find(row => row.id === props.initialDraftId) ?? rows[0];
+      const selected = props.initialDraftId ? rows.find(row => row.id === props.initialDraftId) : rows[0];
+      if (props.initialDraftId && !selected) setNotice('目标草稿已不存在；未打开其他草稿。请返回来源页面刷新。');
       if (selected) actionsRef.current.accept(selected);
       else { setDraft(null); updateRaw('{}'); }
     }).catch(cause => { if (!cancelled) setNotice(errorText(cause)); }).finally(() => { if (!cancelled) setLoading(false); });
@@ -111,14 +118,18 @@ export function AmazonPanel(props: Props) {
   const supportsImages = draft && Object.keys(objectValue(displaySchema(draft.schema.schema, draft.schema.schema).properties)).some(key => /image/i.test(key));
 
   async function operate(action: 'validate' | 'preview' | 'readback') {
+    setNotice('');
     if (action !== 'readback' && !await save()) return;
     const current = latest.current.draft;
     if (!current) return;
     const reference = { id: current.id, revision: current.revision };
     const result = await run(action === 'validate' ? '正在校验类目字段…' : action === 'preview' ? '正在运行验证预览…' : '正在回读 Listing 状态…', () =>
       action === 'validate' ? api.validateAmazonDraft(reference) : action === 'preview' ? api.previewAmazonDraft(reference) : api.readAmazonListing(reference));
-    if (result) { accept(result); setNotice(''); }
+    if (result) { accept(result); setNotice(action === 'validate' ? result.localIssues.some(issue => issue.severity === 'ERROR') ? '重核仍有阻塞项，请按下方问题继续修改。任务未启动。' : '本地重核完成。可返回原页面核对任务，再由你明确点击继续任务并确认；本次没有启动任务。' : ''); }
     await props.onTargetsChanged();
+  }
+  function locateField(path: string) {
+    setEditorMode('fields'); setFieldLocation({ path, token: Date.now() }); setNotice('');
   }
   return <section className="amazon-workflow" data-workflow-step="fields" tabIndex={-1} aria-label="Amazon 上架工作区">
     <div className="section-heading"><div><h3>Amazon 上架</h3><p>按店铺、站点和 SKU 准备草稿，逐步确认上架结果。</p></div><span className={`mode-badge ${draft?.mode ?? selectedTarget?.mode ?? ''}`}>{draft?.mode === 'live' || (!draft && selectedTarget?.mode === 'live') ? '真实店铺' : '本地演示'}</span></div>
@@ -150,7 +161,8 @@ export function AmazonPanel(props: Props) {
       <p className="small-copy">此草稿：{draft.targetName} · {draft.marketplaceId} · 卖家 {draft.sellerId}</p>
       <p className="small-copy">商城：{draft.listingProgram==='haul'?'Haul 低价商城':'标准商城'} · 语言：{draft.schema.locale}</p>
       {!!draft.sourceMapping?.length&&<details className="listing-details"><summary>来源字段映射 · 已填 {draft.sourceMapping.filter(f=>f.status==='mapped').length} · 待补 {draft.sourceMapping.filter(f=>f.status==='needs_input').length} · 冲突 {draft.sourceMapping.filter(f=>f.status==='conflicting').length}</summary><p className="small-copy">待补中包含可选字段；是否必须填写以当前类目完整校验为准。来源单位不明或事实冲突时不会猜填。</p><div className="listing-mapping-rows">{draft.sourceMapping.map(f=><div className="listing-mapping-row" key={f.field}><code>{f.field}</code><span className={`status-badge ${f.status==='mapped'?'ready':f.status==='conflicting'?'blocked':f.status==='needs_input'?'warning':''}`}>{{mapped:'已填入',needs_input:'待补充',not_applicable:'不适用',conflicting:'有冲突'}[f.status]}</span><span>{f.reason}</span></div>)}</div></details>}
-      <ListingAiPanel draft={draft} disabled={disabled||sourceChanged||readOnlyDraft||!!draftTarget?.paused} dirty={dirty} run={run} onAdopt={accept}/>
+      {draft.id === props.initialDraftId && props.problemContext?.imageSlot !== undefined && <ImageSlotProgress key={`${draft.id}:${props.problemContext.imageSlot}`} draftId={draft.id} revision={String(draft.revision)} active={false} sku={draft.sku} focusSlot={props.problemContext.imageSlot} />}
+      <ActualQuoteDetailsPanel draftId={draft.id} revision={String(draft.revision)} unsaved={dirty}/><ListingAiPanel draft={draft} disabled={disabled||sourceChanged||readOnlyDraft||!!draftTarget?.paused} dirty={dirty} run={run} onAdopt={accept} onLocate={locateField}/>
       {supportsImages && <details className="listing-details image-comparison" open><summary>图片归属对照 · {product.assets.length} 张</summary><p className="small-copy">对照本地素材填写可公开访问的 HTTPS 图片地址。图片关联在“图片工作区”确认，不会按顺序自动分配给 SKU。</p>
         <div className="listing-image-grid">{product.assets.map(asset => <figure key={asset.id} className={asset.variantIds.includes(draft.variantId) ? 'sku-linked' : ''}><img src={asset.previewUrl} alt={asset.fileName} /><figcaption><strong>{asset.role === 'main' ? '商品主图' : asset.role === 'gallery' ? '商品附图' : '详情图'}</strong><span>{asset.fileName}</span><span>{asset.variantIds.includes(draft.variantId) ? `已关联本次 SKU ${draft.sku}` : asset.variantIds.length ? `已关联 ${asset.variantIds.length} 个其他 SKU` : '尚未关联 SKU'}</span></figcaption></figure>)}</div>
         {!product.assets.length && <p className="small-copy">尚未导入本地图片。</p>}
@@ -160,15 +172,16 @@ export function AmazonPanel(props: Props) {
       {draft.submittedAt && !lockedWrite && <p className="workflow-notice">此份草稿已提交，属性保留为提交时的记录。如需更新商品，请在上方建立新草稿并重新校验。</p>}
       {draftTarget?.paused && <div className="workflow-warning" role="alert"><AlertCircle size={17} /><span>目标店铺已暂停调用。请在设置中检查连接。</span></div>}
       <div className="draft-editor-heading"><h4>上架属性</h4><div className="segmented-control" aria-label="草稿编辑方式"><button type="button" disabled={disabled || !!parseError} aria-pressed={editorMode === 'fields'} onClick={() => setEditorMode('fields')}><FileCheck2 size={14} />字段表单</button><button type="button" disabled={disabled} aria-pressed={editorMode === 'json'} onClick={() => setEditorMode('json')}><Code2 size={14} />属性 JSON</button></div></div>
-      {editorMode === 'fields' && parsed ? <SchemaFields schema={draft.schema.schema} attributes={parsed} disabled={disabled || readOnlyDraft} onChange={value => updateRaw(JSON.stringify(value, null, 2))} /> : <label className="field"><span>Amazon attributes JSON</span><textarea className="json-editor" aria-label="Amazon attributes JSON" rows={16} spellCheck={false} disabled={disabled || readOnlyDraft} value={raw} onChange={event => updateRaw(event.target.value)} /></label>}
+      {editorMode === 'fields' && parsed ? <SchemaFields locate={fieldLocation} onLocateError={setNotice} schema={draft.schema.schema} attributes={parsed} disabled={disabled || readOnlyDraft} onChange={value => updateRaw(JSON.stringify(value, null, 2))} /> : <label className="field"><span>Amazon attributes JSON</span><textarea className="json-editor" aria-label="Amazon attributes JSON" rows={16} spellCheck={false} disabled={disabled || readOnlyDraft} value={raw} onChange={event => updateRaw(event.target.value)} /></label>}
       {parseError && <p className="workflow-warning" role="alert">{parseError}</p>}
+      {props.onReturnToSource && <div className="workflow-actions" aria-label="问题处理闭环"><button type="button" className="button primary" disabled={disabled || sourceChanged || !!parseError || readOnlyDraft} onClick={() => { void operate('validate'); }}>保存并重核</button><button type="button" className="button secondary" disabled={disabled} onClick={props.onReturnToSource}>返回原页面核对{props.problemContext?.taskId ? '并继续原任务' : '结果'}</button><p className="small-copy">重核仅检查本地 Schema，不代表平台接受或图片已通过。失败及结果未知时保留原记录与保护；返回不会自动启动任务。</p></div>}
       <div className="workflow-actions" data-workflow-step="validation" tabIndex={-1}><button type="button" className="button secondary" disabled={disabled || !dirty || !!parseError || readOnlyDraft} onClick={() => { void save(); }}><Save size={15} />保存上架草稿</button>
         <button type="button" className="button secondary" disabled={disabled || sourceChanged || !!parseError || readOnlyDraft} onClick={() => { void operate('validate'); }}><ClipboardCheck size={15} />本地 Schema 校验</button>
         <button type="button" className="button secondary" disabled={disabled || sourceChanged || !!parseError || readOnlyDraft || draftTarget?.paused} onClick={() => { void operate('preview'); }}><CheckCircle2 size={15} />{draft.mode === 'demo' ? '演示验证预览' : 'Amazon 验证预览'}</button>
       </div>
-      <IssueList title="本地校验" issues={draft.localIssues} demo={draft.mode === 'demo'} empty={draft.state !== 'DRAFT' ? '本地校验未发现阻塞项。' : ''} />
-      {(draft.previewedAt || draft.previewIssues.length > 0) && <IssueList title="验证预览" issues={draft.previewIssues} demo={draft.mode === 'demo'} empty={`预览未返回 ERROR · ${draft.previewedAt ? formatDate(draft.previewedAt) : ''}`} />}
-      {(draft.checkedAt || draft.listingIssues.length > 0) && <IssueList title="Listing 回读" issues={draft.listingIssues} demo={draft.mode === 'demo'} empty="本次回读未返回待处理问题。" />}
+      <IssueList onLocate={locateField} title="本地校验" issues={draft.localIssues} demo={draft.mode === 'demo'} empty={draft.state !== 'DRAFT' ? '本地校验未发现阻塞项。' : ''} />
+      {(draft.previewedAt || draft.previewIssues.length > 0) && <IssueList onLocate={locateField} title="验证预览" issues={draft.previewIssues} demo={draft.mode === 'demo'} empty={`预览未返回 ERROR · ${draft.previewedAt ? formatDate(draft.previewedAt) : ''}`} />}
+      {(draft.checkedAt || draft.listingIssues.length > 0) && <IssueList onLocate={locateField} title="Listing 回读" issues={draft.listingIssues} demo={draft.mode === 'demo'} empty="本次回读未返回待处理问题。" />}
       <div className="listing-publish" data-workflow-step="publish" tabIndex={-1}><div><h4>确认提交与状态回读</h4><p>{dirty ? '草稿有未保存的修改，保存后需要重新验证预览。' : '预览通过后，再确认店铺、站点和 SKU。提交接受后继续回读处理状态。'}</p></div><div className="workflow-actions"><button type="button" className="button primary" disabled={disabled || dirty || sourceChanged || draft.state !== 'AMAZON_VALIDATED' || draftTarget?.paused} onClick={() => { void run('正在确认并提交 Listing…', async () => { const value = await api.submitAmazonDraft({ id: draft.id, revision: draft.revision }); if (value) { accept(value); setNotice(''); } else setNotice('已取消提交，草稿保持不变。'); await props.onTargetsChanged(); }); }}><Send size={15} />{draft.mode === 'demo' ? '演示提交' : '确认正式提交'}</button><button type="button" data-workflow-step="readback" className="button secondary" disabled={disabled || dirty || (!draft.submittedAt && !lockedWrite) || draftTarget?.paused} onClick={() => { void operate('readback'); }}><RefreshCw size={15} />回读 Listing 状态</button></div></div>
       {draft.mode==='live'&&draft.schema.parentageLevel==='NONE'&&<ListingCorrectionPanel key={draft.id} draft={draft} busy={disabled||dirty||!!draftTarget?.paused} run={run} onDraft={accept} />}
       <details className="listing-details"><summary>查看将发送的商品属性</summary><pre>{JSON.stringify({ productType: draft.schema.productType, requirements: draft.schema.requirements, attributes: parsed ?? draft.attributes }, null, 2)}</pre></details>
@@ -177,7 +190,7 @@ export function AmazonPanel(props: Props) {
   </section>;
 }
 function InfoIcon() { return <ShieldCheck size={17} />; }
-function IssueList({ title, issues, demo, empty }: { title: string; issues: ListingIssue[]; demo: boolean; empty: string }) {
+export function IssueList({ title, issues, demo, empty, onLocate }: { onLocate: (path: string) => void; title: string; issues: ListingIssue[]; demo: boolean; empty: string }) {
   if (!issues.length && !empty) return null;
-  return <section className="listing-issues"><h4>{demo ? '演示 · ' : ''}{title} <span className="quiet-count">{issues.length}</span></h4>{issues.length ? <ul>{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={issue.severity.toLowerCase()}><AlertCircle size={17} /><div><strong>{issue.message}</strong><p>{issue.code} · {issue.attributeNames.join('、') || '商品整体'} · {issue.autoFixable ? '可按字段修改' : '需要核对或人工补充'}</p></div><span>{issue.severity}</span></li>)}</ul> : <p className="small-copy">{empty}</p>}</section>;
+  return <section className="listing-issues"><h4>{demo ? '演示 · ' : ''}{title} <span className="quiet-count">{issues.length}</span></h4>{issues.length ? <ul>{issues.map((issue, index) => <li key={`${issue.code}-${index}`} className={issue.severity.toLowerCase()}><AlertCircle size={17} /><div><strong>{issue.message}</strong><p>{issue.code} · {issue.attributeNames.length ? (issue.attributePaths?.length ? issue.attributePaths : issue.attributeNames).map(path => <button type="button" className="text-button" key={path} onClick={() => onLocate(path)}>定位 {path}</button>) : '商品整体'} · {issue.autoFixable ? '可按字段修改' : '需要核对或人工补充'}</p></div><span>{issue.severity}</span></li>)}</ul> : <p className="small-copy">{empty}</p>}</section>;
 }

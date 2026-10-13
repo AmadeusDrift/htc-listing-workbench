@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useFormGuard } from './FormGuard';
+import { useEffect, useRef, useState } from 'react';
 import { Calculator, SlidersHorizontal } from 'lucide-react';
 import { parseListingRules } from '../shared/listing-rules';
 import type { ListingRules, PricingRules, ProductRules } from '../shared/listing-rules';
@@ -12,18 +13,23 @@ function NumberField({ label, value, onChange, unit, step = 'any' }: { label: st
 export function ListingRulesSettings({ section, busy, run, targets }: { section: 'product' | 'pricing'; busy: boolean; run: TaskRunner; targets: AmazonTarget[] }) {
   const [rules, setRules] = useState<ListingRules | null>(null), [dirty, setDirty] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState('');
   const [shopCode, setShopCode] = useState(''), [manufacturer, setManufacturer] = useState('');
+  const savedRules = useRef<ListingRules | null>(null);
   const [sizes, setSizes] = useState('');
-  useEffect(() => { let current = true; void window.red.getListingRules().then(value => { if (current) { setRules(value); setSizes(value.pricing.bundleSizes.join(', ')); } }).catch(error => { if (current) setError(errorText(error)); }); return () => { current = false; }; }, []);
+  useEffect(() => { let current = true; void window.red.getListingRules().then(value => { if (current) { savedRules.current = value; setRules(value); setSizes(value.pricing.bundleSizes.join(', ')); } }).catch(error => { if (current) setError(errorText(error)); }); return () => { current = false; }; }, []);
   useEffect(() => { if (!dirty) return; const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; }; window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard); }, [dirty]);
   function product(change: Partial<ProductRules>) { setRules(value => value && ({ ...value, product: { ...value.product, ...change } })); setDirty(true); setNotice(''); }
   function pricing(change: Partial<PricingRules>) { setRules(value => value && ({ ...value, pricing: { ...value.pricing, ...change } })); setDirty(true); setNotice(''); }
   async function save() {
-    if (!rules) return;
+    if (!rules) return false;
+    if (shopCode || manufacturer) { setError('请先添加或清空正在填写的店铺规则，再保存。'); return false; }
+    let success = false;
     try {
       const next = parseListingRules({ ...rules, pricing: { ...rules.pricing, bundleSizes: sizes.split(/[,，\s]+/).filter(Boolean).map(Number) } });
-      await run('正在保存商品与定价规则…', async () => { const saved = await window.red.saveListingRules(next); setRules(saved); setDirty(false); setError(''); setNotice(`规则版本 ${saved.revision} 已保存。新准备的草稿会使用此设置。`); });
+      await run('正在保存商品与定价规则…', async () => { const saved = await window.red.saveListingRules(next); savedRules.current = saved; success = true; setRules(saved); setDirty(false); setError(''); setNotice(`规则版本 ${saved.revision} 已保存。新准备的草稿会使用此设置。`); });
     } catch (cause) { setError(errorText(cause)); }
+    return success;
   }
+  useFormGuard({ dirty: () => dirty || !!shopCode || !!manufacturer, save, discard: () => { const saved = savedRules.current; if (saved) { setRules(saved); setSizes(saved.pricing.bundleSizes.join(', ')); } setDirty(false); setShopCode(''); setManufacturer(''); setError(''); } });
   if (!rules) return <section className="settings-section"><p role="status">{error || '正在读取规则…'}</p></section>;
   const p = rules.product, r = rules.pricing;
   const amount = (key: keyof PricingRules, label: string, unit?: string) => <NumberField key={key} label={label} value={r[key] as number} unit={unit} onChange={value => pricing({ [key]: value })} />;

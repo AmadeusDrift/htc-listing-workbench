@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { transaction } from '../application/transaction.ts';
 import { sourceIdentity, saveSourceSnapshot, readSourceSnapshot } from './source-snapshots.ts';
 import { readSourceAdoption, adoptReceivedSource, adoptedSourceReceipt } from '../products/source-adoption.ts';
@@ -37,17 +38,20 @@ export function assertMiaoshouHistory(db: DatabaseSync): void {
       if (row && row.product_id !== receipt.productId) return fail();
     }
   }
+  if(db.prepare("SELECT 1 FROM sqlite_master WHERE name='source_snapshots' AND type='table'").get())for(const row of db.prepare('SELECT id FROM source_snapshots').iterate()){
+    const source=readSourceSnapshot(db,String(row.id));if(!source)return fail('STORAGE');assertMiaoshouFactHistory(db,source.receipt);
+  }
 }
 export function getReceipt(db: DatabaseSync, rawProductId: unknown): MiaoshouReceipt | null {
   const productId = uuid(rawProductId);
-  const adopted=adoptedSourceReceipt(db,productId);if(adopted)return adopted;
+  const adopted=adoptedSourceReceipt(db,productId);if(adopted)assertMiaoshouFactHistory(db,adopted);
   try {
     const rows = db.prepare("SELECT id,record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.productId')=?").all(productId);
-    if (!rows.length) return null; if (rows.length !== 1) return fail('STORAGE');
+    if (!rows.length) return adopted; if (rows.length !== 1) return fail('STORAGE');
     const receipt = validateMiaoshouReceipt(JSON.parse(String(rows[0].record_json)));
     if (rows[0].id !== receipt.id || receipt.productId !== productId) return fail('STORAGE');
     assertMiaoshouFactHistory(db, receipt);
-    return receipt;
+    return adopted??receipt;
   } catch (error) { if (error instanceof MiaoshouError) throw error; return fail('STORAGE'); }
 }
 function result(receipt: MiaoshouReceipt, duplicate: boolean): MiaoshouImportResult {
@@ -62,6 +66,7 @@ export function persistImport(db:DatabaseSync,_store:WorkspaceStore,snapshot:Mia
       .map(row=>validateMiaoshouReceipt(JSON.parse(String(row.record_json)))).filter(receipt=>sourceIdentity(receipt.snapshot,accountScope,mode)===identity);
     if(originals.length>1)return fail('STORAGE');
     const original=originals[0],productId=original?.productId??randomUUID();
+    if(original){assertMiaoshouFactHistory(db,original);const adopted=adoptedSourceReceipt(db,productId);if(adopted)assertMiaoshouFactHistory(db,adopted);}
     let prior=original?readSourceAdoption(db,productId):null;
     if(original&&!prior){assertMiaoshouFactHistory(db,original);prior=adoptReceivedSource(db,saveSourceSnapshot(db,original),null,true);}
     const known=original?db.prepare("SELECT id FROM source_snapshots WHERE json_extract(record_json,'$.receipt.fingerprint')=?").get(contentFingerprint):null;
@@ -76,7 +81,7 @@ export function persistImport(db:DatabaseSync,_store:WorkspaceStore,snapshot:Mia
     assertNewImport?.({facts,receipt});
     const source=saveSourceSnapshot(db,receipt),state=adoptReceivedSource(db,source,prior);
     if(!original)db.prepare('INSERT INTO miaoshou_receipts(id,record_json) VALUES(?,?)').run(receipt.id,json);
-    db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),productId,'miaoshou.imported',original?'已接收来源新版本；人工和已处理资料受保护':'从妙手接收商品',JSON.stringify({receiptId:receipt.id,sourceSnapshotId:source.id,adopted:state.adoptedSnapshotId===source.id,mode,remoteId:snapshot.remoteId,skuCount:snapshot.skus.length}),receivedAt);
+    appendAuditEvent(db,randomUUID(),productId,'miaoshou.imported',original?'已接收来源新版本；人工和已处理资料受保护':'从妙手接收商品',JSON.stringify({receiptId:receipt.id,sourceSnapshotId:source.id,adopted:state.adoptedSnapshotId===source.id,mode,remoteId:snapshot.remoteId,skuCount:snapshot.skus.length}),receivedAt);
     const output=result(receipt,!!original);
     if(state.adoptedSnapshotId!==source.id)output.warnings.push('来源新版本已保存，人工修改或已处理商品保持原版本；请核对后明确采用。');
     return output;

@@ -22,3 +22,16 @@ export function invalidImageOutput(stage: 'response'|'shape'|'encoding'|'raster'
   error.message = `生图${labels[stage]}阶段未通过校验，未保存候选图；生成结果未确认，不自动重发付费请求`;
   return error;
 }
+
+const object = (value:unknown):value is Record<string,unknown> => value!==null && typeof value==='object' && !Array.isArray(value);
+export function providerError(status: number, body: unknown): AiError {
+  const error = object(body) && object(body.error) ? body.error : {};
+  const code = typeof error.code === 'string' ? error.code : error.type;
+  const value=status===401?'AUTH_FAILED':status===403?'SERVICE_PERMISSION_REQUIRED':status===402||code==='insufficient_quota'||code==='billing_hard_limit_reached'?'QUOTA_EXCEEDED':status===429?'RATE_LIMITED':'PROVIDER_ERROR';
+  // Gateway/server failures can occur after the provider generated and charged for an image.
+  // Only explicit request rejections permit a new paid attempt; everything else needs reconciliation.
+  const definitive=[400,401,402,403,404,405,413,415,422,429].includes(status);
+  const safe=Object.assign(new AiError(value),{definitive,...(Number.isInteger(status)&&status>=400&&status<=599?{httpStatus:status}:{})});
+  safe.message+=`${'httpStatus' in safe?`（HTTP ${safe.httpStatus}）`:''}；${definitive?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}`;
+  return safe;
+}

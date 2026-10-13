@@ -1,3 +1,4 @@
+import { factsForVariant, hasFactScopeModel } from './fact-scopes.ts';
 import type { ProductDetail, Variant } from './contracts.ts';
 /** Supplier quote quantity is separate from the pieces in one sale package. */
 export interface SourceQuantity {
@@ -49,6 +50,9 @@ export function sourcePackCost(quotedCny: number, quantity: SourceQuantity): num
 }
 /** Selected SKU wording wins; unambiguous product packaging text is a fallback before 1 pc. */
 export function productSourceQuantity(product: ProductDetail, variant: Variant, detailText = ''): SourceQuantity {
+  const scoped=hasFactScopeModel(product);
+  product={...product,facts:factsForVariant(product,variant.id),...(scoped?{title:'',description:''}:{})};
+  if(scoped)detailText='';
   const spec=variant.normalizedSpec.trim()||variant.originalSpec;
   const quoteText=[variant.originalSpec,product.description,detailText,...product.facts.filter(f=>['source_confirmed','human_confirmed'].includes(f.state)&&/计价|报价|quote.?basis/iu.test(f.name)).map(f=>`${f.name}:${f.value}`)].join('\n');
   const primary=sourceQuantity(spec,product.title,quoteText);

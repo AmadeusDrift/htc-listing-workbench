@@ -1,3 +1,4 @@
+import { hasFactScopeModel } from '../../shared/fact-scopes.ts';
 import { PROGRAM_RELATION_FIELDS } from '../amazon/program-relations.ts';
 import { HAUL_UNSUPPORTED_FIELDS } from '../amazon/listing-program.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
@@ -25,7 +26,7 @@ function meaning(name: string): ListingEvidence['meaning'] {
   return 'general';
 }
 export function buildListingContext(draft: AmazonDraft, product: ProductDetail, targetGeneration: number, legacy=false): ListingAiContext {
-  const originalProduct=product;
+  const originalProduct=product,hasScopedFacts=hasFactScopeModel(product);
   product=projectSalesProduct(product,draft.salesPlan,draft.variantId);
   const variant = product.variants.find(v => v.id === draft.variantId);
   if (!variant || product.revision !== draft.productRevision || variant.sku !== draft.sku) throw new UserFacingError('来源商品或 SKU 已变化，请建立新草稿');
@@ -35,7 +36,7 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
     const evidence:ListingEvidence[]=product.facts.filter(f=>f.value.trim()).map(f=>({id:f.id,name:f.name,value:f.value,meaning:meaning(f.name),source:f.state==='human_confirmed'?'human_confirmed':f.state==='source_confirmed'?'source_confirmed':'raw_source'}));
     evidence.push({id:`${variant.id}:spec`,name:'Selected SKU specification',value:variant.normalizedSpec||variant.originalSpec||variant.sku,meaning:'general',source:'selected_sku'});
     evidence.push({id:`${variant.id}:title`,name:'Original product title',value:product.title||draft.schema.productType,meaning:'general',source:'selected_sku'});
-    return validateListingContext({contract:FULL_SCHEMA_CONTRACT,draftId:draft.id,draftRevision:draft.revision,productId:product.id,productRevision:product.revision,variantId:variant.id,sku:variant.sku,targetId:draft.targetId,targetGeneration,listingProgram:draft.listingProgram??'standard',productType:draft.schema.productType,marketplaceId:draft.marketplaceId,locale:draft.schema.locale,requirements:draft.schema.requirements,parentageLevel:draft.schema.parentageLevel,schemaChecksum:draft.schema.checksum,schemaVersion:draft.schema.version,schemaSha256:listingFingerprint({schema:draft.schema.schema,metaSchema:draft.schema.metaSchema}),policyVersion:AMAZON_COPY_POLICY_VERSION,fields,evidence,unverifiedSourceTitle:product.title,fullSchema:{schema:draft.schema.schema,metaSchema:draft.schema.metaSchema},currentAttributes:structuredClone(draft.attributes),businessValues:Object.fromEntries(Object.entries(draft.businessRules?.fields??{}).map(([field,entry])=>[field,entry.value])),sourceProduct:{variants:originalProduct.variants,...(draft.salesPlan?{salesRecipe:draft.salesPlan}:{}),title:originalProduct.title,description:originalProduct.description,facts:originalProduct.facts,selectedSku:variant,assets:originalProduct.assets}});
+    return validateListingContext({contract:FULL_SCHEMA_CONTRACT,draftId:draft.id,draftRevision:draft.revision,productId:product.id,productRevision:product.revision,variantId:variant.id,sku:variant.sku,targetId:draft.targetId,targetGeneration,listingProgram:draft.listingProgram??'standard',productType:draft.schema.productType,marketplaceId:draft.marketplaceId,locale:draft.schema.locale,requirements:draft.schema.requirements,parentageLevel:draft.schema.parentageLevel,schemaChecksum:draft.schema.checksum,schemaVersion:draft.schema.version,schemaSha256:listingFingerprint({schema:draft.schema.schema,metaSchema:draft.schema.metaSchema}),policyVersion:AMAZON_COPY_POLICY_VERSION,fields,evidence,unverifiedSourceTitle:product.title,fullSchema:{schema:draft.schema.schema,metaSchema:draft.schema.metaSchema},currentAttributes:structuredClone(draft.attributes),businessValues:Object.fromEntries(Object.entries(draft.businessRules?.fields??{}).map(([field,entry])=>[field,entry.value])),sourceProduct:{variants:hasScopedFacts?originalProduct.variants.filter(v=>v.id===variant.id):originalProduct.variants,...(draft.salesPlan?{salesRecipe:draft.salesPlan}:{}),title:originalProduct.title,description:originalProduct.description,facts:hasScopedFacts?product.facts:originalProduct.facts,selectedSku:variant,assets:hasScopedFacts?originalProduct.assets.filter(a=>!a.variantIds.length||a.variantIds.includes(variant.id)):originalProduct.assets}});
   }
   const requested=new Set([...draft.localIssues,...draft.previewIssues,...draft.listingIssues].filter(issue=>issue.severity==='ERROR').flatMap(issue=>issue.attributeNames));
   // Newly supported optional attributes must not invalidate already-paid image
@@ -58,11 +59,11 @@ export function buildListingContext(draft: AmazonDraft, product: ProductDetail, 
     evidence.push({id:`${variant.id}:${field}`,name:field==='age_range_description'?'适用人群':field,value:raw,meaning:'general',source:'selected_sku'});
   }
   // Product-level color, measurements and counts cannot disambiguate multiple SKUs.
-  if (product.variants.length > 1) for (let i = evidence.length - 1; i >= 0; i--) if (evidence[i].meaning === 'color' || /^(?:规格|商品规格|产品规格|规格型号)$/u.test(evidence[i].name.trim()) || skuDependentSourceFact(evidence[i].name)) evidence.splice(i, 1);
+  if (product.variants.length > 1) for (let i = evidence.length - 1; i >= 0; i--) if (product.facts.find(f=>f.id===evidence[i].id)?.scope===undefined && (evidence[i].meaning === 'color' || /^(?:规格|商品规格|产品规格|规格型号)$/u.test(evidence[i].name.trim()) || skuDependentSourceFact(evidence[i].name))) evidence.splice(i, 1);
   const selectedRoles=selectedSkuCategoryAttributes(variant),evidenceBlockers:NonNullable<ListingAiContext['evidenceBlockers']>=[];
   for(const fact of product.facts){
     if(fact.state!=='conflicting'||!fact.value.trim()||protectedAttribute(fact.name))continue;
-    if(product.variants.length>1&&(meaning(fact.name)==='color'||/^(?:规格|商品规格|产品规格|规格型号)$/u.test(fact.name.trim())||skuDependentSourceFact(fact.name)))continue;
+    if(product.variants.length>1&&fact.scope===undefined&&(meaning(fact.name)==='color'||/^(?:规格|商品规格|产品规格|规格型号)$/u.test(fact.name.trim())||skuDependentSourceFact(fact.name)))continue;
     const field=evidenceRole(fact.name,fact.value);if(!field)continue;
     if(Object.hasOwn(selectedRoles,field)){
       if(!evidence.some(e=>e.source==='selected_sku'&&evidenceRole(e.name,e.value)===field)){

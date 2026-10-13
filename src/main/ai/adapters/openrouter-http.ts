@@ -24,10 +24,13 @@ export function safeResponse(text:string,key:string):boolean{
 /** One POST only. Capture the received response before domain parsing, including late responses. */
 export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<string,unknown>,credentials:{apiKey:string},signal:AbortSignal,context:AdapterContext):Promise<any>{
   if(!['/api/v1/chat/completions','/api/alpha/decisions','/api/v1/images','/api/v1/batches'].includes(endpoint)||typeof credentials.apiKey!=='string'||!/^[\x21-\x7e]{8,4096}$/.test(credentials.apiKey))throw new AiError('INVALID_CONFIG');
-  throwIfAborted(signal);const serialized=JSON.stringify(body);context.beforeSend?.(serialized);
+  throwIfAborted(signal);
+  if(context.deferOpenRouter){const deferred=await context.deferOpenRouter(endpoint,body);if(deferred){context.onMetadata?.(openRouterMetadata(deferred.body));return deferred.body;}}
+  const serialized=JSON.stringify(body);context.beforeSend?.(serialized);
   let response:Response;
   try{response=await context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal});}
   catch{throwIfAborted(signal);throw new AiError('NETWORK_ERROR');}
+  const length=response.headers.get('content-length');if(length!==null&&(!/^\d+$/.test(length)||!Number.isSafeInteger(Number(length))||Number(length)>context.maxResponseBytes)){void response.body?.cancel().catch(()=>{});throw new AiError('OUTPUT_INVALID');}
   const reader=response.body?.getReader();if(!reader)throw new AiError('OUTPUT_INVALID');
   const captureSignal=AbortSignal.timeout(30_000),chunks:Uint8Array[]=[];let size=0;
   try{for(;;){const part=await abortable(reader.read(),captureSignal,()=>{void reader.cancel().catch(()=>{});});if(part.done)break;size+=part.value.length;if(size>context.maxResponseBytes)throw new AiError('OUTPUT_INVALID');chunks.push(part.value);}}

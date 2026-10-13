@@ -1,3 +1,4 @@
+import { writeProductFactModel } from './fact-models.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../../shared/errors.ts';
 import { readSourceSnapshot, saveSourceSnapshot } from '../miaoshou/source-snapshots.ts';
@@ -7,13 +8,14 @@ import { transaction } from '../application/transaction.ts';
 import { randomUUID } from 'node:crypto';
 import { assertRecordTable } from '../storage/record-table.ts';
 
-export interface SourceAdoption {version:1;id:string;identity:string;adoptedSnapshotId:string;latestSnapshotId:string;productRevision:number;frozen:boolean}
+export interface SourceAdoption {version:1;id:string;identity:string;adoptedSnapshotId:string;latestSnapshotId:string;productRevision:number;frozen:boolean;scopeModelVersion?:1}
 export function readSourceAdoption(db:DatabaseSync,productId:string):SourceAdoption|null {
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<23)return null;
   const row=db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(productId);if(!row)return null;
   const value=JSON.parse(String(row.record_json)) as SourceAdoption;
   if(value.version!==1||value.id!==productId||!Number.isSafeInteger(value.productRevision)||value.productRevision<1||typeof value.frozen!=='boolean'
-    ||Object.keys(value).sort().join()!=='adoptedSnapshotId,frozen,id,identity,latestSnapshotId,productRevision,version')throw new UserFacingError('商品来源采用记录无效');
+    ||value.scopeModelVersion!==undefined&&value.scopeModelVersion!==1
+    ||Object.keys(value).filter(key=>key!=='scopeModelVersion').sort().join()!=='adoptedSnapshotId,frozen,id,identity,latestSnapshotId,productRevision,version')throw new UserFacingError('商品来源采用记录无效');
   for(const id of [value.adoptedSnapshotId,value.latestSnapshotId]){const source=readSourceSnapshot(db,id);if(!source||source.receipt.productId!==productId||source.identity!==value.identity)throw new UserFacingError('商品来源采用版本不匹配');}
   return value;
 }
@@ -24,13 +26,13 @@ export function adoptReceivedSource(db:DatabaseSync,source:SourceSnapshot,prior:
   const productId=source.receipt.productId,product=db.prepare('SELECT revision FROM products WHERE id=?').get(productId);
   if(!prior){
     const revision=product?1:receiveSourceProduct(db,source.receipt,null);
-    const state:SourceAdoption={version:1,id:productId,identity:source.identity,adoptedSnapshotId:source.id,latestSnapshotId:source.id,productRevision:revision,frozen:legacy&&hasStarted(db,productId)};
+    const state:SourceAdoption={version:1,id:productId,identity:source.identity,adoptedSnapshotId:source.id,latestSnapshotId:source.id,productRevision:revision,frozen:legacy&&hasStarted(db,productId),...(!product?{scopeModelVersion:1 as const}:{})};
     save(db,state);return state;
   }
   if(prior.identity!==source.identity||!product)throw new UserFacingError('来源归属或主档已变化');
   const state={...prior,latestSnapshotId:source.id,frozen:prior.frozen||hasStarted(db,productId)};
   if(!state.frozen&&Number(product.revision)===prior.productRevision&&source.id!==prior.adoptedSnapshotId){
-    state.productRevision=receiveSourceProduct(db,source.receipt,prior.productRevision,appliedAt);state.adoptedSnapshotId=source.id;
+    state.productRevision=receiveSourceProduct(db,source.receipt,prior.productRevision,appliedAt);state.adoptedSnapshotId=source.id;state.scopeModelVersion=1;
   }
   save(db,state);return state;
 }
@@ -39,27 +41,43 @@ function hasStarted(db:DatabaseSync,productId:string):boolean{
     ||!!db.prepare('SELECT 1 FROM assets WHERE product_id=? LIMIT 1').get(productId)
     ||!!db.prepare("SELECT 1 FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.productId')=? LIMIT 1").get(productId);
 }
-export function freezeSourceForProduct(db:DatabaseSync,productId:string):void{
+function ensureSourceAdoption(db:DatabaseSync,productId:string):SourceAdoption|null{
   let prior=readSourceAdoption(db,productId);
   if(!prior){
     const receipts=db.prepare("SELECT record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.productId')=?").all(productId);
     if(receipts.length>1)throw new UserFacingError('来源回执归属不明确');
     if(receipts.length)prior=adoptReceivedSource(db,saveSourceSnapshot(db,JSON.parse(String(receipts[0].record_json))),null,true);
   }
+  return prior;
+}
+export function freezeSourceForProduct(db:DatabaseSync,productId:string):void{
+  const prior=ensureSourceAdoption(db,productId);
   if(prior&&!prior.frozen)save(db,{...prior,frozen:true});
 }
+/** First scope edit may precede any draft/task freeze. Join the caller's product-save transaction. */
+export function enterFactScopeModel(db:DatabaseSync,productId:string):void{
+  writeProductFactModel(db,productId);
+  const prior=readSourceAdoption(db,productId);
+  if(prior&&prior.scopeModelVersion!==1)save(db,{...prior,scopeModelVersion:1});
+}
+
 export function adoptedSourceReceipt(db:DatabaseSync,productId:string){
   const state=readSourceAdoption(db,productId);return state?readSourceSnapshot(db,state.adoptedSnapshotId)!.receipt:null;
 }
 export function previewSourceAdoption(db:DatabaseSync,productId:string){
   const state=readSourceAdoption(db,productId);if(!state)return null;
-  const product=db.prepare('SELECT revision,title,description FROM products WHERE id=?').get(productId);
+  // One SQLite statement binds every displayed current value to expectedRevision.
+  // Separate renderer product reads can otherwise show old facts with a new CAS token.
+  const product=db.prepare(`SELECT revision,title,description,
+    (SELECT json_group_array(json_object('id',id,'name',name,'value',value)) FROM (SELECT id,name,value FROM facts WHERE product_id=products.id ORDER BY position)) AS facts_json,
+    (SELECT json_group_array(json_object('id',id,'originalSpec',original_spec,'purchasePrice',purchase_price)) FROM (SELECT id,original_spec,purchase_price FROM variants WHERE product_id=products.id ORDER BY position)) AS variants_json
+    FROM products WHERE id=?`).get(productId);
   if(!product)throw new UserFacingError('来源主档不存在');
   const candidate=readSourceSnapshot(db,state.latestSnapshotId)!;
   return{productId,expectedRevision:Number(product.revision),snapshotId:candidate.id,source:candidate.receipt.snapshot,
     pending:state.latestSnapshotId!==state.adoptedSnapshotId,frozen:state.frozen||hasStarted(db,productId),
     requiresManualConfirmation:Number(product.revision)!==state.productRevision,
-    current:{title:String(product.title),description:String(product.description)}};
+    current:{title:String(product.title),description:String(product.description),facts:JSON.parse(String(product.facts_json)) as {id:string;name:string;value:string}[],variants:JSON.parse(String(product.variants_json)) as {id:string;originalSpec:string;purchasePrice:string}[]}};
 }
 /** Explicit replacement command, after preview. Never adopts into already processed drafts/tasks. */
 export function adoptSource(db:DatabaseSync,input:{productId:string;expectedRevision:number;snapshotId:string;confirmReplaceManual:boolean}):SourceAdoption{
@@ -71,12 +89,23 @@ export function adoptSource(db:DatabaseSync,input:{productId:string;expectedRevi
     if(!preview.pending)return state;
     const source=readSourceSnapshot(db,input.snapshotId)!;
     const before={product:db.prepare('SELECT * FROM products WHERE id=?').get(input.productId),variants:db.prepare('SELECT * FROM variants WHERE product_id=?').all(input.productId),facts:db.prepare('SELECT * FROM facts WHERE product_id=?').all(input.productId)};
-    const next={...state,adoptedSnapshotId:source.id,productRevision:receiveSourceProduct(db,source.receipt,input.expectedRevision,new Date().toISOString())};
+    const next={...state,scopeModelVersion:1 as const,adoptedSnapshotId:source.id,productRevision:receiveSourceProduct(db,source.receipt,input.expectedRevision,new Date().toISOString())};
     save(db,next);
     db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),input.productId,'product.source-adopted','明确采用来源版本；原人工资料保留于审计',JSON.stringify({before,snapshotId:source.id}),new Date().toISOString());
     return next;
   });
 }
+function assertFactScopeRecord(db:DatabaseSync,row:Record<string,unknown>):void{
+  const r=JSON.parse(String(row.record_json));
+  const fact=db.prepare('SELECT product_id FROM facts WHERE id=?').get(r.id);
+  const v1=r.version===1&&Object.keys(r).sort().join()==='id,productId,scope,source,sourceReceiptId,version'&&r.scope==='unknown'&&r.source==='source';
+  const keys=['version','id','productId','scope','variantId','source','productRevision','confirmedAt','sourceReceiptId'];
+  const v2=r.version===2&&Object.keys(r).every(k=>keys.includes(k))&&r.source==='manual'&&['common','variant','unknown'].includes(r.scope)&&Number.isSafeInteger(r.productRevision)&&r.productRevision>0&&typeof r.confirmedAt==='string'&&Number.isFinite(Date.parse(r.confirmedAt))
+    &&(r.scope==='variant'?typeof r.variantId==='string'&&!!db.prepare('SELECT 1 FROM variants WHERE id=? AND product_id=?').get(r.variantId,r.productId):r.variantId===undefined);
+  const product=db.prepare('SELECT revision FROM products WHERE id=?').get(r.productId);
+  if((!v1&&!v2)||r.id!==row.id||fact&&fact.product_id!==r.productId||v2&&(!fact||!product||r.productRevision>Number(product.revision))||r.sourceReceiptId!==undefined&&typeof r.sourceReceiptId!=='string')throw new UserFacingError('来源属性范围记录无效');
+}
+
 export function assertSourceAdoptionHistory(db:DatabaseSync):void{
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<23)return;
   for(const table of ['source_snapshots','product_source_adoptions','product_fact_scopes'])assertRecordTable(db,table);
@@ -86,9 +115,6 @@ export function assertSourceAdoptionHistory(db:DatabaseSync):void{
     if(!db.prepare('SELECT 1 FROM products WHERE id=?').get(id))throw new UserFacingError('来源采用主档缺失');
   }
   for(const row of db.prepare('SELECT id,record_json FROM product_fact_scopes').iterate()){
-    const r=JSON.parse(String(row.record_json));
-    const fact=db.prepare('SELECT product_id FROM facts WHERE id=?').get(r.id);
-    if(Object.keys(r).sort().join()!=='id,productId,scope,source,sourceReceiptId,version'||r.version!==1||r.id!==row.id||r.source!=='source'||r.scope!=='unknown'
-      ||fact&&fact.product_id!==r.productId)throw new UserFacingError('来源属性范围记录无效');
+    assertFactScopeRecord(db,row);
   }
 }

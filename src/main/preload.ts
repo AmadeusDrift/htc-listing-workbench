@@ -14,6 +14,9 @@ const api: RedApi = {
   previewSkuNaming: input => invoke('red:sku-naming:preview', input),
   startAutomaticListing: input => invoke('red:automatic-listing:start', input),
   listAutomaticListingTasks: () => invoke('red:automatic-listing:list'),
+  getAutomaticBatchSummary:id=>invoke('red:automatic-listing:batch-summary',id),
+  setAutomaticExecutionMode:input=>invoke('red:automatic-listing:execution-mode',input),
+  getAutomaticBatchPlan:()=>invoke('red:automatic-listing:batch-plan'),
   getAutomaticListingQueue: input => invoke('red:automatic-listing:queue',input),
   previewAutomaticListingAdaptation: id => invoke('red:automatic-listing:adaptation-preview',id),
   applyAutomaticListingAdaptation: input => invoke('red:automatic-listing:adaptation-apply',input),
@@ -42,6 +45,8 @@ const api: RedApi = {
   cancelImageGeneration: () => invoke('red:image-generation:cancel'),
   getImageRiskSettings:()=>invoke('red:image-risk:settings'),
   saveImageRiskSettings:input=>invoke('red:image-risk:save',input),
+  getAppearanceReviewSettings:()=>invoke('red:appearance-review:settings'),
+  saveAppearanceReviewSettings:input=>invoke('red:appearance-review:save',input),
   getCopyReviewSettings:()=>invoke('red:copy-review:settings'),
   saveCopyReviewSettings:input=>invoke('red:copy-review:save',input),
   approveUnknownImageRetry:input=>invoke('red:automatic-product:unknown-retry',input),
@@ -101,6 +106,11 @@ const api: RedApi = {
   prepareCollectionConnection: () => invoke('red:collection:prepare'),
   openCollectionConnectionFolder: () => invoke('red:collection:open-directory'),
   getCollectionReceipt: productId => invoke('red:collection:receipt', productId),
+  onUnsavedCloseRequested: listener => {
+    const handler = () => listener();
+    ipcRenderer.on('red:unsaved-close-requested', handler);
+    return () => { ipcRenderer.removeListener('red:unsaved-close-requested', handler); };
+  },
   onCollectionReceived: listener => {
     if (typeof listener !== 'function') throw new Error('采集事件监听器无效');
     const handler = (_event: Electron.IpcRendererEvent, result: CollectionReceiveResult) => listener(result);
@@ -183,6 +193,8 @@ const api: RedApi = {
   listAudit: productId => invoke('red:audit:list', productId),
   getSettings: () => invoke('red:settings:get'),
   openDataFolder: () => invoke('red:settings:open-directory'),
+  previewRetention: input => invoke('red:backup:retention-preview', input),
+  applyRetention: input => invoke('red:backup:retention-apply', input),
   copyBackupPassphrase: input => invoke('red:backup:copy-passphrase', input),
   createWorkspaceBackup: input => invoke('red:backup:create', input),
   restoreWorkspaceBackup: input => invoke('red:backup:restore', input),
@@ -196,6 +208,7 @@ const api: RedApi = {
   disconnectAmazonTarget: id => invoke('red:amazon:disconnect', id),
   searchAmazonProductTypes: input => invoke('red:amazon:types', input),
   getAmazonSchema: input => invoke('red:amazon:schema', input),
+  getActualQuoteDetails:id=>invoke('red:amazon:actual-quote',id),
   listAmazonDrafts: id => invoke('red:amazon:drafts', id),
   createAmazonDraft: input => invoke('red:amazon:draft-create', input),
   prepareAmazonDrafts: input => invoke('red:amazon:drafts-prepare', input),

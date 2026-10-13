@@ -25,7 +25,7 @@ export function installItemLabelIpc(directory: string, services: LabelServices, 
     return labels.list({ ...(input.batchId === undefined ? {} : { batchId: identifier(input.batchId) }), ...(input.jobId === undefined ? {} : { jobId: identifier(input.jobId) }) });
   });
   handle('red:item-labels:get', 1, id => labels.get(identifier(id)));
-  handle('red:item-labels:prepare', 1, id => labels.prepareBatch(identifier(id), { format: labelSettings.get() }));
+  handle('red:item-labels:prepare', 1, id => labels.prepareVerifiedBatch(identifier(id), { format: labelSettings.get() }));
   handle('red:item-labels:retry', 1, id => labels.retry(identifier(id)));
   handle('red:item-labels:open', 1, async raw => {
     const input = record(raw, '打开标签', ['id','fileIndex']);

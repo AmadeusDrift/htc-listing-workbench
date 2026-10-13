@@ -15,7 +15,7 @@ test('candidate assembly copies fresh runtime, excludes historical docs/maps and
   await api.assembleCandidate({ snapshot: source, runtime, output, pkg: { name: 'synthetic', version: '1.0.0', main: 'dist-electron/main.cjs' }, notices: 'candidate-notices', source: { commit: 'a'.repeat(40) }, build: {} });
   assert.equal(await readFile(join(output, 'HTC.exe'), 'utf8'), 'fresh-runtime');
   assert.equal(await readFile(join(source, 'THIRD_PARTY_NOTICES.txt'), 'utf8'), 'tracked-original');
-  for (const path of ['docs/private-history.md', 'resources/app/dist-electron/main.cjs.map', 'resources/app/dist-native/Program.g.cs']) await assert.rejects(readFile(join(output, path)), /ENOENT/);
+  for (const path of ['docs/private-history.md', 'resources/app/dist-electron/main.cjs.map', 'resources/app/dist-native/Program.g.cs','resources/app/dist-native/HTC.CollectionHost.exe','采集插件/manifest.json']) await assert.rejects(readFile(join(output, path)), /ENOENT/);
   const manifest = JSON.parse(await readFile(join(output, '版本与摘要.json'), 'utf8'));
   assert.ok(manifest.files.some((f: any) => f.path === 'locales/en.pak'));
   assert.ok(!manifest.files.some((f: any) => f.path === '版本与摘要.json'));

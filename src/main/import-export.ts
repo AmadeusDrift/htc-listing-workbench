@@ -1,3 +1,4 @@
+import { hasFactScopeModel } from '../shared/fact-scopes.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import type { ProductDetail } from '../shared/contracts.ts';
 import type { ImportedProduct } from './store.ts';
@@ -48,8 +49,9 @@ function fromCsv(contents: string): unknown[] {
   });
   return [...groups.values()];
 }
-function normalizeProduct(raw: unknown): ImportedProduct {
-  const p = record(raw, '导入商品', ['title', 'sourceUrl', 'description', 'status', 'variants', 'facts']);
+function normalizeProduct(raw: unknown, explicitModel=false): ImportedProduct {
+  const p = record(raw, '导入商品', ['title', 'sourceUrl', 'description', 'status', 'variants', 'facts', 'factScopeModelVersion']);
+  if(p.factScopeModelVersion!==undefined&&p.factScopeModelVersion!==1)throw new UserFacingError('事实模型版本无效');
   if (!Array.isArray(p.variants) || p.variants.length > 200) throw new UserFacingError('导入商品需要 variants 数组，每件最多 200 个 SKU');
   if (p.facts !== undefined && !Array.isArray(p.facts)) throw new UserFacingError('facts 必须为数组');
   const variants = p.variants.map(rawVariant => {
@@ -57,31 +59,34 @@ function normalizeProduct(raw: unknown): ImportedProduct {
     return { id: randomUUID(), sku: v.sku, originalSpec: v.originalSpec ?? '', normalizedSpec: v.normalizedSpec ?? '', purchasePrice: v.purchasePrice ?? '', inventory: v.inventory ?? null };
   });
   const facts = ((p.facts as unknown[]) || []).map(rawFact => {
-    const f = record(rawFact, '导入事实', ['name', 'value', 'source', 'sourceRef', 'state']);
-    return { ...f, id: randomUUID(), source: f.source ?? 'import', sourceRef: f.sourceRef ?? '', state: f.state ?? 'source_confirmed' };
+    const f = record(rawFact, '导入事实', ['name', 'value', 'source', 'sourceRef', 'state', 'scope', 'variantSku']);
+    const {variantSku,...fact}=f;
+    const variant=f.scope==='variant'?variants.find(v=>v.sku===variantSku):undefined;
+    if(f.scope==='variant'&&!variant||f.scope!=='variant'&&variantSku!==undefined)throw new UserFacingError('导入事实的适用 SKU 无效');
+    return { ...fact, ...(variant?{variantId:variant.id}:{}), id: randomUUID(), source: f.source ?? 'import', sourceRef: f.sourceRef ?? '', state: f.state ?? 'source_confirmed' };
   });
   const { id: _id, revision: _revision, ...result } = parseSaveProduct({ id: randomUUID(), revision: 1, title: p.title, sourceUrl: p.sourceUrl ?? '', description: p.description ?? '',
     status: p.status ?? 'draft', variants, facts });
-  return result;
+  return {...result,...(explicitModel||p.factScopeModelVersion===1||hasFactScopeModel(result)?{factScopeModelVersion:1 as const}:{})};
 }
 export function parseImport(contents: string, format: string): ImportedProduct[] {
   if (Buffer.byteLength(contents, 'utf8') > 5 * 1024 * 1024) throw new UserFacingError('导入文件不能超过 5 MB');
-  const clean = contents.replace(/^\uFEFF/, ''); let raw: unknown[];
+  const clean = contents.replace(/^\uFEFF/, ''); let raw: unknown[],explicitModel=false;
   if (format === 'csv') raw = fromCsv(clean);
   else if (format === 'json') {
     let parsed: unknown; try { parsed = JSON.parse(clean); } catch { throw new UserFacingError('JSON 格式不正确，请检查文件'); }
     const document = record(parsed, 'JSON 导入文件', ['format', 'version', 'products']);
-    if (document.format !== 'red-product-data' || document.version !== 1 || !Array.isArray(document.products)) throw new UserFacingError('导入文件格式或版本不支持，请使用 HTC v1 商品资料格式');
-    raw = document.products;
+    if (document.format !== 'red-product-data' || (document.version !== 1 && document.version !== 2) || !Array.isArray(document.products)) throw new UserFacingError('导入文件格式或版本不支持，请使用 HTC 商品资料格式 v1 或 v2');
+    raw = document.products;explicitModel=document.version===2;
   } else throw new UserFacingError('仅支持 JSON 或 CSV 商品资料文件');
   if (!raw.length || raw.length > 100) throw new UserFacingError('每次导入 1 至 100 件商品');
-  const products = raw.map(normalizeProduct), skus = products.flatMap(p => p.variants.map(v => v.sku.toLowerCase()));
+  const products = raw.map(p=>normalizeProduct(p,explicitModel)), skus = products.flatMap(p => p.variants.map(v => v.sku.toLowerCase()));
   if (new Set(skus).size !== skus.length) throw new UserFacingError('导入文件中的 SKU 不能重复');
   return products;
 }
 export function exportProductData(product: ProductDetail): unknown {
-  return { format: 'red-product-data', version: 1, products: [{ title: product.title, sourceUrl: product.sourceUrl, description: product.description, status: product.status,
+  return { format: 'red-product-data', version: hasFactScopeModel(product)?2:1, products: [{ ...(hasFactScopeModel(product)?{factScopeModelVersion:1}:{}), title: product.title, sourceUrl: product.sourceUrl, description: product.description, status: product.status,
     variants: product.variants.map(({ sku, originalSpec, normalizedSpec, purchasePrice, inventory }) => ({ sku, originalSpec, normalizedSpec, purchasePrice, inventory })),
-    facts: product.facts.map(({ name, value, source, sourceRef, state }) => ({ name, value, source, sourceRef, state })),
+    facts: product.facts.map(({ name, value, source, sourceRef, state, scope, variantId }) => ({ name, value, source, sourceRef, state, ...(scope?{scope}:{}), ...(scope==='variant'?{variantSku:product.variants.find(v=>v.id===variantId)?.sku}:{}) })),
   }] };
 }

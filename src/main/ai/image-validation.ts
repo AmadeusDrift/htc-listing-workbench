@@ -1,3 +1,5 @@
+import { factsForVariant } from '../../shared/fact-scopes.ts';
+import {imageRenderDomains,observationRenderingText} from '../image-workflow/render-domains.ts';
 import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
 import { assertStoredImageEvidence, assertStoredListingReview } from '../listing-ai/stored-evidence.ts';
 import type { AiResult } from '../../shared/ai-contracts.ts';
@@ -49,7 +51,7 @@ function validateIpSource(raw:unknown):ImageRiskSourceSnapshot {
 }
 export function imageRiskSourceSnapshot(product:ProductDetail,variantId:string):ImageRiskSourceSnapshot {
   const variant=product.variants.find(variant=>variant.id===variantId); if(!variant)throw new AiError('SOURCE_CHANGED');
-  return validateIpSource({description:product.description,originalSpec:variant.originalSpec,sourceSpec:variant.sourceSpec,normalizedSpec:variant.normalizedSpec,facts:product.facts.map(({id,name,value,source,state})=>({id,name,value,source,state}))});
+  return validateIpSource({description:product.description,originalSpec:variant.originalSpec,sourceSpec:variant.sourceSpec,normalizedSpec:variant.normalizedSpec,facts:factsForVariant(product,variantId).map(({id,name,value,source,state})=>({id,name,value,source,state}))});
 }
 export function validateProductImageContext(raw: unknown,options:ImageEvidenceOptions={}): ProductImageContext {
   const value = keys(raw, ['listing','currentListingCopy','listingReviewResultId','referenceAssets','purpose','policyVersion'], ['ipSource','sourceVariantIds','slot','setPolicy','setPlan','referenceMeasurements','sourceMeasurements','copyReviewBypass']);
@@ -395,7 +397,8 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
   if(context.slot||context.setPolicy){
     const evidence=imageEvidence(evidenceContext);
     assertImagePromptMeasurements(plan.prompt,{evidence});
-    assertImageMeasurements([imageObservationText(plan.productUnderstanding?.summary??''),...(plan.productUnderstanding?.uncertainties??[]).map(imageObservationText),...plan.expectedText.map(line=>line.text)].join('\n'),{evidence});
+    // Observations/uncertainties are not render requirements or measured facts.
+    assertImageMeasurements(plan.expectedText.map(line=>line.text).join('\n'),{evidence});
   }
   for (const line of plan.expectedText) assertTextEvidence(line.text, line.evidenceIds, evidenceContext,options);
 }
@@ -427,7 +430,7 @@ function imageObservationText(text:string):string {
   return text.replace(sentence,'$1 Excluded packaging measurements must not be used as product dimensions or rendered in the image');
 }
 function imagePromptText(plan:ImagePlanOutput):string{
-  return `Selected SKU visual observations (not verified specifications):\n${imageObservationText(plan.productUnderstanding?.summary??'')}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.map(imageObservationText).join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${plan.prompt}${plan.cameraFocalLength?`\n\nPhotography only — camera focal length: ${cameraFocalLength(plan.cameraFocalLength)}. This describes the taking camera, never product dimensions or visible text.`:""}`;
+  return `Selected SKU visual observations (not verified specifications):\n${observationRenderingText(imageObservationText(plan.productUnderstanding?.summary??''))}\n\nUncertainties to preserve; never invent missing facts:\n${plan.productUnderstanding?.uncertainties.map(value=>observationRenderingText(imageObservationText(value))).join('\n') || 'None reported.'}\n\nUse the attached original reference images in the supplied order. Preserve the actual product and follow these image instructions:\n${imageRenderDomains(plan).renderRequirements.prompt}${plan.cameraFocalLength?`\n\nPhotography only — camera focal length: ${cameraFocalLength(plan.cameraFocalLength)}. This describes the taking camera, never product dimensions or visible text.`:""}`;
 }
 const normalizeText = (value: string): string => value.normalize('NFKC').toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 export function assertImageTextReview(review: ImageTextReviewOutput, context: ProductImageContext, plan: AiResult, ocr: AiResult, candidate: CandidateImageIdentity,options:ImageEvidenceOptions={}): void {

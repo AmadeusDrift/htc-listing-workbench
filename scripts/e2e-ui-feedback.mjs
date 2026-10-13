@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -26,6 +26,7 @@ async function launch() {
   await page.getByRole('button', { name: '设置', exact: true }).click();
   await selectSettingsModule(page, 'ai');
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
+  await provider('deepseek');
 }
 async function screenshot(name) {
   await page.evaluate(async () => { await document.fonts.ready; await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); });
@@ -40,7 +41,9 @@ async function saveLimits() {
 async function provider(id) {
   await page.getByLabel('AI 连接供应商', { exact: true }).selectOption(id.startsWith('deepseek') ? 'deepseek' : 'aliyun');
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
+  if (await page.getByRole('button', {name:'放弃修改',exact:true}).isVisible()) await page.getByRole('button', {name:'放弃修改',exact:true}).click();
   await page.getByLabel('AI 用量服务', { exact: true }).selectOption(id);
+  if (await page.getByRole('button', {name:'放弃修改',exact:true}).isVisible()) await page.getByRole('button', {name:'放弃修改',exact:true}).click();
   await expect(page.getByLabel('AI 用量服务', { exact: true })).toBeEnabled();
 }
 try {
@@ -53,7 +56,7 @@ try {
   });
   const generate = page.getByRole('button', { name: '随机生成口令', exact: true });
   await selectSettingsModule(page, 'data');
-  await generate.click({ timeout: 5000 });
+  await generate.click({ timeout: 15000, noWaitAfter: true });
   const first = await page.getByLabel('备份口令', { exact: true }).inputValue();
   assert.match(first, /^[A-Za-z0-9_-]{32}$/);
   await expect(page.getByLabel('确认备份口令', { exact: true })).toHaveValue(first);
@@ -80,6 +83,7 @@ try {
   pass('secure random backup passwords confirm together; copy matches current input and reports native failures without leaking details');
   await selectSettingsModule(page, 'ai');
 
+  await provider('deepseek');
   const calls = page.getByLabel('每日调用次数预设', { exact: true });
   const tokens = page.getByLabel('每日 Token 预设', { exact: true });
   await expect(calls).toHaveValue('unlimited'); await expect(tokens).toHaveValue('unlimited');

@@ -1,3 +1,4 @@
+import { sourceMeasurementSnapshot } from '../products/public.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ConfirmedMeasurements, MeasurementSet } from '../amazon/field-mapping.ts';
 import { getReceipt } from './persistence.ts';
@@ -9,7 +10,7 @@ export function miaoshouMeasurementsForVariant(db: DatabaseSync, productId: stri
   if (!receipt || targetMode === 'live' && receipt.mode === 'demo') return {};
   const sourceKey = receipt.skuMappings.find(row => row.localVariantId === variantId)?.sourceKey;
   if (!sourceKey) return {};
-  const row = analyzeMiaoshouMeasurements(receipt.snapshot, receipt.mapping).skus.find(row => row.sourceKey === sourceKey);
+  const row = analyzeMiaoshouMeasurements(sourceMeasurementSnapshot(db,receipt,variantId), receipt.mapping).skus.find(row => row.sourceKey === sourceKey);
   const result: ConfirmedMeasurements = {};
   for (const scope of ['item', 'package'] as const) {
     const group: MeasurementSet = {};

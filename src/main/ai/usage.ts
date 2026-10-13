@@ -46,8 +46,8 @@ function saveRecord(db: DatabaseSync, record: AiUsageRecord): void { const parse
 function add(a: number, b: number): number { return integer(a + b, 0, Number.MAX_SAFE_INTEGER); }
 /** Text UTF-8 bytes + 1024 tokens per vision image + 512 framing + max_tokens. Base64 is transport, not text. */
 export function requestTokenReservation(id: Exclude<AiProviderId,'openrouter'|'openrouter-review'>,body:string|Buffer):number;
-export function requestTokenReservation(id:AiProviderId,body:string|Buffer):number|null;
-export function requestTokenReservation(id: AiProviderId, body: string | Buffer): number|null {
+export function requestTokenReservation(id:AiProviderId,body:string|Buffer,hostedImages?:ReadonlySet<string>):number|null;
+export function requestTokenReservation(id: AiProviderId, body: string | Buffer, hostedImages:ReadonlySet<string>=new Set()): number|null {
   if (!isChatProvider(id)) return 0;
   if (typeof body !== 'string') throw new AiError('INVALID_CONFIG');
   const parsed = JSON.parse(body) as { model?:string;questions?:unknown;state?:unknown;max_tokens?: unknown; thinking?: {type?:string}; messages?: {content?: unknown}[] };
@@ -69,7 +69,7 @@ export function requestTokenReservation(id: AiProviderId, body: string | Buffer)
   let imageTokens = 0;
   for (const message of parsed.messages ?? []) if (Array.isArray(message.content)) {
     for (const part of message.content) if (part.type === 'image_url') {
-      if (typeof part.image_url?.url !== 'string' || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(part.image_url.url)) throw new AiError('INVALID_CONFIG');
+      if (typeof part.image_url?.url !== 'string' || (!/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(part.image_url.url)&&!(openrouter&&hostedImages.has(part.image_url.url)))) throw new AiError('INVALID_CONFIG');
       // DeepSeek's documented per-image upper bound, independent of base64 transfer size.
       imageTokens = add(imageTokens,1024); part.image_url.url = '[image]';
     }
@@ -122,12 +122,23 @@ export class AiUsageLedger {
     });
   }
   /** Batch transport keeps its own request history until domain parsing creates a result. */
-  reserveBatch(rawCall:AiCall,body:string):void{
-    const call=validateAiCall(rawCall);transaction(this.db,()=>this.reserveBudget(call,body));
+  reserveBatch(rawCall:AiCall,body:string,references:readonly import('../../shared/ai-batch-contracts.ts').BatchReference[]=[]):void{
+    const call=validateAiCall(rawCall);transaction(this.db,()=>this.reserveBudget(call,body,new Set(references.map(reference=>reference.url))));
   }
-  private reserveBudget(call:AiCall,body:string|Buffer):void{
+  /** Consume the already reserved Batch call identity; never creates another ledger entry. */
+  attachBatch(rawCall:AiCall,body:string|Buffer,recordSend?:(call:AiCall)=>void):AiCall {
+    const call=validateAiCall(rawCall);
+    return transaction(this.db,()=>{
+      const ledger=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);
+      if(!ledger||!body.length)throw new AiError('INVALID_CONFIG');
+      const reserved=validateAiUsageRecord(JSON.parse(String(ledger.record_json)));if(reserved.providerId!==call.providerId)throw new AiError('INVALID_CONFIG');
+      call.startedAt=reserved.startedAt;
+      this.db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(call.id,JSON.stringify(call));recordSend?.(call);return call;
+    });
+  }
+  private reserveBudget(call:AiCall,body:string|Buffer,hostedImages:ReadonlySet<string>=new Set()):void{
       if(this.db.prepare('SELECT 1 FROM ai_usage_ledger WHERE id=?').get(call.id))throw new AiError('INVALID_CONFIG');
-      const reservation=requestTokenReservation(call.providerId,body);
+      const reservation=requestTokenReservation(call.providerId,body,hostedImages);
       const summary = this.summary(call.providerId, call.startedAt), policy = summary.policy;
       if ((policy.dailyCallLimit !== null && summary.attempts >= policy.dailyCallLimit)
         || (policy.dailyTokenLimit !== null && (summary.usedTokens === null || reservation===null || summary.usedTokens + reservation > policy.dailyTokenLimit))) throw new AiError('QUOTA_EXCEEDED');

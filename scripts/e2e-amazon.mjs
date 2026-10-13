@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -142,7 +142,7 @@ try {
   await selectSettingsModule(page, 'data');
   await page.getByLabel('备份口令', { exact: true }).fill('E2E backup passphrase 2026'); await page.getByLabel('确认备份口令', { exact: true }).fill('E2E backup passphrase 2026');
   await button('创建加密备份'); await expect(page.getByText(/已备份 2 件商品/)).toBeVisible();
-  const backupBytes = await readFile(backupFile); assert.ok(backupBytes.subarray(0, 12).toString().startsWith('HTC-BACKUP-1')); assert.equal(backupBytes.includes(Buffer.from(product.title)), false);
+  const backupBytes = await readFile(backupFile); assert.ok(backupBytes.subarray(0, 12).toString().startsWith('HTC-BACKUP-2')); assert.equal(backupBytes.includes(Buffer.from(product.title)), false);
   await chooseOpen(backupFile); await page.getByLabel('备份口令', { exact: true }).fill('incorrect passphrase 2026'); await button('从备份恢复');
   await expect(page.getByRole('alert')).toContainText('口令不正确'); await button('关闭错误提示');
   await page.getByLabel('备份口令', { exact: true }).fill('E2E backup passphrase 2026'); await confirm(0); await button('从备份恢复');

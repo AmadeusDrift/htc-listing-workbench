@@ -1,0 +1,9 @@
+import { useState } from 'react';
+import type { RetentionPreview } from '../shared/backup-contracts';
+import { errorText } from './utils';
+export function RetentionSettings({busy}:{busy:boolean}){
+ const [plan,setPlan]=useState<RetentionPreview|null>(null),[pending,setPending]=useState(false),[notice,setNotice]=useState(''),[error,setError]=useState('');
+ async function preview(){if(busy||pending)return;setPending(true);setPlan(null);setNotice('');setError('');try{setPlan(await window.red.previewRetention({mode:'manual'}));}catch(cause){setError(errorText(cause));}finally{setPending(false);}}
+ async function apply(){if(!plan||busy||pending)return;setPending(true);setError('');const current=plan;setPlan(null);try{const result=await window.red.applyRetention({planId:current.planId,revision:current.revision});setNotice(`已删除 ${result.removed} 个文件；新增引用保护 ${result.protected} 个；内容变化跳过 ${result.changed} 个。再次清理请重新预览。`);}catch(cause){setError(errorText(cause));}finally{setPending(false);}}
+ return <section className="settings-section" aria-label="引用感知素材清理"><h3>引用感知素材清理</h3><p className="settings-help">当前没有自动清理。只有确认预览后才删除未被引用的候选素材。</p><p className="settings-help">范围仅限本地未引用的托管素材文件；商品身份、费用、收据、采购及标签记录不在本次清理范围。执行时重新检查引用与文件指纹，预览不删除文件。</p><button className="button secondary" disabled={busy||pending} onClick={()=>void preview()}>预览素材清理</button>{plan&&<div><p>候选 {plan.candidates.length} 个文件 · {plan.candidates.reduce((n,c)=>n+c.byteSize,0)} bytes · 已保护 {plan.protected} 个</p><ul>{plan.candidates.map(c=><li key={c.path}><code>{c.path}</code> · {c.byteSize} bytes</li>)}</ul><button className="button secondary" disabled={busy||pending||!plan.candidates.length} onClick={()=>void apply()}>确认执行此清理预览</button><button className="button secondary" disabled={pending} onClick={()=>setPlan(null)}>取消清理预览</button></div>}{notice&&<p role="status">{notice}</p>}{error&&<p role="alert">{error}</p>}</section>;
+}

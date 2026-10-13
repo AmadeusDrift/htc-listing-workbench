@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -53,7 +53,7 @@ async function screenshot(name) {
 }
 async function validateVisibleSamples(selector) {
   await expect(page.locator(selector)).toHaveCount(2);
-  await expect(page.locator(`${selector} .sample-tag`)).toHaveText(['本地示例', '本地示例']);
+  for (const row of await page.locator(selector).all()) await expect(row).toContainText('本地示例');
   await expect.poll(() => page.locator(`${selector} .workspace-thumb img, ${selector} .inbox-source-image img`).evaluateAll(images => images.length === 2 && images.every(image => image.complete && image.naturalWidth > 0))).toBe(true);
 }
 async function layout(name) {
@@ -107,7 +107,7 @@ try {
   await validateVisibleSamples('.automatic-product');
   await expect(page.getByRole('button', { name: '载入本地示例', exact: true })).toBeEnabled();
   await expect(page.getByRole('button', { name: '启动并自动发布', exact: true })).toBeDisabled();
-  await expect(page.getByRole('region', { name: '全局自动化连接', exact: true })).toContainText('请先完成全局连接配置');
+  await expect(page.getByLabel('全局自动化连接', { exact: true })).toContainText('连接尚未就绪');
   const automatic = await snapshot(), automaticIds = automatic.products.filter(product => !inboxIds.includes(product.id)).map(product => product.id);
   assert.equal(automaticIds.length, 2);
   assert.deepEqual(automatic.products.filter(product => inboxIds.includes(product.id)), inbox.products);

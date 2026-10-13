@@ -4,6 +4,7 @@ import type { ReasoningEffort,AiPurposeSnapshot } from '../../shared/ai-purpose-
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
+  deferOpenRouter?:(endpoint:string,body:Record<string,unknown>)=>Promise<{body:any}|null>;
   gateway?:'openrouter'|'deepseek';
   effectiveEffort?:ReasoningEffort;
   purposeSnapshot?:AiPurposeSnapshot;

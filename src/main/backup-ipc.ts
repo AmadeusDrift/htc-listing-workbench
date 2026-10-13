@@ -1,3 +1,6 @@
+import {referencePinRetentionOwner} from './hosting/reference-history.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { ReferenceRetention, type RetentionPlan } from './reference-retention.ts';
 import { clipboard, dialog } from 'electron';
 import type { BrowserWindow } from 'electron';
 import { mkdir } from 'node:fs/promises';
@@ -17,10 +20,27 @@ function passphrase(raw: unknown): string {
 interface BackupHooks {
   beginRestore(): () => void;
   performRestore(prepared: PreparedRestore): Promise<void>;
-  beforeBackup(): void;
+  beginBackup(): () => void;
   audit(action: string, summary: string, detail?: unknown): void;
 }
 export function installBackupIpc(window: BrowserWindow, directory: string, handle: IpcHandler, hooks: BackupHooks): void {
+  const retentionPlans = new Map<string, RetentionPlan>();
+  handle('red:backup:retention-preview', 1, async raw => {
+    const input = record(raw, '清理预览', ['mode']);
+    if (input.mode !== 'manual' && input.mode !== 'automatic') throw new UserFacingError('清理预览模式无效');
+    const db = new DatabaseSync(join(directory, 'red.sqlite'), { readOnly: true });
+    try { return await new ReferenceRetention(db, directory, [referencePinRetentionOwner], retentionPlans).preview({ mode: input.mode }); } finally { db.close(); }
+  });
+  handle('red:backup:retention-apply', 1, async raw => {
+    const input = record(raw, '执行清理', ['planId', 'revision']);
+    if (typeof input.planId !== 'string' || typeof input.revision !== 'string') throw new UserFacingError('清理预览无效');
+    const release = hooks.beginBackup(); let db: DatabaseSync | undefined;
+    try {
+      db = new DatabaseSync(join(directory, 'red.sqlite'));
+      const result = await new ReferenceRetention(db, directory, [referencePinRetentionOwner], retentionPlans).apply({ planId: input.planId, revision: input.revision });
+      hooks.audit('workspace.retention.applied', '执行引用感知素材清理', result); return result;
+    } finally { db?.close(); release(); }
+  });
   handle('red:backup:copy-passphrase', 1, async raw => {
     const password = passphrase(raw);
     try {
@@ -33,10 +53,12 @@ export function installBackupIpc(window: BrowserWindow, directory: string, handl
     const backupFolder = join(directory, 'backups'); await mkdir(backupFolder, { recursive: true });
     const result = await dialog.showSaveDialog(window, { title: '保存加密工作区备份（使用新文件名）', defaultPath: join(backupFolder, `HTC-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}.htcbackup`), filters: [{ name: 'HTC 加密备份', extensions: ['htcbackup'] }] });
     if (result.canceled || !result.filePath) return { cancelled: true };
-    hooks.beforeBackup();
-    const info = await createWorkspaceBackup(directory, result.filePath, password);
-    hooks.audit('workspace.backup.created', '创建加密工作区备份', { createdAt: info.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: info.expiresAt });
-    return { cancelled: false, path: result.filePath, ...info };
+    const release = hooks.beginBackup();
+    try {
+      const info = await createWorkspaceBackup(directory, result.filePath, password);
+      hooks.audit('workspace.backup.created', '创建加密工作区备份', { createdAt: info.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: info.expiresAt });
+      return { cancelled: false, path: result.filePath, ...info };
+    } finally { release(); }
   });
   handle('red:backup:restore', 1, async raw => {
     const password = passphrase(raw), release = hooks.beginRestore();

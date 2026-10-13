@@ -185,6 +185,7 @@ export class ImageGenerationService {
       if (assertWorkflowFresh) await abortable(Promise.resolve().then(assertWorkflowFresh), signal);
       throwIfAborted(signal); this.assertProduct(input, assets); this.assertConfig(config);
       const request = { apiKey: config.apiKey, prompt: input.prompt, size: input.size, quality: input.quality, background: input.background, references };
+      this.store.freezeSourceVersion(input.productId,input.productRevision);
       stage='request';enteredAdapter=true;
       const result = config.provider === 'tyai' ? await (isGeminiImageModel(config.model) ? this.gemini : this.relay).generate({ ...request, model: config.model as TyaiImageModel }, signal)
         : await this.adapter.generate({ ...request, model: config.model as OpenAiImageModel }, signal);

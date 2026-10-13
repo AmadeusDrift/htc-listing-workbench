@@ -9,6 +9,8 @@ import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts'
 import { assertProductConsistency,sourceConsistencyUnknown,SourceConsistencyError } from '../source-image-consistency/proof.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { pricingQualificationIssue } from '../pricing/qualification.ts';
+import { freezeSourceForProduct } from '../products/source-adoption.ts';
+import { transaction } from '../application/transaction.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
 import { CompletionJournal, completionSafetyIdentity } from '../listing-ai/completion-journal.ts';
 import { randomUUID } from 'node:crypto';
@@ -424,7 +426,8 @@ export class AutomaticListingService {
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
     for(const row of items)if(row.stage==='PLAN')row.outcome={version:1,kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED',message:row.error!,classifiedAt:now,scope:outcomeScope(task,row),draftId:null,draftRevision:null};
-    this.save(task); this.tasks.set(task.id, task); return structuredClone(task);
+    transaction(this.db,()=>{for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);});
+    this.tasks.set(task.id, task); return structuredClone(task);
   }
   prepareStart(id: string): AutomaticListingTask {
     const task = this.task(id);

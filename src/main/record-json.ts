@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../shared/errors.ts';
 
 const tables = ['source_consistency_attempts','source_consistency_assessments','source_consistency_decisions','source_consistency_bindings','source_image_provenance', 'listing_completion_operations', 'automatic_listing_tasks', 'item_labels', 'shipment_documents', 'image_workflow_runs', 'listing_followups', 'category_libraries', 'procurement_batches', 'hosting_profiles', 'hosting_uploads', 'execution_tasks', 'ai_profiles', 'ai_calls', 'ai_results',
+  'source_snapshots','product_source_adoptions','product_fact_scopes',
   'image_versions', 'image_selections', 'content_versions', 'image_write_operations', 'ai_usage_policies', 'ai_usage_ledger', 'collection_receipts', 'collection_captures', 'miaoshou_receipts', 'miaoshou_sync_runs', 'miaoshou_sync_items'];
 
 /** SQL JSON selectors take the first duplicate key, while JSON.parse takes the last.

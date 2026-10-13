@@ -122,8 +122,9 @@ test('imports are atomic, explicit, duplicate-safe and preserve manual changes',
     env.store.saveProduct({ id: product.id, revision: product.revision, title: '人工改过', sourceUrl: product.sourceUrl, description: product.description, status: product.status,
       facts: product.facts, variants: product.variants.map(({ sourceSpec: _s, sourcePurchasePrice: _p, ...v }) => v) });
     const again = env.service.importProduct({ previewId: preview.previewId, mapping }); assert.equal(again.productId, product.id); assert.equal(again.duplicate, true); assert.equal(env.store.getProduct(product.id).title, '人工改过');
-    const next = env.service.importProduct({ previewId: preview.previewId, mapping: mappingFor(preview.product) }); assert.notEqual(next.productId, product.id);
-    const unmapped = env.store.getProduct(next.productId); assert.ok(unmapped.variants.every(v => /待核对/.test(v.originalSpec))); assert.ok(next.warnings.some(w => /规格/.test(w)));
+    const next = env.service.importProduct({ previewId: preview.previewId, mapping: mappingFor(preview.product) }); assert.equal(next.productId, product.id);
+    const retained = env.store.getProduct(next.productId); assert.equal(retained.title,'人工改过'); assert.deepEqual(retained.variants,product.variants); assert.ok(next.warnings.some(w => /规格/.test(w)));
+    assert.equal(env.service.previewSourceAdoption(product.id)?.requiresManualConfirmation,true);
     const db = openDatabase(env.directory); try { assert.doesNotThrow(() => assertMiaoshouHistory(db)); } finally { db.close(); }
   } finally { await env.dispose(); }
 });
@@ -221,7 +222,7 @@ test('preview cache expires, bounds memory and keeps the trusted snapshot separa
   } finally { await env.dispose(); }
 });
 
-test('semantic map order and capture time do not duplicate an import; changed source data does', async () => {
+test('semantic map order and capture time do not duplicate an import; changed source creates a version on the same untouched master', async () => {
   let raw = detailFixture(), date = at;
   const env = setup({ now: () => date, fetch: (async () => response(raw)) as typeof fetch });
   try {
@@ -232,8 +233,8 @@ test('semantic map order and capture time do not duplicate an import; changed so
     date = new Date(at.getTime() + 1000); const b = await env.service.previewProduct({ id: '90071992547409931' }); const reordered = mappingFor(b.product, true); reordered.skus.reverse();
     const again = env.service.importProduct({ previewId: b.previewId, mapping: reordered }); assert.equal(again.duplicate, true); assert.equal(again.productId, first.productId);
     raw = detailFixture(); raw.data.editCommonCollectBoxDetail.title = '来源名称改变'; const c = await env.service.previewProduct({ id: '90071992547409931' });
-    const changed = env.service.importProduct({ previewId: c.previewId, mapping: mappingFor(c.product, true) }); assert.notEqual(changed.productId, first.productId);
-    assert.equal(env.store.getProduct(first.productId).title, a.product.title);
+    const changed = env.service.importProduct({ previewId: c.previewId, mapping: mappingFor(c.product, true) }); assert.equal(changed.productId, first.productId);
+    assert.equal(env.store.getProduct(first.productId).title, c.product.title);
   } finally { await env.dispose(); }
 });
 

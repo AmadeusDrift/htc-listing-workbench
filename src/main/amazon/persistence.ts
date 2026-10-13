@@ -1,5 +1,6 @@
 import { retireCompletionDrafts } from '../listing-ai/completion-journal.ts';
 import { transaction } from '../application/transaction.ts';
+import { freezeSourceForProduct } from '../products/source-adoption.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonCallEvent, AmazonDataPolicy, AmazonDraft, AmazonSchema, AmazonTarget, CleanupResult, JsonObject } from '../../shared/amazon-contracts.ts';
 import { openDatabase } from '../database.ts';
@@ -54,6 +55,7 @@ export class AmazonPersistence {
   putRecord(record: DraftRecord): void {
     const persist = () => {
     const d = record.draft;
+    freezeSourceForProduct(this.db,d.productId);
     this.db.prepare(`INSERT INTO listing_drafts(id,product_id,target_id,request_json,schema_checksum,validation_json,preview_json,state,created_at,record_json,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET request_json=excluded.request_json,schema_checksum=excluded.schema_checksum,validation_json=excluded.validation_json,
       preview_json=excluded.preview_json,state=excluded.state,record_json=excluded.record_json,updated_at=excluded.updated_at`).run(d.id, d.productId, d.targetId, JSON.stringify(record.request), d.schema.checksum, JSON.stringify(d.localIssues), record.previewResponse ? JSON.stringify(record.previewResponse) : null, d.state, d.createdAt, JSON.stringify(record), d.updatedAt);

@@ -1,5 +1,6 @@
 import { CONSISTENCY_SCHEMA, assertConsistencyHistory } from './source-image-consistency/history.ts';
 import { migrateModules, MODULE_SCHEMA_VERSION } from './storage/migrations.ts';
+import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
 import { assertSourceImageHistory } from './source-image-provenance.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { DatabaseSync } from 'node:sqlite';
@@ -252,6 +253,6 @@ export function openDatabase(directory: string): DatabaseSync {
     id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES listing_drafts(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL, exchange_json TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS amazon_exchanges_draft ON amazon_exchanges(draft_id,created_at);`);
-  try { migrateModules(db); } catch(error) { db.close();throw error; }
+  try { migrateModules(db);assertSourceAdoptionHistory(db); } catch(error) { db.close();throw error; }
   return db;
 }

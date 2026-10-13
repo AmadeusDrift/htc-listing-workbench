@@ -1,5 +1,6 @@
 import { readNativeImageReceipt } from './source-images.ts';
 import { transaction } from './application/transaction.ts';
+import { freezeSourceForProduct } from './products/public.ts';
 import { restoreWorkflowSourceBindings } from './image-upstream-trace.ts';
 import { recordConsistencyBinding,assertConsistencyHistory } from './source-image-consistency/history.ts';
 import { assertProductConsistency } from './source-image-consistency/proof.ts';
@@ -30,6 +31,9 @@ export class WorkspaceStore {
   private directory:string;
   constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);try{assertSourceImageHistory(this.db,directory);assertConsistencyHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
   close(): void { this.db.close(); }
+  freezeSourceVersion(productId:string,revision:number):void{
+    this.transaction(()=>{this.assertRevision({productId,revision});freezeSourceForProduct(this.db,productId);});
+  }
   assertSourceConsistency(productId:string,variantIds:string[]):void { assertProductConsistency(this.db,this.getProduct(productId),variantIds); }
 
   private transaction<T>(operation: () => T): T {

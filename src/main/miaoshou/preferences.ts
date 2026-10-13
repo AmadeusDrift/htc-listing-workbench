@@ -22,7 +22,7 @@ export class MiaoshouPreferenceStore {
   }
   async get(): Promise<MiaoshouPreferences> {
     await this.pending;
-    try { const size = await this.check(); return size && size <= 1024 ? parse(JSON.parse(await readFile(this.path, 'utf8'))) : { autoSyncOnInbox: false }; }
+    try { const size = await this.check(); if(size===null)return {autoSyncOnInbox:true}; return size && size <= 1024 ? parse(JSON.parse(await readFile(this.path, 'utf8'))) : { autoSyncOnInbox: false }; }
     catch { return { autoSyncOnInbox: false }; }
   }
   async save(raw: unknown): Promise<MiaoshouPreferences> {

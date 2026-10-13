@@ -17,6 +17,8 @@ export function installMiaoshouIpc(service: MiaoshouService, images: MiaoshouIma
   handle('red:miaoshou:inbox-summaries', 1, input => service.inboxSummaries(input));
   handle('red:miaoshou:image-preview', 1, input => images.preview(input));
   handle('red:miaoshou:source-update', 1, id => service.getSourceUpdate(id));
+  handle('red:miaoshou:source-adoption-preview',1,id=>service.previewSourceAdoption(id));
+  handle('red:miaoshou:source-adopt',1,input=>service.adoptSource(input));
   handle('red:miaoshou:config-save', 1, raw => service.importConfig(raw));
   handle('red:miaoshou:config-template', 0, () => dialogs.saveTemplate(JSON.stringify(MIAOSHOU_CONFIG_TEMPLATE, null, 2) + '\n'));
   handle('red:miaoshou:config-import', 0, async () => {

@@ -44,7 +44,8 @@ export class TaskBatchRuntime {
    if(batchFingerprint(staged.operation)!==batchFingerprint(op))throw new UserFacingError('待建Batch请求快照已变化，未改为普通请求');
    this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);
   }
-  if(scope?.mode!=='deferred_batch'||this.service.previewPlan([op]).ordinary.length)return null;
+  if(scope?.mode!=='deferred_batch'||op.purpose.gateway!=='openrouter'||!op.purpose.capability.batch||op.purpose.capability.endpoint==='decisions')return null;
+  const unsupported=this.service.previewPlan([op]).ordinary[0];if(unsupported)throw new UserFacingError(unsupported.reason);
   this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);
  }
  async flush(taskId:string):Promise<void>{

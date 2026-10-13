@@ -128,6 +128,9 @@ function managedBackupFile(root: string, path: string): string {
   if (/^documents\/(?:item-labels\/[a-f0-9-]{36}\/[1-9]\d{0,2}|shipments\/[a-f0-9-]{36})\.pdf$/.test(path)) return resolve(root, path);
   return managedAssetPath(root, path);
 }
+function includeCandidateFiles(info:{assetPaths:Set<string>;artifactChecks:Map<string,{sha256:string;byteSize:number}>},files:BackupFile[]):void{
+  for(const file of files){const prior=info.artifactChecks.get(file.path);if(prior&&(prior.sha256!==file.sha256||prior.byteSize!==file.byteSize))throw new UserFacingError('参考图pin与图片候选版本不一致');info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
+}
 function passphraseCheck(value: string): void {
   if (typeof value !== 'string' || value.length < 12 || value.length > 256) throw new UserFacingError('备份口令需要 12–256 个字符');
 }
@@ -450,7 +453,7 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
     checkDatabase(snapshot); disconnectSnapshot(snapshot);
     const info = checkDatabase(snapshot);
-    for(const file of await candidateBackupFiles(root)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
+    includeCandidateFiles(info,await candidateBackupFiles(root));
     const files: BackupFile[] = [{ path: 'red.sqlite', ...await hashBackupFile(snapshot), role: 'workspace-database' }];
     for (const path of info.assetPaths) {
       const file = managedBackupFile(root, path), actual = await hashBackupFile(file), expected = info.artifactChecks.get(path);
@@ -538,7 +541,7 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
     guard.assertTree();
     if (value.source.databaseVersion > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
     const snapshot = join(staging, 'red.sqlite'), info = checkDatabase(snapshot), found = new Set<string>();
-    for(const file of await candidateBackupFiles(staging)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
+    includeCandidateFiles(info,await candidateBackupFiles(staging));
     for (const file of value.files.slice(1)) {
       if (!info.assetPaths.has(file.path) || found.has(file.path)) throw new UserFacingError('备份素材清单不匹配或包含重复路径');
       const expected = info.artifactChecks.get(file.path);
@@ -596,7 +599,7 @@ export async function recoverInterruptedRestore(directory: string): Promise<'rol
 }
 
 async function verifyRestoreArtifacts(directory: string, info: ReturnType<typeof checkDatabase>, prepared: PreparedRestore, guard: RestorePathGuard, names?: readonly string[]): Promise<void> {
-  for(const file of await candidateBackupFiles(directory)){info.assetPaths.add(file.path);info.artifactChecks.set(file.path,file);}
+  includeCandidateFiles(info,await candidateBackupFiles(directory));
   const authenticated = new Map(prepared.artifacts?.map(file => [file.path, file]));
   const verifyTree = () => { if (names) { for (const name of names) if (existsSync(join(directory, name))) guard.assertTree(join(directory, name)); } else guard.assertTree(); };
   verifyTree();

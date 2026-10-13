@@ -1,3 +1,4 @@
+import {createBatchReferencePort} from './hosting/batch-references.ts';
 import { assertConsistencyView } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { app, BrowserWindow, dialog, nativeTheme, net, protocol, safeStorage, session } from 'electron';
@@ -65,6 +66,7 @@ let execution: ExecutionService | undefined;
 let ai: AiService | undefined;
 let images: ImageVersionService | undefined;
 let imageGeneration: ImageGenerationService | undefined;
+let batchReferences:ReturnType<typeof createBatchReferencePort>|undefined;
 let imageWorkflow: ImageWorkflowService | undefined;
 let automatic: AutomaticListingService | undefined;
 let labels: ItemLabelService | undefined;
@@ -94,7 +96,8 @@ async function start() {
     downloadDependencies: { nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) },
   });
   const generationService = imageGeneration;
-  ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability() });
+  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>net.fetch(url,{...init,bypassCustomProtocolHandlers:true})})});
+  ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
@@ -252,7 +255,7 @@ async function start() {
     await miaoshou?.close(); miaoshou = undefined;
     await collection?.close(); collection = undefined;
     await images?.close(); images = undefined; content?.close(); content = undefined;
-    await ai?.close(); ai = undefined; await imageGeneration?.close(); imageGeneration = undefined;
+    await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined;
     await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined;
     amazon?.close(); amazon = undefined; store?.close(); store = undefined;
     try {
@@ -306,7 +309,7 @@ else {
       await automatic?.close(); automatic = undefined;
       skuNaming?.close(); skuNaming = undefined;
       await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
-      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
+      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
       finally {
         await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
         try { await snapshotWorkspaceDatabase(dataRoot); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }

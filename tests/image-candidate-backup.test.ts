@@ -42,3 +42,8 @@ test('restoring an older backup retains newer candidate pins and never shortens 
  const restored=openDatabase(f.target);try{assert.deepEqual(referencePinHistory(restored),[pin]);assert.equal(referencePinRetentionOwner.protects(restored,pin.originalPath,new Date(now.getTime()+10*86400_000)),true);}finally{restored.close();}
  assert.deepEqual((await readCandidateFiles(f.target,id)).bytes,png);
 });
+
+test('a pin cannot authenticate candidate bytes belonging to another hash',async t=>{
+ const f=fixture(t),id=candidate(f.source),now=new Date(),hash='a'.repeat(64),pin={id:randomUUID(),version:1,operationId:randomUUID(),purpose:'candidate-review',state:'READY',url:`https://images.example.test/references/${hash}.png`,createdAt:now.toISOString(),retainedUntil:new Date(now.getTime()+72*3600_000).toISOString(),releasedAt:null,attempts:1,assetId:id,sha256:hash,sourceKind:'candidate',sourceVersion:`candidate:${id}`,originalPath:`image-generation/candidates/${id}/image.png`,byteSize:png.length,mimeType:'image/png'};
+ const db=openDatabase(f.source);db.prepare('INSERT INTO image_reference_pins VALUES(?,?)').run(pin.id,JSON.stringify(pin));db.close();await assert.rejects(()=>createWorkspaceBackup(f.source,f.file,f.pass),/版本不一致/);
+});

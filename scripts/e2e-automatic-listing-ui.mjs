@@ -1,4 +1,4 @@
-import { _electron as electron } from 'playwright';
+import { electron } from './e2e-core-runtime.mjs';
 import { expect } from '@playwright/test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -34,6 +34,9 @@ const label = { id:'label-1',batchId:'batch-1',lineId:'line-1',draftId:'draft-1'
 const state = window.fixture = { calls:[], tasks:[], products:[product], labels:[label,{...label,id:'label-old',version:1,current:false,status:'STALE',quantity:3,files:[{index:0,relativePath:'old.pdf'}]}], profiles, format:label.format, consent:true, documents:[], polls:0 };
 const record = (name,input) => { state.calls.push({name,input:copy(input)}); };
 window.red = {
+ getActualQuoteDetails:async id=>({draftId:id,sku:'FIXTURE',draftRevision:1,sourceRevision:1,ruleRevision:7,bundleQuantity:null,exempt:true,qualified:false,issue:null,offers:[]}),
+ getAutomaticBatchPlan:async()=>({version:1,credentialScope:'component-only',purposes:[],coverage:[]}),
+ getAutomaticBatchSummary:async()=>({mode:'immediate',plan:null,batches:[],details:[]}),
  getAutomaticListingQueue:async input=>{state.queueReads=(state.queueReads??0)+1;return ({targetId:input.targetId,scope:{mode:'live',sellerId:input.targetId==='target-1'?'seller':'other-seller',marketplaceId:'ATVPDKIKX0DER'},ruleRevision:7,products:state.products.filter(p=>input.productIds.includes(p.id)).map(p=>{
   const scoped=input.targetId==='target-1',inputIssue=scoped&&state.queueMode==='input'?'销售配方待补资料：包装件数冲突':undefined;
   const rows=inputIssue?[]:p.variants.slice(0,scoped&&['mixed','reasons'].includes(state.queueMode)?3:2).map((v,index)=>{
@@ -112,7 +115,7 @@ try {
  await expect(page.getByTestId('automatic-product-1').getByText('来源资料尚不完整。请进入商品资料核对。',{exact:true})).toHaveCount(1);
  await page.evaluate(()=>window.fixture.queueMode='mixed');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
  await expect(page.getByText(/本次可启动 1 个销售 SKU/)).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('系统处理未完成，尚无更细的可信归因');
- await mkdir(resolve('artifacts'),{recursive:true});await page.screenshot({path:resolve('artifacts/automatic-outcome-queue.png'),fullPage:true});
+ await mkdir(resolve('artifacts'),{recursive:true});await capture('automatic-outcome-queue.png','body');
  await page.evaluate(()=>window.fixture.queueMode='reasons');await page.getByRole('button',{name:'刷新资料与连接',exact:true}).click();
  const reasonSearch=page.getByRole('searchbox',{name:'搜索商品、SKU或原因',exact:true});await reasonSearch.fill('ROI');await page.getByRole('tab',{name:'规则淘汰 1',exact:true}).click();
  await expect(page.getByText('匹配：1 个来源商品 · 1 个销售配方',{exact:true})).toBeVisible();await expect(page.getByTestId('automatic-product-1')).toContainText('已确认 ROI');await expect(page.getByTestId('automatic-product-1')).not.toContainText('IP 风险');
@@ -135,7 +138,7 @@ try {
  await page.evaluate(()=>window.fixture.consent=true);await start.click();
  await expect(page.getByTestId('automatic-task-task-1')).toBeVisible();
  const submitted=await page.evaluate(()=>window.fixture.calls.filter(call=>call.name==='start').at(-1).input);
- assert.deepEqual(submitted,{productIds:['product-1'],targetId:'target-1',profileId:'alpha'});
+ assert.deepEqual(submitted,{productIds:['product-1'],targetId:'target-1',profileId:'alpha',executionMode:'immediate'});
  await expect(page.getByTestId('automatic-product-group-product-1')).toBeVisible();
  await expect(page.getByTestId('automatic-product-group-product-1')).toContainText('来源规格 3');
  await expect(page.getByTestId('automatic-product-group-product-1')).toContainText('本次销售 SKU 2');

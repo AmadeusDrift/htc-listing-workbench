@@ -8,12 +8,12 @@ test('registered migrations are atomic, sequential and preserve old record bytes
   assert.ok(existsSync(new URL(path,import.meta.url)),'registered migration runner must exist');
   const {migrateModules,assertMigrationJournal}=await import(path);
   const db=new DatabaseSync(':memory:');t.after(()=>db.close());
-  db.exec('PRAGMA user_version=21; CREATE TABLE old_receipts(id TEXT PRIMARY KEY,raw TEXT);');
+  db.exec('PRAGMA user_version=21; CREATE TABLE old_receipts(id TEXT PRIMARY KEY,raw TEXT); CREATE TABLE automatic_listing_tasks(id TEXT PRIMARY KEY,record_json TEXT NOT NULL);');
   db.prepare('INSERT INTO old_receipts VALUES(?,?)').run('unknown','{ "response": null, "attempt": 3 }');
   const before=db.prepare('SELECT raw FROM old_receipts').get()!.raw;
   migrateModules(db);migrateModules(db);assertMigrationJournal(db);
-  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,23);
-  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,2);
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,24);
+  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,3);
   assert.equal(db.prepare('SELECT raw FROM old_receipts').get()!.raw,before);
   db.prepare('UPDATE module_migration_journal SET name=?').run('tampered');
   assert.throws(()=>assertMigrationJournal(db),/迁移/);

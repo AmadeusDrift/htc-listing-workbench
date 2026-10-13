@@ -2,14 +2,15 @@ import type { DatabaseSync } from 'node:sqlite';
 import { transaction } from '../application/transaction.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { SOURCE_TABLES } from '../miaoshou/source-snapshots.ts';
+import { initializeSchemaOperations } from '../catalog/schema-operations.ts';
 
-export const MODULE_SCHEMA_VERSION=23;
+export const MODULE_SCHEMA_VERSION=24;
 export const MIGRATION_TABLES={module_migration_journal:['version','name','applied_at']};
 const migrations=[{version:22,name:'module-foundation',apply(db:DatabaseSync){
   db.exec('CREATE TABLE module_migration_journal(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
 }},{version:23,name:'source-versions-and-adoption',apply(db:DatabaseSync){
   for(const table of Object.keys(SOURCE_TABLES))db.exec(`CREATE TABLE ${table}(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)`);
-}}];
+}},{version:24,name:'catalog-schema-operations',apply:initializeSchemaOperations}];
 export function assertMigrationJournal(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   if(version<22)return;

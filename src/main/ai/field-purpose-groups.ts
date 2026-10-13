@@ -1,3 +1,4 @@
+import { enumDecisionPlans } from './enum-decisions.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { AiPurposeId,AiPurposeSnapshot,FieldPurposeAssignment } from '../../shared/ai-purpose-contracts.ts';
@@ -15,8 +16,10 @@ const copyPurpose:Record<string,AiPurposeId>={item_name:'listing_title',bullet_p
 export function fieldPurposeGroups(db:DatabaseSync,context:ListingAiContext,completion:boolean):FieldPurposeGroup[]{
   const fallback:AiPurposeId=completion?'listing_completion':'listing_generation';
   const assignments:FieldPurposeAssignment[]=[{field:'*',purpose:resolvePurpose(db,fallback)}];
+  const enumFields=new Set(enumDecisionPlans(context).map(p=>p.field));
   for(const {name:field} of context.fields){
     const existing=context.repairRequest?.currentValues[field],repair=existing!==undefined&&existing!==null;
+    if(enumFields.has(field)){assignments.push({field,purpose:resolvePurpose(db,'enum_decision')});continue;}
     if(repair||copyPurpose[field])assignments.push({field,purpose:resolvePurpose(db,repair?'listing_repair':copyPurpose[field])});
   }
   const grouped=new Map<string,FieldPurposeGroup>();
@@ -33,7 +36,7 @@ export function validateAssignments(raw:unknown):FieldPurposeAssignment[]{
 }
 export function validateFieldGroup(raw:unknown):FieldGroupOperation{
   const o=keys(raw,['id','contextHash','scopeHash','revision','completion','members','resultId']);
-  if(typeof o.completion!=='boolean'||!Array.isArray(o.members)||o.members.length<2||o.members.length>6)throw new UserFacingError('字段分组操作无效');
+  if(typeof o.completion!=='boolean'||!Array.isArray(o.members)||o.members.length<2||o.members.length>7)throw new UserFacingError('字段分组操作无效');
   const members=o.members.map(v=>{const m=keys(v,['purpose','assignments','callId','sent','resultId']),purpose=validatePurposeSnapshot(m.purpose),assignments=validateAssignments(m.assignments);if(typeof m.sent!=='boolean'||m.resultId!==null&&!m.sent||assignments.some(a=>a.purpose.gateway!==purpose.gateway||a.purpose.model!==purpose.model||a.purpose.effectiveEffort!==purpose.effectiveEffort))throw new UserFacingError('字段分组模型与调用不一致');return{purpose,assignments,callId:uuid(m.callId),sent:m.sent,resultId:m.resultId===null?null:uuid(m.resultId)};});
   if(new Set(members.map(m=>m.callId)).size!==members.length||members[0].callId!==o.id||o.resultId!==null&&members.some(m=>!m.resultId))throw new UserFacingError('字段分组身份无效');
   const fields=members.flatMap(m=>m.assignments.map(a=>a.field));if(new Set(fields).size!==fields.length||o.scopeHash!==listingFingerprint({contextHash:o.contextHash,completionId:o.completion?o.id:null}))throw new UserFacingError('字段分组范围无效');

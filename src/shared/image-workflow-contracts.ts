@@ -37,7 +37,7 @@ export interface ImageWorkflowRun {
   /** Original automatic-row budget when its workflow checkpoint was absent. */
   legacyImageAttempts?:number;
   id: string; draftId: string; productId: string; productRevision: number; variantId: string; sku: string;
-  status: 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
+  status: 'WAITING_BATCH' | 'RUNNING' | 'COMPLETED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED';
   stage: ImageWorkflowStage; attempt: number; maxAttempts: number;
   contextSha256: string | null; draftSha256: string | null;
   referenceAssets: { id: string; sha256: string }[];

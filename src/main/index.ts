@@ -127,6 +127,7 @@ async function start() {
   const workflowService = imageWorkflow, listingService = new ListingAiService(db, amazon, ai,()=>workflowService.getCopyReviewSettings().enabled), amazonService = amazon, aiService = ai, formatSettings = labelSettings, catalogService = catalog, namingService=skuNaming, executionService=execution;
   automatic = new AutomaticListingService(dataRoot, {
     store: db, amazon, hosting, images: imageWorkflow, execution, followup, procurement, labels,
+    batch:aiService.batchTasks,batchPlan:()=>aiService.taskBatchPlan(),
     rules: () => { const rules = new ListingRuleStore(dataRoot); try { return rules.get(); } finally { rules.close(); } },
     labelFormat: () => formatSettings.get(),
     sourceReceipt: productId => miaoshouService.getReceipt(productId),

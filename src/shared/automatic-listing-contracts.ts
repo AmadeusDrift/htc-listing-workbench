@@ -47,6 +47,7 @@ export interface AutomaticSchemaRetry {
   reason: 'SCHEMA_TRANSIENT';
 }
 export interface AutomaticListingItem {
+  batchWait?:{operationId:string};
   schemaRetry?: AutomaticSchemaRetry;
   /** Written in the same SQLite transaction as the local pricing draft update. */
   pricingRefresh?: { draftRevision:number; draftStamp:string; previousDraftRevision:number; previousDraftStamp:string; previousReason:string|null };
@@ -76,6 +77,8 @@ export interface AutomaticListingItem {
   familyTransition?: { phase:'BIND'|'RECHECK'|'READY'; plan:import('./sales-plan-contracts.ts').SalesListingPlan; sourceWorkflowId:string; draftRevision:number; draftStamp:string };
 }
 export interface AutomaticListingTask {
+  executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode;
+  batchPlan?:import('./ai-batch-contracts.ts').TaskBatchPlan;
   adaptation?:{version:1;token:string;at:string;blockedKeys:string[];previousRules:{stamp:string;revision:number}[]};
   id: string; revision: number; status: AutomaticListingStatus;
   targetId: string; targetName: string; sellerId: string; marketplaceId: string; mode: 'demo' | 'live';
@@ -83,8 +86,11 @@ export interface AutomaticListingTask {
   productType: string; locale: string; labelFormat: ItemLabelFormat; items: AutomaticListingItem[];
   createdAt: string; updatedAt: string; error: string | null;
 }
-export interface StartAutomaticListingInput { productIds: string[]; targetId: string; productType?: string; profileId: string }
+export interface StartAutomaticListingInput { executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
+  getAutomaticBatchSummary(id:string):Promise<{mode:import('./ai-batch-contracts.ts').ListingExecutionMode;plan:import('./ai-batch-contracts.ts').TaskBatchPlan|null;batches:import('./ai-batch-contracts.ts').BatchRecord[]}>;
+  setAutomaticExecutionMode(input:{taskId:string;mode:import('./ai-batch-contracts.ts').ListingExecutionMode}):Promise<AutomaticListingTask>;
+  getAutomaticBatchPlan():Promise<import('./ai-batch-contracts.ts').TaskBatchPlan>;
   previewAutomaticListingAdaptation(id:string):Promise<AutomaticAdaptationPreview>;
   applyAutomaticListingAdaptation(input:{taskId:string;token:string}):Promise<AutomaticListingTask>;
   getAutomaticListingQueue(input:{productIds:string[];targetId:string}):Promise<AutomaticListingQueue>;

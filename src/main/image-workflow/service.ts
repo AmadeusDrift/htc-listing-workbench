@@ -1,3 +1,4 @@
+import { BatchWaitingError } from '../ai/batch/task-context.ts';
 import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import { sameSchemaValidation } from '../amazon/schema-compatibility.ts';
 import { assertImageWorkflowHistory } from './history.ts';
@@ -803,6 +804,7 @@ export class ImageWorkflowService {
       run.status=run.slots!.every(slot=>slot.status==='PASSED')?'COMPLETED':'BLOCKED';run.stage=run.status==='COMPLETED'?'complete':run.stage;
       run.error=run.status==='COMPLETED'?null:'部分图片已达到本位置最多 3 次尝试；已通过图片保留，请处理失败位置';this.save(run);
     }catch(error){
+      if(error instanceof BatchWaitingError){run.status='WAITING_BATCH';run.error=error.message;this.save(run);throw error;}
       this.captureRejection(run,error);
       run.status=signal.aborted?'CANCELLED':error instanceof AiError&&!['NOT_CONFIGURED','DISABLED','SOURCE_CHANGED','CONFIG_CHANGED'].includes(error.code)?'FAILED':'BLOCKED';
       run.error=signal.aborted?'自动准备已停止，已通过图片和尝试次数保留':run.stage==='ip-check'&&error instanceof AiError?`阿里云图片侵权检测未完成：${publicError(error)}。请核对图片审核增强版开通状态、访问权限和额度；本商品已停止。`:publicError(error);this.save(run);
@@ -948,6 +950,7 @@ export class ImageWorkflowService {
       }
       throw new AiError('OUTPUT_INVALID');
     } catch (error) {
+      if(error instanceof BatchWaitingError){run.status='WAITING_BATCH';run.error=error.message;this.save(run);throw error;}
       this.captureRejection(run,error);
       run.status=signal.aborted?'CANCELLED':error instanceof AiError && !['NOT_CONFIGURED','DISABLED','SOURCE_CHANGED','CONFIG_CHANGED'].includes(error.code)?'FAILED':'BLOCKED';
       run.error=signal.aborted?'自动准备已停止，未自动重发请求':run.stage==='ip-check' && error instanceof AiError?`阿里云图片侵权检测未完成：${publicError(error)}。请核对图片审核增强版开通状态、访问权限和额度；本商品已停止。`:publicError(error); this.save(run);

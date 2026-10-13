@@ -8,6 +8,7 @@ export interface BatchReference {
 }
 /** Main-only prepared operation. URLs require a matching M09 pin, not a renderer assertion. */
 export interface BatchOperation {
+  aiCallId?:string;
   taskId:string; operationId:string; attempt:number; phase:string;
   inputFingerprint:string; schemaFingerprint:string; credentialScope:string;
   owner:{productId:string;productRevision:number;providerId:'openrouter'|'openrouter-review';generation:number};
@@ -30,3 +31,5 @@ export interface BatchPlan {
   groups:BatchOperation[][];
   ordinary:{operationId:string;reason:string}[];
 }
+
+export interface TaskBatchPlan {version:1;credentialScope:string;purposes:AiPurposeSnapshot[];coverage:{purposeId:string;mode:ListingExecutionMode;reason:string}[]}

@@ -34,7 +34,7 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
   if(o.listingEvidenceContractVersion!==undefined&&!(LISTING_EVIDENCE_CONTRACT_VERSIONS as readonly unknown[]).includes(o.listingEvidenceContractVersion))throw new UserFacingError('图片证据契约版本无效');
   if (o.imagePolicyVersion !== undefined && !['product-image/v1','product-image/vision-v2',PRODUCT_IMAGE_POLICY_VERSION].includes(String(o.imagePolicyVersion))) throw new UserFacingError('图片规划版本无效');
   if(o.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION && o.ipReviewResultIds===undefined)throw new UserFacingError('缺少侵权风险检测记录');
-  if (!['RUNNING','COMPLETED','BLOCKED','FAILED','CANCELLED','INTERRUPTED'].includes(String(o.status)) || !IMAGE_WORKFLOW_STAGES.includes(o.stage as ImageWorkflowRun['stage']) || ![1,2].includes(Number(o.maxAttempts))) throw new UserFacingError('图片流程记录无效');
+  if (!['WAITING_BATCH','RUNNING','COMPLETED','BLOCKED','FAILED','CANCELLED','INTERRUPTED'].includes(String(o.status)) || !IMAGE_WORKFLOW_STAGES.includes(o.stage as ImageWorkflowRun['stage']) || ![1,2].includes(Number(o.maxAttempts))) throw new UserFacingError('图片流程记录无效');
   if (!Array.isArray(o.referenceAssets) || o.referenceAssets.length > 3) throw new UserFacingError('图片参考记录无效');
   const referenceAssets = o.referenceAssets.map(raw => { const a = keys(raw, ['id','sha256']); return { id: uuid(a.id), sha256: sha256(a.sha256) }; });
   const run: ImageWorkflowRun = {
@@ -67,7 +67,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
-  if(!['seven-provisional-v1',IMAGE_SET_POLICY].includes(String(o.slotPolicy))||o.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||!Array.isArray(o.slots)||o.slots.length!==7||!Array.isArray(o.referenceAssets)||o.referenceAssets.length>10||!['RUNNING','COMPLETED','BLOCKED','FAILED','CANCELLED','INTERRUPTED'].includes(String(o.status))||!IMAGE_WORKFLOW_STAGES.includes(o.stage as ImageWorkflowRun['stage']))invalid();
+  if(!['seven-provisional-v1',IMAGE_SET_POLICY].includes(String(o.slotPolicy))||o.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION||!Array.isArray(o.slots)||o.slots.length!==7||!Array.isArray(o.referenceAssets)||o.referenceAssets.length>10||!['WAITING_BATCH','RUNNING','COMPLETED','BLOCKED','FAILED','CANCELLED','INTERRUPTED'].includes(String(o.status))||!IMAGE_WORKFLOW_STAGES.includes(o.stage as ImageWorkflowRun['stage']))invalid();
   const maybeId=(value:unknown)=>value===null?null:uuid(value),maybeHash=(value:unknown)=>value===null?null:sha256(value),message=(value:unknown)=>value===null?null:boundedText(value,2000);
   const maxAttempts=integer(o.maxAttempts,1,3);
   const slots=(o.slots as unknown[]).map((value,index):ImageWorkflowSlot=>{

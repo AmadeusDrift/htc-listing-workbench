@@ -26,3 +26,13 @@ test('task result CAS conflict rolls back the surrounding domain transaction',as
  assert.equal(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json,before);
  assert.throws(()=>automaticTaskResults.prepare(db,{kind:'fixed-brand',before:draft,operationId}),/同一事务/);
 });
+
+test('stale scheduler save cannot overwrite a newer owner pause',async t=>{
+ const f=await completionOwnerFixture(t,'automatic'),owner=f.ownerService() as any,db=(f.amazon as any).persistence.db,task=[...owner.tasks.values()][0] as any;
+ const paused={...structuredClone(task),revision:task.revision+1,status:'PAUSED'};
+ db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(paused),task.id);
+ task.status='QUEUED';assert.throws(()=>owner.save(task),/任务.*变化/);
+ assert.equal(JSON.parse(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json).status,'PAUSED');
+ // Avoid requesting unrelated child cancellation during fixture teardown.
+ task.status='PAUSED';
+});

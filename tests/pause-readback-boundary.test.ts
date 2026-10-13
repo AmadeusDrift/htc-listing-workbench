@@ -364,7 +364,7 @@ for (const action of ['pause', 'cancel', 'continue'] as const) test(`real Execut
   const task = await f.automatic.create({ productIds: [draft.productId], targetId: draft.targetId, profileId: 'alpha', productType: 'STORAGE_BAG' });
   // Link a real prepared Execution task at the ownership checkpoint; upload, fill,
   // validation, preview, submission and callbacks below remain real service code.
-  checkpoint(f, task.id, saved => { saved.status = 'WAITING'; Object.assign(saved.items[0], { draftId: draft.id, stage: 'READBACK', status: 'WAITING', sourcesPrepared: true, executionTaskIds: [child.id] }); });
+  checkpoint(f, task.id, saved => { saved.status = 'WAITING'; Object.assign(saved.items[0], { draftId: draft.id, stage: 'READBACK', status: 'WAITING', sourcesPrepared: true, executionTaskIds: [child.id] }); }, true);
   const entered = deferred(), release = deferred();
   f.hook(async (url, init) => { if (init.method === 'PUT' && !url.searchParams.has('mode')) { entered.release(); await release.promise; } });
   f.execution.startAuthorized(f.execution.prepareStart(child.id));

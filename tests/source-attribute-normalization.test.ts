@@ -64,9 +64,11 @@ test('first import normalizes bounded source names and values with complete crea
   const entries=trace(f.receipt)!.entries; assert.equal(entries.length,3);
   entries.forEach((entry,index)=>{assert.equal(entry.attributeIndex,index);assert.equal(entry.factId,f.product.facts[index].id);assert.equal(entry.rawName,f.snapshot.attributes[index].name);assert.equal(entry.rawValue,f.snapshot.attributes[index].value);assert.equal(entry.name,f.product.facts[index].name);assert.equal(entry.value,f.product.facts[index].value);assert.ok(entry.ruleIds.length);});
   assert.ok(f.product.facts.every(fact=>fact.source==='import'&&fact.state==='source_confirmed'&&fact.sourceRef===f.snapshot.sources[0].sourceItemUrl));
-  const {mapped,draft,context}=listing(f.product);assert.deepEqual((mapped.material as {value:string}[]).map(x=>x.value),['Silicone']);assert.equal((mapped.batteries_required as {value:boolean}[])[0].value,false);
-  assert.doesNotThrow(()=>assertClaim(f.product,'material','Silicone'));assert.throws(()=>assertClaim(f.product,'material','Cotton'));
-  assert.doesNotThrow(()=>assertClaim(f.product,'age_range_description','Adult'));assert.throws(()=>assertClaim(f.product,'age_range_description','Child'));
+  assert.equal(listing(f.product).mapped.material,undefined,'new imported unknown applicability is not common authority');
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  const {mapped,draft,context}=listing(confirmed);assert.deepEqual((mapped.material as {value:string}[]).map(x=>x.value),['Silicone']);assert.equal((mapped.batteries_required as {value:boolean}[])[0].value,false);
+  assert.doesNotThrow(()=>assertClaim(confirmed,'material','Silicone'));assert.throws(()=>assertClaim(confirmed,'material','Cotton'));
+  assert.doesNotThrow(()=>assertClaim(confirmed,'age_range_description','Adult'));assert.throws(()=>assertClaim(confirmed,'age_range_description','Child'));
   assert.deepEqual(currentDraftEvidenceIssues(draft,context),[]);
   assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Child'}]}},context).length);
 });
@@ -78,9 +80,11 @@ for(const [name,raw,expected,claim] of [
   ['产品重量','2 lb','2 pounds','Weight 2 pounds.'],['产品重量','2 ounces','2 oz','Weight 2 oz.'],
 ] as const)test(`new source measurement supports mapping and legacy v3 evidence: ${raw}`,t=>{
   const f=fixture(t,[{name,value:raw}]);assert.equal(f.product.facts[0].value,expected);assert.equal(trace(f.receipt)!.entries[0].rawValue,raw);
-  const field=name==='产品重量'?'item_weight':'item_length'; assert.ok(listing(f.product).mapped[field]);
-  assert.doesNotThrow(()=>assertClaim(f.product,'product_description',claim));
-  assert.throws(()=>assertClaim(f.product,'product_description',claim.replace(/\d+(?:\.\d+)?/, '99')));
+  const field=name==='产品重量'?'item_weight':'item_length'; assert.equal(listing(f.product).mapped[field],undefined);
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  assert.ok(listing(confirmed).mapped[field]);
+  assert.doesNotThrow(()=>assertClaim(confirmed,'product_description',claim));
+  assert.throws(()=>assertClaim(confirmed,'product_description',claim.replace(/\d+(?:\.\d+)?/, '99')));
 });
 
 test('unknown names, model identifiers, unsupported units and bare measurements stay exact',t=>{
@@ -95,7 +99,7 @@ test('normalization retains distinct conflicting values and does not share globa
   assert.equal(f.product.facts.length,3);assert.ok(trace(f.receipt));assert.equal(trace(f.receipt)!.entries.length,3);assert.equal(listing(f.product).mapped.material,undefined);assert.equal(listing(f.product).mapped.item_length,undefined);
   assert.ok(!listing(f.product).context.evidence.some(e=>e.name==='产品长度'));
   assert.ok(f.product.facts.every(fact=>fact.state==='source_confirmed'));
-  const changed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,state:'conflicting' as const}))});
+  const changed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,state:'conflicting' as const,scope:fact.name==='产品长度'?'unknown':'common'}))});
   assert.ok(currentDraftEvidenceIssues({...listing(changed).draft,attributes:{material:[{value:'Silicone'}]}},listing(changed).context).length);
   assert.doesNotThrow(()=>assertMiaoshouHistory(f.db));assert.deepEqual(getReceipt(f.db,f.product.id),f.receipt);
 });
@@ -181,13 +185,17 @@ test('source snapshot measurement projection and its hash remain independent of 
   const before=sourceImageMeasurements(legacy,draft),after=sourceImageMeasurements(f.receipt,draft);
   assert.ok(after.length);assert.deepEqual(after,before);assert.ok(!after.some(e=>e.name==='商品长度'));
   const sha=listingFingerprint({snapshot:f.snapshot,mapping:f.mapping,skuMappings:f.receipt.skuMappings});assert.ok(after.every(e=>e.sourceSha256===sha));
-  assert.ok(listing(f.product).mapped.item_length);assert.doesNotThrow(()=>assertClaim(f.product,'product_description','Length 2 cm.'));
+  assert.equal(listing(f.product).mapped.item_length,undefined);
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  assert.ok(listing(confirmed).mapped.item_length);assert.doesNotThrow(()=>assertClaim(confirmed,'product_description','Length 2 cm.'));
 });
 
 test('primitive source attribute types remain strict, while string zero and false remain present',t=>{
   for(const value of [0,false])assert.throws(()=>normalizeDetail({result:'success',code:'success',data:{editCommonCollectBoxDetail:{commonCollectBoxDetailId:'100',sourceAttrs:[{name:'是否需要电池',value}]}}},date));
   const f=fixture(t,[{name:'是否需要电池',value:'false'},{name:'产品长度',value:'0'}]);
-  assert.deepEqual(f.product.facts.map(fact=>fact.value),['false','0']);assert.equal(trace(f.receipt),undefined);assert.equal((listing(f.product).mapped.batteries_required as {value:boolean}[])[0].value,false);assert.equal(listing(f.product).mapped.item_length,undefined);
+  assert.deepEqual(f.product.facts.map(fact=>fact.value),['false','0']);assert.equal(trace(f.receipt),undefined);assert.equal(listing(f.product).mapped.batteries_required,undefined);
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  assert.equal((listing(confirmed).mapped.batteries_required as {value:boolean}[])[0].value,false);assert.equal(listing(confirmed).mapped.item_length,undefined);
 });
 
 test('native 1688 SKU attributes remain receipt-local and never create shared product facts',t=>{
@@ -210,7 +218,9 @@ test('bounded width conversion preserves negation and never folds compatibility 
   const f=fixture(t,[{name:'适用年龄',value:'Ｎｏｔ　Ａｄｕｌｔ'},{name:'材质',value:'Ｐｌａｓｔｉｃ Ⅳ ① ﬁ'}]);
   assert.deepEqual(f.product.facts.map(f=>f.value),['Not Adult','Plastic Ⅳ ① ﬁ']);
   assert.equal(listing(f.product).mapped.age_range_description,undefined);assert.throws(()=>assertClaim(f.product,'age_range_description','Adult'));
-  const {draft,context}=listing(f.product);assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Adult'}]}},context).length);
+  const unknown=listing(f.product);assert.equal(currentDraftEvidenceIssues({...unknown.draft,attributes:{age_range_description:[{value:'Adult'}]}},unknown.context).length,0,'unknown applicability is not an asserted conflict');
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  const {draft,context}=listing(confirmed);assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Adult'}]}},context).length);
 });
 
 test('finite unit spellings retain their original number and map to jointly supported source evidence',t=>{
@@ -221,8 +231,10 @@ test('finite unit spellings retain their original number and map to jointly supp
     ...['oz','ounces'].map(unit=>['产品重量',unit,'oz']),
   ]){
     const f=fixture(t,[{name,value:`02.00${unit}`}]);assert.equal(f.product.facts[0].value,`02.00 ${canonical}`);
-    assert.ok(listing(f.product).mapped[name==='产品长度'?'item_length':'item_weight']);
-    assert.doesNotThrow(()=>assertClaim(f.product,'product_description',`Measured 2 ${canonical}.`));
+    assert.equal(listing(f.product).mapped[name==='产品长度'?'item_length':'item_weight'],undefined);
+    const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+    assert.ok(listing(confirmed).mapped[name==='产品长度'?'item_length':'item_weight']);
+    assert.doesNotThrow(()=>assertClaim(confirmed,'product_description',`Measured 2 ${canonical}.`));
   }
 });
 
@@ -258,5 +270,7 @@ test('different original names normalizing to one category field retain both fac
   assert.deepEqual(f.product.facts.map(({name,value,state})=>({name,value,state})),[{name:'age_range_description',value:'Adult',state:'source_confirmed'},{name:'age_range_description',value:'Child',state:'source_confirmed'}]);
   assert.equal(trace(f.receipt)!.entries.length,2);assert.notEqual(f.product.facts[0].id,f.product.facts[1].id);
   assert.equal(listing(f.product).mapped.age_range_description,undefined);assert.throws(()=>assertClaim(f.product,'age_range_description','Adult'));
-  const {draft,context}=listing(f.product);assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Adult'}]}},context).length);
+  const unknown=listing(f.product);assert.equal(currentDraftEvidenceIssues({...unknown.draft,attributes:{age_range_description:[{value:'Adult'}]}},unknown.context).length,0,'unknown applicability is not an asserted conflict');
+  const confirmed=f.store.saveProduct({...saveInput(f.product),facts:f.product.facts.map(fact=>({...fact,scope:'common'}))});
+  const {draft,context}=listing(confirmed);assert.ok(currentDraftEvidenceIssues({...draft,attributes:{age_range_description:[{value:'Adult'}]}},context).length);
 });

@@ -1,4 +1,3 @@
-import { assertFactScopeRecord } from './fact-scopes.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../../shared/errors.ts';
 import { readSourceSnapshot, saveSourceSnapshot } from '../miaoshou/source-snapshots.ts';
@@ -41,15 +40,25 @@ function hasStarted(db:DatabaseSync,productId:string):boolean{
     ||!!db.prepare('SELECT 1 FROM assets WHERE product_id=? LIMIT 1').get(productId)
     ||!!db.prepare("SELECT 1 FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.productId')=? LIMIT 1").get(productId);
 }
-export function freezeSourceForProduct(db:DatabaseSync,productId:string):void{
+function ensureSourceAdoption(db:DatabaseSync,productId:string):SourceAdoption|null{
   let prior=readSourceAdoption(db,productId);
   if(!prior){
     const receipts=db.prepare("SELECT record_json FROM miaoshou_receipts WHERE json_extract(record_json,'$.productId')=?").all(productId);
     if(receipts.length>1)throw new UserFacingError('来源回执归属不明确');
     if(receipts.length)prior=adoptReceivedSource(db,saveSourceSnapshot(db,JSON.parse(String(receipts[0].record_json))),null,true);
   }
+  return prior;
+}
+export function freezeSourceForProduct(db:DatabaseSync,productId:string):void{
+  const prior=ensureSourceAdoption(db,productId);
   if(prior&&!prior.frozen)save(db,{...prior,frozen:true});
 }
+/** First scope edit may precede any draft/task freeze. Join the caller's product-save transaction. */
+export function enterFactScopeModel(db:DatabaseSync,productId:string):void{
+  const prior=ensureSourceAdoption(db,productId);
+  if(prior&&prior.scopeModelVersion!==1)save(db,{...prior,scopeModelVersion:1});
+}
+
 export function adoptedSourceReceipt(db:DatabaseSync,productId:string){
   const state=readSourceAdoption(db,productId);return state?readSourceSnapshot(db,state.adoptedSnapshotId)!.receipt:null;
 }
@@ -79,6 +88,17 @@ export function adoptSource(db:DatabaseSync,input:{productId:string;expectedRevi
     return next;
   });
 }
+function assertFactScopeRecord(db:DatabaseSync,row:Record<string,unknown>):void{
+  const r=JSON.parse(String(row.record_json));
+  const fact=db.prepare('SELECT product_id FROM facts WHERE id=?').get(r.id);
+  const v1=r.version===1&&Object.keys(r).sort().join()==='id,productId,scope,source,sourceReceiptId,version'&&r.scope==='unknown'&&r.source==='source';
+  const keys=['version','id','productId','scope','variantId','source','productRevision','confirmedAt','sourceReceiptId'];
+  const v2=r.version===2&&Object.keys(r).every(k=>keys.includes(k))&&r.source==='manual'&&['common','variant','unknown'].includes(r.scope)&&Number.isSafeInteger(r.productRevision)&&r.productRevision>0&&typeof r.confirmedAt==='string'&&Number.isFinite(Date.parse(r.confirmedAt))
+    &&(r.scope==='variant'?typeof r.variantId==='string'&&!!db.prepare('SELECT 1 FROM variants WHERE id=? AND product_id=?').get(r.variantId,r.productId):r.variantId===undefined);
+  const product=db.prepare('SELECT revision FROM products WHERE id=?').get(r.productId);
+  if((!v1&&!v2)||r.id!==row.id||fact&&fact.product_id!==r.productId||v2&&(!fact||!product||r.productRevision>Number(product.revision))||r.sourceReceiptId!==undefined&&typeof r.sourceReceiptId!=='string')throw new UserFacingError('来源属性范围记录无效');
+}
+
 export function assertSourceAdoptionHistory(db:DatabaseSync):void{
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<23)return;
   for(const table of ['source_snapshots','product_source_adoptions','product_fact_scopes'])assertRecordTable(db,table);

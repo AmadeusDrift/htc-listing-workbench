@@ -186,3 +186,37 @@ test('new empty-attribute source records explicit scope model and never broadcas
   db.prepare('UPDATE product_source_adoptions SET record_json=? WHERE id=?').run(JSON.stringify({...state,scopeModelVersion:2}),p.id);
   assert.throws(()=>assertSourceAdoptionHistory(db),/采用记录无效/);
 });
+
+test('first legacy scope edit persists model before any freeze, including deletion, restart and backup',async t=>{
+  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/scope-edit-first-'));
+  let store=new WorkspaceStore(dir),db=openDatabase(dir);
+  t.after(()=>{db.close();store.close();rmSync(dir,{recursive:true,force:true});});
+  const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[{name:'产品长度',value:'11 cm'}],description:''};
+  const receipt=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z');
+  db.prepare('DELETE FROM product_source_adoptions WHERE id=?').run(receipt.productId);
+  db.prepare("DELETE FROM product_fact_scopes WHERE json_extract(record_json,'$.productId')=?").run(receipt.productId);
+  const raw=String(db.prepare('SELECT record_json FROM miaoshou_receipts').get()!.record_json);
+  let p=store.getProduct(receipt.productId);const variant=p.variants[0];
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length?.value,4.33);
+  p=store.saveProduct({...saveInput(p),facts:p.facts.map(f=>({...f,scope:'unknown'}))});
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+  p=store.saveProduct({...saveInput(p),facts:[]});
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined,'deletion before first freeze must not restore raw measurement');
+  const adoption=JSON.parse(String(db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(p.id)!.record_json));
+  assert.equal(adoption.scopeModelVersion,1);assert.equal(adoption.frozen,false);
+  db.close();store.close();store=new WorkspaceStore(dir);db=openDatabase(dir);
+  assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+  const file=join(dir,'edited-scope.htcbackup'),restoredDir=join(dir,'restored');
+  await createWorkspaceBackup(dir,file,'scope-passphrase');const prepared=await prepareWorkspaceRestore(restoredDir,file,'scope-passphrase');await commitWorkspaceRestore(restoredDir,prepared);
+  const restored=new WorkspaceStore(restoredDir),restoredDb=openDatabase(restoredDir),amazon=new AmazonService(restoredDir,id=>restored.getProduct(id),mockStorage);
+  try{
+    const current=restored.getProduct(p.id);assert.equal(current.revision,p.revision);
+    assert.equal(miaoshouMeasurementsForVariant(restoredDb,p.id,variant.id,'demo').item?.length,undefined);
+    const target=amazon.enableDemo();await amazon.createDraft({productId:p.id,variantId:variant.id,targetId:target.id,productType:'HTC_DEMO_STORAGE_BAG',parentageLevel:'NONE',requirements:'LISTING',locale:'en_US'});
+    assert.equal(miaoshouMeasurementsForVariant(restoredDb,p.id,variant.id,'demo').item?.length,undefined);
+    assert.ok(!currentSourceImageMeasurements(restoredDb,{productId:p.id,variantId:variant.id,mode:'demo'} as any).some(m=>m.value==='11 cm'));
+    assert.equal(String(restoredDb.prepare('SELECT record_json FROM miaoshou_receipts').get()!.record_json),raw);
+    assert.equal(restored.getProduct(p.id).revision,p.revision);assertSourceAdoptionHistory(restoredDb);
+  }finally{amazon.close();restoredDb.close();restored.close();}
+  store.freezeSourceVersion(p.id,p.revision);assert.equal(miaoshouMeasurementsForVariant(db,p.id,variant.id,'demo').item?.length,undefined);
+});

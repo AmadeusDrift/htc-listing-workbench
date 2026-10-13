@@ -55,7 +55,7 @@ export interface MiaoshouApi extends MiaoshouSyncApi {
   getMiaoshouInboxSummaries(input: { productIds: string[] }): Promise<MiaoshouInboxSummary[]>;
   previewMiaoshouImage(input: { productId: string; imageId: string; version?: 'imported' | 'latest' }): Promise<string>;
   getMiaoshouSourceUpdate(productId: string): Promise<MiaoshouProduct | null>;
-  previewMiaoshouSourceAdoption(productId:string):Promise<{productId:string;expectedRevision:number;snapshotId:string;source:MiaoshouProduct;pending:boolean;frozen:boolean;requiresManualConfirmation:boolean;current:{title:string;description:string}}|null>;
+  previewMiaoshouSourceAdoption(productId:string):Promise<{productId:string;expectedRevision:number;snapshotId:string;source:MiaoshouProduct;pending:boolean;frozen:boolean;requiresManualConfirmation:boolean;current:{title:string;description:string;facts:{id:string;name:string;value:string}[];variants:{id:string;originalSpec:string;purchasePrice:string}[]}}|null>;
   adoptMiaoshouSource(input:{productId:string;expectedRevision:number;snapshotId:string;confirmReplaceManual:boolean}):Promise<ProductDetail>;
   saveMiaoshouConfig(input: import('./connection-inputs.ts').MiaoshouConfigInput): Promise<MiaoshouStatus>;
   getMiaoshouStatus(): Promise<MiaoshouStatus>;

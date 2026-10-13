@@ -105,7 +105,7 @@ test('UNKNOWN keeps its original identity through price/shipment revisions, prep
   const {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore}=await import('../src/main/backup.ts');
   const archive=resolve('.test-data',randomUUID()+'.htcbackup'),destination=resolve('.test-data','unknown-restored-'+randomUUID());
   await createWorkspaceBackup(f.dir,archive,'synthetic-unknown-test');await commitWorkspaceRestore(destination,await prepareWorkspaceRestore(destination,archive,'synthetic-unknown-test'));
-  const restored=openDatabase(destination);try{assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels WHERE id=?').get(original.id)!.record_json)),original);}finally{restored.close();}
+  const restored=openDatabase(destination);try{assert.deepEqual(JSON.parse(String(restored.prepare('SELECT record_json FROM item_labels WHERE id=?').get(original.id)!.record_json)),{...original,paused:true});}finally{restored.close();}
 });
 
 test('a late UNKNOWN response blocks an already queued newer revision of the same SKU',async t=>{

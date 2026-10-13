@@ -1,0 +1,1256 @@
+{
+  "passed": true,
+  "startedAt": "2026-10-13T18:09:23.846Z",
+  "finishedAt": "2026-10-13T18:09:37.510Z",
+  "dataRoot": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\.test-data\\image-generation-e2e-pbxhLh",
+  "build": {
+    "packaged": false,
+    "version": "2.5.0",
+    "mainSha256": "c6605a4b6d53cf0f1ca62eff82613e40987f3757d839bb3b13cff15afdce3aa8",
+    "preloadSha256": "76023949f862aa561f30fdd39ba701a5c2560e57a42b8ddae39a18455fd40075",
+    "rendererAssets": [
+      "./assets/index-DmNbfKab.js",
+      "./assets/index-re6d_fcX.css"
+    ]
+  },
+  "checks": [
+    "fresh isolated workspace starts unconfigured and disabled; password is masked and startup/settings make no requests",
+    "production example IPC creates real managed source PNGs; leaving the settings module clears an unsaved key",
+    "UI saves a real safeStorage-encrypted credential, returns metadata only and keeps generation disabled without network",
+    "explicit model check sends one GET; dirty model/enable edits block checks and blank-key saves preserve the credential",
+    "real hidden Electron restart preserves encrypted key/model/enable and product; access-check evidence is correctly reset",
+    "real IPC rejects stale product revisions, duplicate/foreign source IDs and renderer-supplied file paths before any transport",
+    "generation/edit IPC send exact OpenRouter JSON with main-read reference data URLs and persist decoded unreviewed PNG candidates",
+    "failed/cancelled paid POSTs are not retried; busy request is rejected and late response cannot save or adopt a candidate",
+    "original asset bytes, product revision, listing drafts and image selections remain unchanged",
+    "401/403 checks expose fixed safe errors; pending checks stay locked across hide/reopen and never send a generation POST",
+    "pending failed check restores editable state; failed save cannot mutate credentials and successful defaults survive page navigation",
+    "image settings fit 1480/1080/760 widths in both themes; visible key/model/status/help/action text meets 4.5:1 contrast",
+    "explicit catalog IPC accepts only the two active image slugs and preserves connection without a generation POST",
+    "legacy provider UI is absent; real IPC rejects legacy reads/writes/checks/disconnects and Gemini/custom activation before any transport",
+    "synthetic historical official/Tyai/Gemini candidate provenance and response readers remain readable without credentials or generation",
+    "disconnect clears shared OpenRouter credential across restart, preserves historical candidates, and makes zero real HTTP(S), unexpected requests or visible windows"
+  ],
+  "layouts": [
+    {
+      "name": "light/1480",
+      "width": 1480,
+      "height": 960,
+      "theme": "light",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            101,
+            113,
+            132,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 4.69
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            37,
+            113,
+            79,
+            1
+          ],
+          "bg": [
+            237,
+            247,
+            241,
+            1
+          ],
+          "contrast": 5.4
+        }
+      ]
+    },
+    {
+      "name": "light/1080",
+      "width": 1080,
+      "height": 850,
+      "theme": "light",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            101,
+            113,
+            132,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 4.69
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            37,
+            113,
+            79,
+            1
+          ],
+          "bg": [
+            237,
+            247,
+            241,
+            1
+          ],
+          "contrast": 5.4
+        }
+      ]
+    },
+    {
+      "name": "light/760",
+      "width": 760,
+      "height": 680,
+      "theme": "light",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 13.72
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            71,
+            85,
+            105,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 7.18
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            32,
+            42,
+            57,
+            1
+          ],
+          "bg": [
+            255,
+            255,
+            255,
+            1
+          ],
+          "contrast": 14.47
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            101,
+            113,
+            132,
+            1
+          ],
+          "bg": [
+            247,
+            249,
+            252,
+            1
+          ],
+          "contrast": 4.69
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            37,
+            113,
+            79,
+            1
+          ],
+          "bg": [
+            237,
+            247,
+            241,
+            1
+          ],
+          "contrast": 5.4
+        }
+      ]
+    },
+    {
+      "name": "dark/1480",
+      "width": 1480,
+      "height": 960,
+      "theme": "dark",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            164,
+            177,
+            196,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 5.97
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            145,
+            221,
+            178,
+            1
+          ],
+          "bg": [
+            35,
+            62,
+            52,
+            1
+          ],
+          "contrast": 7.29
+        }
+      ]
+    },
+    {
+      "name": "dark/1080",
+      "width": 1080,
+      "height": 850,
+      "theme": "dark",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            164,
+            177,
+            196,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 5.97
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            145,
+            221,
+            178,
+            1
+          ],
+          "bg": [
+            35,
+            62,
+            52,
+            1
+          ],
+          "contrast": 7.29
+        }
+      ]
+    },
+    {
+      "name": "dark/760",
+      "width": 760,
+      "height": 680,
+      "theme": "dark",
+      "overflow": [],
+      "samples": [
+        {
+          "text": "OpenRouter 图像生成",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "已启用",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "https://openrouter.ai/api/v1/images",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "OpenRouter API Key",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "与文案、Decisions 共用同一 OpenRouter 连接，只需填写一次。历史直连和中转密钥不会迁移。",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 11.45
+        },
+        {
+          "text": "生图模型",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认尺寸",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "默认质量",
+          "fg": [
+            204,
+            213,
+            226,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 8.76
+        },
+        {
+          "text": "检查模型访问",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "断开 OpenRouter",
+          "fg": [
+            237,
+            241,
+            248,
+            1
+          ],
+          "bg": [
+            32,
+            41,
+            54,
+            1
+          ],
+          "contrast": 12.95
+        },
+        {
+          "text": "生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。",
+          "fg": [
+            164,
+            177,
+            196,
+            1
+          ],
+          "bg": [
+            39,
+            50,
+            65,
+            1
+          ],
+          "contrast": 5.97
+        },
+        {
+          "text": "生图配置已保存，没有生成图片。",
+          "fg": [
+            145,
+            221,
+            178,
+            1
+          ],
+          "bg": [
+            35,
+            62,
+            52,
+            1
+          ],
+          "contrast": 7.29
+        }
+      ]
+    }
+  ],
+  "screenshots": [
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-access-error.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-light-1480.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-light-1080.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-light-760.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-light-760-controls.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-dark-1480.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-dark-1080.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-dark-760.png",
+    "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-dark-760-controls.png"
+  ],
+  "originalReport": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-integration\\worktrees\\htc-250-image-e2e\\artifacts\\image-generation-e2e-report.json",
+  "originalReportSha256": "c0da774c04f578e27117cc6264e66b60267b6ebd1e507e999334de60840f0ddd",
+  "boundary": "Synthetic local Electron with fake service responses; no real paid service acceptance. Full original evidence retained in the image worktree."
+}

@@ -1,6 +1,7 @@
+import { RestorePathGuard } from './restore-paths.ts';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scrypt } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open, lstat, realpath, mkdir, link, unlink, statfs } from 'node:fs/promises';
+import { constants, writeSync, fsyncSync, closeSync } from 'node:fs';
+import { open, lstat, realpath, link, unlink, statfs } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { UserFacingError } from '../shared/errors.ts';
@@ -49,7 +50,28 @@ export async function readStreamingBackup(source:string,passphrase:string,stagin
  const metadata=await frame(0xffffffff,MAX_MANIFEST);manifestHash=Buffer.from(createHash('sha256').update(metadata).digest());const manifest:unknown=JSON.parse(metadata.toString());validateManifest(manifest);
  // Validate every path before opening any output, including files later in the manifest.
  const paths=manifest.files.map(f=>pathFor(f.path));await checkBackupSpace(staging,manifest.files.reduce((n,f)=>n+f.byteSize,0));
- for(let index=0;index<manifest.files.length;index++){const entry=manifest.files[index],path=paths[index];await mkdir(dirname(path),{recursive:true});const out=await open(path,'wx');try{const hash=createHash('sha256');let count=0;while(count<entry.byteSize){const plain=await frame(index,Math.min(BACKUP_CHUNK_BYTES,entry.byteSize-count));if(!plain.length)throw invalid();await write(out,plain);hash.update(plain);count+=plain.length;}if(hash.digest('hex')!==entry.sha256)throw invalid();await out.sync();}finally{await out.close();}await checkpoint?.('file-restored');}
+ const guard = new RestorePathGuard(staging);
+ for (let index = 0; index < manifest.files.length; index++) {
+   const entry = manifest.files[index], path = paths[index], out = guard.openFile(path);
+   try {
+     const hash = createHash('sha256'); let count = 0;
+     while (count < entry.byteSize) {
+       const plain = await frame(index, Math.min(BACKUP_CHUNK_BYTES, entry.byteSize - count));
+       if (!plain.length) throw invalid();
+       guard.assertFile(path, out);
+       let offset = 0;
+       while (offset < plain.length) {
+         const written = writeSync(out, plain, offset, plain.length - offset);
+         if (!written) throw invalid(); offset += written;
+       }
+       guard.assertFile(path, out); hash.update(plain); count += plain.length;
+     }
+     if (hash.digest('hex') !== entry.sha256) throw invalid();
+     guard.assertFile(path, out); fsyncSync(out);
+   } finally { closeSync(out); }
+   await checkpoint?.('file-restored');
+ }
+ guard.assertTree();
  if((await frame(0xfffffffe,0)).length)throw invalid();const tail=Buffer.alloc(1);if((await file.read(tail,0,1,null)).bytesRead||!same(before,await file.stat())||!same(before,await regular(source)))throw invalid();return manifest;
  }catch(error){if(error instanceof UserFacingError)throw error;throw invalid();}finally{key?.fill(0);await file.close();}
 }

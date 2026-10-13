@@ -1,3 +1,4 @@
+import { RestorePathGuard, writeRestoreFile } from './restore-paths.ts';
 import { V2_MAGIC, hashBackupFile, writeStreamingBackup, readStreamingBackup, type BackupFile } from './backup-stream.ts';
 import { CORRECTION_TABLES, assertCorrectionHistory, retainCorrectionHistory, invalidateCorrectionAuthorizations } from './amazon/correction-history.ts';
 import { MIGRATION_TABLES, assertMigrationJournal } from './storage/migrations.ts';
@@ -15,8 +16,8 @@ import { assertSourceImageHistory, validateSourceImageProvenance } from './sourc
 import { assertCompletionHistory, retainCompletionOperations, validateCompletionOperation } from './listing-ai/completion-journal.ts';
 import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
-import { mkdir, readFile, writeFile, rename, rm, lstat, open } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, readFile, rename, rm, lstat, open } from 'node:fs/promises';
+import { existsSync, renameSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -112,7 +113,7 @@ const versionEighteenTables: Record<string,string[]> = {listing_completion_opera
 const versionSixteenTables: Record<string, string[]> = { automatic_listing_tasks: ['id','record_json'], item_labels: ['id','record_json'], shipment_documents: ['id','record_json'] };
 interface AssetCopy { path: string; data: string; sha256: string }
 interface BackupManifest { format: 'htc-workspace-backup'; version: 1; source: { application: 'HTC'; kind: 'local-workspace'; databaseVersion: number }; retention: BackupRetention; createdAt: string; database: string; databaseSha256: string; assets: AssetCopy[] }
-export interface PreparedRestore { stagingDirectory: string; createdAt: string; productCount: number; assetCount: number; expiresAt: string | null }
+export interface PreparedRestore { stagingDirectory: string; createdAt: string; productCount: number; assetCount: number; expiresAt: string | null; artifacts?: { path: string; sha256: string; byteSize: number }[] }
 interface RestoreJournal { version: 1|2; phase: 'installing' | 'complete'; stagingDirectory: string; rollbackDirectory: string; priorNames: string[] }
 function digest(data: Buffer): string { return createHash('sha256').update(data).digest('hex'); }
 function managedBackupFile(root: string, path: string): string {
@@ -484,9 +485,10 @@ export async function prepareWorkspaceRestore(directory: string, sourceFile: str
   const root = resolve(directory), staging = join(root, `.restore-staging-${randomUUID()}`);
   await mkdir(join(staging, 'assets'), { recursive: true });
   try {
+    const guard = new RestorePathGuard(staging);
     const database = decodeBase64(value.database);
     if (database.length > MAX_BYTES || digest(database) !== value.databaseSha256) throw new UserFacingError('备份数据库校验未通过');
-    const snapshot = join(staging, 'red.sqlite'); await writeFile(snapshot, database, { flag: 'wx' });
+    const snapshot = join(staging, 'red.sqlite'); writeRestoreFile(guard, snapshot, database);
     const info = checkDatabase(snapshot);
     const found = new Set<string>(); let size = database.length;
     for (const asset of value.assets) {
@@ -497,14 +499,17 @@ export async function prepareWorkspaceRestore(directory: string, sourceFile: str
       const expected = info.artifactChecks.get(asset.path);
       if (expected && (data.length !== expected.byteSize || digest(data) !== expected.sha256)) throw new UserFacingError('备份图片版本与记录不一致');
       if (asset.path.startsWith('documents/')) await validateLabelPdf(data);
-      found.add(asset.path); await mkdir(dirname(path), { recursive: true }); await writeFile(path, data, { flag: 'wx' });
+      found.add(asset.path); writeRestoreFile(guard, path, data);
     }
     if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
+    guard.assertTree();
     disconnectSnapshot(snapshot);
     const retention = snapshotRetention(snapshot);
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
+    guard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
-    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt };
+    guard.assertTree();
+    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: value.assets.map(asset => ({ path: asset.path, sha256: asset.sha256, byteSize: Buffer.byteLength(asset.data, 'base64') })) };
   } catch (error) { await removeStaging(root, staging, 'staging'); throw error; }
 }
 
@@ -512,7 +517,9 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
   const root = resolve(directory), staging = join(root, `.restore-staging-${randomUUID()}`);
   await mkdir(join(staging, 'assets'), { recursive: true });
   try {
+    const guard = new RestorePathGuard(staging);
     const value = await readStreamingBackup(sourceFile, passphrase, staging, path => path === 'red.sqlite' ? join(staging, path) : managedBackupFile(staging, path));
+    guard.assertTree();
     if (value.source.databaseVersion > SCHEMA_VERSION) throw new UserFacingError('备份的数据版本不受当前工作台支持，请更新后重试');
     const snapshot = join(staging, 'red.sqlite'), info = checkDatabase(snapshot), found = new Set<string>();
     for (const file of value.files.slice(1)) {
@@ -523,11 +530,14 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
       found.add(file.path);
     }
     if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
+    guard.assertTree();
     disconnectSnapshot(snapshot);
     const retention = snapshotRetention(snapshot);
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
+    guard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
-    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt };
+    guard.assertTree();
+    return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: value.files.slice(1).map(({ path, sha256, byteSize }) => ({ path, sha256, byteSize })) };
   } catch (error) { await removeStaging(root, staging, 'staging'); throw error; }
 }
 
@@ -536,10 +546,12 @@ export async function discardPreparedRestore(directory: string, prepared: Prepar
 }
 
 async function recoverJournal(root: string, journal: RestoreJournal): Promise<void> {
+  new RestorePathGuard(root);
   const staging = stagingPath(root, journal.stagingDirectory, 'staging'), rollback = stagingPath(root, journal.rollbackDirectory, 'rollback');
   const names=journal.version===1?legacyManagedNames:managedNames;
   if (![1,2].includes(journal.version) || !['installing', 'complete'].includes(journal.phase) || !Array.isArray(journal.priorNames) || journal.priorNames.some(name => !names.includes(name))) throw new UserFacingError('恢复日志不完整，请保留当前数据目录后联系维护人员');
   for (const path of [staging, rollback]) if (existsSync(path) && (await lstat(path)).isSymbolicLink()) throw new UserFacingError('恢复暂存目录不能是链接');
+  if (existsSync(rollback)) new RestorePathGuard(rollback).assertTree();
   if (journal.phase === 'installing') {
     for (const name of names) {
       const prior = join(rollback, name), current = join(root, name);
@@ -565,14 +577,31 @@ export async function recoverInterruptedRestore(directory: string): Promise<'rol
   return journal.phase === 'installing' ? 'rolled-back' : 'completed';
 }
 
+async function verifyRestoreArtifacts(directory: string, info: ReturnType<typeof checkDatabase>, prepared: PreparedRestore, guard: RestorePathGuard, names?: readonly string[]): Promise<void> {
+  const authenticated = new Map(prepared.artifacts?.map(file => [file.path, file]));
+  const verifyTree = () => { if (names) { for (const name of names) if (existsSync(join(directory, name))) guard.assertTree(join(directory, name)); } else guard.assertTree(); };
+  verifyTree();
+  for (const path of info.assetPaths) {
+    const file = managedBackupFile(directory, path); guard.assertFile(file);
+    const actual = await hashBackupFile(file); guard.assertFile(file);
+    for (const expected of [info.artifactChecks.get(path), authenticated.get(path)]) {
+      if (expected && (actual.byteSize !== expected.byteSize || actual.sha256 !== expected.sha256)) throw new UserFacingError('恢复引用文件校验失败，未安装备份');
+    }
+  }
+  verifyTree();
+}
+
 export type RestoreCheckpoint = 'journal-written' | 'old-files-moved' | 'database-installed' | 'assets-installed' | 'complete-marked';
 /** Caller closes every workspace SQLite connection. The optional checkpoint is an internal fault-test seam, never an IPC parameter. */
 export async function commitWorkspaceRestore(directory: string, prepared: PreparedRestore, checkpoint?: (point: RestoreCheckpoint) => void | Promise<void>): Promise<void> {
   const root = resolve(directory), staging = stagingPath(root, prepared.stagingDirectory, 'staging');
-  if ((await lstat(staging)).isSymbolicLink()) throw new UserFacingError('恢复暂存目录不能是链接');
-  checkDatabase(join(staging, 'red.sqlite'));
-  for (const name of managedNames) if (existsSync(join(root, name)) && (await lstat(join(root, name))).isSymbolicLink()) throw new UserFacingError('工作区内部文件不能是链接，未更改资料');
+  const stageGuard = new RestorePathGuard(staging), rootGuard = new RestorePathGuard(root);
+  stageGuard.assertTree();
+  let info = checkDatabase(join(staging, 'red.sqlite'));
+  await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
+  for (const name of managedNames) if (existsSync(join(root, name))) rootGuard.assertTree(join(root, name));
   const rollback = join(root, `.restore-rollback-${randomUUID()}`); await mkdir(rollback);
+  const rollbackGuard = new RestorePathGuard(rollback);
   const journal: RestoreJournal = { version: 2, phase: 'installing', stagingDirectory: staging, rollbackDirectory: rollback, priorNames: managedNames.filter(name => existsSync(join(root, name))) };
   const journalFile = join(root, '.restore-journal.json');
   await writeFileAtomically(journalFile, JSON.stringify(journal));
@@ -580,18 +609,30 @@ export async function commitWorkspaceRestore(directory: string, prepared: Prepar
     clearMiaoshouConfig(root);
     clearImageGenerationConnection(root);
     if (checkpoint) await checkpoint('journal-written');
-    // All services are closed by the caller. Include usage acquired after prepare, immediately before replacement.
+    // Recheck after every asynchronous boundary before any file can be installed.
+    stageGuard.assertTree(); rootGuard.assertDirectory(root); rollbackGuard.assertTree();
     retainSafetyHistory(join(root, 'red.sqlite'), join(staging, 'red.sqlite'));
-    checkDatabase(join(staging, 'red.sqlite'));
-    for (const name of journal.priorNames) await rename(join(root, name), join(rollback, name));
+    info = checkDatabase(join(staging, 'red.sqlite'));
+    await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
+    for (const name of journal.priorNames) {
+      rootGuard.assertTree(join(root, name)); rollbackGuard.assertDirectory(rollback);
+      renameSync(join(root, name), join(rollback, name));
+    }
     if (checkpoint) await checkpoint('old-files-moved');
-    await rename(join(staging, 'red.sqlite'), join(root, 'red.sqlite'));
+    await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
+    stageGuard.assertFile(join(staging, 'red.sqlite')); rootGuard.assertDirectory(root);
+    renameSync(join(staging, 'red.sqlite'), join(root, 'red.sqlite'));
     if (checkpoint) await checkpoint('database-installed');
-    await rename(join(staging, 'assets'), join(root, 'assets'));
-    if (existsSync(join(staging, 'documents'))) await rename(join(staging, 'documents'), join(root, 'documents'));
-    if (existsSync(join(staging, 'ai-receipts'))) await rename(join(staging, 'ai-receipts'), join(root, 'ai-receipts'));
+    await verifyRestoreArtifacts(staging, info, prepared, stageGuard);
+    for (const name of ['assets', 'documents', 'ai-receipts']) if (existsSync(join(staging, name))) {
+      stageGuard.assertTree(join(staging, name)); rootGuard.assertDirectory(root);
+      renameSync(join(staging, name), join(root, name));
+    }
     if (checkpoint) await checkpoint('assets-installed');
-    checkDatabase(join(root, 'red.sqlite'));
+    const installedGuard = new RestorePathGuard(root);
+    for (const name of managedNames) if (existsSync(join(root, name))) installedGuard.assertTree(join(root, name));
+    const installed = checkDatabase(join(root, 'red.sqlite'));
+    await verifyRestoreArtifacts(root, installed, prepared, installedGuard, managedNames);
     journal.phase = 'complete'; await writeFileAtomically(journalFile, JSON.stringify(journal));
     if (checkpoint) await checkpoint('complete-marked');
   } catch (error) { await recoverJournal(root, { ...journal, phase: 'installing' }); throw error; }

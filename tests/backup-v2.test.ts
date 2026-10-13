@@ -52,3 +52,26 @@ test('V2 rejects directory junction escape and hard-linked input without touchin
  await symlink(outside,linked,'junction');await assert.rejects(hashBackupFile(join(linked,'source')),/损坏/);assert.equal(await readFile(join(outside,'source'),'utf8'),'protected evidence');
  const hard=join(root,'hard');await link(join(outside,'source'),hard);await assert.rejects(hashBackupFile(hard),/损坏/);assert.equal(await readFile(join(outside,'source'),'utf8'),'protected evidence');
 });
+import { readStreamingBackup } from '../src/main/backup-stream.ts';
+import { rename } from 'node:fs/promises';
+test('restoration rejects an output parent replaced by a junction after an authenticated file',async t=>{
+ const root=await fixture(t),input=join(root,'input'),stage=join(root,'stage'),outside=join(root,'outside');await mkdir(input);await mkdir(stage);await mkdir(outside);await mkdir(join(stage,'assets'));
+ const id=randomUUID(),asset='assets/'+id+'.png';await writeFile(join(input,'db'),'synthetic db');await writeFile(join(input,'image'),'protected bytes');
+ const manifest:StreamManifest={format:'htc-workspace-backup',version:2,source:{application:'HTC',kind:'local-workspace',databaseVersion:26},createdAt:new Date().toISOString(),retention:{amazonDays:180,logDays:365,dataOldestAt:null,expiresAt:null},files:[{path:'red.sqlite',...await hashBackupFile(join(input,'db')),role:'db'},{path:asset,...await hashBackupFile(join(input,'image')),role:'asset'}]};
+ const file=join(root,'archive.htcbackup');await writeStreamingBackup(file,'synthetic passphrase',manifest,p=>join(input,p==='red.sqlite'?'db':'image'),async()=>{});let restored=0;
+ await assert.rejects(readStreamingBackup(file,'synthetic passphrase',stage,p=>join(stage,p),async point=>{if(point==='file-restored'&&++restored===1){await rm(join(stage,'assets'),{recursive:true});await symlink(outside,join(stage,'assets'),'junction');}}),/目录|损坏|路径/);
+ assert.deepEqual(await readdir(outside),[]);
+});
+for(const checkpoint of ['before-commit','old-files-moved','database-installed'] as const)test('commit rejects staging child junction replacement at '+checkpoint,async t=>{
+ const root=await fixture(t),dir=join(root,'data'),outside=join(root,'outside');await mkdir(outside);await writeFile(join(outside,'sentinel'),'keep');
+ const db=new WorkspaceStore(dir),product=db.createProduct();db.close();const file=join(root,'valid.htcbackup');await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(dir,file,'synthetic passphrase');
+ const swap=async()=>{await rename(join(prepared.stagingDirectory,'assets'),join(prepared.stagingDirectory,'original-assets'));await symlink(outside,join(prepared.stagingDirectory,'assets'),'junction');};
+ if(checkpoint==='before-commit')await swap();
+ await assert.rejects(commitWorkspaceRestore(dir,prepared,async point=>{if(point===checkpoint)await swap();}),/目录|路径|链接/);
+ assert.equal(await readFile(join(outside,'sentinel'),'utf8'),'keep');const after=new WorkspaceStore(dir);assert.equal(after.getProduct(product.id).id,product.id);after.close();
+});
+test('commit rechecks authenticated preview hashes before replacing the current workspace',async t=>{
+ const root=await fixture(t),dir=join(root,'data'),store=new WorkspaceStore(dir),p=store.createProduct(),id=randomUUID(),bytes=Buffer.from('original');await mkdir(join(dir,'assets'));await writeFile(join(dir,'assets',id+'.png'),bytes);await writeFile(join(dir,'assets',id+'.preview.png'),bytes);
+ store.addAssets({productId:p.id,revision:p.revision},[{id,fileName:'image.png',mimeType:'image/png',width:10,height:10,byteSize:bytes.length,originalPath:'assets/'+id+'.png',previewPath:'assets/'+id+'.preview.png',sha256:createHash('sha256').update(bytes).digest('hex')}]);store.close();const file=join(root,'valid.htcbackup');await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(dir,file,'synthetic passphrase');await writeFile(join(prepared.stagingDirectory,'assets',id+'.preview.png'),'tampered');
+ await assert.rejects(commitWorkspaceRestore(dir,prepared),/校验/);assert.deepEqual(await readFile(join(dir,'assets',id+'.preview.png')),bytes);
+});

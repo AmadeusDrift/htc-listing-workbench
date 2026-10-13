@@ -1,3 +1,4 @@
+import type { ProblemContext } from './navigation-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Play, RefreshCw } from 'lucide-react';
 import type { ProductDetail, ProductSummary } from '../shared/contracts';
@@ -16,7 +17,7 @@ import { AutomaticQueueProducts } from './AutomaticQueueProducts';
 interface Props {
   products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean;
   taskProducts:ProductSummary[];targetId:string;onTargetChange:(id:string)=>void;queue:AutomaticListingQueue|null;queueLoading:boolean;queueError:string;onRefreshQueue:()=>void;
-  onManual: (productId: string, draftId?: string) => void; onSettings: (module?: SettingsModule) => void;
+  onManual: (productId: string, draftId?: string, context?: ProblemContext) => void; onSettings: (module?: SettingsModule) => void;
   onExamples: () => void; onInbox: () => void;
   onShipping?: (batchId: string) => void;
 }

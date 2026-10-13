@@ -1,3 +1,4 @@
+import { useFormGuard } from './FormGuard';
 import { useEffect, useRef, useState } from 'react';
 import { Save } from 'lucide-react';
 import { DEFAULT_ITEM_LABEL_FORMAT, ITEM_LABEL_PAGE_TYPES } from '../shared/item-label-contracts';
@@ -21,12 +22,13 @@ export function ItemLabelSettings({ busy, onSaved }: { busy: boolean; onSaved?: 
   const valid = format.labelType !== 'THERMAL_PRINTING' || [format.width, format.height].every(value => Number.isFinite(value) && value >= 25 && value <= 100);
   function change(value: ItemLabelFormat) { setFormat(value); setNotice(''); }
   async function save() {
-    if (disabled || !valid) return;
+    if (disabled || !valid) return false;
     setPending(true); setError(''); setNotice('');
-    try { const value = await api.saveItemLabelFormat(format); if (mounted.current) { setFormat(value); setSaved(value); setNotice('商品标签格式已保存'); onSaved?.(); } }
-    catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    try { const value = await api.saveItemLabelFormat(format); if (mounted.current) { setFormat(value); setSaved(value); setNotice('商品标签格式已保存'); onSaved?.(); } return true; }
+    catch (cause) { if (mounted.current) setError(errorText(cause)); return false; }
     finally { if (mounted.current) setPending(false); }
   }
+  useFormGuard({ dirty: () => saved !== null && JSON.stringify(format) !== JSON.stringify(saved), save, discard: () => { if (saved) setFormat(saved); setError(''); } });
   return <section className="settings-section item-label-settings" aria-label="商品标签格式">
     <h3>商品标签格式</h3><p className="small-copy">按实际标签纸选择 A4 排版或热敏尺寸。保存后用于新任务与后续备货；已有自动任务保留启动时的格式，当前可用版本以标签列表为准。</p>
     <div className="form-grid"><label className="field"><span>标签纸类型</span><select aria-label="标签纸类型" disabled={disabled} value={format.labelType} onChange={event => change(event.target.value === 'THERMAL_PRINTING' ? { labelType:'THERMAL_PRINTING',width:50,height:30,localeCode:format.localeCode } : { labelType:'STANDARD_FORMAT',pageType:'A4_21',localeCode:format.localeCode })}><option value="STANDARD_FORMAT">A4 / Letter 标签纸</option><option value="THERMAL_PRINTING">热敏标签纸</option></select></label>

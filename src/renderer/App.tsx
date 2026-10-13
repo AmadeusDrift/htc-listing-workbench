@@ -1,6 +1,10 @@
+import { NavigationMemoryContext } from './navigation-context';
+import type { ProblemContext } from './navigation-context';
 import { AlertCircle, Box, CheckCircle2, ChevronRight, FileInput, FolderOpen, Inbox, LoaderCircle, Monitor, Plus, ShieldCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppSettings, AssetRole, AuditEvent, ListingReadiness, ProductDetail, ProductSummary } from '../shared/contracts';
+import { FormGuardContext, GuardedNavigationContext } from './FormGuard';
+import { createFormGuardRegistry } from './form-guard-registry';
 import { ProductEditor } from './ProductEditor';
 import { ProductList } from './ProductList';
 import { AuditView, SettingsView } from './SupportingViews';
@@ -26,6 +30,10 @@ type PendingAction = () => void | Promise<unknown>;
 
 export default function App() {
   const api = window.red;
+  const formGuards = useRef(createFormGuardRegistry()).current;
+  const navigationMemory = useRef(new Map<string, unknown>()).current;
+  const [returnTo, setReturnTo] = useState<{ view: MainView; scroll: number; context?: ProblemContext } | null>(null);
+  const mainContent = useRef<HTMLElement>(null);
   const appearance = useAppearance();
   const [settingsRequest, setSettingsRequest] = useState<{ module: SettingsModule; token: number }>({ module: 'amazon', token: 0 });
   const [products, setProducts] = useState<ProductSummary[]>([]);
@@ -44,6 +52,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showGuard, setShowGuard] = useState(false);
+  const [guardSaving, setGuardSaving] = useState(false);
+  const guardSavingRef = useRef(false);
   const [readiness, setReadiness] = useState<ListingReadiness | null>(null);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -138,11 +148,15 @@ export default function App() {
 
   useEffect(() => {
     const protect = (event: BeforeUnloadEvent) => {
-      if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty()) { event.preventDefault(); event.returnValue = ''; }
+      if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty() || formGuards.dirty()) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('beforeunload', protect);
     return () => window.removeEventListener('beforeunload', protect);
   }, []);
+
+  const requestClose = useRef<() => void>(() => {});
+  requestClose.current = () => guarded(() => { requestAnimationFrame(() => window.close()); });
+  useEffect(() => api?.onUnsavedCloseRequested?.(() => requestClose.current()), [api]);
 
   useEffect(() => {
     if (!toast) return;
@@ -177,24 +191,29 @@ export default function App() {
       });
       if (result !== true) return false;
     }
-    if (amazonGuard.current?.dirty()) return amazonGuard.current.save();
-    return true;
+    if (amazonGuard.current?.dirty() && !await amazonGuard.current.save()) return false;
+    return formGuards.save();
   }
 
   function guarded(action: PendingAction) {
-    if (lockedRef.current) return;
-    if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty()) {
+    if (lockedRef.current || guardSavingRef.current) return;
+    if (isChanged(currentRef.current, savedRef.current) || amazonGuard.current?.dirty() || formGuards.dirty()) {
       pendingRef.current = action;
       setError(null);
       setShowGuard(true);
     } else { void action(); }
   }
 
-  function cancelGuard() { if (!lockedRef.current) { pendingRef.current = null; setShowGuard(false); } }
+  function cancelGuard() { if (!lockedRef.current && !guardSavingRef.current) { pendingRef.current = null; setShowGuard(false); } }
 
   async function continueAfterSave() {
-    if (lockedRef.current) return;
-    if (!await saveDraft()) return;
+    if (lockedRef.current || guardSavingRef.current) return;
+    guardSavingRef.current = true; setGuardSaving(true);
+    let saved = false;
+    try { saved = await saveDraft(); }
+    catch (cause) { setError(errorText(cause)); }
+    finally { guardSavingRef.current = false; setGuardSaving(false); }
+    if (!saved) { setError(value => value || '部分表单未能保存，请继续编辑并核对对应提示。'); return; }
     const action = pendingRef.current;
     pendingRef.current = null;
     setShowGuard(false);
@@ -202,8 +221,9 @@ export default function App() {
   }
 
   function continueAfterDiscard() {
-    if (lockedRef.current) return;
+    if (lockedRef.current || guardSavingRef.current) return;
     amazonGuard.current?.discard();
+    formGuards.discard();
     if (savedRef.current) commitProduct(savedRef.current);
     const action = pendingRef.current;
     pendingRef.current = null;
@@ -312,7 +332,7 @@ export default function App() {
   function navigate(nextView: MainView) {
     if (nextView === view) return;
     guarded(() => {
-      if (nextView === 'inbox' || nextView === 'automatic') { setView(nextView); return; }
+      if (nextView === 'inbox' || nextView === 'automatic') { setReturnTo(null); setView(nextView); return; }
       return perform('正在打开工作区…', async () => {
         if (nextView === 'audit') setAudit(await api.listAudit());
         else if (nextView === 'settings') setSettings(await api.getSettings());
@@ -326,7 +346,7 @@ export default function App() {
             else { currentRef.current = null; savedRef.current = null; setProduct(null); setSavedProduct(null); }
           }
         }
-        setView(nextView);
+        setReturnTo(null); setView(nextView);
       });
     });
   }
@@ -357,6 +377,26 @@ export default function App() {
     guarded(() => { setShippingBatchId(batchId); setView('shipping'); });
   }
 
+  function openProduct(id: string, initialTab: EditorTab = 'info', draftId?: string, context?: ProblemContext) {
+    guarded(() => perform('正在打开商品…', async () => {
+      const detail = await api.getProduct(id);
+      if (draftId && !(await api.listAmazonDrafts(id)).some(row => row.id === draftId)) {
+        setError('目标草稿已不存在，请返回来源页面刷新；未打开其他草稿。'); return;
+      }
+      if (context?.variantId && !detail.variants.some(item => item.id === context.variantId)) { setError('目标 SKU 已不存在，请返回来源页面刷新。'); return; }
+      setReturnTo({ view, scroll: mainContent.current?.scrollTop ?? 0, context });
+      commitProduct(detail); setTab(initialTab); setInitialDraftId(draftId); setWorkflowRequest(null); setView('manual');
+    }));
+  }
+
+  function returnToSource() {
+    if (!returnTo) return;
+    const destination = returnTo;
+    guarded(() => { setView(destination.view); setReturnTo(null);
+      requestAnimationFrame(() => { if (mainContent.current) mainContent.current.scrollTop = destination.scroll; });
+    });
+  }
+
   function moveProducts(ids: string[], lane: WorkspaceLane, open = false, initialTab: EditorTab = 'info', draftId?: string) {
     guarded(() => perform('正在更新商品去向…', async () => {
       await api.moveWorkspaceProducts({ productIds: ids, destination: lane });
@@ -379,13 +419,13 @@ export default function App() {
 
   if (!api) return <div className="desktop-notice"><span className="brand-logo">H<span /></span><Monitor size={34} strokeWidth={1.4} /><h1>请从 HTC 桌面应用打开</h1><p>此工作台需要桌面环境来读取本机商品资料。<br />请启动 HTC 桌面应用后继续。</p></div>;
 
-  return <div className="desktop-shell"><DesktopTitleBar version={appVersion} appearance={appearance} /><div className="app-shell htc-workspaces">
+  return <NavigationMemoryContext.Provider value={navigationMemory}><FormGuardContext.Provider value={formGuards}><GuardedNavigationContext.Provider value={guarded}><div className="desktop-shell"><DesktopTitleBar version={appVersion} appearance={appearance} /><div className="app-shell htc-workspaces">
     <WorkspaceNavigation view={view} busy={Boolean(busy)} counts={{ inbox: inboxProducts.length, manual: manualProducts.length, automatic: automaticProducts.length }} targets={amazonTargets} onNavigate={navigate} onExamples={loadExamples} onConnectionSettings={() => openSettings('amazon')} />
     <div className="main-shell">
       <header className="topbar"><div className="breadcrumb"><span>工作空间</span><ChevronRight size={13} /><strong>{viewLabels[view]}</strong></div><span className="topbar-local"><span className="topbar-location"><FolderOpen size={14} />本地工作区<span className="topbar-divider" />HTC</span><strong className="app-version" aria-label="当前应用版本">{appVersion ? `v${appVersion}` : '版本读取中'}</strong></span></header>
-      <main className="main-content" data-workspace={view}>
+      <main ref={mainContent} className="main-content" data-workspace={view}>
         <div className="page-heading"><div><span className="page-eyebrow">LISTING WORKSPACE</span><h1>{viewLabels[view]}</h1><p>{viewDescriptions[view]}</p></div>
-          <div className="page-actions">
+          <div className="page-actions">{view === 'manual' && returnTo && <button type="button" className="button secondary" disabled={Boolean(busy)} onClick={returnToSource}>返回{viewLabels[returnTo.view]}{returnTo.context?.taskId ? ' · 原任务' : ''}</button>}
             {view === 'manual' && product && <button type="button" className="button secondary" onClick={() => moveProducts([product.id], 'inbox')} disabled={Boolean(busy)}><Inbox size={16} />移回采集箱</button>}
             {(view === 'manual' || view === 'inbox') && <><button type="button" className="button secondary" onClick={importProducts} disabled={Boolean(busy)}><FileInput size={16} />导入商品</button><button type="button" className="button primary" onClick={createProduct} disabled={Boolean(busy)}><Plus size={17} />新建商品</button></>}
           </div>
@@ -394,24 +434,25 @@ export default function App() {
         {appearance.error && view !== 'settings' && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>外观设置未保存：{appearance.error}</span><button type="button" className="button secondary" onClick={() => openSettings('appearance')}>查看外观设置</button></div>}
         {!initialized ? <div className="loading-state"><LoaderCircle className="spin" size={25} /><p>正在读取本地商品资料…</p></div>
           : view === 'inbox' ? <InboxPage products={products} placements={placements} busy={Boolean(busy)} onImport={importProducts} onExamples={() => loadWorkspaceExamples('inbox')} onMove={moveProducts} onChanged={refreshProducts} onOpenSettings={() => openSettings('collection')} />
-          : view === 'automatic' ? <AutomaticPage onShipping={openShipping} products={automaticProducts} targets={amazonTargets} busy={Boolean(busy)} onExamples={() => loadWorkspaceExamples('automatic')} onInbox={() => navigate('inbox')} onSettings={openSettings} onManual={(id, draftId) => moveProducts([id], 'manual', true, draftId ? 'checks' : 'info', draftId)} />
-          : view === 'results' ? <ResultsPage products={products} drafts={resultDrafts} busy={Boolean(busy)} run={perform} onRefresh={() => { void perform('正在刷新上架记录…', refreshResults); }} onOpen={(id, draftId) => moveProducts([id], 'manual', true, 'checks', draftId)} />
-          : view === 'product-data' ? <ProductDataPage targets={amazonTargets} busy={Boolean(busy)} onOpen={id => moveProducts([id], 'manual', true)} onProcurement={context => { setProcurementContext(context); navigate('procurement'); }} onSettings={() => openSettings('amazon')} />
+          : view === 'automatic' ? <AutomaticPage onShipping={openShipping} products={automaticProducts} targets={amazonTargets} busy={Boolean(busy)} onExamples={() => loadWorkspaceExamples('automatic')} onInbox={() => navigate('inbox')} onSettings={openSettings} onManual={(id, draftId, context) => openProduct(id, draftId ? 'checks' : context?.variantId ? 'variants' : 'info', draftId, context)} />
+          : view === 'results' ? <ResultsPage products={products} drafts={resultDrafts} busy={Boolean(busy)} run={perform} onRefresh={() => { void perform('正在刷新上架记录…', refreshResults); }} onOpen={(id, draftId) => openProduct(id, 'checks', draftId)} />
+          : view === 'product-data' ? <ProductDataPage targets={amazonTargets} busy={Boolean(busy)} onOpen={id => openProduct(id)} onProcurement={context => { setProcurementContext(context); navigate('procurement'); }} onSettings={() => openSettings('amazon')} />
           : view === 'procurement' || view === 'shipping' || view === 'catalog' ? <OperationsPage key={view} section={view} initialProcurementContext={view === 'procurement' ? procurementContext : undefined} initialBatchId={view === 'shipping' ? shippingBatchId : undefined} targets={amazonTargets} busy={Boolean(busy)} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onDirtyChange={setAmazonDirty} onShipping={openShipping} onProcurement={() => navigate('procurement')} />
+
           : view === 'manual' ? <div className="manual-workspace"><WorkflowRail mode="manual" tab={tab} step={workflowRequest?.step} busy={Boolean(busy)} onSelect={(next, step) => { if (product) guarded(() => { setTab(next); setWorkflowRequest({ step, token: Date.now() }); }); }} />
-            {manualProducts.length > 0 ? <div className="workbench-layout"><ProductList products={manualProducts} selectedId={product?.id} busy={Boolean(busy)} onSelect={selectProduct} />
-              {product ? <ProductEditor product={product} tab={tab} initialDraftId={initialDraftId} workflowRequest={workflowRequest} dirty={dirty} busy={Boolean(busy)} readiness={readiness} onImageSettings={() => openSettings('images')} onTabChange={nextTab => { if (nextTab !== tab) guarded(() => { setTab(nextTab); setWorkflowRequest(null); }); }} onChange={changeProduct} onSave={() => { void saveDraft(); }} onExport={exportProduct} onImportImages={importImages} onUpdateAsset={updateAsset} onCheck={checkProduct} amazonTargets={amazonTargets} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onAmazonDirtyChange={setAmazonDirty} onTargetsChanged={refreshAmazonTargets} />
+            {product || manualProducts.length > 0 ? <div className="workbench-layout"><ProductList products={manualProducts} selectedId={product?.id} busy={Boolean(busy)} onSelect={selectProduct} />
+              {product ? <ProductEditor focusVariantId={returnTo?.context?.variantId} product={product} tab={tab} initialDraftId={initialDraftId} workflowRequest={workflowRequest} dirty={dirty} busy={Boolean(busy)} readiness={readiness} onImageSettings={() => openSettings('images')} onTabChange={nextTab => { if (nextTab !== tab) guarded(() => { setTab(nextTab); setWorkflowRequest(null); }); }} onChange={changeProduct} onSave={() => { void saveDraft(); }} onExport={exportProduct} onImportImages={importImages} onUpdateAsset={updateAsset} onCheck={checkProduct} amazonTargets={amazonTargets} run={perform} guarded={guarded} registerGuard={registerAmazonGuard} onAmazonDirtyChange={setAmazonDirty} onTargetsChanged={refreshAmazonTargets} />
                 : <div className="select-product-empty"><Box size={35} strokeWidth={1.2} /><h2>选择一件商品</h2><p>从左侧列表打开商品资料。</p></div>}
             </div> : <EmptyWorkspace onCreate={createProduct} onImport={importProducts} busy={Boolean(busy)} />}
           </div>
           : view === 'audit' ? <AuditView events={audit} products={products} busy={Boolean(busy)} onRefresh={() => { void perform('正在刷新记录…', async () => setAudit(await api.listAudit())); }} />
-          : settings ? <SettingsView settings={settings} targets={amazonTargets} run={perform} onTargetsChanged={refreshAmazonTargets} appearance={appearance} request={settingsRequest} busy={Boolean(busy)} onOpenFolder={() => { void perform('正在打开数据文件夹…', () => api.openDataFolder()); }} /> : null}
+          : settings ? <SettingsView settings={settings} targets={amazonTargets} run={perform} onTargetsChanged={refreshAmazonTargets} appearance={appearance} request={settingsRequest} guarded={guarded} busy={Boolean(busy)} onOpenFolder={() => { void perform('正在打开数据文件夹…', () => api.openDataFolder()); }} /> : null}
       </main>
       <div className={`activity-bar ${busy ? 'working' : ''}`} role="status">{busy ? <><LoaderCircle size={13} className="spin" /><span>{busy}</span></> : <><span className="live-dot" /><span>资料自动保留在本机</span></>}<span className="activity-right">HTC / {viewLabels[view]}</span></div>
     </div>
     {toast && <div className="toast" role="status"><CheckCircle2 size={18} /><span>{toast}</span><button type="button" className="icon-button small" aria-label="关闭成功提示" onClick={() => setToast(null)}><X size={15} /></button></div>}
-    {showGuard && <UnsavedDialog busy={Boolean(busy)} error={error} onCancel={cancelGuard} onSave={() => { void continueAfterSave(); }} onDiscard={continueAfterDiscard} />}
-  </div></div>;
+    {showGuard && <UnsavedDialog busy={Boolean(busy) || guardSaving} error={error} onCancel={cancelGuard} onSave={() => { void continueAfterSave(); }} onDiscard={continueAfterDiscard} />}
+  </div></div></GuardedNavigationContext.Provider></FormGuardContext.Provider></NavigationMemoryContext.Provider>;
 }
 
 function EmptyWorkspace({ onCreate, onImport, busy }: { onCreate: () => void; onImport: () => void; busy: boolean }) {
@@ -435,5 +476,5 @@ function UnsavedDialog({ busy, error, onCancel, onSave, onDiscard }: { busy: boo
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
-  }}><div className="dialog-icon"><AlertCircle size={24} /></div><h2 id="unsaved-title">有未保存的修改</h2><p id="unsaved-description">保存当前商品的修改后再继续，或返回编辑。选择放弃修改会恢复到上次保存的内容。</p>{error && <p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button type="button" className="button danger-quiet" disabled={busy} onClick={onDiscard}>放弃修改</button><div><button ref={cancelRef} type="button" className="button secondary" disabled={busy} onClick={onCancel}>继续编辑</button><button type="button" className="button primary" disabled={busy} onClick={onSave}>{busy ? <LoaderCircle className="spin" size={15} /> : null}保存后继续</button></div></div></div></div>;
+  }}><div className="dialog-icon"><AlertCircle size={24} /></div><h2 id="unsaved-title">有未保存的修改</h2><p id="unsaved-description">保存当前表单的修改后再继续，或返回编辑。选择放弃修改会恢复到上次保存的内容。</p>{error && <p className="dialog-error" role="alert">{error}</p>}<div className="dialog-actions"><button type="button" className="button danger-quiet" disabled={busy} onClick={onDiscard}>放弃修改</button><div><button ref={cancelRef} type="button" className="button secondary" disabled={busy} onClick={onCancel}>继续编辑</button><button type="button" className="button primary" disabled={busy} onClick={onSave}>{busy ? <LoaderCircle className="spin" size={15} /> : null}保存后继续</button></div></div></div></div>;
 }

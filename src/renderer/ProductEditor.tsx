@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { AlertCircle, ArrowDownToLine, Check, CheckCircle2, ChevronDown, Circle, ClipboardCheck, FileText, ImageIcon, Info, Layers3, Link2, Plus, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import type { Fact, FactState, ListingReadiness, ProductDetail, ProductStatus, Variant } from '../shared/contracts';
 import { AssetsPanel } from './AssetsPanel';
@@ -12,6 +13,7 @@ interface Props {
   product: ProductDetail;
   tab: EditorTab;
   initialDraftId?: string;
+  focusVariantId?: string;
   workflowRequest: { step: WorkflowStep; token: number } | null;
   dirty: boolean;
   busy: boolean;
@@ -41,6 +43,11 @@ const tabs = [
 
 export function ProductEditor(props: Props) {
   const { product, tab, dirty, busy, onChange } = props;
+  useEffect(() => {
+    if (tab !== 'variants' || !props.focusVariantId) return;
+    const row = [...document.querySelectorAll<HTMLElement>('[data-variant-id]')].find(row => row.dataset.variantId === props.focusVariantId);
+    row?.scrollIntoView({ block: 'center' }); row?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true });
+  }, [tab, product.id, props.focusVariantId]);
   const update = <K extends keyof ProductDetail>(key: K, value: ProductDetail[K]) => onChange((current) => ({ ...current, [key]: value }));
   const editFact = (id: string, patch: Partial<Fact>) => onChange((current) => ({ ...current, facts: current.facts.map((fact) => fact.id === id ? { ...fact, ...patch } : fact) }));
   const editVariant = (id: string, patch: Partial<Variant>) => onChange((current) => ({ ...current, variants: current.variants.map((variant) => variant.id === id ? { ...variant, ...patch } : variant) }));
@@ -74,7 +81,7 @@ export function ProductEditor(props: Props) {
         {product.variants.length === 0 ? <div className="asset-empty compact"><div className="empty-icon"><Layers3 size={32} strokeWidth={1.3} /></div><h3>添加商品的第一个 SKU</h3><p>每个 SKU 单独维护规格、采购价和库存。</p></div> : <>
           <div className="variant-table-wrap"><table className="variant-table">
             <thead><tr><th className="row-number">#</th><th>SKU</th><th>原始规格</th><th>整理后规格</th><th>采购价</th><th>库存</th><th className="variant-action-column">操作</th></tr></thead>
-            <tbody>{product.variants.map((variant, index) => <tr key={variant.id} data-testid={`variant-${variant.id}`}>
+            <tbody>{product.variants.map((variant, index) => <tr key={variant.id} data-variant-id={variant.id} data-testid={`variant-${variant.id}`}>
               <td className="row-number">{String(index + 1).padStart(2, '0')}</td>
               <td data-label="SKU"><input className="mono" aria-label={`SKU ${index + 1}`} value={variant.sku} placeholder="SKU 编码" onChange={(event) => editVariant(variant.id, { sku: event.target.value })} /></td>
               <td data-label="原始规格"><textarea aria-label={`原始规格 ${index + 1}`} value={variant.originalSpec} rows={2} placeholder="原始规格" onChange={(event) => editVariant(variant.id, { originalSpec: event.target.value })} /></td>

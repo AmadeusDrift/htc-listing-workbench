@@ -7,7 +7,6 @@ import { BackupSettings } from './BackupSettings';
 import { AiUsageSettings } from './AiUsageSettings';
 import { DiagnosticsSettings } from './DiagnosticsSettings';
 import { MiaoshouSettings } from './MiaoshouSettings';
-import { CollectionSettings } from './CollectionSettings';
 import type { AmazonTarget } from '../shared/amazon-contracts';
 import type { TaskRunner } from './amazon-ui';
 import { ListingRulesSettings } from './ListingRulesSettings';
@@ -26,16 +25,16 @@ export function AuditView({ events, products, busy, onRefresh }: { events: Audit
   </section>;
 }
 
-export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTargetsChanged, appearance, request }: { settings: AppSettings; busy: boolean; onOpenFolder: () => void; targets: AmazonTarget[]; run: TaskRunner; onTargetsChanged: () => Promise<void>; appearance: AppearanceController; request: { module: SettingsModule; token: number } }) {
+export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTargetsChanged, appearance, request, guarded }: { settings: AppSettings; busy: boolean; onOpenFolder: () => void; targets: AmazonTarget[]; run: TaskRunner; onTargetsChanged: () => Promise<void>; appearance: AppearanceController; request: { module: SettingsModule; token: number }; guarded: (action: () => void) => void }) {
   const modules = settingsModules;
   const [selected, setSelected] = useState<string>(request.module);
   useEffect(() => { setSelected(request.module); }, [request]);
   return <section className="utility-panel settings-panel"><div className="section-heading"><div><h2>工作区设置</h2><p>按模块管理连接、商品规则与本地数据。</p></div><span className="version-badge">HTC <span>{settings.appVersion}</span></span></div>
-    <div className="settings-layout"><nav className="settings-nav" aria-label="设置模块">{modules.map(([id,label]) => <button type="button" id={`settings-nav-${id}`} key={id} aria-current={selected === id ? 'page' : undefined} onClick={() => setSelected(id)}>{label}</button>)}</nav>
-    <label className="field settings-module-select"><span>设置模块</span><select value={selected} onChange={event => setSelected(event.target.value)}>{modules.map(([id,label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+    <div className="settings-layout"><nav className="settings-nav" aria-label="设置模块">{modules.map(([id,label]) => <button type="button" id={`settings-nav-${id}`} key={id} aria-current={selected === id ? 'page' : undefined} onClick={() => guarded(() => setSelected(id))}>{label}</button>)}</nav>
+    <label className="field settings-module-select"><span>设置模块</span><select value={selected} onChange={event => { const next = event.target.value; guarded(() => setSelected(next)); }}>{modules.map(([id,label]) => <option key={id} value={id}>{label}</option>)}</select></label>
     <div className="settings-module-content">
     <div hidden={selected !== 'appearance'} aria-label="外观设置"><AppearanceSettings appearance={appearance} /></div>
-    <div hidden={selected !== 'images'} aria-label="图片接口设置"><ImageGenerationSettings visible={selected === 'images'} busy={busy} onAiSettings={() => setSelected('ai')} /></div>
+    <div hidden={selected !== 'images'} aria-label="图片接口设置"><ImageGenerationSettings visible={selected === 'images'} busy={busy} onAiSettings={() => guarded(() => setSelected('ai'))} /></div>
     {selected === 'hosting' && <div aria-label="图片托管设置"><HostingSettings busy={busy} /></div>}
     {selected === 'labels' && <div aria-label="商品标签设置"><ItemLabelSettings busy={busy} /></div>}
     {selected === 'sku' && <div aria-label="SKU 命名设置"><SkuNamingSettings targets={targets} busy={busy} run={run} /></div>}
@@ -47,7 +46,7 @@ export function SettingsView({ settings, busy, onOpenFolder, targets, run, onTar
     </div>
     <div hidden={selected !== 'ai'} aria-label="AI 连接与用量"><AiUsageSettings busy={busy} run={run} /></div>
     <div hidden={selected !== 'diagnostics'} aria-label="诊断与关于"><DiagnosticsSettings busy={busy} run={run} /><section className="settings-section"><h3>关于 HTC</h3><dl className="settings-values"><div><dt>应用版本</dt><dd>{settings.appVersion}</dd></div><div><dt>数据格式</dt><dd>{settings.schemaVersion}</dd></div></dl></section></div>
-    <div hidden={selected !== 'collection'} aria-label="采集连接"><MiaoshouSettings busy={busy} /><CollectionSettings busy={busy} run={run} /></div>
+    <div hidden={selected !== 'collection'} aria-label="采集连接"><MiaoshouSettings busy={busy} /></div>
     <div hidden={selected !== 'amazon'} aria-label="店铺连接"><AmazonSettings targets={targets} busy={busy} run={run} onTargetsChanged={onTargetsChanged} /></div>
     <div hidden={selected !== 'product' && selected !== 'pricing'} aria-label="商品与定价规则"><ListingRulesSettings section={selected === 'pricing' ? 'pricing' : 'product'} targets={targets} busy={busy} run={run} /></div>
     </div></div>

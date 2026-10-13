@@ -238,10 +238,9 @@ async function start() {
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => { if (url.split('#')[0] !== expectedUrl) event.preventDefault(); });
   mainWindow.webContents.on('will-attach-webview', event => event.preventDefault());
-  mainWindow.webContents.on('will-prevent-unload', event => {
-    const choice = dialog.showMessageBoxSync(mainWindow, { type: 'question', title: '还有未保存的修改', message: '关闭工作台会放弃当前未保存的修改。',
-      buttons: ['继续编辑', '放弃修改并关闭'], defaultId: 0, cancelId: 0, noLink: true });
-    if (choice === 1) event.preventDefault();
+  mainWindow.webContents.on('will-prevent-unload', () => {
+    // The renderer owns every explicit-save form; keep close prevented until its guard resolves.
+    mainWindow.webContents.send('red:unsaved-close-requested');
   });
   installIpc(mainWindow, db, dataRoot, expectedUrl, amazon, hosting, execution, ai, images, content, async prepared => {
     await automatic?.close(); automatic = undefined;

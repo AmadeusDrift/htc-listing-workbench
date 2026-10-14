@@ -20,22 +20,26 @@ const png = (color: number) => {
   const bytes = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a','hex').copy(bytes); bytes.writeUInt32BE(13,8); bytes.write('IHDR',12);
   bytes.writeUInt32BE(256,16); bytes.writeUInt32BE(256,20); bytes[32]=color; return bytes;
 };
-async function fixture(t: test.TestContext, options: { fallback?: boolean; unmapped?: boolean; hold?: boolean; mutate?: boolean; aliases?: boolean; assetEdit?: boolean } = {}) {
+async function fixture(t: test.TestContext, options: { fallback?: boolean; unmapped?: boolean; hold?: boolean; mutate?: boolean; aliases?: boolean; assetEdit?: boolean; sixthMapped?: boolean } = {}) {
   await mkdir(resolve('.test-data'), {recursive:true}); const directory=await mkdtemp(resolve('.test-data/automatic-sources-'));
   const store=new WorkspaceStore(directory), db=openDatabase(directory); let product=store.createProduct();
   const input=editable(product);
-  product=store.saveProduct({...input,title:'Automatic source product',variants:options.aliases?Array.from({length:21},(_,i)=>({...input.variants[0],id:randomUUID(),sku:`SKU-${i}`})):[...input.variants,{...input.variants[0],id:randomUUID(),sku:'SECOND-SKU'}]});
+  product=store.saveProduct({...input,title:'Automatic source product',variants:options.sixthMapped?input.variants:options.aliases?Array.from({length:21},(_,i)=>({...input.variants[0],id:randomUUID(),sku:`SKU-${i}`})):[...input.variants,{...input.variants[0],id:randomUUID(),sku:'SECOND-SKU'}]});
   const receipt={productId:product.id,mode:'live',snapshot:{skus:product.variants.map(v=>({key:v.sku})),images:[
     {id:'red',url:'https://images.example.com/red.png',role:'main'},
     {id:'blue',url:'https://images.example.com/blue.png',role:'gallery'},
     {id:'fallback',url:'https://images.example.com/fallback.png',role:'gallery'},
   ]},skuMappings:[
     {sourceKey:'red',localVariantId:product.variants[0].id,imageIds:options.unmapped?[]:options.fallback?['red','fallback']:['red']},
-    {sourceKey:'blue',localVariantId:product.variants[1].id,imageIds:['blue']},
+    {sourceKey:'blue',localVariantId:product.variants[1]?.id,imageIds:['blue']},
   ]} as MiaoshouReceipt;
   if(options.aliases){
     receipt.snapshot.images=product.variants.map((_,i)=>({id:`alias-${i}`,url:`https://images.example.com/alias-${i}.png`,role:'gallery'}));
     receipt.skuMappings=product.variants.map((v,i)=>({sourceKey:`source-${i}`,localVariantId:v.id,imageIds:[`alias-${i}`]}));
+  }
+  if(options.sixthMapped){
+    receipt.snapshot.images=Array.from({length:6},(_,i)=>({id:`photo-${i}`,url:`https://images.example.com/photo-${i}.png`,role:i===0?'main':'gallery'}));
+    receipt.skuMappings=[{sourceKey:'white',localVariantId:product.variants[0].id,imageIds:['photo-5']}];
   }
   persistSourceImageFixture(directory,receipt);
   const downloads:string[]=[]; let began!:()=>void, release!:()=>void;
@@ -49,7 +53,7 @@ async function fixture(t: test.TestContext, options: { fallback?: boolean; unmap
       store.updateAsset({productId:current.id,revision:current.revision,assetId:current.assets[0].id,role:'main',variantIds:[current.variants[0].id]});
     }
     if(options.fallback&&url.endsWith('/red.png'))throw new Error('Source image unavailable');
-    return png(url.endsWith('/blue.png')?2:1);
+    return png(url.endsWith('/blue.png')?2:url.endsWith('/photo-5.png')?5:1);
   }});
   const source={getReceipt:()=>receipt,images};
   t.after(async()=>{release(); await images.close();db.close();store.close();await rm(directory,{recursive:true,force:true});});
@@ -144,4 +148,24 @@ test('named SKU without thumbnail uses unowned product reference and persists sp
  assert.equal(context.referenceAssets[0].scope,'product');
  const conclusion=reduceSourceConsistency(context,{kind:'source-image-consistency',version:'source-image-consistency/v2',assets:[{assetId:context.referenceAssets[0].assetId,quality:'clear',lighting:'neutral',visibility:'complete',presentation:'single-product',colors:['Blue'],appearance:[],claims:context.claims.map(c=>({claimId:c.id,value:'Blue',visibility:'visible'}))}]});
  assert.ok(!conclusion.reasons.some(r=>r.startsWith('VISIBLE_CONTRADICTION')));
+});
+
+for(const prior of [false,true])test(`single SKU explicit sixth image wins over generic gallery, including saved generic original (${prior})`,async t=>{
+ const f=await fixture(t,{sixthMapped:true});
+ let oldAsset:string|undefined;
+ if(prior){const p=f.store.getProduct(f.product.id);await f.images.download({productId:p.id,revision:p.revision,imageIds:[sourceImageId('https://images.example.com/photo-0.png')]});oldAsset=f.store.getProduct(p.id).assets[0].id;}
+ const result=await f.run();assert.deepEqual(result.missing,[]);
+ assert.deepEqual(f.downloads.map(u=>new URL(u).pathname),prior?['/photo-0.png','/photo-5.png']:['/photo-5.png']);
+ if(oldAsset)assert.deepEqual(result.product.assets.find(a=>a.id===oldAsset)!.variantIds,[],'generic historical asset is not silently confirmed');
+ const context=resolveConsistencyContext(f.db,f.store,f.directory,{productId:result.product.id,productRevision:result.product.revision,variantId:result.product.variants[0].id});
+ assert.equal(context.referenceAssets.length,1);assert.equal(context.referenceAssets[0].imageId,sourceImageId('https://images.example.com/photo-5.png'));
+ await f.run();assert.equal(f.downloads.length,prior?2:1);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM ai_calls').get()!.n,0);
+});
+
+test('single SKU missing mapped image must not borrow the available generic main image',async t=>{
+ const f=await fixture(t,{sixthMapped:true});
+ f.receipt.skuMappings[0].imageIds=['missing-image'];
+ const result=await f.run();assert.equal(result.missing.length,1);assert.equal(f.downloads.length,0);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM ai_calls').get()!.n,0);
 });

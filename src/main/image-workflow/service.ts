@@ -1,3 +1,4 @@
+import { candidateRetryEvidence } from './retry-evidence.ts';
 import { randomUUID as retryCommandId } from 'node:crypto';
 import { imageSlotAttemptLimit } from '../../shared/image-workflow-contracts.ts';
 import { planningRetryExhausted,assertRetryAllowanceRun,grantImageRetry,historicalRetryEligible,retryGrants,retryHistoryGap,saveRetryConsumption } from './retry-allowance.ts';
@@ -229,14 +230,7 @@ export class ImageWorkflowService {
     if(planningRetryExhausted(this.db,run,index))return '';
     if(slot.status!=='FAILED'||last?.state!=='RETRYABLE_FAILURE')return '不是明确失败图位';
     if(slot.attempts.length<imageSlotAttemptLimit(run,index))return '现有额度尚未耗尽';
-    if(last.candidateId){
-      const ip=last.ipReviewResultId?this.ai.getResult(last.ipReviewResultId):undefined,review=last.reviewResultId?this.ai.getResult(last.reviewResultId):undefined;
-      const riskPassed=ip?.output.kind==='image-ip-review'&&ip.output.planResultId===last.planResultId&&ip.output.candidate.id===last.candidateId&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict==='PASS';
-      if(riskPassed&&index===1&&last.textReviewPolicyVersion===IMAGE_TEXT_REVIEW_POLICY_VERSION&&review?.output.kind==='image-text-review'&&review.output.verdict==='NEEDS_CHANGES'&&review.output.planResultId===last.planResultId&&review.output.candidate.id===last.candidateId)return '';
-      const appearanceId=last.appearanceReview?.resultIds.at(-1),appearance=appearanceId?this.ai.getResult(appearanceId):undefined;
-      if(riskPassed&&appearance?.output.kind==='image-appearance-review'&&appearance.output.verdict==='MISMATCH'&&appearance.output.planResultId===last.planResultId&&appearance.output.candidate.id===last.candidateId)return '';
-      return '已有候选须优先核对或复核，风险不确定不能补额放行';
-    }
+    if(last.candidateId)return candidateRetryEvidence(run,index,last,this.getRiskSettings(),id=>this.ai.getResult(id))?'':'已有候选须优先核对或复核，风险不确定不能补额放行';
     if(!last.planResultId||this.ai.getResult(last.planResultId)?.output.kind!=='image-plan')return '原有效规划缺失，请先恢复原规划响应';
     if(last.failureProof?.kind==='provider-definitive')return '';
     const audit=this.db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' AND json_extract(detail_json,'$.productId')=? AND json_extract(detail_json,'$.requestId')=? ORDER BY rowid DESC LIMIT 1").get(run.productId,last.requestId);

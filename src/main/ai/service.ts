@@ -2,7 +2,7 @@ import {recoverCategoryPhase,categoryCalls,claimCategoryRepair} from './category
 import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
 import { fieldGroupCallId,fieldGroupRetryScope,assertFieldGroupHistory } from './field-purpose-groups.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
-import { appendRunEvidence, evidenceCode, evidenceSku, validateTransportRunEvidence } from '../diagnostics/run-evidence.ts';
+import { appendRunEvidence, evidenceCode, evidenceSku, validateRunEvidence, validateTransportRunEvidence } from '../diagnostics/run-evidence.ts';
 import type { RunEvidence } from '../../shared/run-evidence-contracts.ts';
 import { imagePlanFailureConfirmed } from './image-plan-retry.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
@@ -986,9 +986,32 @@ export class AiService {
     const scope=requestScope(profile,input,source);
     const key = requestKey({ profile, input, source, ...(completion?{completion}:{}), product: this.product(input.productId, input.productRevision) });
     const taskScope=taskAiContext.getStore(),hash=taskScope?requestKey({taskId:taskScope.taskId,rowKey:taskScope.rowKey,key}):null;
-    return this.requests.run(key, profile.id, async (activeSignal, responseDeadlineAt) => {
+    // Sharing the input promise must not share another task row's adoption grant.
+    const controlKey=taskScope?requestKey({key,taskId:taskScope.taskId,rowKey:taskScope.rowKey,phase:taskScope.phase,waitingOperationId:taskScope.waitingOperationId??null,authorized:taskScope.authorize()}):key;
+    return this.requests.run(controlKey, profile.id, async (activeSignal, responseDeadlineAt) => {
       throwIfAborted(activeSignal);
-      const pending=this.pendingInvocation(scope);
+      const waiting=taskScope?.waitingOperationId?this.batchTasks.find(taskScope.waitingOperationId):undefined;
+      const waitingId=taskScope?.waitingOperationId&&!waiting?.adoption?taskScope.waitingOperationId:undefined;
+      if(waitingId&&(waiting||this.batchTasks.pendingOperation(waitingId))&&(durable?.id??completion?.callId)&&(durable?.id??completion?.callId)!==waitingId)throw new UserFacingError('原Batch步骤身份尚未解决，不能替换请求编号');
+      let id=durable?.id??completion?.callId??randomUUID();
+      const batchOperationId = durable?.id??completion?.callId ?? waitingId?? (hash?`${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-a${hash.slice(17,20)}-${hash.slice(20,32)}`:id);
+      const pending=this.pendingInvocation(scope),originalBatch=this.batchTasks.find(batchOperationId);
+      // An unresolved Batch call is still protected. Only its own immutable item
+      // and transactional task-row reservation can enter the existing runtime's
+      // original-receipt path; a waiting ID by itself grants no exception.
+      if(taskScope&&originalBatch&&pending.some(call=>call.id===batchOperationId)){
+        const original=this.getCall(batchOperationId)!;
+        const rowBound=this.db.prepare("SELECT detail_json FROM audit_events WHERE action='run.evidence' AND product_id=? AND json_extract(detail_json,'$.event')='REQUEST_RESERVED' AND json_extract(detail_json,'$.callId')=?").all(input.productId,original.id).some(row=>{
+          try{const evidence=validateRunEvidence(JSON.parse(String(row.detail_json)));return evidence.taskId===taskScope.taskId&&evidence.itemKey===taskScope.rowKey;}catch{return false;}
+        });
+        if(originalBatch.aiCallId!==original.id||originalBatch.taskId!==taskScope.taskId||originalBatch.phase!==taskScope.phase.toLowerCase()||originalBatch.inputFingerprint!==key
+          ||originalBatch.owner.productId!==original.productId||originalBatch.owner.productRevision!==original.productRevision||originalBatch.owner.providerId!==original.providerId||originalBatch.owner.generation!==original.generation
+          ||originalBatch.purpose.model!==original.model||requestKey(originalBatch.purpose)!==requestKey(original.purposeSnapshot)||!original.requestScope||!sameRequestBusiness(scope,original.requestScope)
+          ||original.requestFingerprint!==this.invocationFingerprint(this.originalProfile(original),input,source)||!rowBound)throw this.unknownInvocation(original);
+        this.batchTasks.assertCredentialIdentity(taskScope.taskId);
+        if(!taskScope.authorize())throw new BatchWaitingError(batchOperationId);
+        pending.splice(pending.findIndex(call=>call.id===original.id),1);
+      }
       // Restore only an exactly bound original response. No hosting/preparation or
       // new credentials are needed to inspect a completed local recovery.
       for(const original of this.matchingInvocations(scope))if(original.status==='FAILED'&&original.requestScope&&original.requestFingerprint===this.invocationFingerprint(this.originalProfile(original),input,source)){
@@ -1009,11 +1032,6 @@ export class AiService {
         if(!saved||openRouterFailure(saved.record.status,saved.capture.body))throw this.unknownInvocation(original);
         replay=saved;replayCall=original;Object.assign(profile,frozen);
       }
-      const waiting=taskScope?.waitingOperationId?this.batchTasks.find(taskScope.waitingOperationId):undefined;
-      const waitingId=taskScope?.waitingOperationId&&!waiting?.adoption?taskScope.waitingOperationId:undefined;
-      if(waitingId&&(waiting||this.batchTasks.pendingOperation(waitingId))&&(durable?.id??completion?.callId)&&(durable?.id??completion?.callId)!==waitingId)throw new UserFacingError('原Batch步骤身份尚未解决，不能替换请求编号');
-      let id=durable?.id??completion?.callId??randomUUID();
-      const batchOperationId = durable?.id??completion?.callId ?? waitingId?? (hash?`${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-a${hash.slice(17,20)}-${hash.slice(20,32)}`:id);
       let call: AiCall | undefined=replayCall, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       if(replayCall)id=replayCall.id;
       let batchItem:BatchItem|undefined,reservingBatch=false;let adapterContext:AdapterContext;

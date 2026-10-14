@@ -1,0 +1,21 @@
+import {electron} from './e2e-core-runtime.mjs';
+import {expect} from '@playwright/test';
+import {build} from 'esbuild';
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {mkdir,mkdtemp,writeFile} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+await mkdir('.test-data',{recursive:true});await mkdir('artifacts',{recursive:true});const root=await mkdtemp(resolve('.test-data/correction-ui-'));
+await build({entryPoints:['tests/fixtures/correction-electron.ts'],outfile:join(root,'main.cjs'),bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
+await build({entryPoints:['src/main/preload.ts'],outfile:join(root,'preload.cjs'),bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
+await build({entryPoints:['tests/fixtures/correction-panel.tsx'],outfile:join(root,'panel.js'),bundle:true,platform:'browser',format:'iife'});
+await writeFile(join(root,'index.html'),'<meta charset="utf-8"><link rel="stylesheet" href="panel.css"><div id="root"></div><script src="panel.js"></script>');
+const require=createRequire(import.meta.url),env={...process.env,RED_DATA_DIR:root,RED_E2E:'1'};delete env.ELECTRON_RUN_AS_NODE;let app;
+try{app=await electron.launch({executablePath:require('electron'),args:[join(root,'main.cjs')],cwd:resolve('.'),env});app.process().stderr.on('data',chunk=>console.log(chunk.toString()));const page=await app.firstWindow(),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.waitForFunction(()=>window.setCorrectionDraft);const draft=await app.evaluate(()=>globalThis.__correctionHarness.draft);await page.evaluate(d=>window.setCorrectionDraft(d),draft);
+ const original=await app.evaluate(()=>JSON.stringify(globalThis.__correctionHarness.snapshot().original));
+ await page.getByRole('button',{name:'准备原 SKU 修正',exact:true}).click();await expect(page.getByText('待验证预览',{exact:true})).toBeVisible();await expect(page.getByRole('button',{name:'继续并确认修正范围',exact:true})).toBeEnabled();
+ await app.evaluate(({dialog})=>{dialog.showMessageBox=async(_w,o)=>{globalThis.__confirmation=o;return {response:0};};});await page.getByRole('button',{name:'继续并确认修正范围',exact:true}).click();assert.equal((await app.evaluate(()=>globalThis.__correctionHarness.snapshot())).sends,0);
+ await app.evaluate(({dialog})=>{dialog.showMessageBox=async(_w,o)=>{globalThis.__confirmation=o;return {response:1};};});await page.getByRole('button',{name:'继续并确认修正范围',exact:true}).click();await expect(page.getByText('目标修正已核实',{exact:true})).toBeVisible();const state=await app.evaluate(()=>globalThis.__correctionHarness.snapshot()),confirmation=await app.evaluate(()=>globalThis.__confirmation);assert.equal(state.sends,1);assert.match(confirmation.detail,/color/);assert.match(confirmation.detail,/1\/2/);assert.equal(JSON.stringify(state.original),original);assert.deepEqual(errors,[]);
+ await page.evaluate(async()=>{await document.fonts.ready;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+ await writeFile('artifacts/correction-ui.png',Buffer.from(await app.evaluate(async({BrowserWindow})=>(await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG().toString('base64')),'base64'));await writeFile('artifacts/correction-ui-report.json',JSON.stringify({passed:true,checks:5,scope:'Production correction component, real preload and Amazon IPC/service with fake transport; synthetic isolated data; guard before main',state,confirmation,errors},null,2));console.log('PASS 5 checks: prepare, validate, native cancel, confirmed PATCH/readback, immutable original');
+}finally{await app?.close();}

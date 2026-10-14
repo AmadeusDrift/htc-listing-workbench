@@ -894,6 +894,12 @@
       "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
     },
     {
+      "file": "main/amazon/corrections.ts",
+      "command": "continue",
+      "expression": "{id:c.draftId,revision:c.draftRevision}",
+      "review": "Non-SQL ListingCorrections.prepare call; plans the second frozen-scope correction, not DatabaseSync.prepare."
+    },
+    {
       "file": "main/amazon/service.ts",
       "command": "prepareCorrection",
       "expression": "input",

@@ -1,3 +1,4 @@
+import {validateCorrectionRecord} from './correction-record.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import type {ListingCorrection,ListingCorrectionAttempt} from '../../shared/listing-correction-contracts.ts';
 import {UserFacingError} from '../../shared/errors.ts';
@@ -8,7 +9,7 @@ const identity=(c:ListingCorrection)=>correctionHash([c.id,c.draftId,c.draftRevi
 const has=(db:DatabaseSync,table:string)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
 export function assertCorrectionHistory(db:DatabaseSync){
  for(const row of db.prepare('SELECT * FROM listing_corrections').all()){
-  const c=JSON.parse(String(row.record_json)) as ListingCorrection;
+  const c=validateCorrectionRecord(JSON.parse(String(row.record_json)) as ListingCorrection);
   if(c.id!==row.id||c.draftId!==row.draft_id||c.listingHash!==row.listing_hash||correctionHash(c.request)!==c.patchHash||!Number.isSafeInteger(c.revision)||c.revision<1||!['PREPARED','READY','SENDING','ACCEPTED','VERIFIED','REJECTED','STALE','CANCELLED','UNKNOWN'].includes(c.state))throw new UserFacingError('修正历史身份或请求指纹无效');
  }
  for(const row of db.prepare('SELECT * FROM listing_correction_attempts').all()){

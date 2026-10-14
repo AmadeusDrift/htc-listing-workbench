@@ -9,9 +9,14 @@ await mkdir('artifacts', { recursive: true });
 const dataRoot = await mkdtemp(resolve('.test-data/inbox-summary-pages-'));
 const require = createRequire(import.meta.url), env = { ...process.env, RED_DATA_DIR: dataRoot, RED_E2E: '1' };
 delete env.ELECTRON_RUN_AS_NODE;
+const packaged = Boolean(process.env.HTC_TEST_EXE);
+const executablePath = packaged ? resolve(process.env.HTC_TEST_EXE) : require('electron');
 let app;
 try {
-  app = await electron.launch({ executablePath: require('electron'), args: ['.'], cwd: resolve('.'), env });
+  app = await electron.launch({ executablePath, args: packaged ? [] : ['.'], cwd: resolve('.'), env });
+  const runtime = await app.evaluate(({ app }) => ({ packaged: app.isPackaged, execPath: process.execPath }));
+  assert.equal(runtime.packaged, packaged);
+  assert.equal(resolve(runtime.execPath).toLowerCase(), resolve(executablePath).toLowerCase());
   const page = await app.firstWindow();
   await expect(page.getByRole('button', { name: '同步妙手采集箱', exact: true })).toBeVisible();
   await page.evaluate(async () => {
@@ -41,5 +46,5 @@ try {
     }
     console.log(`PASS ${count} actual product prices and dimensions displayed without summary error`);
   }
-  await writeFile('artifacts/inbox-summary-pages-evidence.json', JSON.stringify({ dataRoot, counts: [100, 51], checkedEveryPriceAndSize: true, realElectron: true, replacedRed: false, externalRequests: 0 }, null, 2));
+  await writeFile('artifacts/inbox-summary-pages-evidence.json', JSON.stringify({ dataRoot, ...runtime, counts: [100, 51], checkedEveryPriceAndSize: true, realElectron: true, replacedRed: false, externalRequests: 0 }, null, 2));
 } finally { if (app) await app.close(); }

@@ -1,3 +1,4 @@
+import { sanitizeFailureReason } from '../shared/automatic-resume';
 import { ImageRetryAllowance } from './ImageRetryAllowance';
 import { imageSlotAttemptLimit } from '../shared/image-workflow-contracts';
 import { presentRejection } from '../shared/rejection-presentation';
@@ -34,7 +35,7 @@ export function ImageSlotProgress({draftId,revision,active,sku,color,defaultExpa
   if(error)return <p className="small-copy" role="status">图片进度暂不可读：{error}</p>;
   if(!run)return null;
   const unknown=run.resultUnknown===true||run.slots?.some(s=>s.status==='UNKNOWN'||s.attempts.some(a=>['UNKNOWN','GENERATING'].includes(a.state)));
-  const failure=unknown||run.error||run.rejection?<p className="workflow-warning" role="status">{presentRejection(run.rejection?.code,unknown)}</p>:null;
+  const failure=unknown||run.error||run.rejection?<p className="workflow-warning" role="status">{run.error?sanitizeFailureReason(run.error):presentRejection(run.rejection?.code,unknown)}</p>:null;
   if(!run.slots)return <>{failure}<p className="small-copy">历史单图流程 · 新自动准备需要七张通过审核的图片。</p></>;
   const approved=run.slots.filter(slot=>slot.status==='PASSED').length;
   return <details ref={container} className="image-slot-progress" open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
@@ -52,7 +53,8 @@ export function ImageSlotProgress({draftId,revision,active,sku,color,defaultExpa
       {onLocateSlot && ['FAILED','BLOCKED','UNKNOWN'].includes(slot.status) && <button type="button" className="text-button" onClick={()=>onLocateSlot(slot.index)}>查看图位 {slot.index} 问题</button>}
       <div className="image-slot-heading"><strong>{slot.index}. {title}</strong>{slot.index===1&&<span>当前 SKU 主图</span>}</div>
       <ImageSlotPreview key={`${draftId}:${slot.status==='PASSED'?slot.approvedAssetId:'candidate'}:${slot.attempts.findLast(attempt=>attempt.candidateId)?.candidateId??''}`} draftId={draftId} slot={slot} sku={sku||run.sku} title={title}/>
-      {plan&&<small>{plan.focus}</small>}<span>{labels[slot.status]}</span><small>{slot.attempts.length} / {imageSlotAttemptLimit(run,slot.index)} 次</small>{slot.error&&<p>{presentRejection(run.rejection?.slot===slot.index?run.rejection.code:undefined,slot.status==='UNKNOWN'||slot.attempts.at(-1)?.state==='UNKNOWN')}</p>}
+      {plan&&<small>{plan.focus}</small>}<span>{labels[slot.status]}</span><small>{slot.attempts.length} / {imageSlotAttemptLimit(run,slot.index)} 次</small>{slot.error&&<p>{sanitizeFailureReason(slot.error)}</p>}
+      {slot.error&&<small>{slot.attempts.at(-1)?.failureProof?.at?`原请求明确失败时间：${new Date(slot.attempts.at(-1)!.failureProof!.at).toLocaleString()}`:'原失败时间未保存；本次读取未发送新请求'}</small>}
       <ImageRetryAllowance run={run} slot={slot.index} active={active} onUpdated={setRun}/>
       <p className="small-copy">外观复核：{slot.attempts.at(-1)?.appearanceReview?.state==='NOT_PERFORMED'?'未执行':slot.attempts.at(-1)?.appearanceReview?.state==='DONE'?'已完成（结论以保存结果为准）':slot.attempts.at(-1)?.appearanceReview?'待完成':'无复核记录'}</p>
       {run.riskEvidence?.filter(item=>item.slot===slot.index).map(item=><p className="small-copy" key={item.slot}>{item.summary}</p>)}

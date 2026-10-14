@@ -47,6 +47,8 @@ export interface AutomaticSchemaRetry {
   reason: 'SCHEMA_TRANSIENT';
 }
 export interface AutomaticListingItem {
+  lastContinuedAt?:string;
+  failureHistory?:import('./automatic-resume.ts').AutomaticFailureEvent[];
   batchWait?:{operationId:string};
   schemaRetry?: AutomaticSchemaRetry;
   /** Written in the same SQLite transaction as the local pricing draft update. */
@@ -79,6 +81,7 @@ export interface AutomaticListingItem {
   familyTransition?: { phase:'BIND'|'RECHECK'|'READY'; plan:import('./sales-plan-contracts.ts').SalesListingPlan; sourceWorkflowId:string; draftRevision:number; draftStamp:string };
 }
 export interface AutomaticListingTask {
+  resumeScope?:import('./automatic-resume.ts').AutomaticResumeSelection;
   executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode;
   batchPlan?:import('./ai-batch-contracts.ts').TaskBatchPlan;
   adaptation?:{version:1;token:string;at:string;blockedKeys:string[];previousRules:{stamp:string;revision:number}[]};
@@ -90,6 +93,8 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
+  previewAutomaticResume(input:{taskId:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<{taskRevision:number;token:string;lines:string[]}>;
+  resumeAutomaticSelection(input:{taskId:string;taskRevision:number;token:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<AutomaticListingTask|null>;
   getAutomaticBatchSummary(id:string):Promise<import('./ai-batch-contracts.ts').TaskBatchSummary>;
   setAutomaticExecutionMode(input:{taskId:string;mode:import('./ai-batch-contracts.ts').ListingExecutionMode}):Promise<AutomaticListingTask>;
   getAutomaticBatchPlan():Promise<import('./ai-batch-contracts.ts').TaskBatchPlan>;

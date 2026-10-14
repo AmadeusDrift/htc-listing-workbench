@@ -108,6 +108,7 @@ export class HostingService {
     if (!profile.configured) throw new HostingError('CREDENTIAL_NOT_FOUND');
     return profile;
   }
+  async checkLocalAssets(ids:string[]):Promise<void>{for(const id of ids)await this.readAsset(this.eligibleAsset(id));}
   listUploads(): HostedAsset[] {
     this.ensureOpen(); return this.db.prepare('SELECT id,record_json FROM hosting_uploads ORDER BY rowid').all().map(row => {
       const record = validatePersistedUpload(JSON.parse(String(row.record_json))); if (record.id !== row.id) throw new HostingError('INVALID_CONFIG'); return record;

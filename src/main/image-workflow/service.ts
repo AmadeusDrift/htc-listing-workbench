@@ -59,7 +59,7 @@ import { privateDirectory } from '../image-generation/vault.ts';
 
 import { publicError } from '../security.ts';
 import { inspectRaster } from '../image-format.ts';
-import { approvedWorkflowAsset, currentWorkflowPlanIds, validateStoredImageWorkflowRun, workflowRuns } from "./records.ts";
+import { approvedWorkflowAsset, approvedWorkflowAssets, currentWorkflowPlanIds, validateStoredImageWorkflowRun, workflowRuns } from "./records.ts";
 import { imageWorkflowDraftStamp } from "./approval-reuse.ts";
 import { selectImageReferences } from "../assets/reference-selection.ts";
 import { parseAutomaticSources, prepareImageWorkflowSources } from './sources.ts';
@@ -269,8 +269,8 @@ export class ImageWorkflowService {
     if(!run||run.slots?.[index-1]?.attempts.at(-1)?.requestId!==requestId||this.amazon.getDraft(draftId).submittedAt)throw new UserFacingError('图位历史已变化，请刷新后重试');
     this.retryPending=true;try{await this.applyRetry(run,index,commandId,'manual');return structuredClone(run);}finally{this.retryPending=false;}
   }
-  private async applyHistoricalRetries(run:ImageWorkflowRun):Promise<void> {
-    for(const slot of run.slots??[])if(!this.retryReason(run,slot.index)&&historicalRetryEligible(this.db,run,slot.index))await this.applyRetry(run,slot.index,retryCommandId(),'historical');
+  private async applyHistoricalRetries(run:ImageWorkflowRun,selectedSlots?:number[]):Promise<void> {
+    for(const slot of run.slots??[])if((!selectedSlots||selectedSlots.includes(slot.index))&&!this.retryReason(run,slot.index)&&historicalRetryEligible(this.db,run,slot.index))await this.applyRetry(run,slot.index,retryCommandId(),'historical');
   }
   async approveUnknownRetry(raw:unknown):Promise<ImageWorkflowRun>{
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停自动任务，再处理未知生图结果');
@@ -394,9 +394,12 @@ export class ImageWorkflowService {
   }
   // Admission contract: synchronous checks send nothing. Accepted work is deferred
   // so the automatic coordinator can persist its intent before any async work runs.
-  complete(raw: unknown, options: {maxImageAttempts?:1|2|3;legacyImageAttempts?:number} = {}): Promise<CompleteAutomaticProductResult> {
+  inspectApproval(draftId:string):{id:string;sha256:string}[]{this.ensureOpen();const draft=this.amazon.getDraft(draftId);return approvedWorkflowAssets(this.db,draft,this.store.getProduct(draft.productId))??[];}
+  complete(raw: unknown, options: {maxImageAttempts?:1|2|3;legacyImageAttempts?:number;selectedSlots?:number[]} = {}): Promise<CompleteAutomaticProductResult> {
     this.ensureOpen(); const input = keys(raw, ['draftId','draftRevision']), draftId = uuid(input.draftId), revision = integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
+    if(options.selectedSlots&&(!Array.isArray(options.selectedSlots)||!options.selectedSlots.length||options.selectedSlots.some(slot=>!Number.isInteger(slot)||slot<1||slot>7)||new Set(options.selectedSlots).size!==options.selectedSlots.length))throw new UserFacingError('定向图位无效');
     if (this.active.has(draftId)) {
+      if(options.selectedSlots)throw new UserFacingError('图片任务正在执行，不能合并其他图位授权');
       const active=this.active.get(draftId)!;
       if(active.operation!=='complete')throw new UserFacingError('当前商品正在复核已有图片，请等待完成');
       return active.promise;
@@ -408,6 +411,7 @@ export class ImageWorkflowService {
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     let prior = this.getProgress(draftId);
     if(prior&&retryHistoryGap(this.db,prior))throw new UserFacingError('旧备份早于已付费图片尝试，请先核对保留的后续历史；未重复发送');
+    if(options.selectedSlots&&(!prior?.setPlan||!prior.imageContext))throw new UserFacingError('尚无完整图片规划，请先接续 SKU 规划');
     if(!prior&&options.legacyImageAttempts!==undefined)options={...options,maxImageAttempts:missingWorkflowBudget(this.db,this.directory,draft,options.legacyImageAttempts)};
     if(prior?.referenceAssets.length){
       const product=this.store.getProduct(draft.productId),allowUnbound=allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants=draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId];
@@ -460,7 +464,7 @@ export class ImageWorkflowService {
     const controller = new AbortController();
     // Defer until the operation is registered so even immediate cancellation observes it.
     const reuseSource=run.recheckedFromRunId?workflowRuns(this.db,draftId).find(record=>record.id===run.recheckedFromRunId):undefined;
-    const promise = Promise.resolve().then(async () => {await this.applyHistoricalRetries(run);if(run.recheckedFromRunId&&!reuseSource)throw new AiError('SOURCE_CHANGED');return this.runSeven(run, draft, controller.signal,reuseSource);}).finally(() => this.active.delete(draftId));
+    const promise = Promise.resolve().then(async () => {await this.applyHistoricalRetries(run,options.selectedSlots);if(run.recheckedFromRunId&&!reuseSource)throw new AiError('SOURCE_CHANGED');return this.runSeven(run, draft, controller.signal,reuseSource,options.selectedSlots);}).finally(() => this.active.delete(draftId));
     this.active.set(draftId, {operation:'complete',controller,promise}); return promise;
   }
   /** Internal repair path: review a previously approved image again, with zero generation calls. */
@@ -584,7 +588,7 @@ export class ImageWorkflowService {
     this.active.set(draftId,{operation:'recheck',controller,promise});return promise;
   }
   private paid<T>(draftId:string,send:()=>Promise<T>):Promise<T>{ this.assertSourceConsistency(draftId);this.amazon.assertPricingForPaid(draftId); return send(); }
-  private async runSeven(run:ImageWorkflowRun,initial:AmazonDraft,signal:AbortSignal,reuse?:ImageWorkflowRun):Promise<CompleteAutomaticProductResult>{
+  private async runSeven(run:ImageWorkflowRun,initial:AmazonDraft,signal:AbortSignal,reuse?:ImageWorkflowRun,selectedSlots?:number[]):Promise<CompleteAutomaticProductResult>{
     this.assertSourceConsistency(run.draftId);
     let result={draft:initial,aiCalls:0,previewAttempts:0,remaining:remaining(initial)};
     const riskEnabled=run.riskInterceptionEnabled!==false;
@@ -613,7 +617,7 @@ export class ImageWorkflowService {
       const pricing=pricingBlockingReason(initial,readListingRules(this.db));
       if(pricing){
         // Price changes block new spending, not recovery of a response already paid for.
-        for(const slot of run.slots??[]){const attempt=slot.attempts.at(-1);if(!attempt||!['GENERATING','UNKNOWN'].includes(attempt.state))continue;
+        for(const slot of run.slots??[]){if(selectedSlots&&!selectedSlots.includes(slot.index))continue;const attempt=slot.attempts.at(-1);if(!attempt||!['GENERATING','UNKNOWN'].includes(attempt.state))continue;
           const candidate=await this.generation.reconcileWorkflowGeneration(attempt.requestId);
           if(candidate){if(candidate.id!==attempt.requestId||candidate.productId!==run.productId||candidate.productRevision!==run.productRevision||listingFingerprint(candidate.sourceAssets)!==listingFingerprint(run.referenceAssets))throw new AiError('SOURCE_CHANGED');attempt.candidateId=candidate.id;attempt.state='GENERATED';attempt.error=null;this.save(run);}
         }
@@ -771,6 +775,7 @@ export class ImageWorkflowService {
       }
       if(riskEnabled&&run.slots!.some(slot=>slot.status==='BLOCKED'))throw new UserFacingError('此销售 SKU 的来源或生成图存在 IP 风险，保留已通过图片，不自动修改规避风险');
       for(const slot of run.slots!){
+        if(selectedSlots&&!selectedSlots.includes(slot.index))continue;
         if(slot.status==='PASSED')continue;run.activeSlot=slot.index;
         const context=validateProductImageContext({...base,...(run.setPlan?{setPlan:run.setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}});if(!run.sourceReuse||slot.attempts.length!==run.sourceReuse.slotAttempts[slot.index-1]||!slot.attempts.length)slot.contextSha256=listingFingerprint(context);
         let attempt=slot.attempts.at(-1);

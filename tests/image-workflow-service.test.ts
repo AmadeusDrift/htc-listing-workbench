@@ -1330,3 +1330,15 @@ test('image retry allowance: old structured definitive audit supports grant with
  assert.equal(f.service.getProgressPresentation(f.draft.id)!.retryAllowanceStatus![0].manual,true);
  await f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:last.requestId,commandId:randomUUID()});const count=f.calls.filter(c=>c==='plan').length;const resumed=await f.run();assert.equal(resumed.workflow.status,'COMPLETED');assert.equal(f.calls.filter(c=>c==='plan').length,count);assert.equal(resumed.workflow.slots![0].attempts[2].failureProof,undefined);
 });
+
+test('P05 selected image slot reuses its pending request and leaves other slots untouched',async t=>{
+ const f=await fixture(t),generate=f.generation.generateForWorkflow;let stop=true;
+ f.generation.generateForWorkflow=async(...args)=>{if(stop){stop=false;throw Object.assign(new AiError('BUSY'),{notSent:true});}return generate(...args);};
+ const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0]?.state,'READY',JSON.stringify(first.workflow));
+ const before=structuredClone(first.workflow.slots!.slice(1));
+ const result=await f.service.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});
+ assert.equal(f.calls.filter(call=>call==='generate').length,1);
+ assert.equal(result.workflow.slots![0].status,'PASSED');
+ assert.deepEqual(result.workflow.slots!.slice(1),before);
+ assert.equal(result.workflow.slots![0].attempts[0].requestId,first.workflow.slots![0].attempts[0].requestId);
+});

@@ -1896,3 +1896,76 @@ test('a readonly observer can conservatively expire one preview but explicit ref
  const pending=f.service.previewAdaptationForUi(task.id);(f.service as any).observing=Promise.resolve();const stale=await pending;assert.equal(stale.canApply,false);assert.equal(reads,0);assert.equal((f.service as any).previewFlights.size,0);
  (f.service as any).observing=null;const fresh=await f.service.previewAdaptationForUi(task.id);assert.equal(fresh.canApply,true);assert.equal(reads,1);assert.equal((f.service as any).previewFlights.size,0);
 });
+
+test('P05 targeted resume does not execute an unselected pending sibling',async t=>{
+ const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO',originalSpec:'blue',normalizedSpec:'blue',sourceSpec:'blue'});
+ const task=await f.create();assert.equal(task.items.length,2);
+ const scope={mode:'targeted' as const,selections:[{key:task.items[0].key}]};
+ const preview=await f.service.previewResume({taskId:task.id,scope});
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);
+ await f.service.waitForIdle();
+ assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+ assert.equal(f.service.get(task.id).items[1].draftId,null);
+});
+
+test('P05 cancelled or stale scope never grants worker authority',async t=>{
+ const f=fixture(t),task=await f.create(),scope={mode:'recheck' as const,selections:[{key:task.items[0].key}]};
+ const before=structuredClone(f.calls),preview=await f.service.previewResume({taskId:task.id,scope});
+ assert.equal(await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>false),null);
+ assert.deepEqual(f.service.get(task.id),task);assert.deepEqual(f.calls,before);
+ await assert.rejects(f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision-1,token:preview.token,scope},async()=>true),/预览已变化/);
+ assert.deepEqual(f.calls,before);
+});
+test('P05 continuing preserves old failure without inventing time and saves a new independent check event',async t=>{
+ const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id);saved.status='NEEDS_ATTENTION';saved.items[0].status='FAILED';saved.items[0].error='旧图位 2 下载失败 https://private.invalid?k=secret api_key=secret';(f.service as any).save(saved);f.failImages();
+ const scope={mode:'recheck' as const,selections:[{key:task.items[0].key}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);await f.service.waitForIdle();
+ const result=f.service.get(task.id),history=result.items[0].failureHistory!;
+ assert.equal(history[0].occurredAt,null);assert.match(history[0].reason,/旧图位 2 下载失败/);assert.doesNotMatch(history[0].reason,/private|secret/);
+ assert.equal(history.at(-1)!.source,'local-check');assert.ok(Date.parse(history.at(-1)!.occurredAt!)>=Date.parse(result.items[0].lastContinuedAt!));
+ assert.deepEqual(validateAutomaticListingTask(result),result);
+});
+test('P05 selected slot confirmation invokes image owner with exact slots and never starts publishing',async t=>{
+ const f=fixture(t),task=await f.create();f.failImages();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const row=f.service.get(task.id).items[0],draft=f.drafts.get(row.draftId!)!;
+ f.workflow.set(draft.id,{id:randomUUID(),draftId:draft.id,status:'FAILED',stage:'generating',maxAttempts:3,setPlan:{},slots:Array.from({length:7},(_,index)=>({index:index+1,status:'PENDING',attempts:[]}))});
+ let options:any;f.dependencies.images.complete=async(_raw,opts)=>{options=opts;return {draft,workflow:{...f.workflow.get(draft.id),attempt:7,status:'BLOCKED',stage:'generating',error:'其他历史图位失败',slots:Array.from({length:7},(_,index)=>({index:index+1,status:index===1?'PASSED':'PENDING',attempts:[]}))},remaining:[],aiCalls:0,previewAttempts:0} as any;};
+ const scope={mode:'targeted' as const,selections:[{key:row.key,slots:[2]}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);await f.service.waitForIdle();
+ assert.deepEqual(options,{selectedSlots:[2]});assert.equal(f.calls.submissions,0);assert.match(f.service.get(task.id).items[0].error!,/图位 2：通过/);assert.match(f.service.get(task.id).items[0].error!,/未执行其他图位/);assert.doesNotMatch(f.service.get(task.id).items[0].failureHistory!.at(-1)!.reason,/其他历史图位失败/);
+});
+
+for(const missing of [true,false])test(`P05 from-start checks early field evidence even from EXECUTION and preserves healthy images (${missing})`,async t=>{
+ const f=fixture(t),submit=f.dependencies.execution.startAuthorized;f.dependencies.execution.startAuthorized=()=>{throw new UserFacingError('暂停在发送前');};
+ const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();const row=f.service.get(task.id).items[0];assert.equal(row.stage,'EXECUTION');
+ f.dependencies.execution.startAuthorized=submit;
+ let checks=0;f.dependencies.amazon.previewTaskAdaptation=id=>{checks++;return {...f.drafts.get(id)!,localIssues:missing?[{severity:'ERROR',code:'REQUIRED',message:'缺少真实材质资料',attributeNames:['material'],category:'fact',source:'local',autoFixable:false}]:[]};};
+ f.dependencies.images.inspectApproval=id=>f.workflow.get(id).slots.map((slot:any)=>({id:slot.approvedAssetId,sha256:slot.approvedSha256}));
+ f.dependencies.hosting.checkLocalAssets=async()=>{};
+ const before=structuredClone(f.calls),scope={mode:'recheck' as const,selections:[{key:row.key}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ assert.ok(preview.lines[0].includes('当前步骤 EXECUTION'));assert.ok(preview.lines[0].includes(missing?'缺少真实材质资料':'字段与事实校验通过'));
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);await f.service.waitForIdle();
+ assert.ok(checks>=4);assert.equal(f.calls.images,before.images);assert.equal(f.calls.sources,before.sources);
+ assert.equal(f.calls.submissions-before.submissions,missing?0:1);
+ if(missing)assert.match(f.service.get(task.id).items[0].error!,/从头检查发现字段待处理/);
+});
+test('P05 evidence token rejects a draft change during native confirmation without dispatch',async t=>{
+ const f=fixture(t),task=await f.create(),scope={mode:'recheck' as const,selections:[{key:task.items[0].key}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ await assert.rejects(f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>{f.product.title='changed source';return true;}),/资料|变化/);
+ assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+
+test('P05 changed unrelated unselected product cannot block or join selected execution',async t=>{
+ const f=fixture(t),task=await f.create(),other=structuredClone(f.product);other.id=randomUUID();other.variants[0].id=randomUUID();other.variants[0].sku='UNSELECTED';
+ const saved=(f.service as any).tasks.get(task.id),second={...structuredClone(saved.items[0]),productId:other.id,variantId:other.variants[0].id,sku:'UNSELECTED',sourceStamp:sourceStamp(other)};second.key=second.productId+':'+second.variantId;saved.items.push(second);(f.service as any).save(saved);
+ f.dependencies.store.getProduct=id=>structuredClone(id===other.id?other:f.product);other.title='unselected changed';
+ const scope={mode:'targeted' as const,selections:[{key:task.items[0].key}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);await f.service.waitForIdle();
+ assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);assert.deepEqual(f.service.get(task.id).items[1],second);
+});
+
+test('P05 ordinary continue after targeted operation confirms the full scope rather than reusing restricted dialog',async t=>{
+ const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id);saved.resumeScope={mode:'targeted',selections:[{key:task.items[0].key,slots:[1]}]};(f.service as any).save(saved);
+ await f.service.confirmStart(task.id,async approved=>{assert.equal(approved.resumeScope,undefined);assert.equal(approved.items.length,task.items.length);return false;});
+ assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});

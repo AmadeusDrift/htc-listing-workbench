@@ -170,10 +170,10 @@ try {
  });
  await page.clock.fastForward(30_001);
  await expect(page.getByTestId('automatic-task-task-1')).toContainText('需要处理');
- await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();await expect(page.getByTestId('automatic-result-v-z')).toContainText('历史记录未保存可信的结构化细因');
+ await page.getByTestId('automatic-product-group-product-1').getByRole('button',{name:/展开来源商品/}).click();await expect(page.getByTestId('automatic-result-v-z')).toContainText('历史标签失败测试原因');
  await page.evaluate(()=>{const task=window.fixture.tasks[0];task.revision++;task.status='COMPLETED';Object.assign(task.items[0],{status:'DONE',stage:'COMPLETE',error:null});});
  await page.clock.fastForward(30_001);
- await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史记录未保存可信的结构化细因');
+ await expect(page.getByTestId('automatic-result-v-z')).toHaveAttribute('data-state','DONE');await expect(page.getByTestId('automatic-result-v-z')).not.toContainText('历史标签失败测试原因');
  assert.equal(await page.evaluate(()=>window.fixture.tasks[0].items[0].outcome.message),'历史标签失败测试原因');
  pass('completed sales rows retain failure audit without displaying an old fault as the current result');
  await page.evaluate(()=>{const task=window.fixture.tasks[0];task.revision++;task.status='NEEDS_ATTENTION';Object.assign(task.items[0],{status:'FAILED',stage:'READBACK',error:'原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交',outcome:{kind:'SYSTEM_REPAIR',code:'READBACK_FAILED'}});});

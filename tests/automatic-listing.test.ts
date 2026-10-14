@@ -2016,3 +2016,19 @@ test('adding batch members uses one readonly existence check and never full prod
  f.dependencies.store.hasProducts=ids=>{reads++;return ids.length===1&&ids[0]===f.product.id;};f.dependencies.store.getProduct=()=>{throw Error('full product read must not run during membership changes');};
  assert.deepEqual(f.service.addWorkBatchProducts({batchId:batch.id,productIds:[f.product.id]}).productIds,[f.product.id]);assert.equal(reads,1);
 });
+
+test('integrated scoped resume revoked by archive cannot publish a late image or execute its sibling',async t=>{
+ const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-TWO',originalSpec:'blue',normalizedSpec:'blue',sourceSpec:'blue'});
+ const task=await f.create(),batch=f.service.listWorkBatches().find(b=>!b.archivedAt)!,sibling=structuredClone(task.items[1]);
+ const scope={mode:'targeted' as const,selections:[{key:task.items[0].key}]},preview=await f.service.previewResume({taskId:task.id,scope});
+ let started!:()=>void;const began=new Promise<void>(resolve=>started=resolve);f.holdImages(started);f.dependencies.images.cancel=()=>({cancelled:true});
+ await f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true);
+ await reachedStage(began,f.service.waitForIdle(),()=>f.service.get(task.id));
+ const archived=f.service.archiveWorkBatch(batch.id);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.service.get(task.id).status,'PAUSED');assert.throws(()=>f.service.prepareStart(task.id,scope),/归档/);
+ f.releaseImages();const next=await archived;await f.service.waitForIdle();
+ assert.deepEqual(next.productIds,[]);assert.deepEqual(next.taskIds,[]);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,0);
+ assert.deepEqual(f.service.get(task.id).items[1],sibling);assert.equal(f.service.get(task.id).status,'PAUSED');
+ await assert.rejects(f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true),/变化/);
+ assert.equal(f.calls.submissions,0);
+});

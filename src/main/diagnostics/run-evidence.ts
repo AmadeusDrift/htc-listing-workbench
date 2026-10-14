@@ -29,6 +29,7 @@ export function validateRunEvidence(raw: unknown): RunEvidence {
 }
 export function validateTransportRunEvidence(raw: unknown): TransportRunEvidence {
   if (!raw || typeof raw !== 'object' || Reflect.ownKeys(raw).some(k => typeof k !== 'string' || !['at','event','certainty','abortSource','errorCode','httpStatus','receivedBytes'].includes(k))) return invalid();
+  if (Object.getPrototypeOf(raw) !== Object.prototype || Object.values(Object.getOwnPropertyDescriptors(raw)).some(d => !('value' in d))) return invalid();
   const safe = validateRunEvidence({ version: 1, stage: 'transport', ...raw });
   if (!['DISPATCH_ATTEMPTED','HEADERS_RECEIVED','BODY_COMPLETED','STAGE_BLOCKED'].includes(safe.event)) invalid();
   const { version: _version, stage: _stage, ...event } = safe;

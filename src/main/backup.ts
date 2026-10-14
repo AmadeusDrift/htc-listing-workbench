@@ -17,6 +17,9 @@ import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
 import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOperations,revokeSchemaInFlight } from './catalog/schema-operations.ts';
 import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
 import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles,indexProviderReceiptPointers } from './ai/receipts.ts';
+import { assertReceiptRecovery } from './ai/receipt-recovery.ts';
+import { retainRequestCallHistory } from './ai/request-history.ts';
+import { assertOpaqueResponse } from './ai/opaque-response.ts';
 import { BATCH_TABLES,assertBatchHistory } from './ai/batch/records.ts';
 import { FIELD_GROUP_TABLES,assertFieldGroupHistory,retainFieldGroupHistory } from './ai/field-purpose-groups.ts';
 import { pauseBatchHistory,retainBatchHistory,retainProviderReceipts } from './ai/batch/recovery.ts';
@@ -28,7 +31,7 @@ import { assertCompletionHistory, retainCompletionOperations, validateCompletion
 import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdir, readFile, rm, lstat, open } from 'node:fs/promises';
-import { existsSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -153,7 +156,7 @@ async function removeStaging(root: string, path: string, kind: 'staging' | 'roll
   if (existsSync(valid) && (await lstat(valid)).isSymbolicLink()) throw new UserFacingError('恢复目录不能是链接');
   await rm(valid, { recursive: true, force: true });
 }
-function checkDatabase(path: string): { productCount: number; assetCount: number; assetPaths: Set<string>; artifactChecks: Map<string, { sha256: string; byteSize: number }> } {
+function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: number; assetCount: number; assetPaths: Set<string>; artifactChecks: Map<string, { sha256: string; byteSize: number }> } {
   let database: DatabaseSync | undefined;
   try {
     database = new DatabaseSync(path, { readOnly: true });
@@ -296,7 +299,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
-    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
+    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {
@@ -327,7 +330,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 6) {
       const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateStoredAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
       const calls = new Map(database.prepare('SELECT record_json FROM ai_calls').all().map(row => { const call = validateAiCall(JSON.parse(String(row.record_json))); return [call.id, call] as const; }));
-      for(const result of results.values())assertPresentationResultOwner(result,calls.get(result.callId),database);
+      for(const result of results.values()){assertReceiptRecovery(database,receiptRoot,result,calls.get(result.callId));assertPresentationResultOwner(result,calls.get(result.callId),database);}
       for(const asset of assertSourceColorHistory(database,results,calls))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
       if (version >= 15) assertImageWorkflowHistory(database, results, calls);
       if(version>=16)for(const row of database.prepare('SELECT record_json FROM automatic_listing_tasks').all())assertAutomaticRejectionHistory(database,validateAutomaticListingTask(JSON.parse(String(row.record_json))));
@@ -433,6 +436,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     }
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
+    retainRequestCallHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
@@ -472,8 +476,8 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     const snapshot = join(staging, 'red.sqlite');
     await backup(source, snapshot); source.close(); source = undefined;
     const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
-    checkDatabase(snapshot); disconnectSnapshot(snapshot);
-    const info = checkDatabase(snapshot);
+    checkDatabase(snapshot,root); disconnectSnapshot(snapshot);
+    const info = checkDatabase(snapshot,root);
     includeCandidateFiles(info,await candidateBackupFiles(root));
     const files: BackupFile[] = [{ path: 'red.sqlite', ...await hashBackupFile(snapshot), role: 'workspace-database' }];
     for (const path of info.assetPaths) {

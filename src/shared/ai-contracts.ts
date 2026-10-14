@@ -25,7 +25,7 @@ export interface AiProfile {
   generation: number;
 }
 export interface AiCapabilityInfo { capability: AiCapability; providerId: AiProviderId | 'openai-images' | 'tyai-images' | 'openrouter-images' | null; available: boolean; reason: string | null }
-export type AiErrorCode = 'INVALID_INPUT' | 'INVALID_CONFIG' | 'NOT_CONFIGURED' | 'DISABLED' | 'CONFIG_CHANGED' | 'SOURCE_CHANGED' | 'IMAGE_INVALID' | 'HOSTED_IMAGE_REQUIRED' | 'ENCRYPTION_UNAVAILABLE' | 'AUTH_FAILED' | 'SERVICE_PERMISSION_REQUIRED' | 'QUOTA_EXCEEDED' | 'RATE_LIMITED' | 'TIMEOUT' | 'NETWORK_ERROR' | 'PROVIDER_ERROR' | 'OUTPUT_INVALID' | 'BUSY' | 'CANCELLED' | 'INTERRUPTED' | 'SERVICE_CLOSED';
+export type AiErrorCode = 'INVALID_INPUT' | 'INVALID_CONFIG' | 'NOT_CONFIGURED' | 'DISABLED' | 'CONFIG_CHANGED' | 'SOURCE_CHANGED' | 'IMAGE_INVALID' | 'HOSTED_IMAGE_REQUIRED' | 'ENCRYPTION_UNAVAILABLE' | 'AUTH_FAILED' | 'MODEL_REGION_RESTRICTED' | 'ROUTING_FORBIDDEN' | 'SERVICE_PERMISSION_REQUIRED' | 'QUOTA_EXCEEDED' | 'RATE_LIMITED' | 'TIMEOUT' | 'NETWORK_ERROR' | 'PROVIDER_ERROR' | 'OUTPUT_INVALID' | 'BUSY' | 'CANCELLED' | 'INTERRUPTED' | 'SERVICE_CLOSED';
 export interface AiUsage { promptTokens: number; completionTokens: number; processedImages: number }
 export const AI_DAILY_CALL_MAX = 1000000;
 export const AI_DAILY_TOKEN_MAX = 1000000000000;

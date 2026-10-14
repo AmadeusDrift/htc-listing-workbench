@@ -90,7 +90,7 @@ export class BatchService {
     }
     if(batch.locallyStopped)invalid('Batch已本地暂停，未发送');if(this.deps.reserve&&types.isAsyncFunction(this.deps.reserve))invalid('Batch预算命令必须同步');const credential=this.credentials(batch),items=this.items(id);
     for(const item of items){const reason=this.eligible(operation(item));if(reason)invalid(reason);}
-    const body={endpoint:'/v1/chat/completions',model:batch.model,provider:{only:['openai'],allow_fallbacks:false},completion_window:'24h',requests:items.map(item=>({custom_id:item.customId,body:item.body}))};
+    const body={endpoint:'/v1/chat/completions',model:batch.model,provider:{allow_fallbacks:true,require_parameters:true},completion_window:'24h',requests:items.map(item=>({custom_id:item.customId,body:item.body}))};
     if(JSON.stringify(body).includes(credential.apiKey))invalid('Batch正文含凭据，未发送');
     try{
       const raw=await postOpenRouter('/api/v1/batches',body,credential,signal,{fetch:this.fetcher,now:()=>new Date(this.now()),nonce:()=>'',maxResponseBytes:160*1024*1024,
@@ -131,7 +131,7 @@ export class BatchService {
       const current=this.get(id);writeBatch(this.db,{...current,receiptIds:[...new Set([...current.receiptIds,receipt.id])],updatedAt:this.now()});
       if(!safe)invalid('Batch响应包含凭据回显，未采用');
     });
-    if(!response.ok)throw openRouterHttpError(response.status);
+    if(!response.ok)throw openRouterHttpError(response.status,raw);
     await this.collect(id,raw);throwIfAborted(signal);return this.get(id);
   }
   private async submitUnknownRecovery(id:string){

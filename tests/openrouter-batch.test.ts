@@ -24,7 +24,7 @@ test('A45 real Batch creates once with ordered envelope then reads by remote id'
   assert.deepEqual(requests.map(r=>r.init.method),['POST','GET']);
   const body=JSON.parse(String(requests[0].init.body));assert.deepEqual(Object.keys(body),['endpoint','model','provider','completion_window','requests']);
   assert.equal(body.model,'openai/gpt-6-luna');assert.equal(body.requests.length,2);assert.equal(body.requests[0].body.provider,undefined);assert.equal(body.requests[0].body.model,undefined);assert.equal(body.requests[0].body.stream,undefined);
-  assert.deepEqual(body.provider,{only:['openai'],allow_fallbacks:false});assert.equal(requests[1].url,'https://openrouter.ai/api/v1/batches/batch_fixture');
+  assert.deepEqual(body.provider,{allow_fallbacks:true,require_parameters:true});assert.equal(requests[1].url,'https://openrouter.ai/api/v1/batches/batch_fixture');
   assert.equal(f.service.get(batch.id).remoteBatchId,'batch_fixture');assert.equal(f.service.items(batch.id).every(i=>i.state==='waiting'),true);
 });
 

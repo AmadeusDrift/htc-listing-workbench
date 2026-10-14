@@ -19,7 +19,7 @@ import { parseFullGeneration,retainValidNativeCandidates } from '../listing-ai/f
 import { transaction } from '../application/transaction.ts';
 import { readAiUsageReport } from './usage-report.ts';
 import { TEXT_MODEL_CAPABILITIES } from './model-capabilities.ts';
-import { saveProviderReceipt,readProviderReceipt,confirmedAuthenticationRejection } from './receipts.ts';
+import { saveProviderReceipt,readProviderReceipt,confirmedAuthenticationRejection,confirmedLegacyRegionRejection } from './receipts.ts';
 import type { AiPurposeId,SaveAiPurposeInput,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { freezeSourceForProduct } from '../products/public.ts';
 import { isSchemaTransientError } from '../amazon/schema-retry.ts';
@@ -691,7 +691,7 @@ export class AiService {
         if(listConsistencyAttempts(this.db,context).some(previous=>consistencyAttemptUnknown(this.db,previous)))throw new AiError('INTERRUPTED');
         const current=this.activePurpose('source_understanding',true),authRetry=canRetryConsistencyAuthentication(this.db,call,{providerId:current.id,generation:current.generation});
         if(authRetry){const receipt=await readProviderReceipt(this.db,this.directory,call.id) as {status?:number}|null;if(!receipt||![401,403].includes(receipt.status??0))throw new AiError('AUTH_FAILED');}
-        if(!call||call.status!=='FAILED'||!(call.errorCode==='OUTPUT_INVALID'||authRetry)||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':confirmedAuthenticationRejection(this.db,call)?'AUTH_FAILED':'INTERRUPTED');
+        if(!call||call.status!=='FAILED'||!(call.errorCode==='OUTPUT_INVALID'||authRetry)||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':confirmedLegacyRegionRejection(this.db,call)?'MODEL_REGION_RESTRICTED':call?.errorCode==='MODEL_REGION_RESTRICTED'||call?.errorCode==='ROUTING_FORBIDDEN'?call.errorCode:confirmedAuthenticationRejection(this.db,call)?'AUTH_FAILED':'INTERRUPTED');
       }else{
       const result=validateStoredAiResult(JSON.parse(String(saved.record_json)));
       if(result.output.kind!=='source-image-consistency'||!result.sourceConsistencyContext||consistencyScopeKey(result.sourceConsistencyContext)!==consistencyScopeKey(context))throw new AiError('INVALID_CONFIG');
@@ -835,6 +835,8 @@ export class AiService {
           unknown.message='图片规划原请求结果未知，已保留调用与费用记录；本次未发送新请求，请先核对原结果';throw unknown;
         }
       }
+      const denied=calls.find(previous=>previous.status==='FAILED'&&(previous.errorCode==='MODEL_REGION_RESTRICTED'||previous.errorCode==='ROUTING_FORBIDDEN'));
+      if(denied)throw new AiError(denied.errorCode as 'MODEL_REGION_RESTRICTED'|'ROUTING_FORBIDDEN');
     }
     return this.start(profile, context.listing, { operation: 'image-plan', context, repair, ...(workflowId?{workflowId:uuid(workflowId)}:{}) }, async activeSignal => {
       const assertFresh = async () => { await this.assertImageFresh(context, assertContextFresh, activeSignal); if (prior) this.imageResult(prior, context, 'image-plan'); };
@@ -953,7 +955,7 @@ export class AiService {
           deferOpenRouter:async(endpoint,body)=>{
             if(!taskScope||endpoint!=='/api/v1/chat/completions'||profile.routing?.gateway!=='openrouter')return null;
             const {model,provider,stream,...ordinaryBody}=body;let requestBody=ordinaryBody,references:BatchReference[]=[];
-            if(stream!==false||JSON.stringify(provider)!==JSON.stringify({only:['openai'],allow_fallbacks:false,require_parameters:true}))return null;
+            if(stream!==false||JSON.stringify(provider)!==JSON.stringify({allow_fallbacks:true,require_parameters:true}))return null;
             if(model!==profile.model)throw new AiError('CONFIG_CHANGED');
             const existingBatch=this.batchTasks.find(batchOperationId)??this.batchTasks.pendingOperation(batchOperationId);
             if(existingBatch){requestBody=existingBatch.body;references=existingBatch.references;}

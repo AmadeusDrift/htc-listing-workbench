@@ -1,11 +1,13 @@
 import { UserFacingError } from '../../shared/errors.ts';
 import type { AiErrorCode } from '../../shared/ai-contracts.ts';
 
-export const AI_ERROR_CODES: readonly AiErrorCode[] = ['INVALID_INPUT', 'INVALID_CONFIG', 'NOT_CONFIGURED', 'DISABLED', 'CONFIG_CHANGED', 'SOURCE_CHANGED', 'IMAGE_INVALID', 'HOSTED_IMAGE_REQUIRED', 'ENCRYPTION_UNAVAILABLE', 'AUTH_FAILED', 'SERVICE_PERMISSION_REQUIRED', 'QUOTA_EXCEEDED', 'RATE_LIMITED', 'TIMEOUT', 'NETWORK_ERROR', 'PROVIDER_ERROR', 'OUTPUT_INVALID', 'BUSY', 'CANCELLED', 'INTERRUPTED', 'SERVICE_CLOSED'];
+export const AI_ERROR_CODES: readonly AiErrorCode[] = ['INVALID_INPUT', 'INVALID_CONFIG', 'NOT_CONFIGURED', 'DISABLED', 'CONFIG_CHANGED', 'SOURCE_CHANGED', 'IMAGE_INVALID', 'HOSTED_IMAGE_REQUIRED', 'ENCRYPTION_UNAVAILABLE', 'AUTH_FAILED', 'MODEL_REGION_RESTRICTED', 'ROUTING_FORBIDDEN', 'SERVICE_PERMISSION_REQUIRED', 'QUOTA_EXCEEDED', 'RATE_LIMITED', 'TIMEOUT', 'NETWORK_ERROR', 'PROVIDER_ERROR', 'OUTPUT_INVALID', 'BUSY', 'CANCELLED', 'INTERRUPTED', 'SERVICE_CLOSED'];
 const MESSAGES: Record<AiErrorCode, string> = {
   INVALID_INPUT: 'AI 请求参数无效', INVALID_CONFIG: 'AI 配置或记录格式无效，请检查所填字段或配置文件', NOT_CONFIGURED: 'AI 凭据不可用，请在设置中重新填写或导入配置', DISABLED: 'AI 接口尚未启用',
   CONFIG_CHANGED: 'AI 配置已变更，请重新发起请求', SOURCE_CHANGED: '商品或来源图片已变化，请重新加载后再试', IMAGE_INVALID: '图片格式、尺寸或大小不符合接口要求',
   HOSTED_IMAGE_REQUIRED: '请先为当前图片准备并验证可用的托管记录', ENCRYPTION_UNAVAILABLE: '系统安全加密不可用，无法保存 AI 配置', AUTH_FAILED: 'AI 接口鉴权失败，请检查配置',
+  MODEL_REGION_RESTRICTED: '所选模型在当前请求地区不可用；请核对模型与提供商可用范围，此错误不是密钥无效',
+  ROUTING_FORBIDDEN: 'OpenRouter 拒绝此请求；请核对提供商权限、路由或内容限制，此错误不等于密钥无效',
   SERVICE_PERMISSION_REQUIRED: '当前凭据没有此功能的服务权限，请检查对应服务是否开通及账号授权；无需因此重新填写已保存的密钥',
   QUOTA_EXCEEDED: 'AI 接口额度不足', RATE_LIMITED: 'AI 接口请求频率受限，请稍后重试', TIMEOUT: 'AI 请求超时，请先核对调用记录再决定是否重试', NETWORK_ERROR: 'AI 网络请求未完成，请先核对调用记录',
   PROVIDER_ERROR: 'AI 服务未完成请求，请核对服务状态和调用记录', OUTPUT_INVALID: 'AI 返回内容未通过校验，未保存为商品资料', BUSY: 'AI 请求数量已达上限，请等待当前请求完成',

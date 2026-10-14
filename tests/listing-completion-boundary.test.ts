@@ -225,3 +225,11 @@ test('legacy unsent retry checkpoint cannot bypass the original unknown request'
  assert.equal(f.listing.completionUnknown(op.id),true);
  await assert.rejects(f.listing.complete(f.reference),/未自动重发/);assert.equal(f.requests.length,1);assert.deepEqual(f.listing.getCompletion(op.id).rounds[0].candidate,op.rounds[0].candidate);
 });
+
+for(const code of ['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'] as const)test(`known field ${code} remains definitive without allocating retry or sending again`,async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response('{}',{status:401}));
+ await assert.rejects(f.listing.complete(f.reference));const op=f.listing.completionOperations(f.draft.id)[0],id=op.rounds[0].candidate.id;
+ const db=openDatabase(f.directory);try{const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id)!;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...JSON.parse(String(row.record_json)),errorCode:code}),id);}finally{db.close();}
+ assert.equal(f.listing.completionUnknown(op.id),false);for(let n=0;n<2;n++)await assert.rejects(f.listing.complete(f.reference),(error:any)=>error.code===code);
+ assert.equal(f.requests.length,1);assert.equal(f.listing.getCompletion(op.id).rounds[0].candidate.id,id);
+});

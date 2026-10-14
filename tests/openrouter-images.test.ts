@@ -9,7 +9,7 @@ test('OpenRouter images uses input_references and persists base64 before decode'
   const service=new OpenRouterImageAdapter({fetch:async(url:any,init:any)=>{requests.push({url,init});return new Response(JSON.stringify({id:'gen_image',data:[{b64_json:png.toString('base64'),media_type:'image/png'}],usage:{cost:.08}}));}});
   const result=await service.generate({apiKey:'openrouter-fixture-key',model:'openai/gpt-image-2.5-sunburst',prompt:'A product photo',size:'1024x1024',quality:'high',background:'opaque',references:[{mimeType:'image/png',bytes:png}]},new AbortController().signal,{onProviderReceipt:(r:any)=>receipts.push(r)});
   assert.equal(requests[0].url,'https://openrouter.ai/api/v1/images');
-  const body=JSON.parse(requests[0].init.body);assert.equal(body.input_references[0].type,'image_url');assert.ok(body.input_references[0].image_url.url.startsWith('data:image/png;base64,'));assert.equal(body.images,undefined);
+  const body=JSON.parse(requests[0].init.body);assert.equal(body.input_references[0].type,'image_url');assert.ok(body.input_references[0].image_url.url.startsWith('data:image/png;base64,'));assert.equal(body.images,undefined);assert.deepEqual(body.provider,{allow_fallbacks:true,require_parameters:true});
   assert.deepEqual(result.bytes,png);assert.equal(receipts[0].costUsd,.08);
 });
 test('invalid image bytes retain the original receipt without another generation',async()=>{

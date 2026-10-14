@@ -35,7 +35,7 @@ export class OpenRouterImageAdapter{
         try{if(inspectRaster(ref.bytes).mimeType!==ref.mimeType)throw new Error();}catch{throw new AiError('IMAGE_INVALID');}
       }
     }catch(error){throw imageRequestNotSent(error);}
-    const body={model:input.model,prompt:input.prompt,n:1,size:input.size,quality:input.quality,background:input.background,output_format:'png',provider:{only:['openai'],allow_fallbacks:false},...(input.references.length?{input_references:input.references.map(r=>({type:'image_url',image_url:{url:`data:${r.mimeType};base64,${r.bytes.toString('base64')}`}}))}:{})};
+    const body={model:input.model,prompt:input.prompt,n:1,size:input.size,quality:input.quality,background:input.background,output_format:'png',provider:{allow_fallbacks:true,require_parameters:true},...(input.references.length?{input_references:input.references.map(r=>({type:'image_url',image_url:{url:`data:${r.mimeType};base64,${r.bytes.toString('base64')}`}}))}:{})};
     let raw;try{raw=await postOpenRouter('/api/v1/images',body,{apiKey:input.apiKey},signal,{fetch:this.fetcher,now:()=>new Date(),nonce:()=>'',maxResponseBytes:this.maxResponseBytes,...hooks});}catch(error){if(error instanceof AiError&&error.code==='OUTPUT_INVALID')error.message=invalidImageOutput('response').message;throw error;}
     const result=decodeOpenRouterImage(raw);if(result.requestId?.includes(input.apiKey)||result.requestId?.includes(input.prompt))result.requestId=null;return result;
   }

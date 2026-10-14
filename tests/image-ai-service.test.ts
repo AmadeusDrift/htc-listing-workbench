@@ -1853,3 +1853,11 @@ for(const body of ['missing','empty','interrupted'] as const)test(`planning ${bo
  assert.equal(f.requests.length,before+1);const call=f.ai.listCalls().find(c=>c.errorCode==='OUTPUT_INVALID')!;assert.equal(call.responseReceived,undefined);
  await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');assert.equal(f.requests.length,before+1);
 });
+
+for(const code of ['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'] as const)test(`known image planning ${code} keeps its precise reason and never repeats POST`,async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),saved=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);
+ const call={...f.ai.getCall(saved.callId)!,status:'FAILED' as const,errorCode:code};delete call.responseReceived;
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
+ const before=f.requests.length;for(let n=0;n<2;n++)await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.code===code);
+ assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(call.id),call);
+});

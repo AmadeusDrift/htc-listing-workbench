@@ -5,7 +5,7 @@ import type { ProductSummary } from '../shared/contracts';
 import type { AutomaticListingQueue } from '../shared/automatic-listing-contracts';
 import { ProductThumb, WorkspaceEmpty } from './WorkspaceParts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
-import { automaticQueueReason } from './automatic-product-groups';
+import { automaticQueueDisplayKind, automaticQueueReason } from './automatic-product-groups';
 import { matchesQueueSearch, queueInTab, queuePresentation, queueRowInTab } from './automatic-queue-view';
 import type { QueueTab } from './automatic-queue-view';
 import { productGaps } from './workspace-model';
@@ -45,7 +45,7 @@ export function AutomaticQueueProducts({ products, queue, selectedIds, selectabl
         <details className="automatic-product" data-testid={`automatic-${product.id}`}><summary><span className="automatic-queue-identity"><ProductThumb product={product}/><span className="automatic-product-identity"><strong>{product.title || '未命名商品'}</strong><small>{product.origin === 'sample' ? '本地示例' : sourceLabel(product.sourceUrl)} · {product.assetCount} 张图</small></span></span><span className="automatic-queue-quantities"><strong>{product.variantCount} 个来源规格</strong><small>可启动 {item?.eligibleCount ?? '待核对'} 个销售 SKU</small></span><span className="automatic-queue-status"><Badge tone={status.tone}>{status.label}</Badge><small>{status.reason}</small></span><ChevronDown className="disclosure-chevron" size={16}/></summary>
           <div className="automatic-product-body">{gaps.length > 0 && <p className="workflow-notice" data-tone="warning">还需要补充：{gaps.join('、')}。</p>}
             {item && item.rows.length > 0 && <div className="automatic-recipe-table"><table><thead><tr><th>销售规格 / SKU</th><th>状态</th><th>原因与下一步</th></tr></thead><tbody>{matchingRows(product).map(row => { const state = queuePresentation({ ...item, inputIssue: undefined, rows: [row], eligibleCount: row.eligible ? 1 : 0 }); return <tr key={row.key}><td>{row.specification}<small>{row.sku || '尚未分配销售 SKU'}</small></td><td><Badge tone={state.tone}>{state.label}</Badge></td><td>{automaticQueueReason(row) || state.reason}</td></tr>; })}</tbody></table></div>}
-            <div className="workflow-actions"><button type="button" className="button secondary" disabled={disabled} onClick={() => onManual(product.id)}>转手动补充资料<ArrowRight size={15}/></button><span className="small-copy">异常按 SKU 独立处理；已完成成果保留。</span></div>
+            <div className="workflow-actions"><button type="button" className="button secondary" disabled={disabled} onClick={() => onManual(product.id)}>{item?.rows.some(row=>row.kind==='NEEDS_INPUT'&&automaticQueueDisplayKind(row)==='SYSTEM_REPAIR')?'查看商品资料':'转手动补充资料'}<ArrowRight size={15}/></button><span className="small-copy">异常按 SKU 独立处理；已完成成果保留。</span></div>
           </div>
         </details>
       </div>;

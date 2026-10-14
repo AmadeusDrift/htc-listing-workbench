@@ -1,6 +1,6 @@
 import type { AutomaticListingQueue, AutomaticQueueRow } from '../shared/automatic-listing-contracts.ts';
 import { presentRejection } from '../shared/rejection-presentation.ts';
-import { automaticQueueReason } from './automatic-product-groups.ts';
+import { automaticQueueDisplayKind, automaticQueueReason } from './automatic-product-groups.ts';
 
 export type QueueTab = 'all' | 'pending' | 'repair' | 'filtered' | 'submitted';
 export type QueueProjection = AutomaticListingQueue['products'][number];
@@ -25,7 +25,7 @@ export function queuePresentation(projection: QueueProjection | undefined): { la
     ['UNKNOWN', '结果未知', 'warning'], ['SYSTEM_REPAIR', '系统待修复', 'danger'], ['NEEDS_INPUT', '待补资料', 'warning'], ['UNCLASSIFIED', '待核对', 'warning'],
   ];
   for (const [kind, label, tone] of priority) {
-    const row = projection.rows.find(row => row.kind === kind);
+    const row = projection.rows.find(row => automaticQueueDisplayKind(row) === kind);
     if (row) return { label, tone, reason: automaticQueueReason(row) };
   }
   if (projection.inputIssue) return { label: '待补资料', tone: 'warning', reason: presentRejection('SOURCE_INPUT_REQUIRED') };

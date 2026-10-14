@@ -29,3 +29,12 @@ test('queue view preserves mixed SKU membership and prioritizes unknown over rep
   assert.equal(queueInTab(undefined, 'repair'), false);
   assert.equal(queuePresentation(undefined).label, '待核对');
 });
+
+test('legacy service display is consistent in queue without changing eligibility or raw outcome',async()=>{
+ const {queuePresentation}=await import('../src/renderer/automatic-queue-view.ts'),{automaticQueueReason}=await import('../src/renderer/automatic-product-groups.ts');
+ const row:AutomaticQueueRow={key:'legacy',productId:'p',recipeKey:'r',specification:'蓝色',sku:'S1',kind:'NEEDS_INPUT',reasonCode:'SOURCE_CONSISTENCY_NEEDS_INPUT',eligible:false,message:'AI 服务未完成请求，请核对服务状态和调用记录',reconsideration:null,taskId:'t1'};
+ const before=structuredClone(row),projection={productId:'p',title:'商品',eligibleCount:0,pendingCount:1,filteredCount:0,rows:[row]};
+ assert.equal(queuePresentation(projection).label,'系统待修复');assert.match(automaticQueueReason(row),/这是历史记录，查看本提示不会重试/);assert.deepEqual(row,before);
+ for(const patch of [{message:'缺少来源原图'},{message:row.message+'。'},{reasonCode:'SOURCE_INPUT_REQUIRED'}])assert.equal(queuePresentation({...projection,rows:[{...row,...patch}]}).label,'待补资料');
+ assert.equal(queuePresentation({...projection,rows:[{...row,kind:'UNKNOWN'}]}).label,'结果未知');
+});

@@ -14,10 +14,12 @@ function itemReason(item: AutomaticListingItem): string {
     READBACK_BRAND_REQUIRES_MANUAL: '品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理；请查看平台字段及错误代码。',
     LABELS_FAILED: '商品标签处理失败，请查看备货与标签中的具体原因；已提交商品和已保存文件保留。',
   };
-  if(item.status==='FAILED'&&(item.error||item.outcome?.message))return sanitizeFailureReason(item.error||item.outcome!.message);
+  // Typed rule and safety dispositions must not be replaced by provider text.
+  if(item.outcome?.kind==='RULE_FILTERED')return presentRejection(code);
   if (code && Object.hasOwn(reasons, code)) return reasons[code];
-  if (item.stage === 'READBACK' && (!['DONE', 'FAILED', 'SCREENED'].includes(item.status) || code === 'READBACK_FAILED')) return item.error || item.outcome?.message || '已提交，等待 Amazon 回读确认；接受提交不等于已可售。';
   if (item.outcome?.kind === 'UNKNOWN') return '结果待核对，请查看当前步骤已保存的调用与恢复记录；正式提交结果未知时禁止自动重发。';
+  if(item.status==='FAILED'&&(item.error||item.outcome?.message))return sanitizeFailureReason(item.error||item.outcome!.message);
+  if (item.stage === 'READBACK' && (!['DONE', 'FAILED', 'SCREENED'].includes(item.status) || code === 'READBACK_FAILED')) return item.error || item.outcome?.message || '已提交，等待 Amazon 回读确认；接受提交不等于已可售。';
   if (['FAILED', 'SCREENED'].includes(item.status)) return presentRejection(code);
   if (item.stage === 'LABELS') return '平台建档结果待核对，请查看备货与标签中的进度；已提交商品保留。';
   const waiting: Record<AutomaticListingItem['stage'], string> = {

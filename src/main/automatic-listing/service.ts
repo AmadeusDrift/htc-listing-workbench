@@ -752,7 +752,7 @@ export class AutomaticListingService {
             if (!rowSelected(task.resumeScope,row.key)||task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)||row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state)) continue;
             try {
               const execute=()=>rowSelected(task.resumeScope,row.key)?this.prepareItem(task,row):Promise.resolve();
-              if(this.deps.batch)await this.deps.batch.run({taskId:task.id,rowKey:row.key,explicitContinueAt:row.lastContinuedAt,get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,authorize:()=>rowSelected(task.resumeScope,row.key)&&this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)},execute);else await taskAiContext.run({taskId:task.id,rowKey:row.key,explicitContinueAt:row.lastContinuedAt,phase:row.stage.toLowerCase(),mode:'immediate',authorize:()=>rowSelected(task.resumeScope,row.key)&&this.running(task)&&this.grants.has(task.id)},execute);
+              await this.runTaskAiScope(task,row,execute);
               delete row.batchWait;
             }
             catch (error) {
@@ -820,6 +820,14 @@ export class AutomaticListingService {
       if(Date.now()>=Date.parse(retry.deadlineAt))throw new UserFacingError('Schema 重试超过 10 分钟，原进度和次数保留');
       retry.state='SUCCEEDED';row.stage=retry.originalStage;row.status='PENDING';row.error=null;this.save(task);return true;
     }catch(error){retry.state='EXHAUSTED';row.status='FAILED';row.error=errorMessage(error);this.save(task);return false;}
+  }
+  /** Source siblings have independent continuation grants and Batch operation ownership. */
+  private runTaskAiScope<T>(task:AutomaticListingTask,row:AutomaticListingItem,action:()=>T):T {
+    const scope={taskId:task.id,rowKey:row.key,explicitContinueAt:row.lastContinuedAt,
+      get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',
+      get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,
+      authorize:()=>rowSelected(task.resumeScope,row.key)&&this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)};
+    return this.deps.batch?this.deps.batch.run(scope,action):taskAiContext.run(scope,action);
   }
   private batchAuthorized(task:AutomaticListingTask):boolean{
     if(!this.running(task))return false;
@@ -913,7 +921,7 @@ export class AutomaticListingService {
           try{
             this.checkpoint(task,sibling);
             if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
-            await this.deps.prepareSourceConsistency({productId:sibling.productId,productRevision:sibling.productRevision,variantIds:sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]},this.controller!.signal,()=>this.checkpoint(task,sibling));
+            await this.runTaskAiScope(task,sibling,()=>this.deps.prepareSourceConsistency!({productId:sibling.productId,productRevision:sibling.productRevision,variantIds:sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]},this.controller!.signal,()=>this.checkpoint(task,sibling)));
             this.checkpoint(task,sibling);assertProductConsistency(this.db,this.deps.store.getProduct(sibling.productId),sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]);
           }catch(error){
             if(!this.running(task))throw error;

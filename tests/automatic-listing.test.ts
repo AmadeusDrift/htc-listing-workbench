@@ -1,3 +1,4 @@
+import { taskAiContext } from '../src/main/ai/batch/task-context.ts';
 import { pricingBlockingReason } from '../src/main/image-workflow/deferred-fields.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
@@ -2101,4 +2102,34 @@ test('source configuration and authentication failures keep safe system reason w
  const f=fixture(t);f.dependencies.prepareSourceConsistency=async input=>{materializeSourceSnapshot(f.directory,f.product,input.variantIds);throw new AiError(code);};const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
  const row=f.service.get(task.id).items[0];assert.equal(row.outcome?.kind,'SYSTEM_REPAIR');assert.equal(row.outcome?.code,`AI_${code}`);assert.match(row.error??'',/AI/);
  }
+});
+
+for(const interruption of ['none','unknown','pause','cancel','revision'] as const)test(`manual continuation uses each source sibling authorization after first failure: ${interruption}`,async t=>{
+ const f=fixture(t);f.rules.product.variantLimit=3;
+ f.product.variants=['Red','Blue','Green'].map((color,index)=>({...f.product.variants[0],id:randomUUID(),sku:`SOURCE-${index}`,originalSpec:color,normalizedSpec:color,sourceSpec:color}));
+ const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,mockStorage);let sends=0,seed=true;
+ const ai=new AiService(f.directory,store,hosting,mockStorage,{fetch:async(_url,options)=>{
+  sends++;const payload=JSON.parse(JSON.parse(String(options?.body)).messages[1].content[0].text);
+  if(seed&&interruption==='unknown'&&payload.claims.some((c:any)=>c.value==='Blue'))throw new TypeError('Synthetic unknown result');
+  if(seed)return Response.json({error:{message:'Forbidden',code:403}},{status:403});
+  return chat({kind:'source-image-consistency',assets:payload.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:[],claims:payload.claims.map((c:any)=>({claimId:c.id,value:c.value,visibility:'visible'}))}))});
+ }});
+ ai.saveConnection({id:'openrouter',apiKey:'synthetic-only'});ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ const purpose=ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+ f.cleanups.push(async()=>{await ai.close();await hosting.close();store.close();});f.dependencies.batch=ai.batchTasks;
+ materializeSourceSnapshot(f.directory,f.product,f.product.variants.map(v=>v.id));
+ for(const variantId of f.product.variants.slice(1).map(v=>v.id))await assert.rejects(ai.observeSourceConsistency(ai.sourceConsistencyContext({productId:f.product.id,productRevision:f.product.revision,variantId}),()=>{}));
+ seed=false;
+ f.dependencies.prepareSourceConsistency=async(input,signal,fresh)=>{
+  if(input.variantIds.includes(f.product.variants[0].id))throw new UserFacingError('Synthetic first sibling needs manual mapping');
+  materializeSourceSnapshot(f.directory,f.product,input.variantIds);
+  const scope=taskAiContext.getStore()!;assert.equal(scope.rowKey,f.service.get(scope.taskId).items.find(i=>i.variantId===input.variantIds[0])!.key);
+  if(interruption==='pause')f.service.pause(scope.taskId);
+  if(interruption==='cancel')f.service.cancel(scope.taskId);
+  if(interruption==='revision'){const db=openDatabase(f.directory);try{db.prepare("UPDATE automatic_listing_tasks SET record_json=json_set(record_json,'$.revision',json_extract(record_json,'$.revision')+1) WHERE id=?").run(scope.taskId);}finally{db.close();}}
+  for(const variantId of input.variantIds){const selected={productId:input.productId,productRevision:input.productRevision,variantId};await ai.observeSourceConsistency(ai.sourceConsistencyContext(selected),fresh,signal);assertConsistencyView(await ai.getSourceConsistency(selected));}
+ };
+ await new Promise(resolve=>setTimeout(resolve,5));const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));if(interruption==='revision'){await assert.rejects(f.service.waitForIdle(),/检查点已变化/);const db=openDatabase(f.directory);try{const saved=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.ok(saved.revision>f.service.get(task.id).revision);(f.service as any).tasks.set(task.id,saved);}finally{db.close();}}else await f.service.waitForIdle();
+ const result=f.service.get(task.id);if(['pause','cancel','revision'].includes(interruption)){assert.equal(sends,2,'revoked task never sends a retry');return;}assert.equal(sends,interruption==='unknown'?3:4,JSON.stringify(result.items.map(i=>({sku:i.sku,error:i.error}))));
+ assert.equal(result.items[0].status,'FAILED');if(interruption==='unknown')assert.equal(result.items[1].outcome?.kind,'UNKNOWN');else assert.equal(result.items[1].status,'DONE',result.items[1].error??'');assert.equal(result.items[2].status,'DONE',result.items[2].error??'');
 });

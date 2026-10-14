@@ -1,4 +1,4 @@
-import { confirmedAuthenticationRejection,confirmedLegacyRegionRejection } from '../ai/receipts.ts';
+import { confirmedAuthenticationRejection,confirmedForbiddenRejection } from '../ai/receipts.ts';
 import {explicitRandomFulfillment} from '../sales-plans/source-meaning.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -43,7 +43,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
   if(context.fields.some(field=>explicitRandomFulfillment(field.value))){view.status='NEEDS_INPUT';view.reasons=['EXPLICIT_RANDOM_FULFILLMENT'];return view;}
   if(attempt&&!assessment){
     const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
-    if(call&&(confirmedLegacyRegionRejection(db,call)||['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'].includes(call.errorCode??''))){view.status='SYSTEM_REPAIR';view.reasons=['SOURCE_CONSISTENCY_ROUTING_FORBIDDEN'];return view;}
+    if(call&&confirmedForbiddenRejection(db,call)){view.status='SYSTEM_REPAIR';view.reasons=['SOURCE_CONSISTENCY_ROUTING_FORBIDDEN'];return view;}
     if(call&&confirmedAuthenticationRejection(db,call)){view.status='SYSTEM_REPAIR';view.reasons=['SOURCE_CONSISTENCY_AUTH_FAILED'];return view;}
     view.status=call?.errorCode==='OUTPUT_INVALID'?'SYSTEM_REPAIR':call?.status==='SUCCEEDED'?'PENDING':'UNKNOWN';view.reasons=[call?.errorCode==='OUTPUT_INVALID'?'SOURCE_CONSISTENCY_INVALID_OUTPUT':call?.status==='SUCCEEDED'?'SOURCE_CONSISTENCY_RECOVERY_REQUIRED':'SOURCE_CONSISTENCY_SENT_UNKNOWN'];return view;
   }

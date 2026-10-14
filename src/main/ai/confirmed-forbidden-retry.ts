@@ -7,14 +7,17 @@ import { confirmedForbiddenRejection } from './receipts.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 
 const ACTION='ai.forbidden.manual-retry';
-const fail=():never=>{const error=new AiError('ROUTING_FORBIDDEN');error.message='历史403未满足安全重试条件或该步骤的一次重试已使用；本次未发送新请求，请核对原记录';throw error;};
+const fail=(message='历史403未满足安全重试条件；本次未发送新请求，请核对原记录'):never=>{const error=new AiError('ROUTING_FORBIDDEN');error.message=message;throw error;};
 function claimId(scopeKey:string):string {
  if(!scopeKey||scopeKey.length>1000)fail();
  const hex=createHash('sha256').update(ACTION+':'+scopeKey).digest('hex');
  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }
+export function isConfirmedForbiddenRetryCall(db:DatabaseSync,callId:string):boolean {
+ return !!db.prepare("SELECT 1 FROM audit_events WHERE action=? AND json_extract(detail_json,'$.retryCallId')=?").get(ACTION,callId);
+}
 function used(db:DatabaseSync,prior:AiCall,scopeKey:string):boolean {
- return !!db.prepare("SELECT 1 FROM audit_events WHERE action=? AND (id=? OR json_extract(detail_json,'$.retryCallId')=?)").get(ACTION,claimId(scopeKey),prior.id);
+ return !!db.prepare("SELECT 1 FROM audit_events WHERE action=? AND (id=? OR json_extract(detail_json,'$.retryCallId')=? OR json_extract(detail_json,'$.priorCallId')=?)").get(ACTION,claimId(scopeKey),prior.id,prior.id);
 }
 /** No mutation: only an explicit, live task continuation can authorize the one retry. */
 export function canRetryConfirmedForbidden(db:DatabaseSync,prior:AiCall,scopeKey:string):boolean {
@@ -22,7 +25,8 @@ export function canRetryConfirmedForbidden(db:DatabaseSync,prior:AiCall,scopeKey
  return !!scope?.explicitContinueAt&&Number.isFinite(Date.parse(scope.explicitContinueAt))&&Date.parse(scope.explicitContinueAt)>Date.parse(prior.finishedAt??prior.startedAt)&&scope.authorize()&&confirmedForbiddenRejection(db,prior)&&!used(db,prior,scopeKey);
 }
 export function assertConfirmedForbiddenRetry(db:DatabaseSync,prior:AiCall,scopeKey:string):void {
- if(!canRetryConfirmedForbidden(db,prior,scopeKey))fail();
+ if(used(db,prior,scopeKey))fail('已使用一次手动403重试；本次未发送新请求，请核对上次重试结果与配置');
+ if(!canRetryConfirmedForbidden(db,prior,scopeKey))fail('历史403失败尚未获本次手动继续授权或原始回执无法确认；本次未发送新请求');
 }
 /** Caller MUST invoke inside the same usage/call reservation transaction; no autonomous grant. */
 export function claimConfirmedForbiddenRetry(db:DatabaseSync,prior:AiCall,retry:Pick<AiCall,'id'|'productId'|'startedAt'>,scopeKey:string):void {

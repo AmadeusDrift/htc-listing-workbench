@@ -1,3 +1,7 @@
+import { randomUUID as retryCommandId } from 'node:crypto';
+import { imageSlotAttemptLimit } from '../../shared/image-workflow-contracts.ts';
+import { planningRetryExhausted,assertRetryAllowanceRun,grantImageRetry,historicalRetryEligible,retryGrants,retryHistoryGap,saveRetryConsumption } from './retry-allowance.ts';
+import { transaction } from '../application/transaction.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { registerGeneratedAsset } from '../assets/commands.ts';
 import { confirmAssetBinding } from '../products/asset-bindings.ts';
@@ -93,6 +97,7 @@ export class ImageWorkflowService {
   private activeSources = new Map<string, { scope: string; controller: AbortController; promise: Promise<AutomaticSourcesResult> }>();
   private sources?: AutomaticImageSources;
   private closed = false;
+  private retryPending=false;
   private workflowProfile(id:string){
     if(this.ai.purposeProfile&&id==='deepseek')return this.ai.purposeProfile('image_plan',true);
     if(this.ai.purposeProfile&&id==='deepseek-review')return this.ai.purposeProfile('image_text_review',false,true);
@@ -167,17 +172,18 @@ export class ImageWorkflowService {
   }
   private save(run: ImageWorkflowRun): void {
     if(run.slots){const attempts=run.slots.flatMap(slot=>slot.attempts);run.attempt=attempts.length;
-      for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)run[plural]=attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]!]:[]);
+      for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)run[plural]=[...new Set(attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]!]:[]))];
       run.approvedAssetId=run.slots[0].approvedAssetId;run.approvedSha256=run.slots[0].approvedSha256;
     }
     run.updatedAt = new Date(Math.max(Date.now(), Date.parse(run.createdAt))).toISOString();
     const valid = validateStoredImageWorkflowRun(run);
     assertWorkflowRejectionOwner(valid,id=>this.ai.getCall(id),id=>this.ai.getResult(id),id=>readCompletionForRejection(this.db,id));
-    this.db.prepare('INSERT INTO image_workflow_runs VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(valid.id, JSON.stringify(valid));
+    transaction(this.db,()=>{assertRetryAllowanceRun(this.db,valid);saveRetryConsumption(this.db,valid);
+    this.db.prepare('INSERT INTO image_workflow_runs VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(valid.id, JSON.stringify(valid));});
   }
   getAppearanceReviewSettings(){this.ensureOpen();return readAppearanceReviewSettings(this.db);}
   saveAppearanceReviewSettings(raw:unknown){this.ensureOpen();return writeAppearanceReviewSettings(this.db,raw);}
-  get busy(): boolean { return this.active.size > 0 || this.activeSources.size > 0; }
+  get busy(): boolean { return this.retryPending || this.active.size > 0 || this.activeSources.size > 0; }
   getRiskSettings(){this.ensureOpen();return readImageRiskSettings(this.db);}
   saveRiskSettings(raw:unknown){
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停当前自动图片流程，再切换风险拦截');
@@ -213,6 +219,59 @@ export class ImageWorkflowService {
     return hasRecordedRecheckDraft({draft,product,targetGeneration:target.generation,context:this.currentContext(draft,product,target.generation),
       run:runs[0],source:runs.find(run=>run.id===input.sourceWorkflowId),getResult:id=>this.ai.getResult(id),getCall:id=>this.ai.getCall(id)});
   }
+
+  private retryReason(run:ImageWorkflowRun,index:number):string {
+    const slot=run.slots?.[index-1],last=slot?.attempts.at(-1);
+    if(retryHistoryGap(this.db,run))return '旧备份早于后续付费尝试，请核对保留历史';
+    if(run.contentPreparation?.state==='STARTED')return '先核对原文案请求';
+    if(!slot||slot.status==='PASSED')return '已通过图位保留';
+    if(run.slots?.some(s=>s.status==='BLOCKED'||s.attempts.some(a=>['UNKNOWN','GENERATING'].includes(a.state))))return '先核对进行中、未知请求或风险阻断';
+    if(planningRetryExhausted(this.db,run,index))return '';
+    if(slot.status!=='FAILED'||last?.state!=='RETRYABLE_FAILURE')return '不是明确失败图位';
+    if(slot.attempts.length<imageSlotAttemptLimit(run,index))return '现有额度尚未耗尽';
+    if(last.candidateId){
+      const ip=last.ipReviewResultId?this.ai.getResult(last.ipReviewResultId):undefined,review=last.reviewResultId?this.ai.getResult(last.reviewResultId):undefined;
+      const riskPassed=ip?.output.kind==='image-ip-review'&&ip.output.planResultId===last.planResultId&&ip.output.candidate.id===last.candidateId&&evaluateImageRisk(ip.output,this.getRiskSettings()).verdict==='PASS';
+      if(riskPassed&&index===1&&last.textReviewPolicyVersion===IMAGE_TEXT_REVIEW_POLICY_VERSION&&review?.output.kind==='image-text-review'&&review.output.verdict==='NEEDS_CHANGES'&&review.output.planResultId===last.planResultId&&review.output.candidate.id===last.candidateId)return '';
+      const appearanceId=last.appearanceReview?.resultIds.at(-1),appearance=appearanceId?this.ai.getResult(appearanceId):undefined;
+      if(riskPassed&&appearance?.output.kind==='image-appearance-review'&&appearance.output.verdict==='MISMATCH'&&appearance.output.planResultId===last.planResultId&&appearance.output.candidate.id===last.candidateId)return '';
+      return '已有候选须优先核对或复核，风险不确定不能补额放行';
+    }
+    if(!last.planResultId||this.ai.getResult(last.planResultId)?.output.kind!=='image-plan')return '原有效规划缺失，请先恢复原规划响应';
+    if(last.failureProof?.kind==='provider-definitive')return '';
+    const audit=this.db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' AND json_extract(detail_json,'$.productId')=? AND json_extract(detail_json,'$.requestId')=? ORDER BY rowid DESC LIMIT 1").get(run.productId,last.requestId);
+    if(audit){const evidence=JSON.parse(String(audit.detail_json));if(evidence.version===1&&evidence.productId===run.productId&&evidence.stage==='image-generation.request'&&evidence.requestOutcome==='DEFINITIVE_FAILURE'&&[400,401,402,403,404,405,413,415,422,429].includes(evidence.httpStatus))return '';}
+    const receipt=this.db.prepare("SELECT record_json FROM ai_provider_receipts WHERE json_extract(record_json,'$.callId')=? ORDER BY rowid DESC LIMIT 1").get(last.requestId);
+    const intent=this.db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(last.requestId);
+    if(receipt&&intent){const r=JSON.parse(String(receipt.record_json)),i=JSON.parse(String(intent.record_json));if(i.productId===run.productId&&i.productRevision===run.productRevision&&[400,401,402,403,404,405,413,415,422,429].includes(r.status))return '';}
+    return '旧失败缺少明确远端拒绝证据，先核对原请求';
+  }
+  private retryStatus(run:ImageWorkflowRun):NonNullable<ImageWorkflowProgress['retryAllowanceStatus']> {
+    const gap=retryHistoryGap(this.db,run);
+    return (run.slots??[]).map(slot=>{const reason=this.retryReason(run,slot.index);return {scope:slot.attempts.at(-1)?.state==='PLANNING'?'planning' as const:'generation' as const,slot:slot.index,manual:!reason,automatic:!reason&&historicalRetryEligible(this.db,run,slot.index),reason,...(gap?.slot===slot.index?{retainedAttempts:structuredClone(gap.savedAttempts)}:{})};});
+  }
+  hasHistoricalRetryAllowance(draftId:string):boolean {const run=this.getProgress(draftId);return !!run&&this.retryStatus(run).some(s=>s.automatic);}
+  private async applyRetry(run:ImageWorkflowRun,index:number,commandId:string,mode:'manual'|'historical'):Promise<void> {
+    const reason=this.retryReason(run,index);if(reason)throw new UserFacingError(reason);
+    const slot=run.slots![index-1],last=slot.attempts.at(-1)!;
+    if(planningRetryExhausted(this.db,run,index)){transaction(this.db,()=>{grantImageRetry(this.db,run,index,commandId,mode,'planning');this.save(run);});return;}
+    let recovered:GeneratedImageCandidate|null=null;
+    try{if(!last.candidateId)recovered=await this.generation.reconcileWorkflowGeneration(last.requestId);}catch(error){if(!(error instanceof AiError&&'definitive' in error&&error.definitive===true))throw error;}
+    if(recovered){if(recovered.id!==last.requestId||recovered.productId!==run.productId||recovered.productRevision!==run.productRevision)throw new AiError('SOURCE_CHANGED');last.candidateId=recovered.id;last.state='GENERATED';last.error=null;delete last.failureProof;slot.status='PENDING';slot.error=null;this.save(run);return;}
+    transaction(this.db,()=>{grantImageRetry(this.db,run,index,commandId,mode);this.save(run);});
+  }
+  /** Explicit local command adds capacity only. It never continues or sends a paid request. */
+  async addRetryAllowance(raw:unknown):Promise<ImageWorkflowRun> {
+    this.ensureOpen();const input=keys(raw,['draftId','slot','requestId','commandId']),draftId=uuid(input.draftId),index=integer(input.slot,1,7),requestId=uuid(input.requestId),commandId=uuid(input.commandId);
+    const existing=retryGrants(this.db).find(g=>g.id===commandId),run=this.getProgress(draftId);
+    if(existing){if(existing.draftId!==draftId||existing.slot!==index||existing.requestId!==requestId||existing.mode!=='manual')throw new UserFacingError('追加命令身份不一致');if(!run)throw new UserFacingError('原图片历史不存在');return run;}
+    if(this.busy)throw new UserFacingError('请先暂停图片任务，再追加额度');
+    if(!run||run.slots?.[index-1]?.attempts.at(-1)?.requestId!==requestId||this.amazon.getDraft(draftId).submittedAt)throw new UserFacingError('图位历史已变化，请刷新后重试');
+    this.retryPending=true;try{await this.applyRetry(run,index,commandId,'manual');return structuredClone(run);}finally{this.retryPending=false;}
+  }
+  private async applyHistoricalRetries(run:ImageWorkflowRun):Promise<void> {
+    for(const slot of run.slots??[])if(!this.retryReason(run,slot.index)&&historicalRetryEligible(this.db,run,slot.index))await this.applyRetry(run,slot.index,retryCommandId(),'historical');
+  }
   async approveUnknownRetry(raw:unknown):Promise<ImageWorkflowRun>{
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停自动任务，再处理未知生图结果');
     const input=keys(raw,['draftId','slot','requestId']),draftId=uuid(input.draftId),index=integer(input.slot,1,7),requestId=uuid(input.requestId);
@@ -223,7 +282,7 @@ export class ImageWorkflowService {
     if(this.busy||!run||run.updatedAt!==before.updatedAt||!slot||!attempt||attempt.requestId!==requestId||attempt.state!=='UNKNOWN')throw new UserFacingError('未知生图记录已变化，请刷新后处理');
     if(recovered){if(recovered.productId!==run.productId||recovered.productRevision!==run.productRevision)throw new AiError('SOURCE_CHANGED');attempt.candidateId=recovered.id;attempt.state='GENERATED';attempt.error=null;}
     else{
-      if(slot.attempts.length>=run.maxAttempts)throw new UserFacingError('该图片已用完尝试次数，请先核对服务商生成记录或导入已有图片');
+      if(slot.attempts.length>=imageSlotAttemptLimit(run,slot.index))throw new UserFacingError('该图片已用完尝试次数，请先核对服务商生成记录或导入已有图片');
       throw new UserFacingError('原生图结果仍未知；保留原请求和次数，请核对原响应或导入已有图片，不会重新发送');
     }
     slot.status='PENDING';slot.error=null;run.status='INTERRUPTED';run.error='已核对未知结果，等待继续任务';
@@ -260,7 +319,7 @@ export class ImageWorkflowService {
     const riskEvidence=(run.slots??[]).flatMap(slot=>{const id=slot.attempts.at(-1)?.ipReviewResultId,ip=id?this.ai.getResult(id):undefined;return ip?.output.kind==='image-ip-review'?[{slot:slot.index,summary:describeImageRisk(ip.output,this.getRiskSettings(),run.sku,slot.index)}]:[];});
     const sourceId=run.setPlanResultId??run.planResultIds.at(-1),source=sourceId?this.ai.getResult(sourceId):undefined;
     const sourceRiskSummary=source?.output.kind==='image-plan'&&source.output.ipRisk?`来源 AI 初筛 · SKU ${run.sku} · 原结论 ${source.output.ipRisk.verdict}（非阿里云等级，无数值评分）：${source.output.ipRisk.findings.map(item=>`${item.name}：${item.evidence}`).join('；')||'未报告明确风险'}${run.riskInterceptionEnabled===false?'；当时风险拦截关闭，不计审核通过':''}`:undefined;
-    return {...run,sourceTrace:imageSourceTrace(run,id=>this.ai.getResult(id),id=>this.ai.getCall(id)),resultUnknown,riskEvidence,...(sourceRiskSummary?{sourceRiskSummary}:{})};
+    return {...run,retryAllowanceStatus:this.retryStatus(run),sourceTrace:imageSourceTrace(run,id=>this.ai.getResult(id),id=>this.ai.getCall(id)),resultUnknown,riskEvidence,...(sourceRiskSummary?{sourceRiskSummary}:{})};
   }
   /** Local, bounded proof. A workflow status alone is never a rule rejection. */
   async getRuleFilterEvidence(rawId:string):Promise<AutomaticRuleEvidence|null> {
@@ -348,6 +407,7 @@ export class ImageWorkflowService {
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
     if (draft.submittedAt || !['DRAFT','BLOCKED','LOCAL_VALIDATED','AMAZON_VALIDATED'].includes(draft.state)) throw new UserFacingError('已提交的商品不能重新自动准备');
     let prior = this.getProgress(draftId);
+    if(prior&&retryHistoryGap(this.db,prior))throw new UserFacingError('旧备份早于已付费图片尝试，请先核对保留的后续历史；未重复发送');
     if(!prior&&options.legacyImageAttempts!==undefined)options={...options,maxImageAttempts:missingWorkflowBudget(this.db,this.directory,draft,options.legacyImageAttempts)};
     if(prior?.referenceAssets.length){
       const product=this.store.getProduct(draft.productId),allowUnbound=allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),variants=draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId];
@@ -400,7 +460,7 @@ export class ImageWorkflowService {
     const controller = new AbortController();
     // Defer until the operation is registered so even immediate cancellation observes it.
     const reuseSource=run.recheckedFromRunId?workflowRuns(this.db,draftId).find(record=>record.id===run.recheckedFromRunId):undefined;
-    const promise = Promise.resolve().then(() => {if(run.recheckedFromRunId&&!reuseSource)throw new AiError('SOURCE_CHANGED');return this.runSeven(run, draft, controller.signal,reuseSource);}).finally(() => this.active.delete(draftId));
+    const promise = Promise.resolve().then(async () => {await this.applyHistoricalRetries(run);if(run.recheckedFromRunId&&!reuseSource)throw new AiError('SOURCE_CHANGED');return this.runSeven(run, draft, controller.signal,reuseSource);}).finally(() => this.active.delete(draftId));
     this.active.set(draftId, {operation:'complete',controller,promise}); return promise;
   }
   /** Internal repair path: review a previously approved image again, with zero generation calls. */
@@ -720,13 +780,15 @@ export class ImageWorkflowService {
           const oldIp=this.ai.getResult(attempt.ipReviewResultId),oldReview=this.ai.getResult(attempt.reviewResultId);
           if(oldIp?.output.kind==='image-ip-review'&&evaluateImageRisk(oldIp.output,this.getRiskSettings()).verdict==='PASS'&&oldIp.output.planResultId===attempt.planResultId&&oldIp.output.candidate.id===attempt.candidateId&&oldReview?.output.kind==='image-text-review'&&oldReview.output.planResultId===attempt.planResultId&&listingFingerprint(oldReview.output.candidate)===listingFingerprint(oldIp.output.candidate)){attempt.state='GENERATED';attempt.error=null;this.save(run);}
         }
-        const reviewOnly=run.slotPolicy===IMAGE_SET_POLICY&&slot.attempts.length>=run.maxAttempts&&this.canRecheckTextPolicy(attempt);
-        if(attempt?.state==='RETRYABLE_FAILURE'&&slot.attempts.length>=run.maxAttempts&&!reviewOnly){slot.status='FAILED';this.save(run);continue;}
+        const reviewOnly=run.slotPolicy===IMAGE_SET_POLICY&&slot.attempts.length>=imageSlotAttemptLimit(run,slot.index)&&this.canRecheckTextPolicy(attempt);
+        if(attempt?.state==='RETRYABLE_FAILURE'&&slot.attempts.length>=imageSlotAttemptLimit(run,slot.index)&&!reviewOnly){slot.status='FAILED';this.save(run);continue;}
         for(;;){
           throwIfAborted(signal);await fresh();
           if(!attempt||attempt.state==='RETRYABLE_FAILURE'&&!reviewOnly){
-            if(slot.attempts.length>=run.maxAttempts){slot.status='FAILED';this.save(run);break;}
-            attempt={number:slot.attempts.length+1,requestId:randomUUID(),state:'PLANNING',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:null};slot.attempts.push(attempt);slot.contextSha256=listingFingerprint(context);
+            if(slot.attempts.length>=imageSlotAttemptLimit(run,slot.index)){slot.status='FAILED';this.save(run);break;}
+            const previous=attempt;
+            attempt={number:slot.attempts.length+1,requestId:randomUUID(),state:'PLANNING',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:null};if(previous?.planResultId&&!previous.candidateId&&slot.attempts.length>=run.maxAttempts&&(!run.sourceReuse||slot.attempts.length>run.sourceReuse.slotAttempts[slot.index-1])){attempt.planResultId=previous.planResultId;attempt.planReuse={version:1,fromRequestId:previous.requestId};}
+            slot.attempts.push(attempt);slot.contextSha256=listingFingerprint(context);
           }
           slot.status='RUNNING';slot.error=null;this.save(run);
           if(!attempt.planResultId){
@@ -748,7 +810,7 @@ export class ImageWorkflowService {
             let recovered:GeneratedImageCandidate|null;
             try{recovered=await this.generation.reconcileWorkflowGeneration(attempt.requestId);}
             catch(error){
-              if(error instanceof AiError&&'definitive' in error&&error.definitive===true){attempt.state='RETRYABLE_FAILURE';slot.status='FAILED';attempt.error=slot.error=`原收据明确拒绝 [DEFINITIVE_FAILURE]：${publicError(error)}`;this.save(run);continue;}
+              if(error instanceof AiError&&'definitive' in error&&error.definitive===true){attempt.failureProof={version:1,kind:'provider-definitive',at:new Date().toISOString()};attempt.state='RETRYABLE_FAILURE';slot.status='FAILED';attempt.error=slot.error=`原收据明确拒绝 [DEFINITIVE_FAILURE]：${publicError(error)}`;this.save(run);continue;}
               throw error;
             }
             if(!recovered){
@@ -778,7 +840,7 @@ export class ImageWorkflowService {
                   slot.error=attempt.error;slot.status='FAILED';this.save(run);if(isSchemaTransientError(error))throw error;throw new UserFacingError(attempt.error);
                 }
                 const known=error instanceof AiError&&'definitive' in error&&error.definitive===true;
-                attempt.state=known?'RETRYABLE_FAILURE':'UNKNOWN';attempt.error=`${known?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}：${publicError(error)}`;slot.error=attempt.error;slot.status=known?'FAILED':'UNKNOWN';this.save(run);
+                if(known)attempt.failureProof={version:1,kind:'provider-definitive',at:new Date().toISOString()};attempt.state=known?'RETRYABLE_FAILURE':'UNKNOWN';attempt.error=`${known?'明确拒绝 [DEFINITIVE_FAILURE]':'结果未知 [RESULT_UNKNOWN]'}：${publicError(error)}`;slot.error=attempt.error;slot.status=known?'FAILED':'UNKNOWN';this.save(run);
                 if(known&&!signal.aborted)continue;throw error;
               }
             }
@@ -835,7 +897,7 @@ export class ImageWorkflowService {
         }
       }
       run.status=run.slots!.every(slot=>slot.status==='PASSED')?'COMPLETED':'BLOCKED';run.stage=run.status==='COMPLETED'?'complete':run.stage;
-      run.error=run.status==='COMPLETED'?null:run.slots!.some(slot=>slot.status==='BLOCKED')?'部分图位存在明确阻断或外观无法判断，已保留候选、依据、次数与其他成功图片':'部分图片未通过或已达到本位置最多 3 次尝试；已通过图片保留，请处理失败位置';this.save(run);
+      run.error=run.status==='COMPLETED'?null:run.slots!.some(slot=>slot.status==='BLOCKED')?'部分图位存在明确阻断或外观无法判断，已保留候选、依据、次数与其他成功图片':(run.retryAllowance?'部分图片未通过或已用完本位置当前尝试额度；已通过图片保留，请处理失败位置':'部分图片未通过或已达到本位置最多 3 次尝试；已通过图片保留，请处理失败位置');this.save(run);
     }catch(error){
       if(error instanceof BatchWaitingError){run.status='WAITING_BATCH';run.error=error.message;this.save(run);throw error;}
       this.captureRejection(run,error);

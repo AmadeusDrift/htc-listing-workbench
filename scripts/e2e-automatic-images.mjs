@@ -178,8 +178,9 @@ function installMockTransport(keys) {
       assert.deepEqual(body.provider, { only: ['openai'], allow_fallbacks: false });
       call.referenceHashes = body.input_references.map(image => digest(Buffer.from(image.image_url.url.split(',')[1], 'base64')));
       const plan = state.calls.findLast(previous => previous.kind === 'image-plan');
-      assert.equal(plan?.sufficient, true); assert.deepEqual(plan.repair?call.referenceHashes.slice(1):call.referenceHashes, plan.referenceHashes);
+      assert.equal(plan?.sufficient, true); assert.deepEqual(call.referenceHashes.length===plan.referenceHashes.length+1?call.referenceHashes.slice(1):call.referenceHashes, plan.referenceHashes);
       assert.ok(call.prompt.includes(plan.visualSummary)); assert.ok(call.prompt.includes('Exact size is unknown'));
+      if(state.mode==='definitive-retry'&&state.imageCount<=3)return new Response(JSON.stringify({error:{message:'Synthetic definitive rate limit'}}),{status:429,headers:{'content-type':'application/json'}});
       if (state.mode === 'network-error') throw Error('Synthetic ambiguous provider disconnect');
       if (state.holdAttempt === state.imageCount) await new Promise((done, reject) => {
         const finish = () => { options.signal?.removeEventListener('abort', abort); done(); };
@@ -507,6 +508,26 @@ try {
   assert.equal(repaired.calls.filter(call => call.kind === 'listing-current-review').length, 1);
   assert.deepEqual(repaired.calls.filter(call => call.kind === 'image-plan').map(call => call.repair), [false, false, true,...Array(6).fill(false)]);
   pass('known text rejection repairs only the failed slot; UI polls and displays attempt 2 while retaining the seven-slot workflow');
+
+  const exhausted = await scenario(await createProduct('RETRY-ALLOWANCE'), target.id, 'definitive-retry', 'blocked');
+  assert.equal(exhausted.workflow.slots[0].attempts.length,3);
+  assert.equal(exhausted.workflow.retryAllowanceStatus[0].manual,true);
+  assert.equal(exhausted.workflow.retryAllowanceStatus[0].automatic,false);
+  const countBeforeGrant=await app.evaluate(()=>globalThis.__automaticImagesE2E.calls.length);
+  const retryInput={draftId:exhausted.draft.id,slot:1,requestId:exhausted.workflow.slots[0].attempts.at(-1).requestId,commandId:crypto.randomUUID()};
+  const granted=await page.evaluate(input=>window.red.addImageRetryAllowance(input),retryInput);
+  assert.equal(granted.retryAllowance.grants.length,1);
+  await page.evaluate(input=>window.red.addImageRetryAllowance(input),retryInput);
+  assert.equal(await app.evaluate(()=>globalThis.__automaticImagesE2E.calls.length),countBeforeGrant);
+  await app.evaluate(()=>{globalThis.__automaticImagesE2E.mode='pass';});
+  const continued=await page.evaluate(async input=>{const draft=(await window.red.listAmazonDrafts(input.productId)).find(d=>d.id===input.id);return window.red.completeAutomaticProduct({draftId:input.id,draftRevision:draft.revision});},{id:exhausted.draft.id,productId:exhausted.product.id});
+  assert.equal(continued.workflow.status,'COMPLETED');
+  assert.deepEqual(continued.workflow.slots[0].attempts.slice(0,3),exhausted.workflow.slots[0].attempts);
+  assert.deepEqual(continued.workflow.slots.slice(1),exhausted.workflow.slots.slice(1));
+  const retryCalls=await app.evaluate((_electron,before)=>globalThis.__automaticImagesE2E.calls.slice(before),countBeforeGrant);
+  assert.equal(retryCalls.filter(c=>c.kind==='image-generation').length,1);
+  assert.equal(retryCalls.filter(c=>c.kind==='image-plan').length,0);
+  pass('real IPC manual retry grant is idempotent and sends nothing; explicit continue reuses paid plan and six passed slots');
 
   const blocked = await scenario(await createProduct('BLOCKED'), target.id, 'blocked', 'blocked');
   assert.equal(blocked.workflow.status, 'BLOCKED'); assert.equal(blocked.workflow.attempt, 9); assert.equal(blocked.workflow.approvedAssetId, null);

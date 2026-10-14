@@ -58,6 +58,7 @@ export interface AutomaticListingItem {
   outcome?:AutomaticListingOutcome;
   observationFailureStamp?:string;
   stage: AutomaticListingStage; draftId: string | null; executionTaskIds: string[];
+  imageRetryAllowance?:{workflowId:string;allowance:import('./image-workflow-contracts.ts').ImageRetryAllowance};
   imageStarted: boolean; imageAttempts: number; repairAttempts: number;
   repairPolicyVersion?: typeof FIELD_REPAIR_POLICY_VERSION;
   /** A one-time extra request for legacy exhausted tasks; the original attempts stay counted. */

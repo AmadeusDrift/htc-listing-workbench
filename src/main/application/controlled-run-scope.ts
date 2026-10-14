@@ -3,7 +3,7 @@ import {realpathSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiRequestScope} from '../../shared/ai-request-identity-contracts.ts';
-import {UserFacingError} from '../../shared/errors.ts';
+import {AiError} from '../ai/errors.ts';
 import {transaction} from './transaction.ts';
 import {listingFingerprint} from '../json-fingerprint.ts';
 import {spendObject,spendInteger,spendUuid,spendText,spendDate,spendHash,spendInvalid} from '../ai/spend-records.ts';
@@ -13,7 +13,7 @@ export const CONTROLLED_RUN_TABLES={controlled_run_scopes:['id','record_json']};
 export interface ControlledRunItem {itemKey:string;sku:string;productId:string;variantIds:string[];recipeKey:string|null;parentage:'NONE'}
 export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;createdAt:string;status:'PAUSED'|'ACTIVE'}
 const authority=new AsyncLocalStorage<{scopeId:string;fingerprint:string;grant:object}>(),grants=new WeakSet<object>();
-export class ControlledRunError extends UserFacingError {readonly code='CONTROLLED_RUN_SCOPE_BLOCKED';constructor(){super('受控验收任务、卖家、站点、SKU或当前授权不匹配；未发送');}}
+export class ControlledRunError extends AiError {constructor(){super('INVALID_INPUT');this.diagnosticReason='CONTROLLED_RUN_SCOPE_BLOCKED';this.message='受控验收任务、卖家、站点、SKU或当前授权不匹配；未发送';}}
 function blocked():never{throw new ControlledRunError();}
 const memoryWorkspaces=new WeakMap<DatabaseSync,string>();
 function workspaceIdentity(db:DatabaseSync):string{

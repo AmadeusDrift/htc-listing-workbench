@@ -45,8 +45,8 @@ export class AiSpendBudget {
  }
  summary(id:AiSpendPolicy['id'],db=this.db,at=this.at()):AiSpendSummary{
   const policy=this.policy(id,db),result:AiSpendSummary={reportedUsdMicros:0,heldUsdMicros:0,unboundedCalls:0,anomaly:false,limitUsdMicros:policy.limitUsdMicros};
-  for(const r of readReservations(db).filter(r=>r.policyIds.includes(id)&&(policy.period==='LIFETIME'||r.createdAt.slice(0,10)===at.slice(0,10)))){
-   result.anomaly ||=r.state==='COST_ANOMALY';
+  const records=readReservations(db).filter(r=>r.policyIds.includes(id));result.anomaly=records.some(r=>r.state==='COST_ANOMALY');
+  for(const r of records.filter(r=>policy.period==='LIFETIME'||r.createdAt.slice(0,10)===at.slice(0,10)||['DISPATCH_ATTEMPTED','UNKNOWN'].includes(r.state))){
    if(r.actualUsdMicros!==null)result.reportedUsdMicros=spendInteger(result.reportedUsdMicros+r.actualUsdMicros);
    if(['DISPATCH_ATTEMPTED','UNKNOWN'].includes(r.state)){if(r.bound)result.heldUsdMicros=spendInteger(result.heldUsdMicros+Math.max(0,r.bound.upperUsdMicros-(r.actualUsdMicros??0)));else result.unboundedCalls++;}
   }return result;
@@ -67,10 +67,10 @@ export class AiSpendBudget {
  }
  private read(id:string,db:DatabaseSync):AiSpendReservation{const r=readReservations(db).find(r=>r.id===id);if(!r)spendInvalid();return r;}
  markUnknownInTransaction(db:DatabaseSync,id:string):void{assertSpendTransaction(this.db,db);const r=this.read(id,db);if(r.state==='DISPATCH_ATTEMPTED')writeReservation(db,{...r,state:'UNKNOWN'});}
- settleReceiptInTransaction(db:DatabaseSync,id:string,receiptId:string,rawProof?:AiSpendReceiptProof):AiSpendReservation{
+ settleReceiptInTransaction(db:DatabaseSync,id:string,receiptId:string,rawProof:AiSpendReceiptProof):AiSpendReservation{
   assertSpendTransaction(this.db,db);spendHash(receiptId);const r=this.read(id,db),row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(receiptId);if(!row)spendInvalid();
   const receipt=JSON.parse(String(row.record_json));if(receipt.id!==receiptId||receipt.callId!==id||receipt.gateway!=='openrouter'||receipt.endpoint!=='/api/v1/images'||receipt.model!==r.model)throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');
-  if(rawProof)assertPreparedSpendReceiptProof(rawProof);const proof=validateSpendReceiptProof(rawProof??{receiptId,sha256:receipt.sha256,certainty:'SENT_UNKNOWN'});if(proof.receiptId!==receiptId||proof.sha256!==receipt.sha256)spendInvalid();
+  assertPreparedSpendReceiptProof(rawProof);const proof=validateSpendReceiptProof(rawProof);if(proof.receiptId!==receiptId||proof.sha256!==receipt.sha256)spendInvalid();
   if(r.receiptIds.includes(receiptId)){if(listingFingerprint(r.receiptProofs.find(p=>p.receiptId===receiptId))!==listingFingerprint(proof))spendInvalid();return r;}
   const proofs=[...r.receiptProofs,proof],amount=receipt.costUsd===null?null:usdMicrosCeil(receipt.costUsd),actual=amount===null?r.actualUsdMicros:Math.max(amount,r.actualUsdMicros??0),state=r.state==='COST_ANOMALY'||r.bound&&actual!==null&&actual>r.bound.upperUsdMicros?'COST_ANOMALY':actual===null||!proofs.some(p=>p.certainty!=='SENT_UNKNOWN')?'UNKNOWN':'SETTLED';
   const next:AiSpendReservation={...r,state,actualUsdMicros:actual,receiptIds:[...r.receiptIds,receiptId],receiptProofs:proofs};writeReservation(db,next);return next;

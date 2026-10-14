@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 test('real listing AI service uses the purpose OpenRouter key, model, effort and durable receipt',async t=>{
   const f=await fixture(t),requests:{url:string;key:string|null;body:any}[]=[],context=(f.ai as any).context,fetcher=context.fetch;
-  context.fetch=async(url:unknown,init:RequestInit)=>{requests.push({url:String(url),key:new Headers(init.headers).get('authorization'),body:JSON.parse(String(init.body))});return fetcher(url,init);};
+  context.fetch=async(url:unknown,init:RequestInit)=>{requests.push({url:String(url),key:new Headers(init.headers).get('authorization'),body:JSON.parse(String(init.body))});const response=await fetcher(url,init);const body=await response.json();return new Response(JSON.stringify({...body,model:'openai/actual-fixture-version',openrouter_metadata:{attempts:[{model:'openai/actual-fixture-version',provider:'Azure',status:200}]}}),{status:response.status});};
   f.ai.saveConnection({id:'openrouter',apiKey:'openrouter-fixture-own-key'});
   f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
   for(const p of f.ai.getPurposeProfiles().filter(p=>['listing_generation','listing_title','listing_bullets','listing_description','listing_search_terms'].includes(p.purposeId)))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-astra',effort:'high'}});
@@ -19,6 +19,7 @@ test('real listing AI service uses the purpose OpenRouter key, model, effort and
   assert.deepEqual(requests[0].body.reasoning,{effort:'high'});assert.equal(result.providerId,'openrouter');assert.equal(result.model,'openai/gpt-6-astra');
   const call=f.ai.listCalls().find(c=>c.id===result.callId)!;
   assert.equal(call.purposeSnapshot?.model,'openai/gpt-6-astra');assert.equal(call.purposeSnapshot?.effectiveEffort,'high');
+  const date=call.startedAt.slice(0,10),detail=f.ai.getUsageReport({from:date,to:date}).details!.find(v=>v.id===call.id)!;assert.equal(detail.model,'openai/gpt-6-astra');assert.equal(detail.actualModel,'openai/actual-fixture-version');assert.equal(detail.actualProvider,'Azure');
   const receipt=await f.ai.readProviderReceipt(call.id);assert.ok(receipt);assert.equal(JSON.stringify(receipt).includes('openrouter-fixture-own-key'),false);
 });
 

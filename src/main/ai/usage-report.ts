@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { UserFacingError } from '../../shared/errors.ts';
-import type { AiUsageReport,AiUsageReportRow } from '../../shared/ai-purpose-contracts.ts';
+import type { AiUsageReport,AiUsageReportRow,AiCallDetail } from '../../shared/ai-purpose-contracts.ts';
 
 /** UTC-day ledger report. Provider-reported USD is not a complete account invoice. */
 export function readAiUsageReport(db:DatabaseSync,raw:unknown):AiUsageReport{
@@ -12,17 +12,20 @@ export function readAiUsageReport(db:DatabaseSync,raw:unknown):AiUsageReport{
   if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_batch_items'").get())for(const row of db.prepare('SELECT record_json FROM ai_batch_items').iterate()){
     const item=JSON.parse(String(row.record_json)),callId=item.aiCallId??item.id;batchCallIds.set(item.id,callId);if(!calls.has(callId))calls.set(callId,{model:item.purpose.model,purposeSnapshot:item.purpose});
   }
+  const receipts=new Map<string,any>();
   const costs=new Map<string,number>(),reportedTokens=new Map<string,number>();for(const row of db.prepare('SELECT record_json FROM ai_provider_receipts ORDER BY rowid').iterate()){
-    const receipt=JSON.parse(String(row.record_json));receipt.callId=batchCallIds.get(receipt.callId)??receipt.callId;if(Number.isSafeInteger(receipt.reportedTokens)&&receipt.reportedTokens>=0)reportedTokens.set(receipt.callId,receipt.reportedTokens);if(typeof receipt.costUsd==='number'&&Number.isFinite(receipt.costUsd)&&receipt.costUsd>=0)costs.set(receipt.callId,receipt.costUsd);
+    const receipt=JSON.parse(String(row.record_json));receipt.callId=batchCallIds.get(receipt.callId)??receipt.callId;receipts.set(receipt.callId,receipt);if(Number.isSafeInteger(receipt.reportedTokens)&&receipt.reportedTokens>=0)reportedTokens.set(receipt.callId,receipt.reportedTokens);if(typeof receipt.costUsd==='number'&&Number.isFinite(receipt.costUsd)&&receipt.costUsd>=0)costs.set(receipt.callId,receipt.costUsd);
   }
   const entries:any[]=db.prepare("SELECT record_json FROM ai_usage_ledger WHERE substr(json_extract(record_json,'$.startedAt'),1,10) BETWEEN ? AND ?").all(input.from,input.to).map(row=>JSON.parse(String(row.record_json)));
   const known=new Set(entries.map(e=>e.id));
   for(const row of db.prepare("SELECT record_json FROM ai_image_requests WHERE substr(json_extract(record_json,'$.createdAt'),1,10) BETWEEN ? AND ?").iterate(input.from,input.to)){
     const r=JSON.parse(String(row.record_json));if(known.has(r.id))continue;entries.push({...r,startedAt:r.createdAt,providerId:'openrouter',purposeId:'image_generation'});
   }
-  const grouped=new Map<string,AiUsageReportRow>();
+  const grouped=new Map<string,AiUsageReportRow>(),details:AiCallDetail[]=[];
   for(const entry of entries){
     const call=calls.get(entry.id),purposeId=call?.purposeSnapshot?.purposeId??entry.purposeId??'legacy',model=call?.model??entry.model??'历史型号未知',gateway=String(entry.providerId).startsWith('openrouter')?'openrouter':String(entry.providerId).startsWith('deepseek')?'deepseek':'aliyun',date=String(entry.startedAt).slice(0,10);
+    const receipt=receipts.get(entry.id),identity=receipt?.executionIdentity;
+    details.push({id:entry.id,startedAt:entry.startedAt,receivedAt:receipt?.receivedAt??null,gateway,model,actualModel:identity?.actualModel??null,actualProvider:identity?.actualProvider??null,status:call?.status??(receipt?'RECEIVED':'UNKNOWN'),httpStatus:receipt?.status??null});
     const key=JSON.stringify([date,purposeId,gateway,model]),row=grouped.get(key)??{date,purposeId,gateway,model,calls:0,reportedTokens:0,reportedCostUsd:0,unknownCostCalls:0,totalCostUsd:null};
     row.calls++;row.reportedTokens+=reportedTokens.get(entry.id)??(entry.state==='REPORTED'?(entry.usage.promptTokens??0)+(entry.usage.completionTokens??0):0);
     if(costs.has(entry.id))row.reportedCostUsd+=costs.get(entry.id)!;else row.unknownCostCalls++;
@@ -30,5 +33,5 @@ export function readAiUsageReport(db:DatabaseSync,raw:unknown):AiUsageReport{
   }
   const rows=[...grouped.values()].sort((a,b)=>b.date.localeCompare(a.date)||a.purposeId.localeCompare(b.purposeId));
   const count=rows.reduce((n,r)=>n+r.calls,0),reportedCostUsd=rows.reduce((n,r)=>n+r.reportedCostUsd,0),unknownCostCalls=rows.reduce((n,r)=>n+r.unknownCostCalls,0);
-  return{from:input.from,to:input.to,timeZone:'UTC',calls:count,reportedCostUsd,unknownCostCalls,totalCostUsd:unknownCostCalls?null:reportedCostUsd,rows};
+  return{details:details.sort((a,b)=>b.startedAt.localeCompare(a.startedAt)).slice(0,100),detailsTotal:details.length,from:input.from,to:input.to,timeZone:'UTC',calls:count,reportedCostUsd,unknownCostCalls,totalCostUsd:unknownCostCalls?null:reportedCostUsd,rows};
 }

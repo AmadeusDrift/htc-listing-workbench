@@ -1,3 +1,4 @@
+import { openRouterExecutionIdentity } from './execution-identity.ts';
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdir,readFile,lstat } from 'node:fs/promises';
@@ -11,11 +12,12 @@ import { assertRecordTable } from '../storage/record-table.ts';
 import { openRouterMetadata } from './adapters/openrouter-http.ts';
 
 export const PROVIDER_RECEIPT_TABLES={ai_provider_receipts:['id','record_json'],ai_image_requests:['id','record_json']};
-export interface ProviderReceipt {version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
+export interface ProviderReceipt {executionIdentity?:{actualModel:string|null;actualProvider:string|null};version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
 const hash=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex');
 function parse(raw:unknown):ProviderReceipt{
   const r=raw as ProviderReceipt;
-  if(!r||Object.keys(r).sort().join()!=='byteSize,callId,costUsd,endpoint,gateway,id,model,receivedAt,relativePath,reportedTokens,requestId,sha256,status,version'||r.version!==1||!/^[a-f0-9-]{36}$/.test(r.callId)||!Number.isInteger(r.status)||r.status<100||r.status>599||typeof r.model!=='string'||r.model.length>200||typeof r.endpoint!=='string'||!(r.endpoint.startsWith('/api/')||r.gateway==='deepseek'&&r.endpoint==='/chat/completions')||r.endpoint.length>200||r.requestId!==null&&(typeof r.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(r.requestId))||!Number.isSafeInteger(r.byteSize)||r.byteSize<1||r.byteSize>200*1024*1024||!/^[a-f0-9]{64}$/.test(r.id)||!/^[a-f0-9]{64}$/.test(r.sha256)
+  if(r?.executionIdentity!==undefined){const e=r.executionIdentity;if(!e||Object.keys(e).sort().join()!=='actualModel,actualProvider'||[e.actualModel,e.actualProvider].some(v=>v!==null&&(typeof v!=='string'||v.length<1||v.length>200||!/^[-a-zA-Z0-9_.:/ ()]+$/.test(v))))throw new UserFacingError('AI实际路由记录无效');}
+  if(!r||Object.keys(r).filter(key=>key!=='executionIdentity').sort().join()!=='byteSize,callId,costUsd,endpoint,gateway,id,model,receivedAt,relativePath,reportedTokens,requestId,sha256,status,version'||r.version!==1||!/^[a-f0-9-]{36}$/.test(r.callId)||!Number.isInteger(r.status)||r.status<100||r.status>599||typeof r.model!=='string'||r.model.length>200||typeof r.endpoint!=='string'||!(r.endpoint.startsWith('/api/')||r.gateway==='deepseek'&&r.endpoint==='/chat/completions')||r.endpoint.length>200||r.requestId!==null&&(typeof r.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(r.requestId))||!Number.isSafeInteger(r.byteSize)||r.byteSize<1||r.byteSize>200*1024*1024||!/^[a-f0-9]{64}$/.test(r.id)||!/^[a-f0-9]{64}$/.test(r.sha256)
     ||r.relativePath!==`ai-receipts/${r.id}.json`||!['openrouter','deepseek'].includes(r.gateway)||!Number.isFinite(Date.parse(r.receivedAt))
     ||r.costUsd!==null&&(typeof r.costUsd!=='number'||!Number.isFinite(r.costUsd)||r.costUsd<0)
     ||r.reportedTokens!==null&&(!Number.isSafeInteger(r.reportedTokens)||r.reportedTokens<0||r.reportedTokens>2_000_000_000))throw new UserFacingError('AI原始收据记录无效');return r;
@@ -24,7 +26,8 @@ export async function saveProviderReceipt(db:DatabaseSync,directory:string,callI
   if(!/^[a-f0-9-]{36}$/.test(callId))throw new UserFacingError('AI收据调用身份无效');
   const bytes=Buffer.from(JSON.stringify({version:1,callId,purpose:purpose??null,...capture})),sha256=hash(bytes),id=hash(callId+':'+sha256),relativePath=`ai-receipts/${id}.json`;
   const metadata=openRouterMetadata(capture.body);
-  const value:ProviderReceipt={reportedTokens:metadata.usageKnown?metadata.usage.promptTokens+metadata.usage.completionTokens:null,version:1,id,callId,gateway:capture.gateway,endpoint:capture.endpoint,model:capture.model,status:capture.status,requestId:capture.requestId,receivedAt:capture.receivedAt,relativePath,sha256,byteSize:bytes.length,costUsd:capture.costUsd};parse(value);
+  const executionIdentity=capture.gateway==='openrouter'?openRouterExecutionIdentity(capture.body,capture.status):undefined;
+  const value:ProviderReceipt={...(executionIdentity?{executionIdentity}:{}),reportedTokens:metadata.usageKnown?metadata.usage.promptTokens+metadata.usage.completionTokens:null,version:1,id,callId,gateway:capture.gateway,endpoint:capture.endpoint,model:capture.model,status:capture.status,requestId:capture.requestId,receivedAt:capture.receivedAt,relativePath,sha256,byteSize:bytes.length,costUsd:capture.costUsd};parse(value);
   await mkdir(join(directory,'ai-receipts'),{recursive:true});
   const folder=await lstat(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())throw new UserFacingError('AI收据目录无效');
   const path=resolve(directory,relativePath);

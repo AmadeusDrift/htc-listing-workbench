@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "delivery": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-采集箱参数修正版-20261014",
+  "exe": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-采集箱参数修正版-20261014\\HTC.exe",
+  "archive": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-采集箱参数修正版-20261014.zip",
+  "archiveBytes": 163541106,
+  "archiveSha256": "b0c6c0f06e407b8c136a4585fd29362ce66cd8316dad5f2e12f855761fd939aa",
+  "files": 89,
+  "sourceCommit": "182014b9cc021f20b65db748b6514cc4ec7f7556",
+  "manifestSha256": "11eda07bcf0a6946e35c299c8e2d034ab42c030e9055098995648af1b6c394e8",
+  "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e",
+  "allFolderAndArchiveFileHashesVerified": true,
+  "activated": false,
+  "tests": {
+    "total": 3117,
+    "passed": 3114,
+    "failed": 0,
+    "skipped": 3
+  },
+  "candidateParameterRows": [
+    100,
+    51
+  ]
+}

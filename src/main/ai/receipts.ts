@@ -61,7 +61,7 @@ export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import
     const bytes=readFileSync(path),after=lstatSync(path);
     if(bytes.length!==record.byteSize||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||hash(bytes)!==record.sha256)return null;
     const capture=JSON.parse(bytes.toString('utf8'));
-    if(capture.version!==1||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    if(!Object.hasOwn(capture,'body')||capture.version!==1||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
     return {record,capture};
   }catch{return null;}
 }

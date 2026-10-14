@@ -30,6 +30,17 @@ async function oldKit(t:any){
  db.close();return {...f,p,plan,db:persistence.db,persistence,ref:{id:r.draft.id,revision:r.draft.revision}};
 }
 const history=(f:Awaited<ReturnType<typeof oldKit>>)=>JSON.stringify({draft:f.persistence.record(f.ref.id),calls:f.db.prepare('SELECT * FROM ai_calls').all(),usage:f.db.prepare('SELECT * FROM ai_usage_ledger').all(),receipts:f.db.prepare('SELECT * FROM ai_provider_receipts').all(),results:f.db.prepare('SELECT * FROM ai_results').all()});
+for(const [label,body] of [['null',null],['number',123],['string','invalid response content'],['raw JSON text','{broken json'],['boolean',false]] as const)test(`complete scalar ${label} response is received invalid and permits only authorized local unit adoption`,async t=>{
+ const f=await oldKit(t);f.respond(()=>new Response('{}',{status:500}));await assert.rejects(()=>f.ai.suggest({productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id,ocrResultIds:[]}));
+ const call=f.ai.listCalls()[0],receipt=await saveProviderReceipt(f.db,f.directory,call.id,{gateway:'deepseek',endpoint:'/chat/completions',model:call.model,status:200,requestId:null,receivedAt:new Date().toISOString(),body,costUsd:null},call.purposeSnapshot);
+ f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...call,errorCode:'OUTPUT_INVALID',providerReceiptId:receipt.id}),call.id);
+ const before=history(f),preview=f.amazon.previewSalesUnitAdoption({...f.ref,platformPieces:1,basis:'合成明确按原完整套装确认'});
+ assert.equal(preview.canApply,true,'a complete hash-verified scalar response is invalid, not missing/unknown');assert.equal(history(f),before);
+ const financial=()=>JSON.stringify(['ai_calls','ai_usage_ledger','ai_provider_receipts','ai_results'].map(table=>f.db.prepare('SELECT * FROM '+table).all())),oldFinancial=financial(),path=join(f.directory,receipt.relativePath),bytes=readFileSync(path);
+ const next=f.amazon.adoptSalesUnit({...f.ref,platformPieces:1,basis:preview.basis,token:preview.token,confirmed:true});
+ assert.equal(next.sku,f.plan.sku);assert.equal(next.salesPlan?.recipe.quantityVersion,2);assert.equal(f.requests.length,1);
+ assert.equal(financial(),oldFinancial);assert.deepEqual(readFileSync(path),bytes,'local adoption preserves original raw invalid response');
+});
 test('paid provider failure without reliable result evidence keeps unit adoption blocked regardless of error label',async t=>{
  const f=await oldKit(t);f.respond(()=>new Response(JSON.stringify({error:{message:'Synthetic processing failure'}}),{status:500}));
  await assert.rejects(()=>f.ai.suggest({productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id,ocrResultIds:[]}),(e:any)=>e.code==='PROVIDER_ERROR');
@@ -46,7 +57,7 @@ test('paid provider failure without reliable result evidence keeps unit adoption
 test('verified complete response distinguishes received invalid content and definitive rejection from processing errors',async t=>{
  const f=await oldKit(t);f.respond(()=>new Response('{}',{status:500}));await assert.rejects(()=>f.ai.suggest({productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id,ocrResultIds:[]}));
  const call=f.ai.listCalls()[0];
- for(const [status,body,errorCode,allowed] of [[401,{error:{code:401,message:'Synthetic authorization denial'}},'AUTH_FAILED',true],[200,{choices:[]},'OUTPUT_INVALID',true],[200,{error:{code:500,message:'Synthetic processed failure'}},'OUTPUT_INVALID',false],[200,{choices:[{error:{code:500}}]},'OUTPUT_INVALID',false],[503,{error:{message:'Synthetic gateway failure'}},'PROVIDER_ERROR',false]] as const){
+ for(const [status,body,errorCode,allowed] of [[401,{error:{code:401,message:'Synthetic authorization denial'}},'AUTH_FAILED',true],[200,{choices:[]},'OUTPUT_INVALID',true],[200,undefined,'OUTPUT_INVALID',false],[200,'[omitted: credential echo]','OUTPUT_INVALID',false],[200,{error:{code:500,message:'Synthetic processed failure'}},'OUTPUT_INVALID',false],[200,{choices:[{error:{code:500}}]},'OUTPUT_INVALID',false],[503,{error:{message:'Synthetic gateway failure'}},'PROVIDER_ERROR',false]] as const){
   const receipt=await saveProviderReceipt(f.db,f.directory,call.id,{gateway:'deepseek',endpoint:'/chat/completions',model:call.model,status,requestId:null,receivedAt:new Date().toISOString(),body,costUsd:null},call.purposeSnapshot);
   f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...call,errorCode,providerReceiptId:receipt.id}),call.id);
   const before=history(f),preview=f.amazon.previewSalesUnitAdoption({...f.ref,platformPieces:1,basis:'合成按整套确认'});

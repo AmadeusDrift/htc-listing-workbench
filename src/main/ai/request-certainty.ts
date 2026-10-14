@@ -17,7 +17,7 @@ export function localAiRequestResolved(db:DatabaseSync,directory:string,id:strin
     const {record,capture}=saved,body=capture.body as any;
     // HTTP 200 may contain an upstream processing error; a complete envelope is
     // not proof of rejection before processing, nor a valid domain result.
-    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!==null&&typeof body==='object'&&!body.error&&!(Array.isArray(body.choices)&&body.choices.some((c:any)=>c?.error));
+    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!=='[omitted: credential echo]'&&!body?.error&&!(Array.isArray(body?.choices)&&body.choices.some((c:any)=>c?.error));
     if(call.status!=='FAILED'||!body||typeof body!=='object'||!body.error)return false;
     const error=record.gateway==='openrouter'?openRouterHttpError(record.status,body):httpError(record.status,body.error.code);
     const definitive=record.gateway==='openrouter'?(error as ReturnType<typeof openRouterHttpError>).definitive:[401,402,403,429].includes(record.status);

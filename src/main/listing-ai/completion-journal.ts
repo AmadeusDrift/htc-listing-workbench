@@ -1,4 +1,5 @@
 import { readCopyReview,copyReviewResult } from '../ai/copy-review-upgrade.ts';
+import { isDefinitiveFieldRejection } from './request-outcome.ts';
 import { legacyCompletionAssets } from './legacy-generated-scope.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair } from './legacy-theme-repair.ts';
@@ -158,6 +159,7 @@ export class CompletionJournal {
   }
   assertSendBudget(id:string,kind:'candidate'|'review'):void {
     const op=this.get(id),round=op.rounds.at(-1);
+    if(this.previousUnknown(op))unknownCompletion();
     if(round&&legacyStepDebt(op,round,kind)+(round[kind]?.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');
   }
   /** Invoked only inside the usage reservation transaction on this exact connection. */
@@ -169,6 +171,7 @@ export class CompletionJournal {
       if(!grant)throw new UserFacingError('旧主题修复额度尚未持久化，未发送请求');
     }
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;
+    if(this.previousUnknown(op))unknownCompletion();
     if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(legacyStepDebt(op,round,entry===round.candidate?'candidate':'review')+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');entry.sent=true;this.save(op);
   }
   /** Result/call/usage and journal result reference commit together. */
@@ -178,12 +181,20 @@ export class CompletionJournal {
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;if(!entry.sent||entry.resultId)invalid();entry.resultId=result.id;this.save(op);
   }
   unknown(id:string):boolean {
-    const op=this.get(id);return op.state==='GUARD'||op.rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!this.result(call,r)&&!this.received(call,r)));
+    const op=this.get(id);return op.state==='GUARD'||this.previousUnknown(op)||op.rounds.some(r=>[r.candidate,r.review].some(call=>call?.sent&&!this.result(call,r)&&!this.received(call,r)&&!this.definitiveRejection(call.id)));
   }
-  /** The original two repair rounds remain fixed; each missing step has at most three sends. */
+  private previousUnknown(op:CompletionOperation):boolean {
+    return op.rounds.some(round=>(['candidate','review'] as const).some(kind=>round[kind]?.previous?.some(call=>call.sent&&!call.resultId&&!this.definitiveRejection(call.id)&&!this.received(call,round,kind==='candidate'?'amazon-fields':'amazon-fields-review'))));
+  }
+  definitiveRejection(callId:string):boolean {
+    const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(callId);
+    return !!row&&isDefinitiveFieldRejection(validateAiCall(JSON.parse(String(row.record_json))));
+  }
+  /** Only explicit rejections or the existing controlled review repair may obtain another call ID. */
   retryMissing(id:string,kind:'candidate'|'review'):void {
     const op=this.get(id),round=op.rounds.at(-1),entry=round?.[kind];
     if(op.state!=='ACTIVE'||!round||round.resolved||!entry||!entry.sent||entry.resultId)invalid();
+    if(this.previousUnknown(op))unknownCompletion();
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
     const usage=this.db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(entry.id);
     if(!row||!usage)invalid();
@@ -192,6 +203,7 @@ export class CompletionJournal {
     const owner=call.presentationContext;
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
+    if(!isDefinitiveFieldRejection(call)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if(this.received(entry,round)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if((entry.previous?.length??0)+legacyStepDebt(op,round,kind)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
     const {previous,...old}=entry;
@@ -206,10 +218,10 @@ export class CompletionJournal {
     const output=candidate.output;
     return readInvalidAiOutputs(this.directory,call,'amazon-fields-review').some(raw=>isReviewCoverageOmission(raw,output,round.context));
   }
-  private received(entry:CompletionCall,round:CompletionRound):AiCall|undefined {
+  private received(entry:CompletionCall,round:CompletionRound,kind:'amazon-fields'|'amazon-fields-review'=entry.id===round.candidate.id?'amazon-fields':'amazon-fields-review'):AiCall|undefined {
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(entry.id);
     if(!row)return;
-    const call=validateAiCall(JSON.parse(String(row.record_json))),kind=entry.id===round.candidate.id?'amazon-fields':'amazon-fields-review';
+    const call=validateAiCall(JSON.parse(String(row.record_json)));
     if(call.id!==entry.id||call.productId!==round.context.productId||call.productRevision!==round.context.productRevision||!(kind==='amazon-fields'?isGenerationProvider(call.providerId):isReviewProvider(call.providerId))||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return;
     const p=call.presentationContext;
     if(p&&(p.kind!=='listing'||p.draftId!==round.context.draftId||p.variantId!==round.context.variantId||p.sourceSha256!==round.contextHash))return;

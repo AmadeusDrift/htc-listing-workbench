@@ -83,7 +83,7 @@ test('historical exact diagnostic proves response receipt but FAILED or mismatch
  assert.equal(f.listing.completionUnknown(f.op.id),false);
  const diagnostic=JSON.parse(readFileSync(f.path,'utf8'));diagnostic.productId='00000000-0000-4000-8000-000000000099';writeFileSync(f.path,JSON.stringify(diagnostic));
  assert.equal(f.listing.completionUnknown(f.op.id),true);
- await assert.rejects(f.listing.complete(f.reference,undefined,f.op.id));assert.equal(f.requests.length,2);assert.equal(f.listing.getCompletion(f.op.id).rounds[0].candidate.previous?.length,1);
+ await assert.rejects(f.listing.complete(f.reference,undefined,f.op.id));assert.equal(f.requests.length,1);assert.equal(f.listing.getCompletion(f.op.id).rounds[0].candidate.id,f.call.id);assert.equal(f.listing.getCompletion(f.op.id).rounds[0].candidate.previous?.length??0,0);
  }finally{db.close();}
 });
 test('changed current product retains frozen recovery but refuses stale adoption without another provider call',async t=>{

@@ -200,13 +200,13 @@ for(const lostAt of ['candidate','review'] as const)test(`second restore safety 
 test('unknown field attempt budget survives repeated resume and encrypted backup',async t=>{
  const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>{throw Error('synthetic unavailable');});
  for(let n=0;n<4;n++)await assert.rejects(f.listing.complete(f.reference));
- const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(f.requests.length,3);assert.equal(op.rounds.length,1);assert.equal(op.rounds[0].candidate.previous?.length,2);
+ const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(f.requests.length,1);assert.equal(op.rounds.length,1);assert.equal(op.rounds[0].candidate.previous?.length??0,0);
  const file=join(f.directory,'retry-history.htcbackup');await createWorkspaceBackup(f.directory,file,pass);const prepared=await prepareWorkspaceRestore(f.directory,file,pass),db=openDatabase(prepared.stagingDirectory);
- try{const restored=new CompletionJournal(db).get(op.id);assert.equal(restored.rounds[0].candidate.previous?.length,2);assert.equal(db.prepare('SELECT count(*) n FROM ai_usage_ledger').get()!.n,3);}finally{db.close();}
+ try{const restored=new CompletionJournal(db).get(op.id);assert.equal(restored.rounds[0].candidate.previous?.length??0,0);assert.equal(db.prepare('SELECT count(*) n FROM ai_usage_ledger').get()!.n,1);}finally{db.close();}
 });
 
 test('older field backup retains all attempts added after its snapshot',async t=>{
- const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>{throw Error('synthetic unavailable');});
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response('{}',{status:401}));
  await assert.rejects(f.listing.complete(f.reference));const file=join(f.directory,'first-attempt.htcbackup');await createWorkspaceBackup(f.directory,file,pass);
  await assert.rejects(f.listing.complete(f.reference));await assert.rejects(f.listing.complete(f.reference));
  const op=f.listing.completionOperations(f.draft.id)[0],prepared=await prepareWorkspaceRestore(f.directory,file,pass),db=openDatabase(prepared.stagingDirectory);
@@ -215,7 +215,7 @@ test('older field backup retains all attempts added after its snapshot',async t=
 
 test('a locally prepared unsent retry cannot hide the original paid history during rollback',async t=>{
  const f=await fixture(t),file=join(f.directory,'before-retry-reservation.htcbackup');await createWorkspaceBackup(f.directory,file,pass);
- f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>{throw Error('synthetic unavailable');});await assert.rejects(f.listing.complete(f.reference));
+ f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response('{}',{status:401}));await assert.rejects(f.listing.complete(f.reference));
  f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:null});await assert.rejects(f.listing.complete(f.reference));
  const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(op.rounds[0].candidate.sent,false);assert.equal(op.rounds[0].candidate.previous?.length,1);
  const prepared=await prepareWorkspaceRestore(f.directory,file,pass),db=openDatabase(prepared.stagingDirectory);

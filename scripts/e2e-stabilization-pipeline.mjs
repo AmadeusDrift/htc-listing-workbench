@@ -8,6 +8,13 @@ import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { createFakeProvider } from '../tests/fixtures/stabilization/fake-http-provider.mjs';
 import { writePolicy, materializeFixtures, launchElectron } from '../tests/fixtures/stabilization/pipeline-runtime.mjs';
+if(process.argv.length===3&&process.argv[2]==='--normal-plan'){
+  const {worktreeRoot}=createRequire(import.meta.url)('../tests/fixtures/stabilization/trusted-path.cjs');assert.equal(resolve('.'),worktreeRoot,'S10_EXPLICIT_WORKTREE_REQUIRED');
+  const {normalPlan,schemaFixture}=await import('../tests/fixtures/stabilization/pipeline-normal-draft.mjs');
+  const schemas=await Promise.all(['drink-coaster-us','figurine-parent-us'].map(name=>schemaFixture(name).then(f=>({name,propertyCount:Object.keys(JSON.parse(f.schema.bytes).properties).length,sha256:f.schema.sha256,checksum:f.definition.schema.checksum}))));
+  const report={mode:'normal-plan',sourceCommit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',windowsHide:true}).trim(),businessStarted:false,providerStarted:false,workerStarted:false,schemaFixtures:schemas,...normalPlan({sellerId:'S10SELLER',skus:['S10-COASTER-01']})};
+  await new Promise((done,reject)=>process.stdout.write(JSON.stringify(report,null,2)+'\n',error=>error?reject(error):done()));process.exit(0);
+}
 if(process.argv.length!==3||process.argv[2]!=='--foundation-dryrun')throw Error('S10_WAITING_FOR_OWNER_CONTRACTS: only --foundation-dryrun is available; no full pipeline acceptance');
 const {worktreeRoot}=createRequire(import.meta.url)('../tests/fixtures/stabilization/trusted-path.cjs');
 assert.equal(resolve('.'),worktreeRoot,'S10_EXPLICIT_WORKTREE_REQUIRED');

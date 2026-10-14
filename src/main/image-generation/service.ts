@@ -227,7 +227,16 @@ export class ImageGenerationService {
     const intents=this.imageIntents(scope),outcomes=intents.map(intent=>({intent,outcome:this.imageOutcome(intent)})),pending=outcomes.filter(value=>['unknown','raw'].includes(value.outcome.kind));
     const connection=this.getConnection();
     if(pending.length){const item=pending[0];if(pending.length>1||item.outcome.kind==='unknown'||requestId&&requestId!==item.intent.id)throw this.imageBlocked(item.intent);this.assertImageRecoveryIdentity(input,scope,item.intent,editCandidateId);if(!requestId&&connection.configured&&connection.model!==item.intent.model)throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId:item.intent.id,message:'当前选用模型与原生图请求不一致；请按原请求身份恢复，未重发'});const restored=await this.reconcileWorkflowGeneration(item.intent.id);if(!restored)throw this.imageBlocked(item.intent);return restored;}
-    for(const item of outcomes)if(item.outcome.kind==='candidate'&&item.intent.version===2){if(listingFingerprint(scope)!==listingFingerprint(item.intent.requestScope)||(item.intent.editSource?.id??null)!==(editCandidateId??null))continue;const frozen={...item.intent,model:connection.configured?String(connection.model):item.intent.model};if(this.imageFingerprint(input,frozen,editCandidateId)===item.intent.requestFingerprint){if(requestId&&requestId!==item.intent.id)throw this.imageBlocked(item.intent);return item.outcome.candidate;}}
+    for(const item of outcomes)if(item.outcome.kind==='candidate'&&item.intent.version===2){if(listingFingerprint(scope)!==listingFingerprint(item.intent.requestScope)||(item.intent.editSource?.id??null)!==(editCandidateId??null))continue;const frozen={...item.intent,model:connection.configured?String(connection.model):item.intent.model};if(this.imageFingerprint(input,frozen,editCandidateId)===item.intent.requestFingerprint){
+      if(requestId&&requestId!==item.intent.id){
+        if(!scope.draftId||scope.slot===undefined)throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId:item.intent.id,message:'已有候选结果已知；新生图尝试缺少可验证的原草稿和图位身份，未发送'});
+        // A verified workflow's new bounded attempt is distinct from recovering
+        // this known candidate. It still passes the existing freshness/budget
+        // checks and reserves its own intent; unknown/raw requests above cannot.
+        continue;
+      }
+      return item.outcome.candidate;
+    }}
     return undefined;
   }
   private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner}):Promise<GeneratedImageCandidate>{

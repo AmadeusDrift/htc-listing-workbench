@@ -1,3 +1,4 @@
+import {retainSalesUnitAdoptions} from './sales-plans/unit-restore-history.ts';
 import {retainCategoryRepairs} from './ai/category-recovery.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
@@ -440,6 +441,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
+    retainSalesUnitAdoptions(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);

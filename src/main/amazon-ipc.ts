@@ -36,6 +36,8 @@ export function installAmazonIpc(window: BrowserWindow, service: AmazonService, 
   handle('red:amazon:types', 1, raw => service.searchProductTypes(raw));
   handle('red:amazon:schema', 1, raw => service.getSchema(raw));
   handle('red:amazon:actual-quote',1,raw=>service.getActualQuoteDetails(identifier(raw)));
+  handle('red:amazon:unit-preview',1,raw=>service.previewSalesUnitAdoption(record(raw,'独立草稿计量预览',['id','revision','platformPieces','basis'])));
+  handle('red:amazon:unit-adopt',1,raw=>service.adoptSalesUnit(raw));
   handle('red:amazon:drafts', 1, raw => service.listDrafts(identifier(raw)));
   handle('red:amazon:draft-create', 1, raw => service.createDraft(raw));
   handle('red:amazon:drafts-prepare', 1, raw => service.prepareDrafts(raw));

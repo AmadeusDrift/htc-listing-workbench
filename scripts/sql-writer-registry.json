@@ -890,6 +890,26 @@
         "retainImageRetryHistory|c6849f233c3e9efd2ae31ca2b5640c4bc389b6d31df7bb3141c20994f62ad065": 1,
         "retainImageRetryHistory|79014e01448946226358f282552c876d16c903afab92f248680e878e563d22e0": 1
       }
+    },
+    "main/amazon/unit-retention.ts": {
+      "role": "listing",
+      "review": "S06 approved exact staged unit-adoption restore owner command; synchronous transaction only; no providers, resume, submission or permission.",
+      "commands": [
+        "restoreSalesUnitRecord|UPDATE|listing_drafts"
+      ],
+      "statements": {
+        "restoreSalesUnitRecord|0a7e050d220366f4e3a5c3848202707ba704992bd4d98c6f2a5db835280a464b": 1
+      }
+    },
+    "main/automatic-listing/unit-retention.ts": {
+      "role": "tasks",
+      "review": "S06 approved exact staged unit-adoption restore owner command; synchronous transaction only; no providers, resume, submission or permission.",
+      "commands": [
+        "restoreSalesUnitTask|UPDATE|automatic_listing_tasks"
+      ],
+      "statements": {
+        "restoreSalesUnitTask|5662832c0de1a0c1c0cceeb6dd590d159bb58a3660cab89226af859f6981555b": 1
+      }
     }
   },
   "opaque": [

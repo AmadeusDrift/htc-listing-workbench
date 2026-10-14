@@ -22,6 +22,8 @@ export function reserveImageReviewRequest(owner:DatabaseSync,borrowed:DatabaseSy
  const callRow=borrowed.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(request.requestId);
  if(!callRow)throw new UserFacingError('图片审核缺少同事务原调用');
  const call=validateAiCall(JSON.parse(String(callRow.record_json))),p=call.presentationContext,s=call.requestScope,operation={risk:'image-ip-review',ocr:'generated-image-ocr',text:'image-text-review'}[request.step];
+ // Historical single-image scopes omitted slot; only their original slot 0 is compatible.
+ if(s&&(s.slot??0)!==request.slot)throw new UserFacingError('图片审核原调用与图位输入不一致');
  if(call.id!==request.requestId||call.status!=='RUNNING'||call.productId!==request.productId||call.productRevision!==request.productRevision||call.providerId!==request.execution.providerId||call.model!==request.execution.model||call.generation!==request.execution.generation||call.startedAt!==request.reservedAt||call.requestFingerprint!==request.requestFingerprint||listingFingerprint(call.purposeSnapshot??null)!==listingFingerprint(request.execution.purposeSnapshot)||!p||p.kind!=='image'||p.draftId!==request.draftId||p.variantId!==request.variantId||p.slot!==request.slot||p.sourceSha256!==request.contextSha256||!s||s.operation!==operation||s.productId!==request.productId||s.variantId!==request.variantId||s.sku!==request.sku||s.candidateSha256!==request.candidate.sha256)throw new UserFacingError('图片审核原调用与图位输入不一致');
  const row=borrowed.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(request.runId);
  if(!row)throw new UserFacingError('图片审核原工作流不存在');

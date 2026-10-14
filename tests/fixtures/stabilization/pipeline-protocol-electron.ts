@@ -4,7 +4,7 @@ import {app,BrowserWindow,net} from 'electron';
 import {readFileSync,appendFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {recognizeWithAliyun} from '../../../src/main/ai/adapters.ts';
-const guard=(globalThis as typeof globalThis&{__s10Guard?:{installedBeforeMain:boolean;blocked:string[];nativeProtocolSent?:number}}).__s10Guard;
+const guard=(globalThis as typeof globalThis&{__s10Guard?:{installedBeforeMain:boolean;blocked:string[];nativeProtocolSent?:number;nodeProtocolSent?:number}}).__s10Guard;
 assert.ok(guard?.installedBeforeMain);assert.ok(process.env.S10_POLICY_FILE&&process.env.RED_DATA_DIR);
 const policy=JSON.parse(readFileSync(process.env.S10_POLICY_FILE,'utf8')),root=process.env.RED_DATA_DIR;
 assert.equal(root,policy.dataRoot);app.setPath('userData',root);app.setName('S10 native protocol only');app.enableSandbox();
@@ -15,7 +15,7 @@ void app.whenReady().then(async()=>{
     const result=await recognizeWithAliyun(Buffer.from('s10-owned-image-bytes'),{width:256,height:256},{accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret},new AbortController().signal,{fetch:(url,init)=>net.fetch(url instanceof URL?url.href:url,init),now:()=>new Date(p.now),nonce:()=>p.nonce,maxResponseBytes:1048576});
     assert.equal(result.output.kind,'ocr');assert.equal(result.requestId,'s10-native-ocr');
     let denied=0;for(const target of [route.publicUrl+'&Type=Commerce','http://127.0.0.1:1/protocol/ocr','https://outside.invalid/'])try{await net.fetch(target,{method:'POST'});throw Error('native protocol escaped');}catch(error){assert.match(String(error),/S10_NETWORK_BLOCKED/);denied++;}
-    return {identity:report.identity,nativeProtocolSent:guard.nativeProtocolSent??0,requestId:result.requestId,denied};
+    return {identity:report.identity,nativeProtocolSent:guard.nativeProtocolSent??0,nodeProtocolSent:guard.nodeProtocolSent??0,requestId:result.requestId,denied};
   },__s10Drain:async()=>({drained:true})});
   app.on('quit',(_event,exitCode)=>appendFileSync(join(root,'s10-lifecycle.jsonl'),JSON.stringify({event:'exit',exitCode,pid:process.pid})+'\n'));
   const window=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});await window.loadURL('data:text/html,<p>S10 construction only; native protocol probe.</p>');

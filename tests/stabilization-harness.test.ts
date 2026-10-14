@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, readFile, symlink, unlink, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, symlink, unlink, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Client } from 'basic-ftp';
@@ -182,4 +182,28 @@ for(const mode of ['missing-identity','wrong-nonce'])test(`S10 exited-zero ${mod
   const worker=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:[mode]});let identityFailure:unknown;await assert.rejects(worker.ready(),(error:unknown)=>{identityFailure=error;return true;});
   const report=await worker.wait();assert.equal(report.identity,null);assert.equal(report.exitCode,0);assert.equal(report.signal,null);assert.equal(report.forced,false);
   await assert.rejects(worker.stop(),(error:unknown)=>error===identityFailure);await assert.rejects(worker.stop(),(error:unknown)=>error===identityFailure);
+});
+
+for(const method of ['request','get'])test(`S10 Node HTTP ${method} freezes validated URL/options and never sends unapproved overrides`,async t=>{
+  const api=await feature(providerFile),runtime=await feature(runtimeFile),directory=await root();
+  const provider=await api.createFakeProvider({directory:join(directory,'server'),routes:[
+    {id:'approved',method:'POST',path:'/approved',credential:{header:'authorization',value:'Bearer s10-fixture-only'},response:{json:{approved:true}}},
+    {id:'unapproved',method:'POST',path:'/unapproved',response:{json:{unapproved:true}}},
+    {id:'wrong-method',method:'PUT',path:'/approved',response:{json:{wrongMethod:true}}},
+  ]});t.after(()=>provider.close());
+  const policy=await runtime.writePolicy({directory:join(directory,'worker'),provider:{...provider,routes:provider.routes.filter((row:any)=>row.id==='approved')},guardFile});
+  const code=`const http=require('node:http'),origin=${JSON.stringify(provider.origin)},method=${JSON.stringify(method)},headers={authorization:'Bearer s10-fixture-only'};
+    const send=(input,options)=>new Promise(done=>{try{const callback=res=>{res.resume();res.on('end',()=>done({status:res.statusCode}));};const req=options===undefined?http[method](input,callback):http[method](input,options,callback);req.on('error',e=>done({denied:String(e).includes('S10_NETWORK_BLOCKED'),error:String(e)}));if(method==='request')req.end('synthetic-probe-only');}catch(e){done({denied:String(e).includes('S10_NETWORK_BLOCKED'),error:String(e)});}});
+    (async()=>{const cases=[{path:'/unapproved'},{path:undefined},{hostname:'127.1'},{hostname:'127.0.0.1',host:'other.invalid'},{host:'other.invalid'},{port:${provider.port}+1},{protocol:'https:'},{method:'PUT'},{auth:'unapproved:credential'},{headers:{authorization:'Bearer wrong'}},{headers:{authorization:'Bearer s10-fixture-only',host:'other.invalid'}}];
+      const rejected=[];for(const override of cases)rejected.push(await send(origin+'/approved',{method:'POST',headers,...override}));
+      const safe=await send(new URL(origin+'/approved'),{method:'POST',headers,hostname:'127.0.0.1',host:'127.0.0.1',port:${provider.port},protocol:'http:',path:'/approved',agent:false,timeout:2000,signal:new AbortController().signal});
+      let methodReads=0,headerReads=0;const options={headers:{}};Object.defineProperty(options,'method',{enumerable:true,get:()=>++methodReads===1?'POST':'PUT'});Object.defineProperty(options.headers,'authorization',{enumerable:true,get:()=>++headerReads===1?'Bearer s10-fixture-only':'Bearer wrong'});
+      const frozen=await send(origin+'/approved',options);const objectOnly=await send({hostname:'127.0.0.1',port:${provider.port},path:'/approved',method:'POST',headers:['Authorization','Bearer s10-fixture-only'],agent:false});console.log(JSON.stringify({rejected,safe,frozen,objectOnly,methodReads,headerReads}));
+    })().catch(e=>{console.error(e);process.exitCode=1;});`;
+  const output=await run(process.execPath,['--require',guardFile,'-e',code],{windowsHide:true,timeout:10000,env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path}});
+  const results=JSON.parse(output.stdout),rows=provider.ledger();
+  await writeFile(join(directory,`http-${method}-report.json`),JSON.stringify({sourceCommit:(await run('git',['rev-parse','HEAD'],{windowsHide:true})).stdout.trim(),method,policyRoutes:policy.path,results,actualRequests:rows.filter((row:any)=>row.event==='request'),ledgerPath:provider.ledgerPath},null,2));
+  assert.equal(rows.filter((row:any)=>row.event==='request'&&row.routeId==='unapproved').length,0,JSON.stringify({results,rows}));
+  assert.ok(results.rejected.every((row:any)=>row.denied===true),JSON.stringify(results.rejected));assert.equal(results.safe.status,200);assert.equal(results.frozen.status,200);assert.equal(results.objectOnly.status,200);assert.equal(results.methodReads,1);assert.equal(results.headerReads,1);
+  assert.equal(rows.filter((row:any)=>row.event==='request').length,3);
 });

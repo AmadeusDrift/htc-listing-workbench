@@ -37,10 +37,23 @@ const dns=require('node:dns');for(const target of [dns,dns.promises])for(const n
 require('node:tls').connect=()=>deny('tls.connect');require('node:http2').connect=()=>deny('http2.connect');require('node:dgram').createSocket=()=>deny('dgram');
 for(const name of ['node:http','node:https'])for(const method of ['request','get']){
   const module=require(name),original=module[method];module[method]=function(input,options,callback){
-    const opts=typeof options==='object'?options:typeof input==='object'&&!(input instanceof URL)?input:{};
-    const url=typeof input==='string'||input instanceof URL?String(input):`${opts.protocol??(name==='node:https'?'https:':'http:')}//${opts.hostname??opts.host??''}${opts.port?':'+opts.port:''}${opts.path??'/'}`;
-    const request=mapped(url,opts,name+'.'+method);if(new URL(url).origin!==origin.origin||request.url!==url)return deny(name+'.direct-route');
-    return httpScope.run(true,()=>original.call(module,input,options,callback));
+    const urlInput=typeof input==='string'||input instanceof URL;
+    const opts={...(urlInput?{}:input),...(options&&typeof options==='object'?options:{})};
+    const scheme=name==='node:https'?'https:':'http:',raw=urlInput?String(input):`${opts.protocol??scheme}//${opts.hostname??opts.host??''}${opts.port?':'+opts.port:''}${opts.path??'/'}`;
+    let url;try{url=new URL(raw);}catch{return deny(name+'.target');}
+    const expected={protocol:url.protocol,hostname:url.hostname,host:url.hostname,port:url.port,path:url.pathname};
+    for(const [key,value] of Object.entries(expected))if(Object.hasOwn(opts,key)&&(key==='port'?String(opts[key]):opts[key])!==value)return deny(name+'.target-override');
+    if(url.protocol!==scheme||opts.auth!==undefined||opts.socketPath!==undefined||opts.createConnection!==undefined)return deny(name+'.target-override');
+    let headerInput=opts.headers;
+    if(Array.isArray(headerInput)&&headerInput.every(value=>typeof value==='string')){
+      if(headerInput.length%2)return deny(name+'.headers');headerInput=Array.from({length:headerInput.length/2},(_,index)=>[headerInput[index*2],headerInput[index*2+1]]);
+    }
+    const headers=new Headers(headerInput);
+    if(headers.has('host')&&headers.get('host')!==url.host)return deny(name+'.host-header');
+    const request=mapped(raw,{method:String(opts.method??'GET').toUpperCase(),headers},name+'.'+method);if(url.origin!==origin.origin||request.url!==raw)return deny(name+'.direct-route');
+    headers.set('host',url.host);
+    const frozen=Object.freeze({...opts,protocol:url.protocol,hostname:url.hostname,host:url.hostname,port:Number(url.port),path:url.pathname,method:request.method,headers:Object.freeze(Object.fromEntries(headers))});
+    return httpScope.run(true,()=>original.call(module,frozen,typeof options==='function'?options:callback));
   };
 }
 require('node:module').syncBuiltinESMExports();

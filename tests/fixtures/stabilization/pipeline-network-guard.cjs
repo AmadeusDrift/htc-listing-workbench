@@ -7,7 +7,7 @@ const policyFile=process.env.S10_POLICY_FILE;trusted(path.join(worktreeRoot,'.te
 const policy=JSON.parse(fs.readFileSync(policyFile,'utf8'));
 if(policy.version!==1||!Array.isArray(policy.routes)||!policy.routes.length)throw Error('S10_POLICY_INVALID');
 trusted(path.dirname(policyFile),policy.dataRoot);trusted(path.dirname(policyFile),policy.reportPath);
-const origin=new URL(policy.origin);if(origin.protocol!=='http:'||origin.hostname!=='127.0.0.1'||!origin.port||origin.pathname!=='/'||origin.search||origin.hash)throw Error('S10_POLICY_INVALID');
+const origin=new URL(policy.origin);if(policy.origin!==origin.origin||origin.protocol!=='http:'||origin.hostname!=='127.0.0.1'||!origin.port||origin.pathname!=='/'||origin.search||origin.hash)throw Error('S10_POLICY_INVALID');
 for(const route of policy.routes){if(!/^[a-z0-9-]+$/.test(route.id)||!/^\/[a-zA-Z0-9/_.-]+$/.test(route.path)||route.path.includes('..')||route.path.includes('//')||!['GET','POST','PUT','PATCH','DELETE','HEAD'].includes(route.method))throw Error('S10_POLICY_INVALID');
   if(route.credential&&!/^Bearer s10-[a-z0-9-]+$/.test(route.credential.value))throw Error('S10_POLICY_INVALID');
 }
@@ -20,7 +20,7 @@ function mapped(input,init={},transport='fetch'){
   const raw=typeof input==='string'||input instanceof URL?String(input):input?.url; if(typeof raw!=='string')return deny(transport);rawPathSafe(raw);
   const url=new URL(raw),method=String(init.method??input?.method??'GET').toUpperCase();
   if(url.username||url.password||url.hash||url.search)return deny(transport);
-  const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||url.origin===origin.origin&&url.pathname===row.path));if(!route)return deny(transport);
+  const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path));if(!route)return deny(transport);
   const headers=new Headers(init.headers??input?.headers);
   if(route.credential&&headers.get(route.credential.header)!==route.credential.value)return deny('credential');
   for(const [key,value] of headers)if(/authorization|api.?key|token|cookie/i.test(key)&&(!route.credential||key!==route.credential.header||value!==route.credential.value))return deny('credential');

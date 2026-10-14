@@ -7,6 +7,14 @@ import { createRequire } from 'node:module';
 import { deflateSync } from 'node:zlib';
 const {worktreeRoot,assertTrustedWithin}=createRequire(import.meta.url)('./trusted-path.cjs');
 const owned=new WeakMap();
+async function deadline(work,ms,code){let timer;try{return await Promise.race([work,new Promise((_done,reject)=>{timer=setTimeout(()=>reject(Error(code)),ms);})]);}finally{clearTimeout(timer);}}
+export async function cleanupFailure({close,force,record,timeoutMs=2000},failure){
+  assert.ok(Number.isSafeInteger(timeoutMs)&&timeoutMs>0&&timeoutMs<=10000,'S10_INVALID_CLEANUP_TIMEOUT');let forced=false;
+  try{await deadline(Promise.resolve().then(close),timeoutMs,'S10_FAILED_CLOSE_TIMEOUT');}catch{forced=true;}
+  await deadline(Promise.resolve().then(()=>record({forced})),timeoutMs,'S10_FAILED_CLOSE_RECORD_TIMEOUT').catch(()=>{});
+  if(forced){await deadline(Promise.resolve().then(force),timeoutMs,'S10_FAILED_FORCE_TIMEOUT').catch(()=>{});await deadline(Promise.resolve().then(close),timeoutMs,'S10_FAILED_CLOSE_TIMEOUT').catch(()=>{});}
+  throw failure;
+}
 export async function writePolicy({directory,provider,guardFile}){
   directory=resolve(directory);assertTrustedWithin(join(worktreeRoot,'.test-data'),directory);assertTrustedWithin(join(worktreeRoot,'tests/fixtures/stabilization'),guardFile);
   await mkdir(directory,{recursive:true});assertTrustedWithin(worktreeRoot,directory);const dataRoot=join(directory,'workspace');await mkdir(dataRoot);
@@ -36,28 +44,40 @@ export async function launchWorker({policy,guardFile,entry,args=[],executable=pr
   const sourceCommit=execFileSync('git',['rev-parse','HEAD'],{cwd:worktreeRoot,encoding:'utf8',windowsHide:true}).trim();
   const nonce=randomUUID(),startedAt=new Date().toISOString(),env={...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path,S10_WORKER_NONCE:nonce,S10_SOURCE_COMMIT:sourceCommit};delete env.ELECTRON_RUN_AS_NODE;
   const child=spawn(executable,['--require',guardFile,entry,...args],{cwd:worktreeRoot,env,windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
-  let stdout='',stderr='',identity=null,stopRequested=false,readyDone,readyReject;
+  let stdout='',stderr='',identity=null,stopRequested=false,forced=false,readyDone,readyReject;
   const readiness=new Promise((done,reject)=>{readyDone=done;readyReject=reject;});readiness.catch(()=>{});
   const timer=setTimeout(()=>readyReject(Error('S10_WORKER_READY_TIMEOUT')),10000);
   child.on('message',message=>{try{assert.equal(message.nonce,nonce);assert.equal(message.pid,child.pid);assert.equal(message.executable,executable);assert.equal(message.dataRoot,policy.dataRoot);assert.equal(message.sourceCommit,sourceCommit);identity=message;clearTimeout(timer);readyDone(message);}catch(error){clearTimeout(timer);readyReject(error);}});
   child.stdout.on('data',data=>{stdout+=data;});child.stderr.on('data',data=>{stderr+=data;});
   const completion=new Promise((done,reject)=>{child.once('error',error=>{clearTimeout(timer);readyReject(error);reject(error);});child.once('close',async(exitCode,signal)=>{clearTimeout(timer);if(!identity)readyReject(Error('S10_WORKER_NO_IDENTITY'));
-    const report={sourceCommit,node:process.version,startedAt,finishedAt:new Date().toISOString(),entry:relative(worktreeRoot,entry).replaceAll('\\','/'),pid:child.pid,identity,exitCode,signal,stopRequested,scope:'S10 foundation worker; no business acceptance'};
+    const report={sourceCommit,node:process.version,startedAt,finishedAt:new Date().toISOString(),entry:relative(worktreeRoot,entry).replaceAll('\\','/'),pid:child.pid,identity,exitCode,signal,stopRequested,forced,...(forced?{stopFailureCode:'S10_WORKER_FORCED_STOP'}:{}),workerMode:args[0]??null,scope:'S10 foundation worker; no business acceptance'};
     const prefix=join(policy.directory,`worker-${child.pid}-${nonce}`);try{await writeFile(prefix+'.stdout.log',stdout,{flag:'wx'});await writeFile(prefix+'.stderr.log',stderr,{flag:'wx'});await writeFile(prefix+'.json',JSON.stringify(report,null,2),{flag:'wx'});done(report);}catch(error){reject(error);}
   });});completion.catch(()=>{});
   const handle={pid:child.pid,ready:()=>readiness,wait:()=>completion,stop:()=>stopWorker(handle)};
-  owned.set(handle,{child,nonce,mark:()=>{stopRequested=true;},completion});return handle;
+  owned.set(handle,{child,nonce,mark:()=>{stopRequested=true;},force:()=>{forced=true;},wasForced:()=>forced,readiness,completion});return handle;
 }
 export async function stopWorker(handle){
-  const record=owned.get(handle);assert.ok(record,'S10_WORKER_NOT_OWNED');if(record.child.exitCode!==null||record.child.signalCode!==null)return record.completion;
-  record.mark();if(record.child.connected)record.child.send({s10Stop:record.nonce});
-  let timer;try{await Promise.race([record.completion,new Promise(done=>{timer=setTimeout(()=>{if(record.child.exitCode===null&&record.child.signalCode===null)record.child.kill();done();},3000);})]);}finally{clearTimeout(timer);}return record.completion;
+  const record=owned.get(handle);assert.ok(record,'S10_WORKER_NOT_OWNED');
+  const finished=async()=>{let timer;try{const report=await Promise.race([record.completion,new Promise((_done,reject)=>{timer=setTimeout(()=>reject(Error('S10_WORKER_EXIT_TIMEOUT')),3000);})]);
+    if(record.wasForced())throw Error('S10_WORKER_FORCED_STOP');assert.equal(record.child.exitCode,0,'S10_WORKER_STOP_FAILED');assert.equal(record.child.signalCode,null,'S10_WORKER_STOP_FAILED');return report;
+  }finally{clearTimeout(timer);}};
+  if(record.child.exitCode!==null||record.child.signalCode!==null)return finished();
+  await record.readiness;record.mark();if(record.child.connected)record.child.send({s10Stop:record.nonce},()=>{});
+  let timer;try{await Promise.race([record.completion,new Promise(done=>{timer=setTimeout(()=>{if(record.child.exitCode===null&&record.child.signalCode===null){record.force();record.child.kill();}done();},3000);})]);}finally{clearTimeout(timer);}return finished();
 }
 export async function launchElectron({policy,guardFile,entry}){
   assertTrustedWithin(policy.directory,entry);assertTrustedWithin(join(worktreeRoot,'tests/fixtures/stabilization'),guardFile);assertTrustedWithin(join(worktreeRoot,'.test-data'),policy.path);
   const {_electron}=await import('playwright'),executable=createRequire(import.meta.url)('electron');
   const sourceCommit=execFileSync('git',['rev-parse','HEAD'],{cwd:worktreeRoot,encoding:'utf8',windowsHide:true}).trim(),env={...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path,RED_DATA_DIR:policy.dataRoot};delete env.ELECTRON_RUN_AS_NODE;delete env.RED_DEV_SERVER_URL;
-  let app;try{app=await _electron.launch({executablePath:executable,args:['--require',guardFile,entry],cwd:worktreeRoot,env,timeout:15000});
+  let app,ownedMain;const forceOwned=async()=>{assert.ok(ownedMain,'S10_ELECTRON_IDENTITY_UNVERIFIED');assert.equal(ownedMain.executable.toLowerCase(),executable.toLowerCase());assert.equal(ownedMain.dataRoot,policy.dataRoot);
+    const processHandle=app.process();if(processHandle.exitCode===null&&processHandle.signalCode===null){
+      const lifecycle=await readFile(join(policy.dataRoot,'s10-lifecycle.jsonl'),'utf8').catch(()=> '');
+      const mainExited=lifecycle.trim().split('\n').filter(Boolean).some(line=>{const row=JSON.parse(line);return row.event==='exit'&&row.pid===ownedMain.pid;});
+      if(!mainExited){try{process.kill(ownedMain.pid);}catch{}}processHandle.kill();
+    }};
+  try{app=await _electron.launch({executablePath:executable,args:['--require',guardFile,entry],cwd:worktreeRoot,env,timeout:15000});
+    const identity=await deadline(app.evaluate(({app})=>({pid:process.pid,executable:process.execPath,dataRoot:app.getPath('userData')})),10000,'S10_ELECTRON_IDENTITY_TIMEOUT');
+    assert.equal(identity.executable.toLowerCase(),executable.toLowerCase());assert.equal(identity.dataRoot,policy.dataRoot);ownedMain=identity;
     const page=await app.firstWindow();await page.waitForFunction(()=>document.body.textContent.includes('S10 construction only'));
     const report=await app.evaluate(()=>globalThis.__s10Dryrun);assert.equal(report.identity.dataRoot,policy.dataRoot);assert.equal(report.identity.userData,policy.dataRoot);assert.equal(report.identity.executable.toLowerCase(),executable.toLowerCase());assert.deepEqual(report.blocked,[]);
     const prefix=join(policy.directory,`electron-${report.identity.pid}`);await writeFile(prefix+'.json',JSON.stringify({sourceCommit,entry:relative(worktreeRoot,entry),...report},null,2),{flag:'wx'});
@@ -76,9 +96,7 @@ export async function launchElectron({policy,guardFile,entry}){
       try{assert.deepEqual(await bounded(app.evaluate(()=>globalThis.__s10Drain())),{drained:true});await bounded(app.close());assert.equal(processHandle.exitCode,0,'S10 Electron wrapper must exit normally');
         const lifecycle=(await readFile(join(policy.dataRoot,'s10-lifecycle.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));assert.ok(lifecycle.some(row=>row.event==='exit'&&row.exitCode===0&&row.pid===report.identity.pid),'S10 actual main did not report normal exit');
         const result={drained:true,exitCode:processHandle.exitCode,forced:false};await writeFile(prefix+'-stop.json',JSON.stringify(result),{flag:'wx'});return result;
-      }catch(error){await writeFile(prefix+'-stop.json',JSON.stringify({drained:false,forced:true,errorCode:String(error.message)}),{flag:'wx'});
-        if(processHandle.exitCode===null&&processHandle.signalCode===null){try{process.kill(report.identity.pid);}catch{}processHandle.kill();}await app.close().catch(()=>{});throw error;
-      }
+      }catch(error){return cleanupFailure({close:()=>app.close(),force:forceOwned,record:row=>writeFile(prefix+'-stop.json',JSON.stringify({drained:false,...row,errorCode:'S10_ELECTRON_STOP_FAILED'}),{flag:'wx'})},error);}
     }};
-  }catch(error){await app?.close();throw error;}
+  }catch(error){if(!app)throw error;return cleanupFailure({close:()=>app.close(),force:forceOwned,record:row=>writeFile(join(policy.directory,`electron-launch-failed-${randomUUID()}.json`),JSON.stringify({sourceCommit,identity:ownedMain??null,...row,errorCode:'S10_ELECTRON_LAUNCH_FAILED'}),{flag:'wx'})},error);}
 }

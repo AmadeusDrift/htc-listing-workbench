@@ -98,7 +98,7 @@ test('S10 controller owns worker identity/stop, retains reports and fixture inve
     assert.equal(report.identity.executable,process.execPath);assert.equal(report.identity.pid,worker.pid);
     await assert.rejects(runtime.stopWorker({pid:process.pid}),/S10_WORKER_NOT_OWNED/);
     const inventory=await runtime.fixtureInventory();assert.ok(inventory.every((r:any)=>r.sha256.length===64));assert.ok(inventory.some((r:any)=>r.path.endsWith('schema.json')));
-    const holding=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:['hold']});await holding.ready();await holding.stop();const stopped=await holding.wait();assert.equal(stopped.stopRequested,true);
+    const holding=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:['hold']});await holding.ready();await holding.stop();const stopped=await holding.wait();assert.equal(stopped.stopRequested,true);assert.equal(stopped.exitCode,0);assert.equal(stopped.signal,null);assert.equal(stopped.forced,false);
   } finally {await provider.close();}
 });
 
@@ -134,4 +134,44 @@ test('S10 pipeline CLI cannot claim integration or start tasks while owner contr
 test('S10 controller rejects wrong cwd before creating any data or launch files',async()=>{
   const directory=await root();await assert.rejects(run(process.execPath,[resolve('scripts/e2e-stabilization-pipeline.mjs'),'--foundation-dryrun'],{cwd:directory,windowsHide:true,timeout:10000,env:{...process.env,NODE_OPTIONS:''}}),/S10_EXPLICIT_WORKTREE_REQUIRED/);
   assert.deepEqual(await readdir(directory),[]);
+});
+
+test('S10 raw host aliases cannot normalize into an owned route; exact public URI and normal URL objects remain valid',async()=>{
+  const runtime=await feature(runtimeFile),origin='http://127.0.0.1:49123';
+  const provider={origin,routes:[{id:'foundation',method:'GET',path:'/foundation'},{id:'public',method:'POST',path:'/chat',publicUrl:'https://openrouter.ai/api/v1/chat/completions',credential:{header:'authorization',value:'Bearer s10-fixture-only'}}],ftp:null};
+  const policy=await runtime.writePolicy({directory:join(await root(),'worker'),provider,guardFile});
+  const code=`const assert=require('node:assert/strict'),{mapped}=require(${JSON.stringify(guardFile)}),origin=${JSON.stringify(origin)};
+    const aliases=['127.1','2130706433','0x7f000001','0177.0.0.1'],escaped=[];
+    for(const host of aliases){try{escaped.push(mapped('http://'+host+':49123/foundation').url);}catch(error){assert.match(String(error),/S10_NETWORK_BLOCKED/);}}
+    assert.deepEqual(escaped,[],'raw host aliases must be rejected before normalized-origin acceptance');
+    assert.equal(mapped(origin+'/foundation').url,origin+'/foundation');assert.equal(mapped(new URL(origin+'/foundation')).url,origin+'/foundation');
+    assert.equal(mapped('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer s10-fixture-only'}}).url,origin+'/chat');
+    console.log(JSON.stringify({networkCalls:0,aliasesRejected:aliases.length,validForms:3}));`;
+  const output=await run(process.execPath,['--require',guardFile,'-e',code],{windowsHide:true,timeout:10000,env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path}});
+  assert.deepEqual(JSON.parse(output.stdout),{networkCalls:0,aliasesRejected:4,validForms:3});
+});
+
+test('S10 normal Node stop rejects forced cleanup and retains the owned worker failure report',async()=>{
+  const runtime=await feature(runtimeFile),provider={origin:'http://127.0.0.1:49123',routes:[{id:'foundation',method:'GET',path:'/foundation'}],ftp:null};
+  const policy=await runtime.writePolicy({directory:join(await root(),'worker'),provider,guardFile});
+  const worker=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:['ignore-stop']});await worker.ready();
+  await assert.rejects(worker.stop(),/S10_WORKER_FORCED_STOP/);const report=await worker.wait();
+  assert.equal(report.stopRequested,true);assert.equal(report.forced,true);assert.notEqual(report.signal,null);assert.notEqual(report.exitCode,0);
+  assert.equal(report.identity.pid,worker.pid);assert.equal(report.identity.executable,process.execPath);assert.equal(report.identity.dataRoot,policy.dataRoot);
+  await assert.rejects(worker.stop(),/S10_WORKER_FORCED_STOP/);
+});
+
+test('S10 deliberate crash has a separate command marker and never satisfies normal Node stop',async()=>{
+  const runtime=await feature(runtimeFile),provider={origin:'http://127.0.0.1:49123',routes:[{id:'foundation',method:'GET',path:'/foundation'}],ftp:null};
+  const policy=await runtime.writePolicy({directory:join(await root(),'worker'),provider,guardFile});
+  const worker=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:['deliberate-crash']});await worker.ready();
+  const report=await worker.wait();assert.equal(report.workerMode,'deliberate-crash');assert.equal(report.exitCode,73);assert.equal(report.signal,null);assert.equal(report.forced,false);
+  await assert.rejects(worker.stop(),/S10_WORKER_STOP_FAILED/);
+});
+
+test('S10 failed teardown bounds a stuck close, records forced cleanup, and preserves the original failure',async()=>{
+  const runtime=await feature(runtimeFile);assert.equal(typeof runtime.cleanupFailure,'function','bounded failed teardown missing');
+  const failure=new Error('S10_FAULT_EOF'),records: {forced:boolean}[]=[];let attempts=0,forces=0;
+  await assert.rejects(runtime.cleanupFailure({close:()=>{attempts++;return attempts===1?new Promise(()=>{}):Promise.resolve();},force:()=>{forces++;},record:(row:{forced:boolean})=>{records.push(row);},timeoutMs:20},failure),(error:unknown)=>error===failure);
+  assert.equal(forces,1);assert.equal(attempts,2);assert.deepEqual(records,[{forced:true}]);
 });

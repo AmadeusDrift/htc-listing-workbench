@@ -5,7 +5,7 @@ assert.ok(guard?.installedBeforeMain,'S10 guard must precede worker');
 const nonce=process.env.S10_WORKER_NONCE;
 assert.ok(nonce&&process.send,'S10 controller IPC required');
 process.send({nonce,pid:process.pid,executable:process.execPath,dataRoot:process.env.RED_DATA_DIR,sourceCommit:process.env.S10_SOURCE_COMMIT});
-if(process.argv[2]==='hold'){
+if(['hold','ignore-stop'].includes(process.argv[2])){
   const timer=setInterval(()=>{},1000);
-  process.on('message',message=>{if((message as {s10Stop?:string}).s10Stop===nonce){clearInterval(timer);process.disconnect?.();}});
-}else{assert.equal(process.argv[2],'foundation');process.disconnect?.();}
+  process.on('message',message=>{if(process.argv[2]!=='ignore-stop'&&(message as {s10Stop?:string}).s10Stop===nonce){clearInterval(timer);process.disconnect?.();}});
+}else{if(process.argv[2]==='deliberate-crash')process.exitCode=73;else assert.equal(process.argv[2],'foundation');process.disconnect?.();}

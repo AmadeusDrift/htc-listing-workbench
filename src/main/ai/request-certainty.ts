@@ -18,10 +18,14 @@ export function localAiRequestResolved(db:DatabaseSync,directory:string,id:strin
     const {record,capture}=saved,body=capture.body as any;
     // HTTP 200 may contain an upstream processing error; a complete envelope is
     // not proof of rejection before processing, nor a valid domain result.
-    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!==''&&body!=='[omitted: credential echo]'&&!openRouterFailure(record.status,body);
+    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!=='[omitted: credential echo]'&&!openRouterFailure(record.status,body);
     if(call.status!=='FAILED'||body===undefined||typeof body==='string'&&!body.trim()||body==='[omitted: credential echo]')return false;
     const error=record.gateway==='openrouter'?openRouterFailure(record.status,body):httpError(record.status,body?.error?.code);
     const definitive=record.gateway==='openrouter'?!!error&&'definitive' in error&&error.definitive===true:[401,402,403,429].includes(record.status);
-    return definitive&&call.errorCode===error?.code;
+    // Earlier OpenRouter readers encoded a complete matching 403 as AUTH_FAILED.
+    // Recognize that terminal receipt; retry permission remains with the existing
+    // explicit once-only claim, not this read-only certainty projection.
+    const legacy403=record.gateway==='openrouter'&&record.status===403&&call.errorCode==='AUTH_FAILED'&&typeof body?.error?.message==='string'&&!!body.error.message.trim()&&(body.error.code===undefined||body.error.code===403);
+    return definitive&&(call.errorCode===error?.code||legacy403);
   }catch{return false;}
 }

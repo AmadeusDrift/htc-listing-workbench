@@ -4,11 +4,16 @@ import { openDatabase } from '../src/main/database.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { fixture, holdFetch, isCode, storage } from './fixtures/ai-control.ts';
 import { sameRequestBusiness, requestScope, validateRequestScope } from '../src/main/ai/request-identity.ts';
-import { createWorkspaceBackup,prepareWorkspaceRestore,discardPreparedRestore } from '../src/main/backup.ts';
+import { createWorkspaceBackup,prepareWorkspaceRestore,discardPreparedRestore,commitWorkspaceRestore } from '../src/main/backup.ts';
 import { join } from 'node:path';
 import { readFile,writeFile } from 'node:fs/promises';
 import { localAiRequestResolved } from '../src/main/ai/request-certainty.ts';
 import { ReviewedContentService } from '../src/main/content/service.ts';
+import { WorkspaceStore } from '../src/main/store.ts';
+import { HostingService } from '../src/main/hosting/service.ts';
+import { randomUUID } from 'node:crypto';
+import { fixture as listingFixture } from './fixtures/listing-ai.ts';
+import { validateListingContext } from '../src/main/listing-ai/validation.ts';
 
 for(const failure of ['network','gateway'] as const)test(`manual ${failure} UNKNOWN cannot create a new POST after key/model/revision/restart`,async t=>{
   const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('fixture disconnected');return Response.json({error:{message:'Upstream unavailable'}},{status:500});}});f.enable('deepseek');
@@ -47,6 +52,39 @@ test('stable request scopes ignore repair/key/model/task/revision and do not use
   assert.throws(()=>validateRequestScope({...first,nonce:'renderer'}));
   let accessed=false;const malformed={...first};Object.defineProperty(malformed,'sku',{get(){accessed=true;return 'OTHER';}});assert.throws(()=>validateRequestScope(malformed));assert.equal(accessed,false);
   assert.equal(sameRequestBusiness(first,{...second,variantId:'33333333-3333-4333-8333-333333333333'}),false);
+});
+
+test('virtual sales identity is compared to virtual identity before supplier component sets',()=>{
+  const productId=randomUUID(),virtual=randomUUID(),supplier=randomUUID();
+  const modern:any={version:1,productId,operation:'listing-fields',variantId:virtual,variantIds:[supplier]},legacy:any={version:1,productId,operation:'listing-fields',variantId:virtual};
+  assert.equal(sameRequestBusiness(modern,legacy),true);
+  assert.equal(sameRequestBusiness(modern,{...legacy,variantId:randomUUID()}),false);
+  const {variantId:_primary,...components}=modern;assert.equal(sameRequestBusiness(components,{...components,variantIds:[supplier,randomUUID()].sort()}),true);assert.equal(sameRequestBusiness(components,{...components,variantIds:[randomUUID()]}),false);
+});
+
+for(const raw of ['', '   '])test(`complete HTTP200 ${JSON.stringify(raw)} is received invalid while fees remain unknown`,async t=>{
+  const f=await fixture(t,{fetch:async()=>new Response(raw,{status:200})});f.enable('deepseek');await assert.rejects(f.service.suggest(f.textInput),isCode('OUTPUT_INVALID'));const call=f.service.listCalls()[0],receipt:any=await f.service.readProviderReceipt(call.id),db=openDatabase(f.directory);
+  try{assert.equal(receipt.body,raw);assert.equal(localAiRequestResolved(db,f.directory,call.id,call),true);}finally{db.close();}
+  assert.equal(f.requests.length,1);assert.equal(f.service.getUsageSummary('deepseek').unknownCalls,1);assert.equal(f.service.listResults(f.product.id).length,0);
+});
+
+for(const echo of [false,true])test(`complete invalid UTF8 receipt ${echo?'echo omitted':'opaque'} has strict backup proof and no invented result or fee`,async t=>{
+  const bytes=Buffer.concat([Buffer.from([0xff,0xfe]),Buffer.from(echo?'fixture-api-key':'synthetic-wire')]),f=await fixture(t,{fetch:async()=>new Response(bytes)});f.enable('deepseek');await assert.rejects(f.service.suggest(f.textInput),isCode('OUTPUT_INVALID'));const call=f.service.listCalls()[0],receipt:any=await f.service.readProviderReceipt(call.id),db=openDatabase(f.directory);
+  try{assert.equal(localAiRequestResolved(db,f.directory,call.id,call),!echo);}finally{db.close();}
+  if(echo){assert.equal(receipt.body,'[omitted: credential echo]');assert.doesNotMatch(JSON.stringify(receipt),/fixture-api-key|base64/);}else{assert.deepEqual(Buffer.from(receipt.body.base64,'base64'),bytes);assert.equal(receipt.body.complete,true);await createWorkspaceBackup(f.directory,join(f.directory,'opaque.htcbackup'),'s02-synthetic-passphrase');}
+  assert.equal(f.requests.length,1);assert.equal(f.service.listResults(f.product.id).length,0);assert.equal(f.service.getUsageSummary('deepseek').unknownCalls,1);
+});
+
+test('actual AiService supplier-set context cannot replace a legacy unresolved call with the same primary sales identity',async t=>{
+  const f=await listingFixture(t);f.respond(()=>{throw Error('synthetic disconnected');});await assert.rejects(f.listing.suggest(f.reference));
+  const original=f.ai.listCalls().find(call=>call.presentationContext?.kind==='listing')!,db=openDatabase(f.directory);
+  const {requestScope:_scope,requestFingerprint:_fingerprint,...legacy}=original;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(legacy),original.id);db.close();
+  const context=f.listing.currentContext(f.amazon.getDraft(f.draft.id),f.store.getProduct(f.product.id),f.amazon.executionTargetScope(f.draft.targetId).generation);
+  // This main-only context fixture models the two identity namespaces without
+  // pretending the supplier ID is the legacy primary sales-variant ID.
+  context.sourceProduct!.salesRecipe={recipe:{components:[{variantId:randomUUID()}]}} as any;
+  validateListingContext(context);
+  const outcome:any=await f.ai.listingFields(context,async()=>{}).catch(error=>error);assert.equal(f.requests.length,1,'same primary sales identity must not create a replacement provider POST');assert.equal(outcome.code,'INTERRUPTED');assert.equal(outcome.callId,original.id);
 });
 
 test('backup verifies original recovered receipt identity and rejects altered raw bytes without changing paid history',async t=>{
@@ -91,4 +129,14 @@ test('recovered manual text can be explicitly reviewed, adopted and backed up wi
   const review=await f.service.review({productId:f.product.id,productRevision:f.product.revision,suggestionResultId:generation.id});
   const content=new ReviewedContentService(f.directory,f.store,f.service);
   try{await content.adopt({productId:f.product.id,productRevision:f.product.revision,reviewResultId:review.id});assert.equal(f.requests.length,2);assert.deepEqual(f.service.listCalls().find(call=>call.id===original.id),original);await createWorkspaceBackup(f.directory,join(f.directory,'adopted-recovery.htcbackup'),'s02-synthetic-passphrase');}finally{content.close();}
+});
+
+test('restoring a backup from before a manual UNKNOWN retains whole call scope and rejects all replacement sends',async t=>{
+  const f=await fixture(t,{fetch:async()=>{throw Error('fixture disconnected');}});f.enable('deepseek');const backup=join(f.directory,'before-manual-call.htcbackup');await createWorkspaceBackup(f.directory,backup,'s02-synthetic-passphrase');
+  await assert.rejects(f.service.suggest(f.textInput));const original=f.service.listCalls()[0],db=openDatabase(f.directory),raw=String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(original.id)!.record_json);db.close();
+  const prepared=await prepareWorkspaceRestore(f.directory,backup,'s02-synthetic-passphrase'),snapshot=openDatabase(prepared.stagingDirectory);
+  try{assert.equal(snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(original.id)?.record_json,raw);}finally{snapshot.close();}
+  await f.service.close();await f.hosting.close();f.closeStore();await commitWorkspaceRestore(f.directory,prepared);
+  const store=new WorkspaceStore(f.directory),hosting=new HostingService(f.directory,store,storage);let posts=0;const ai=new AiService(f.directory,store,hosting,storage,{fetch:async()=>{posts++;throw Error('must not send');}});
+  try{ai.importProfile({id:'deepseek',model:'deepseek-v4-pro',apiKey:'synthetic-restored-key'});ai.setEnabled({id:'deepseek',enabled:true});await assert.rejects(ai.suggest(f.textInput),(error:any)=>error.code==='INTERRUPTED'&&error.callId===original.id);assert.equal(posts,0);assert.deepEqual(ai.listCalls().find(call=>call.id===original.id),original);}finally{await ai.close();await hosting.close();store.close();}
 });

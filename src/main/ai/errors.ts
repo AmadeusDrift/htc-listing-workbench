@@ -20,6 +20,7 @@ export class AiError extends UserFacingError {
   readonly code: AiErrorCode;
   rejection?: import('../../shared/rejection-presentation.ts').OutputRejection;
   callId?:string;
+  requestId?:string;
   diagnosticReason?:string;
   responseDiagnostic?:{status:number;byteCount:number};
   abortSource?: import('../../shared/run-evidence-contracts.ts').AbortSource;

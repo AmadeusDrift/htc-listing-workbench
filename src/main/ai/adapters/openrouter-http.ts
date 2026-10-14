@@ -3,6 +3,7 @@ import type { AdapterContext } from '../transport.ts';
 import type { ProviderMetadata } from '../transport.ts';
 import { emptyUsage } from '../transport.ts';
 import { responseCollection, transportEvidence } from '../response-lifecycle.ts';
+import {opaqueResponse} from '../opaque-response.ts';
 
 export type OpenRouterEndpoint='/api/v1/chat/completions'|'/api/alpha/decisions'|'/api/v1/images'|'/api/v1/batches';
 export function openRouterHttpError(status:number,raw?:unknown):AiError&{httpStatus:number;definitive:boolean}{
@@ -59,7 +60,12 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   catch(error){void reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
   transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:response.status,receivedBytes:size});
   complete=true;
-  let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks));}catch{throw new AiError('OUTPUT_INVALID');}
+  const received=Buffer.concat(chunks);
+  let text:string;try{text=new TextDecoder('utf-8',{fatal:true}).decode(received);}catch{
+    const safe=!received.includes(Buffer.from(credentials.apiKey))&&safeResponse(received.toString('utf8'),credentials.apiKey);
+    await context.onProviderReceipt?.({gateway:'openrouter',endpoint,model:String(body.model??''),status:response.status,requestId:null,receivedAt:context.now().toISOString(),body:safe?opaqueResponse(received):'[omitted: credential echo]',costUsd:null});
+    throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:safe?'RESPONSE_UTF8_INVALID':'RESPONSE_SECRET_ECHO',responseDiagnostic:{status:response.status,byteCount:size}});
+  }
   const safe=safeResponse(text,credentials.apiKey);let raw:any;let valid=true;
   try{raw=JSON.parse(text);}catch{raw=text;valid=false;}
   const id=typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)&&!raw.id.includes(credentials.apiKey)?raw.id:null;
@@ -71,7 +77,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   if(!valid)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:size?'RESPONSE_ENVELOPE_JSON_INVALID':'RESPONSE_BODY_EMPTY'});return raw;
   } catch(error) {
     const known=error instanceof AiError?error:new AiError('NETWORK_ERROR');
-    known.certainty=!dispatched?'NOT_SENT':complete&&'definitive' in known&&known.definitive===true?'DEFINITIVE_REJECTION':complete&&size>0&&known.code==='OUTPUT_INVALID'&&known.diagnosticReason!=='RESPONSE_SECRET_ECHO'?'RECEIVED_INVALID':'SENT_UNKNOWN';
+    known.certainty??=!dispatched?'NOT_SENT':complete&&'definitive' in known&&known.definitive===true?'DEFINITIVE_REJECTION':complete&&known.code==='OUTPUT_INVALID'&&known.diagnosticReason!=='RESPONSE_SECRET_ECHO'?'RECEIVED_INVALID':'SENT_UNKNOWN';
     transportEvidence(context,{event:'STAGE_BLOCKED',certainty:known.certainty,abortSource:known.abortSource??'NONE',errorCode:known.code,...(response?{httpStatus:response.status}:{}),receivedBytes:size});
     throw known;
   } finally { collection.close(); }

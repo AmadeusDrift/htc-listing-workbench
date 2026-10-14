@@ -13,7 +13,7 @@ export function verifiedRecoveryReceipt(db:DatabaseSync,directory:string,call:Ai
   const saved=readCallReceiptSync(db,directory,call);
   if(!saved||saved.record.status<200||saved.record.status>=300||openRouterFailure(saved.record.status,saved.capture.body))return null;
   const captured=saved.capture as unknown as {purpose?:unknown;body:any};
-  if(listingFingerprint(captured.purpose??null)!==listingFingerprint(call.purposeSnapshot??null)||!captured.body||typeof captured.body!=='object')return null;
+  if(listingFingerprint(captured.purpose??null)!==listingFingerprint(call.purposeSnapshot??null)||!captured.body||typeof captured.body!=='object'||captured.body.encoding==='raw-utf8-invalid/v1')return null;
   return saved;
 }
 /** Shared by runtime reads and the backup's current/staged artifact root. */

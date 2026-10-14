@@ -890,6 +890,18 @@
         "retainImageRetryHistory|c6849f233c3e9efd2ae31ca2b5640c4bc389b6d31df7bb3141c20994f62ad065": 1,
         "retainImageRetryHistory|79014e01448946226358f282552c876d16c903afab92f248680e878e563d22e0": 1
       }
+    },
+    "main/ai/request-history.ts": {
+      "role": "ai",
+      "review": "M07 staged restore only: preserves complete validated original calls and owned results by immutable identity; same restore transaction; no ordinary query writes.",
+      "commands": [
+        "retainRequestCallHistory|INSERT|ai_calls",
+        "retainRequestCallHistory|INSERT|ai_results"
+      ],
+      "statements": {
+        "retainRequestCallHistory|4633a1c6198502e2494f8ab97e07b767fd848e2882d738726659358c919fa214": 1,
+        "retainRequestCallHistory|69d42ce27c3df1bcb0dfcf497a5743d4f6dc12273f218db6cb34d927cb65012b": 1
+      }
     }
   },
   "opaque": [

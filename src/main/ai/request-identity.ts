@@ -6,10 +6,10 @@ import { evidenceSku } from '../diagnostics/run-evidence.ts';
 
 export function validateRequestScope(raw:unknown):AiRequestScope {
   if(!raw||typeof raw!=='object'||Object.getPrototypeOf(raw)!==Object.prototype||Reflect.ownKeys(raw).some(key=>typeof key!=='string')||Object.values(Object.getOwnPropertyDescriptors(raw)).some(value=>!('value' in value)))invalid();
-  const o=keys(raw,['version','productId','operation'],['variantId','variantIds','assetId','sku','targetId','marketplaceId','slot','candidateSha256','phase']);
+  const o=keys(raw,['version','productId','operation'],['variantId','variantIds','assetId','sku','draftId','targetId','marketplaceId','slot','candidateSha256','phase']);
   if(o.version!==1||!AI_REQUEST_OPERATIONS.includes(o.operation as AiRequestScope['operation']))invalid();
   const scope:AiRequestScope={version:1,productId:uuid(o.productId),operation:o.operation as AiRequestScope['operation']};
-  for(const field of ['variantId','assetId'] as const)if(o[field]!==undefined)scope[field]=uuid(o[field]);
+  for(const field of ['variantId','assetId','draftId'] as const)if(o[field]!==undefined)scope[field]=uuid(o[field]);
   if(o.variantIds!==undefined){scope.variantIds=uuidList(o.variantIds,100,1);if(JSON.stringify(scope.variantIds)!==JSON.stringify([...scope.variantIds].sort()))invalid();}
   if(o.targetId!==undefined){if(typeof o.targetId!=='string'||!/^[A-Za-z0-9_.:-]{1,100}$/.test(o.targetId))invalid();scope.targetId=o.targetId;}
   if(o.sku!==undefined){if(!evidenceSku(o.sku))invalid();scope.sku=o.sku;}
@@ -66,8 +66,10 @@ export function sameRequestBusiness(a:AiRequestScope,b:AiRequestScope):boolean {
   const generation=['content-suggestion','listing-fields','category','source-observation','source-color','image-plan','legacy-text-request'],review=['content-review','listing-copy-review','image-text-review','image-appearance-review','legacy-text-review-request'];
   const legacy=(scope:AiRequestScope,other:AiRequestScope)=>scope.operation==='legacy-text-request'&&generation.includes(other.operation)||scope.operation==='legacy-text-review-request'&&review.includes(other.operation);
   if(a.productId!==b.productId||a.operation!==b.operation&&!legacy(a,b)&&!legacy(b,a))return false;
-  const av=a.variantIds??(a.variantId?[a.variantId]:[]),bv=b.variantIds??(b.variantId?[b.variantId]:[]);
-  if(av.length&&bv.length&&!av.some(id=>bv.includes(id)))return false;
+  // Compare primary sales IDs with primary sales IDs. Supplier component IDs
+  // are a separate namespace and must not erase a matching legacy primary ID.
+  if(a.variantId!==undefined&&b.variantId!==undefined){if(a.variantId!==b.variantId)return false;}
+  else if(a.variantIds!==undefined&&b.variantIds!==undefined&&!a.variantIds.some(id=>b.variantIds!.includes(id)))return false;
   // Candidate bytes are retained for exact recovery, not a way to bypass an
   // unresolved review at the same original SKU/slot by making another picture.
   return (['assetId','targetId','marketplaceId','slot','phase'] as const).every(field=>a[field]===undefined||b[field]===undefined||a[field]===b[field]);

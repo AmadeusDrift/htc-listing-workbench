@@ -18,6 +18,8 @@ import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOpera
 import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
 import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles,indexProviderReceiptPointers } from './ai/receipts.ts';
 import { assertReceiptRecovery } from './ai/receipt-recovery.ts';
+import { retainRequestCallHistory } from './ai/request-history.ts';
+import { assertOpaqueResponse } from './ai/opaque-response.ts';
 import { BATCH_TABLES,assertBatchHistory } from './ai/batch/records.ts';
 import { FIELD_GROUP_TABLES,assertFieldGroupHistory,retainFieldGroupHistory } from './ai/field-purpose-groups.ts';
 import { pauseBatchHistory,retainBatchHistory,retainProviderReceipts } from './ai/batch/recovery.ts';
@@ -29,7 +31,7 @@ import { assertCompletionHistory, retainCompletionOperations, validateCompletion
 import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdir, readFile, rm, lstat, open } from 'node:fs/promises';
-import { existsSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -297,7 +299,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
-    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
+    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {
@@ -434,6 +436,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     }
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
+    retainRequestCallHistory(current,snapshot);
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));

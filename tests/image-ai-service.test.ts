@@ -1765,3 +1765,64 @@ test('retry planning-first then generation grant keeps separate quotas across re
  await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:failed.workflow.slots![0].attempts[2].requestId,commandId:randomUUID()});phase='pass';const completed=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(posts(),10);
  const restored=await prepareWorkspaceRestore(f.directory,path,passphrase),db=openDatabase(restored.stagingDirectory);try{const {assertImageRetryHistory,retryGrants}=await import('../src/main/image-workflow/retry-allowance.ts');assertImageRetryHistory(db);const grants=retryGrants(db);assert.deepEqual(grants.map(g=>g.scope),['planning','generation']);assert.equal(grants[0].initialPlanningCallIds!.length,3);}finally{db.close();}
 });
+
+for(const code of ['NETWORK_ERROR','TIMEOUT','INTERRUPTED','CANCELLED','PROVIDER_ERROR','OUTPUT_INVALID'] as const)test(`unknown image planning ${code} is retained without another paid POST`,async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),saved=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);
+ const call={...f.ai.getCall(saved.callId)!,status:'FAILED' as const,errorCode:code};delete call.responseReceived;
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
+ const before=f.requests.length,usage=f.ai.getUsageSummary('deepseek');let sent=0;
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId,()=>sent++),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');
+ assert.equal(f.requests.length,before);assert.equal(sent,0);assert.deepEqual(f.ai.getCall(call.id),call);assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);
+});
+
+test('confirmed image planning authentication rejection allows one fresh bounded attempt',async t=>{
+ const f=await fixture(t),workflowId=randomUUID();f.respond(operation=>operation==='image-plan'?new Response('{}',{status:401}):undefined);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.code==='AUTH_FAILED');
+ const old=f.ai.listCalls().find(c=>c.errorCode==='AUTH_FAILED')!,before=f.requests.length;f.respond(undefined);
+ const result=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);assert.equal(result.output.kind,'image-plan');assert.equal(f.requests.length,before+1);assert.deepEqual(f.ai.getCall(old.id),old);
+});
+
+test('changed image planning repair feedback cannot bypass an unknown request in the same workflow',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),plan=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);
+ f.respond(operation=>{if(operation==='image-plan')throw new AiError('NETWORK_ERROR');});
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},{previousPlanId:plan.id,issues:['First repair']},undefined,workflowId));
+ const call=f.ai.listCalls().find(c=>c.errorCode==='NETWORK_ERROR')!,before=f.requests.length;f.respond(undefined);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},{previousPlanId:plan.id,issues:['Changed repair']},undefined,workflowId),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');
+ assert.equal(f.requests.length,before);
+});
+
+test('running image planning remains protected before a response is known',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),saved=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId);
+ const call={...f.ai.getCall(saved.callId)!,status:'RUNNING' as const,errorCode:null,finishedAt:null};delete call.responseReceived;
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
+ const before=f.requests.length;
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');assert.equal(f.requests.length,before);
+});
+
+test('unknown OCR history does not become an image planning request lock',async t=>{
+ const f=await fixture(t);await f.ai.imagePlan(f.context,()=>{});const ocr=await f.ai.recognizeGeneratedImage(f.context,f.candidate,f.bytes,()=>{});
+ const call={...f.ai.getCall(ocr.callId)!,status:'FAILED' as const,errorCode:'NETWORK_ERROR' as const};
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(ocr.id);}finally{db.close();}
+ const before=f.requests.length;const plan=await f.ai.imagePlan(f.context,()=>{});assert.equal(plan.output.kind,'image-plan');assert.equal(f.requests.length,before+1);
+});
+
+test('unknown image planning Batch keeps the exact waiting identity and adopts its original receipt without POST',async t=>{
+ const f=await fixture(t),{createBatchReferencePort}=await import('../src/main/hosting/batch-references.ts');
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-image-batch-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ const taskId=randomUUID(),workflowId=randomUUID(),profile={id:'alpha',name:'Alpha',host:'fixture.invalid',port:21,secure:true,remoteRoot:'/',publicBaseUrl:'https://images.example.test/',enabled:true,configured:true,generation:1};
+ const port=createBatchReferencePort({directory:f.directory,store:f.store,generation:{readCandidate:async()=>{throw Error('No generated reference');}},hosting:{getProfile:()=>profile as any,listUploads:()=>[],uploadReferenceVersion:async(_id,_gen,version)=>`https://images.example.test/references/${version.sha256}.png`},task:()=>({id:taskId,profileId:'alpha',profileStamp:createHash('sha256').update(JSON.stringify(profile)).digest('hex')}) as any,probe:async()=>{}});
+ f.cleanup(()=>port.close());(f.ai as any).batchReferences=port;
+ const context=(f.ai as any).context,original=context.fetch;let posts=0,captured:any;
+ context.fetch=async(url:unknown,init:RequestInit)=>{
+  assert.ok(String(url).startsWith('https://openrouter.ai/api/v1/batches'));
+  if(init.method==='POST'){posts++;captured=JSON.parse(String(init.body));return Response.json({id:'batch_image_plan',model:captured.model,endpoint:'/v1/chat/completions',status:'in_progress'});}
+  const results=[];for(const r of captured.requests){const response=await original('https://openrouter.ai/api/v1/chat/completions',{method:'POST',body:JSON.stringify({...r.body,model:captured.model})});results.push({custom_id:r.custom_id,response:{status_code:200,body:await response.json()}});}
+  return Response.json({id:'batch_image_plan',model:captured.model,endpoint:'/v1/chat/completions',status:'completed',results});
+ };
+ const scope={taskId,rowKey:f.context.listing.variantId,phase:'image',mode:'deferred_batch' as const,authorize:()=>true,waitingOperationId:undefined as string|undefined},runtime=(f.ai as any).batchTasks;
+ const plan=()=>runtime.run(scope,()=>f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));
+ await assert.rejects(plan,(error:any)=>{scope.waitingOperationId=error.operationId;return error.name==='BatchWaitingError';});await runtime.flush(taskId);assert.equal(posts,1);
+ await assert.rejects(plan,{name:'BatchWaitingError'});assert.equal(posts,1);await runtime.reconcile(taskId);
+ const result=await plan();assert.equal(result.output.kind,'image-plan');assert.equal(result.callId,scope.waitingOperationId);assert.equal(posts,1);
+});

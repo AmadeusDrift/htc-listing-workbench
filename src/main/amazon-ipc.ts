@@ -66,10 +66,10 @@ export function installAmazonIpc(window: BrowserWindow, service: AmazonService, 
   handle('red:amazon:self-relation-correct',1,raw=>service.correctUnsubmittedSelfRelation(raw));
   handle('red:amazon:correction-send',1,async raw=>{
     const input=record(raw,'修正参数',['id','revision','patchHash']),c=service.getCorrection(identifier(input.id));
-    if(c.state!=='READY'||c.revision!==input.revision||c.patchHash!==input.patchHash)throw new UserFacingError('请重新加载修正案并完成验证预览');
-    const answer=await dialog.showMessageBox(window,{type:'question',title:'确认修正原 SKU 包装关系',message:`删除 SKU ${c.sku} 的包装自引用？`,detail:`卖家：${c.sellerId}\n站点：${c.marketplaceId}\n商品类型：${c.productType}\n\n仅删除 package_contains_sku 中指向自身的关系，保留原 SKU 与提交历史。正式请求仅发送一次；接受后仍需单独核对，不代表已可售。\n\n删除前：${JSON.stringify(c.before.package_contains_sku)}\n删除后：无此关系\n补丁指纹：${c.patchHash}`,buttons:['取消','确认发送原 SKU 修正'],defaultId:0,cancelId:0,noLink:true});
+    if(!['PREPARED','READY'].includes(c.state)||c.revision!==input.revision||c.patchHash!==input.patchHash)throw new UserFacingError('请重新加载已准备的修正范围');
+    const answer=await dialog.showMessageBox(window,{type:'question',title:'确认原 SKU 修正范围',message:`继续修正原 SKU ${c.sku}？`,detail:`卖家：${c.sellerId}\n站点：${c.marketplaceId}\n商品类型：${c.productType}\n第 ${c.round??1}/2 轮；本次确认允许以下范围内最多两轮不同载荷的自动修正，保留原 SKU、图片与提交历史。无变化不重发，UNKNOWN 必须核对。\n依据：${(c.evidence??[]).join('；')}\n差异：${JSON.stringify((c.scope??["package_contains_sku"]).map(field=>({field,before:c.before[field]??null,after:c.after[field]??null})))}\n补丁：${JSON.stringify(c.request.patches)}\n指纹：${c.patchHash}\n接受后核对结果，不代表已可售。`,buttons:['取消','确认范围并继续'],defaultId:0,cancelId:0,noLink:true});
     if(answer.response!==1)return null;
-    return service.sendCorrection({id:c.id,revision:c.revision,patchHash:c.patchHash},true);
+    return service.continueCorrection({id:c.id,revision:c.revision,patchHash:c.patchHash},true);
   });
   handle('red:amazon:calls', 0, () => service.listCalls());
   handle('red:amazon:policy', 0, () => service.getDataPolicy());

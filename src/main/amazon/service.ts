@@ -149,6 +149,7 @@ export class AmazonService {
   getCorrection(id:string){this.ensureOpen();return this.corrections.get(id);}
   prepareCorrection(input:unknown){this.ensureOpen();return this.corrections.prepare(input);}
   previewCorrection(input:unknown){this.ensureOpen();return this.corrections.preview(input);}
+  continueCorrection(input:unknown,confirmed:boolean){this.ensureOpen();return this.corrections.continue(input,confirmed);}
   sendCorrection(input:unknown,confirmed:boolean){this.ensureOpen();return this.corrections.send(input,confirmed);}
   readCorrection(input:unknown){this.ensureOpen();return this.corrections.readback(input);}
   cancelCorrection(input:unknown){this.ensureOpen();return this.corrections.cancel(input);}

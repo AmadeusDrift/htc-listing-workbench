@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 const { worktreeRoot, assertTrustedWithin } = createRequire(import.meta.url)('./trusted-path.cjs');
+const {validateProtocolRoute,verifyProtocol}=createRequire(import.meta.url)('./pipeline-protocol.cjs');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const safePath = path => typeof path === 'string' && /^\/[a-zA-Z0-9/_.-]+$/.test(path) && !path.includes('..') && !path.includes('//');
 
@@ -25,8 +26,9 @@ function verifyRoutes(routes) {
   return routes.map(route=>{assert.ok(/^[a-z0-9-]+$/.test(route.id)&&!ids.has(route.id),'S10_ROUTE_ID_INVALID');ids.add(route.id);
     assert.ok(['GET','POST','PUT','PATCH','DELETE','HEAD'].includes(route.method)&&safePath(route.path),'S10_ROUTE_INVALID');const key=route.method+' '+route.path;assert.ok(!keys.has(key),'S10_ROUTE_DUPLICATE');keys.add(key);
     if(route.credential){assert.ok(/^[a-z-]+$/.test(route.credential.header)&&/^Bearer s10-[a-z0-9-]+$/.test(route.credential.value),'S10_FIXTURE_CREDENTIAL_REQUIRED');}
-    if(route.publicUrl){const url=new URL(route.publicUrl);assert.ok(url.protocol==='https:'&&!url.username&&!url.password&&!url.search&&!url.hash,'S10_PUBLIC_ROUTE_INVALID');}
-    return route;
+    if(route.publicUrl){const url=new URL(route.publicUrl);assert.ok(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash&&(!url.search||route.protocol),'S10_PUBLIC_ROUTE_INVALID');}
+    if(route.protocol)validateProtocolRoute(route);
+    return structuredClone(route);
   });
 }
 async function listen(server){await new Promise((done,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',done);});return server.address().port;}
@@ -37,11 +39,13 @@ export async function createFakeProvider({directory,routes,ftp=false,maxRequestB
   const connections=server=>server.on('connection',socket=>{sockets.add(socket);socket.on('error',()=>{});socket.on('close',()=>sockets.delete(socket));});
   const server=httpServer(async(request,response)=>{
     const route=known.find(row=>row.method===request.method&&row.path===request.url);
+    if(known.some(row=>row.protocol))ledger.append({event:'arrival',method:request.method??'GET',routeId:route?.id??null});
     const reject=(status,reason)=>{ledger.append({event:'rejected',method:request.method??'GET',reason});request.resume();response.writeHead(status);response.end();};
     if(!route)return reject(404,'route');if(route.credential&&request.headers[route.credential.header]!==route.credential.value)return reject(403,'credential');
     const parts=[];let size=0;
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
-      const row=ledger.append({event:'request',routeId:route.id,method:route.method,path:route.path,bodySha256:digest(Buffer.concat(parts)),bodyBytes:size});
+      const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
+      const row=ledger.append({event:'request',routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true}:{})});
       const output=route.response??{},bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(output.json??{}));
       response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':String(row.sequence),'content-length':String(bytes.length)});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestSequence:row.sequence,status:output.status??200});
       const finish=()=>{if(!response.destroyed){response.end(bytes);ledger.append({event:'body',routeId:route.id,requestSequence:row.sequence,bodySha256:digest(bytes),bodyBytes:bytes.length});}};

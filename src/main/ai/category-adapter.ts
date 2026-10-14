@@ -8,16 +8,22 @@ import { visionContent } from './vision.ts';
 import type { DeepSeekCredentials } from "./primitives.ts";
 import type { AdapterContext } from './transport.ts';
 import type { DeepSeekReferenceImage } from './vision.ts';
+import {categoryCandidateSnapshot} from './category-context.ts';
 
-function invalidCategory(reason:string):never { const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error; }
+function invalidCategory(reason:string):never { const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;error.certainty='RECEIVED_INVALID';throw error; }
 export function validateCategoryDecision(raw: unknown): CategoryDecision {
-  const value = keys(raw, ['kind','phase','keywords','productType','reason','ambiguous']);
+  const value = keys(raw, ['kind','phase','keywords','productType','reason','ambiguous'],['selection']);
   if (value.kind !== 'category-decision' || !['keywords','select','judge'].includes(String(value.phase)) || typeof value.ambiguous !== 'boolean'
     || !Array.isArray(value.keywords) || value.phase === 'keywords' && !value.keywords.length || value.keywords.length > 8) throw new AiError('OUTPUT_INVALID');
   const keywords = value.keywords.map(word => boundedText(word, 100));
+  let selection:CategoryDecision['selection'];
+  if(value.selection!==undefined){
+   try{const s=keys(value.selection,['version','outcome','candidateSnapshotSha256']);if(s.version!==1||!['SELECTED','NO_SUITABLE'].includes(String(s.outcome))||typeof s.candidateSnapshotSha256!=='string'||!/^[a-f0-9]{64}$/.test(s.candidateSnapshotSha256)||value.phase==='keywords')invalidCategory('CATEGORY_SELECTION_INVALID');selection={version:1,outcome:s.outcome as 'SELECTED'|'NO_SUITABLE',candidateSnapshotSha256:s.candidateSnapshotSha256};}
+   catch{invalidCategory('CATEGORY_SELECTION_INVALID');}
+  }
   const productType = value.productType === null ? null : boundedText(value.productType, 100);
-  if (value.phase === 'keywords' ? productType !== null : !productType || !/^[A-Z0-9_]+$/.test(productType)) invalidCategory('CATEGORY_SELECTION_MISSING');
-  return { kind:'category-decision', phase:value.phase as CategoryDecision['phase'], keywords, productType, reason:boundedText(value.reason, 2000), ambiguous:value.ambiguous };
+  if(selection?.outcome==='NO_SUITABLE' ? productType!==null||value.ambiguous : value.phase === 'keywords' ? productType !== null : !productType || !/^[A-Z0-9_]+$/.test(productType)) invalidCategory('CATEGORY_SELECTION_MISSING');
+  return { kind:'category-decision', phase:value.phase as CategoryDecision['phase'], keywords, productType, reason:boundedText(value.reason, 2000), ambiguous:value.ambiguous,...(selection?{selection}:{}) };
 }
 export async function categoryDecision(payload: { phase: CategoryDecision['phase']; candidates: ProductTypeOption[]; [key: string]: unknown }, credentials: DeepSeekCredentials, signal: AbortSignal, context: AdapterContext, images: DeepSeekReferenceImage[]) {
   if(context.purposeSnapshot?.capability.endpoint==='decisions'){
@@ -37,6 +43,7 @@ export async function categoryDecision(payload: { phase: CategoryDecision['phase
   const { content, ...metadata } = await requestDeepSeekJson(payload, system, 'deepseek-flash', credentials, signal, context, maxTokens, images);
   const output = validateCategoryDecision(content);
   if (output.phase !== payload.phase) invalidCategory('CATEGORY_PHASE_MISMATCH');
+  if(output.selection&&output.selection.candidateSnapshotSha256!==categoryCandidateSnapshot(payload.candidates))invalidCategory('CATEGORY_CANDIDATE_SNAPSHOT_MISMATCH');
   if (output.productType && !payload.candidates.some(candidate => candidate.name === output.productType)) invalidCategory('CATEGORY_NOT_IN_CANDIDATES');
   return { ...metadata, output };
 }

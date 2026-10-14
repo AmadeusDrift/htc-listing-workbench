@@ -25,7 +25,7 @@ function mapped(input,init={},transport='fetch'){
   const url=new URL(raw),method=String(init.method??input?.method??'GET').toUpperCase();
   if(url.username||url.password||url.hash)return deny(transport);
   const headers=new Headers(init.headers??input?.headers);
-  if([...headers.keys()].some(name=>name.startsWith('x-s10-native-')))return deny('native-capability');
+  if([...headers.keys()].some(name=>name.startsWith('x-s10-native-')))return deny('native-capability:'+transport);
   const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){

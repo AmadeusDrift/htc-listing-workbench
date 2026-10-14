@@ -135,6 +135,7 @@ const api: RedApi = {
   queryImageVersions: input => invoke('red:images:versions-query', input),
   queryImageSelections: input => invoke('red:images:selections-query', input),
   queryContentVersions: input => invoke('red:content:versions-query', input),
+  diagnoseAiNetwork: () => invoke('red:ai:network-diagnostics'),
   listAiConnections: () => invoke('red:ai:connections'),
   getAiPurposeProfiles:()=>invoke('red:ai:purpose-profiles'),
   getAiUsageReport:input=>invoke('red:ai:usage-report',input),

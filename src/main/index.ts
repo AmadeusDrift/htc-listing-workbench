@@ -1,3 +1,4 @@
+import {createSystemProxyFetch, createAiNetworkDiagnostics} from './ai-network.ts';
 import {createBatchReferencePort} from './hosting/batch-references.ts';
 import { assertConsistencyView } from './source-image-consistency/proof.ts';
 import { UserFacingError } from '../shared/errors.ts';
@@ -91,14 +92,16 @@ async function start() {
     dataFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
   });
   hosting = new HostingService(dataRoot, db, safeStorage, { probe: createPublicImageProbe({ nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) }) });
+  const aiFetch = createSystemProxyFetch((url, init) => net.fetch(url, init));
+  const networkDiagnostics = createAiNetworkDiagnostics({fetch:aiFetch,resolveProxy:url=>session.defaultSession.resolveProxy(url)});
   imageGeneration = new ImageGenerationService(dataRoot, db, safeStorage, {
     normalizeImage: normalizeGeneratedImage,
-    fetch: (url, init) => net.fetch(url instanceof URL ? url.href : url, { ...init, bypassCustomProtocolHandlers: true }), decodePreview,
+    fetch: aiFetch, decodePreview,
     downloadDependencies: { nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) },
   });
   const generationService = imageGeneration;
   batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>net.fetch(url,{...init,bypassCustomProtocolHandlers:true})})});
-  ai = new AiService(dataRoot, db, hosting, safeStorage, { imageGenerationCapability: () => generationService.capability(),batchReferences });
+  ai = new AiService(dataRoot, db, hosting, safeStorage, { fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
@@ -287,7 +290,7 @@ async function start() {
       updateWindowAppearance();
       return saved;
     },
-  }, imageGeneration, imageWorkflow, automatic, { labels, labelSettings, shipmentDocuments, procurement }, skuNaming);
+  }, imageGeneration, imageWorkflow, automatic, { labels, labelSettings, shipmentDocuments, procurement }, skuNaming, networkDiagnostics);
   mainWindow.once('ready-to-show', () => { if (process.env.RED_E2E !== '1') mainWindow.show(); });
   await mainWindow.loadURL(expectedUrl);
   listingFollowup.start();

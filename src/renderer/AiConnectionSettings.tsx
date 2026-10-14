@@ -1,3 +1,4 @@
+import {AiNetworkDiagnostics} from './AiNetworkDiagnostics';
 import { useFormGuard } from './FormGuard';
 import { useEffect, useState } from 'react';
 import type { AiProfile, AiProviderId } from '../shared/ai-contracts';
@@ -77,6 +78,7 @@ export function AiConnectionSettings({ vendor, busy, run, onVendorChange }: { ve
   }
   useFormGuard({ dirty: () => !!(apiKey || accessKeyId || accessKeySecret || securityToken), save, discard: clearSecrets });
   return <form className="credential-form" aria-label="AI 连接配置" onSubmit={event => { event.preventDefault(); void save(); }}>
+    <AiNetworkDiagnostics />
     <div className="credential-heading"><h4>{vendorName} 连接</h4><SettingsStatusBadge tone={loading ? 'info' : error ? 'danger' : issuePresentation?.tone ?? (connection ? connectionTones[connection.state] : 'neutral')}>{loading ? '正在读取…' : error ? '读取失败' : issuePresentation?.label ?? (connection ? connectionStates[connection.state] : '尚未配置')}</SettingsStatusBadge></div>
     {issuePresentation && <p className="workflow-warning" role="alert">{issuePresentation.detail}</p>}
     <p className="settings-help">{textVendor ? '填写一次 API Key，文案生成与复核共用。两项任务的模型和启停可分别设置。' : '填写一次 AccessKey，OCR、图片分割与侵权风险检测共用。请开通所需服务并授予访问权限；侵权检测使用图片审核增强版。临时凭据还需填写 Security Token。'}</p>

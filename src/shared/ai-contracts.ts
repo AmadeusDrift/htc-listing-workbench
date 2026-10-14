@@ -122,6 +122,7 @@ export interface ReviewContentInput { productId: string; productRevision: number
 /** Image generation uses the independent, candidate-only ImageGenerationApi contract. */
 export interface AiCallQuery extends RecordPageOptions { productId?: string; providerId?: AiProviderId; status?: AiCall['status'] }
 export interface AiApi extends AiConnectionApi, ListingAiApi,AiPurposeApi {
+  diagnoseAiNetwork(): Promise<import('./ai-network-contracts.ts').AiNetworkReport>;
   listAiProviders(): Promise<AiProfile[]>;
   listAiCapabilities(): Promise<AiCapabilityInfo[]>;
   importAiProviderConfig(): Promise<AiProfile | null>;

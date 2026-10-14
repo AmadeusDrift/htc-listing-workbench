@@ -1,3 +1,4 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useEffect, useRef, useState } from 'react';
 import { Download, ExternalLink, RefreshCw } from 'lucide-react';
 import type { ItemLabelRecord, ItemLabelStatus } from '../shared/item-label-contracts';
@@ -11,11 +12,14 @@ const statusLabels: Record<ItemLabelStatus, string> = { NOT_REQUESTED:'尚未请
 function labelTone(status: ItemLabelStatus): SettingsStatusTone { return status === 'READY' ? 'success' : status === 'FAILED' ? 'danger' : status === 'STALE' ? 'warning' : 'neutral'; }
 
 export function ItemLabelsPanel({ batch, busy, dirty }: { batch: ProcurementBatch; busy: boolean; dirty: boolean }) {
+  const [pageSize, setPageSize] = useListPageSize('item-labels');
   const api = window.red;
   const [labels, setLabels] = useState<ItemLabelRecord[]>([]);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(false);
   const [error, setError] = useState(''), [readError, setReadError] = useState(''), [notice, setNotice] = useState('');
   const [refresh, setRefresh] = useState(0), [page, setPage] = useState(0);
+  const safePage = Math.min(page, Math.max(0, Math.ceil(batch.lines.length / pageSize) - 1));
+  useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
   const mounted = useRef(true), version = useRef(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -44,12 +48,12 @@ export function ItemLabelsPanel({ batch, busy, dirty }: { batch: ProcurementBatc
     <p className="ops-hint">打开标签 PDF 后，在系统阅读器中选择打印机。工作台不会自动向实体打印机发送任务。完整批次标签就绪后可统一导出。</p>
     {dirty && <p className="workflow-warning" role="status">备货单有未保存修改，请先保存后再准备、打开、导出或重试标签。</p>}
     {loading && <p role="status">正在读取商品标签…</p>}{readError && <p className="workflow-notice" role="alert">标签状态读取失败：{readError}</p>}{error && <p className="workflow-notice" role="alert">{error}</p>}{notice && <p className="ops-notice" role="status">{notice}</p>}
-    <div className="ops-table-wrap"><table><thead><tr><th>商品 / 规格 / SKU</th><th>发往 Amazon</th><th>平台商品编号</th><th>商品标签状态</th><th>标签文件与操作</th></tr></thead><tbody>{batch.lines.slice(page*100,(page+1)*100).map(line => {
+    <div className="ops-table-wrap"><table><thead><tr><th>商品 / 规格 / SKU</th><th>发往 Amazon</th><th>平台商品编号</th><th>商品标签状态</th><th>标签文件与操作</th></tr></thead><tbody>{batch.lines.slice(safePage* pageSize,(safePage+1)* pageSize).map(line => {
       const value = current.find(item => item.lineId === line.id), status = value?.status ?? (history.some(item => item.lineId === line.id) ? 'STALE' : 'NOT_REQUESTED');
       const usable = value?.status === 'READY' && value.quantity === line.stockQuantity;
       return <tr key={line.id} data-testid={`item-label-${line.id}`}><td><div className="ops-product">{line.imageAssetId && <img alt="商品图" src={`red-asset://image/${line.imageAssetId}`} />}<div>{line.title}<small>{line.spec}</small><strong>{line.sku}</strong></div></div></td><td>{line.stockQuantity ?? '尚未填写'} 个销售单位<small>对应标签 {value?.quantity ?? line.stockQuantity ?? '待定'} 张</small></td><td>ASIN {line.asin || '待确认'}<small>FNSKU {line.fnsku || '尚未取得'}</small></td><td><Badge tone={labelTone(status)}>{statusLabels[status]}</Badge>{value && <small>当前版本 v{value.version}{value.paused ? ' · 已暂停，需明确准备或重试标签' : ''}</small>}<small>{value?.message || (batch.mode === 'demo' ? '演示记录不会请求真实平台标签。' : '需要备货或打印时，点击“准备本批次标签”。')}</small>{value && value.quantity !== line.stockQuantity && <small>当前份数与备货数量不一致，请刷新后等待新版本。</small>}</td><td>{value?.files.length ? <><small>{value.files.length} 个 PDF 文件 · {value.quantity} 张标签</small>{value.files.map((file,index) => <button key={file.index} type="button" className="button secondary" aria-label={`打开标签文件 ${index+1}`} title={`${line.sku} · 文件 ${index+1}，可在系统阅读器打印`} disabled={disabled || !usable} onClick={() => { void action(async () => { await api.openItemLabel({ id:value.id,fileIndex:file.index }); return '已在系统阅读器打开标签，可选择打印机打印'; }); }}><ExternalLink size={14} />打开 / 打印 {index+1}</button>)}</> : <small>尚无可打印文件</small>}{value?.status === 'FAILED' && <button type="button" className="button secondary" disabled={disabled} onClick={() => { void action(async () => { await api.retryItemLabel(value.id); return `${line.sku} 已安排重试`; }); }}>重试此 SKU 标签</button>}</td></tr>;
     })}</tbody></table></div>
-    {batch.lines.length > 100 && <div className="ops-pagination"><button type="button" className="button secondary" disabled={!page} onClick={() => setPage(page-1)}>上一页</button><span>{page+1} / {Math.ceil(batch.lines.length/100)} 页</span><button type="button" className="button secondary" disabled={(page+1)*100 >= batch.lines.length} onClick={() => setPage(page+1)}>下一页</button></div>}
+    {batch.lines.length > 0 && <div className="ops-pagination"><PageSizeSelect label="商品标签每页数量" value={pageSize} onChange={setPageSize}/><button type="button" className="button secondary" disabled={!safePage} onClick={() => setPage(safePage-1)}>上一页</button><span>{safePage+1} / {Math.ceil(batch.lines.length/ pageSize)} 页</span><button type="button" className="button secondary" disabled={(safePage+1)* pageSize >= batch.lines.length} onClick={() => setPage(safePage+1)}>下一页</button></div>}
     {!!history.length && <details className="listing-details"><summary>历史标签版本（{history.length}）</summary><p>以下版本已失效，不用于当前备货贴标。</p><ul className="listing-history">{history.map(value => <li key={value.id}><strong>{value.sku} · v{value.version} · {value.quantity ?? '待定'} 张</strong><p>旧版本已失效 · {value.files.length} 个文件 · {value.message}</p></li>)}</ul></details>}
     <details className="listing-details"><summary>设置标签纸规格</summary><ItemLabelSettings busy={busy || dirty || pending} onSaved={() => setRefresh(value => value + 1)} /></details>
   </section>;

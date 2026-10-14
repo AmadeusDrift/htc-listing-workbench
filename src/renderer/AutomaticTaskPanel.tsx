@@ -136,11 +136,11 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
       </div>
       {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
-      {adaptation&&<div className="workflow-notice" aria-label="旧任务适配检查"><strong>当前规则与资料检查</strong>
+      {adaptation&&<details className="workflow-notice" aria-label="旧任务适配检查"><summary>当前规则与资料检查（展开明细）</summary>
         {adaptation.blockers.map(message=><p key={message}>{message}</p>)}
         {adaptation.changes.length?<ul>{adaptation.changes.map((change,index)=><li key={change.key+':'+index}>{change.sku??'新增规格'}：{change.message}{change.fields.length?'；字段：'+change.fields.join('、'):''}{change.steps.length?'；涉及：'+change.steps.join('、'):''}</li>)}</ul>:<p>未发现需要适配的差异。</p>}
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
-      </div>}
+      </details>}
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
       <AutomaticProductGroups key={task.id} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}

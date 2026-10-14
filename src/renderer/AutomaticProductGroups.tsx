@@ -1,3 +1,5 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
+import { pageWindow } from './list-pagination';
 import { ActualQuoteDetailsPanel } from './ActualQuoteDetailsPanel';
 import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
@@ -58,17 +60,21 @@ export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, m
   const [expandedIds, setExpandedIds] = usePageState<string[]>(`task:${memoryKey}:expanded`, []);
   const [search, setSearch] = usePageState(`task:${memoryKey}:search`, '');
   const [collapsedSearchIds, setCollapsedSearchIds] = usePageState<string[]>(`task:${memoryKey}:collapsed`, []);
+  const [pageSize, setPageSize] = useListPageSize('task-products');
+  const [page, setPage] = usePageState(`task:${memoryKey}:page`, 1);
   const visible = filterAutomaticProductGroups(groups, search);
+  const paging = pageWindow(visible.length, pageSize, page);
+  useEffect(() => { if (page !== paging.page) setPage(paging.page); }, [page, paging.page]);
   const query = search.trim().toLocaleLowerCase();
   return <div className="automatic-source-groups">
     <div className="automatic-group-toolbar">
-      <label className="automatic-group-search"><Search size={16} /><input type="search" aria-label="搜索任务商品或 SKU" placeholder="搜索商品、颜色、来源或销售 SKU" value={search} onChange={event => { setSearch(event.target.value); setCollapsedSearchIds([]); }} /></label>
+      <label className="automatic-group-search"><Search size={16} /><input type="search" aria-label="搜索任务商品或 SKU" placeholder="搜索商品、颜色、来源或销售 SKU" value={search} onChange={event => { setSearch(event.target.value); setPage(1); setCollapsedSearchIds([]); }} /></label>
       <button type="button" className="text-button" onClick={() => { setExpandedIds(visible.map(group => group.productId)); setCollapsedSearchIds([]); }}>展开全部商品</button>
       <button type="button" className="text-button" onClick={() => { setExpandedIds([]); setSearch(''); }}>收起全部商品</button>
     </div>
     <p className="small-copy">按来源商品链接汇总；展开查看同款销售组、实际父 SKU 和子 SKU。来源链接与 Amazon 父体分别显示。</p>
     {!visible.length && <p className="small-copy" role="status">没有匹配的商品或 SKU。</p>}
-    {visible.map(group => {
+    {visible.slice(paging.start, paging.end).map(group => {
       const expanded = expandedIds.includes(group.productId) || Boolean(query) && !collapsedSearchIds.includes(group.productId);
       const status = group.statusCounts;
       const outcomes = group.outcomeCounts;
@@ -90,5 +96,6 @@ export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, m
         </div>}
       </article>;
     })}
+    <nav className="inbox-pagination" aria-label="任务商品分页"><PageSizeSelect label="任务商品每页数量" value={pageSize} onChange={setPageSize}/><button className="button secondary" disabled={paging.page <= 1} onClick={() => setPage(paging.page - 1)}>上一页</button><span>第 {paging.page} / {paging.pages} 页 · 共 {visible.length} 件</span><button className="button secondary" disabled={paging.page >= paging.pages} onClick={() => setPage(paging.page + 1)}>下一页</button></nav>
   </div>;
 }

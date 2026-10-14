@@ -1,3 +1,4 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Pause, Play, RefreshCw } from 'lucide-react';
 import type { MiaoshouPreview } from '../shared/miaoshou-contracts';
@@ -6,6 +7,7 @@ import { errorText } from './utils';
 
 const itemLabels: Record<MiaoshouSyncItemState, string> = { pending: '待读取', ready: '已暂存', unchanged: '未变更', failed: '读取失败' };
 export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPreview: (preview: MiaoshouPreview) => void }) {
+  const [displaySize, setDisplaySize] = useListPageSize('miaoshou-sync-records');
   const [status, setStatus] = useState<MiaoshouSyncStatus | null>(null), [items, setItems] = useState<MiaoshouSyncPage | null>(null);
   const [page, setPage] = useState(1), [filter, setFilter] = useState<MiaoshouSyncPageInput['filter']>('all'), [pageSize, setPageSize] = useState(500);
   const [working, setWorking] = useState(false), [error, setError] = useState(''), [refresh, setRefresh] = useState(0);
@@ -15,14 +17,14 @@ export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPre
     let active = true, timer: ReturnType<typeof setTimeout> | undefined;
     async function load() {
       try {
-        const [state, rows] = await Promise.all([window.red.getMiaoshouSyncStatus(), window.red.listMiaoshouSyncItems({ page, pageSize: 20, filter })]);
+        const [state, rows] = await Promise.all([window.red.getMiaoshouSyncStatus(), window.red.listMiaoshouSyncItems({ page, pageSize: displaySize, filter })]);
         if (!active) return; setStatus(state); setItems(rows);
         if (page > 1 && rows.total <= (page - 1) * rows.pageSize) { setPage(Math.max(1, Math.ceil(rows.total / rows.pageSize))); return; }
         timer = setTimeout(() => void load(), state.status === 'running' ? 1000 : 5000);
       } catch (cause) { if (active) { setError(errorText(cause)); timer = setTimeout(() => void load(), 5000); } }
     }
     void load(); return () => { active = false; clearTimeout(timer); };
-  }, [page, filter, refresh]);
+  }, [page, displaySize, filter, refresh]);
   async function action(operation: () => Promise<unknown>) {
     if (working || disabled) return; setWorking(true); setError('');
     try { await operation(); } catch (cause) { if (mounted.current) setError(errorText(cause)); }
@@ -49,6 +51,6 @@ export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPre
       <button className="button secondary" disabled={busy || !['ready', 'unchanged'].includes(item.status)} onClick={() => void action(async () => { const preview = await window.red.previewMiaoshouSyncedProduct({ id: item.remoteId }); if (mounted.current) onPreview(preview); })}>预览与映射</button>
     </div>)}</div>
     {items?.total === 0 && <p className="settings-help">{filter === 'all' ? '暂无暂存商品。同步完成的详情会显示在这里。' : '当前筛选下没有商品。'}</p>}
-    <div className="workflow-actions"><button className="button secondary" disabled={working || page <= 1} onClick={() => setPage(value => value - 1)}><ChevronLeft size={15} />上一页</button><button className="button secondary" disabled={working || !items || page * items.pageSize >= items.total} onClick={() => setPage(value => value + 1)}>下一页<ChevronRight size={15} /></button><button className="button secondary" disabled={working} onClick={() => setRefresh(value => value + 1)}>刷新进度</button></div>
+    <div className="workflow-actions"><PageSizeSelect label="采集同步记录每页数量" value={displaySize} onChange={value => { setItems(null); setDisplaySize(value); }}/><button className="button secondary" disabled={working || page <= 1} onClick={() => setPage(value => value - 1)}><ChevronLeft size={15} />上一页</button><button className="button secondary" disabled={working || !items || page * items.pageSize >= items.total} onClick={() => setPage(value => value + 1)}>下一页<ChevronRight size={15} /></button><button className="button secondary" disabled={working} onClick={() => setRefresh(value => value + 1)}>刷新进度</button></div>
   </section>;
 }

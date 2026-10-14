@@ -16,6 +16,8 @@ test('unknown local failures make no unsupported disk diagnosis',()=>{
 });
 
 import { recordErrorEvidence } from '../src/main/error-evidence.ts';
+import { AiError } from '../src/main/ai/errors.ts';
+import { randomUUID } from 'node:crypto';
 test('diagnostics are bounded, allowlisted and never replace an exception',()=>{
   const rows:Record<string,unknown>[]=[];
   const original=Object.assign(new Error('https://private?token=secret'),{code:'ENOSPC'});
@@ -26,4 +28,11 @@ test('diagnostics are bounded, allowlisted and never replace an exception',()=>{
   const hostile=new Proxy({}, {get(){throw Error('hostile accessor');}});
   assert.doesNotThrow(()=>recordErrorEvidence(()=>{},hostile,{stage:'image-generation.save'}));
   assert.equal(original.message,'https://private?token=secret');
+});
+test('structured failed evidence retains exact call, abort source and safe finer reason', () => {
+  const rows: Record<string, unknown>[] = [], callId = randomUUID(), operationId = randomUUID();
+  const error = Object.assign(new AiError('TIMEOUT'), { callId, abortSource: 'BODY_TIMEOUT', certainty: 'SENT_UNKNOWN', diagnosticReason: 'RESPONSE_READ_FAILED', headers: { Authorization: 'Bearer sk-bait' } });
+  recordErrorEvidence(detail => rows.push(detail), error, { stage: 'fields', operationId } as any);
+  assert.equal(rows[0].callId, callId); assert.equal(rows[0].operationId, operationId); assert.equal(rows[0].abortSource, 'BODY_TIMEOUT'); assert.equal(rows[0].certainty, 'SENT_UNKNOWN'); assert.equal(rows[0].diagnosticReason, 'RESPONSE_READ_FAILED');
+  assert.doesNotMatch(JSON.stringify(rows), /Authorization|sk-bait|Bearer/);
 });

@@ -124,6 +124,8 @@ const api: RedApi = {
     return () => { ipcRenderer.removeListener('red:collection:received', handler); };
   },
   getLocalDiagnostics: () => invoke('red:diagnostics:get'),
+  getRunDiagnostics: input => invoke('red:diagnostics:run-query', input),
+  exportRunDiagnostics: input => invoke('red:diagnostics:run-export', input),
   exportLocalDiagnostics: () => invoke('red:diagnostics:export'),
   saveImageResult: input => invoke('red:images:save-result', input),
   listImageVersions: id => invoke('red:images:versions', id),

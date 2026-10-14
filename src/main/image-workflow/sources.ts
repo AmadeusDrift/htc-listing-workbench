@@ -65,7 +65,7 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   const mappings=source?sourceImageMappings(source):[];
   const originalStamp=sourceStamp(product),derived=new Set(workflowRuns(db).flatMap(run=>run.slots?run.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):run.approvedAssetId?[run.approvedAssetId]:[]));
   const ready=(variantId:string)=>{
-    try { selectImageReferences(product,variantId,derived,(assetId,id)=>Boolean(db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,id)),allowUnbound);return true; }
+    try { selectImageReferences(product,variantId,derived,(assetId,id)=>Boolean(db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,id)),allowUnbound&&!mappings.find(row=>row.localVariantId===variantId)?.images.length);return true; }
     catch(error) { if(error instanceof UserFacingError)return false;throw error; }
   };
   const receiptStamp=listingFingerprint(source),attempted=new Set<string>(),failedUrls=new Map<string,string>();
@@ -74,7 +74,9 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   const productReferences=new Set<string>();
   const candidates=new Map(input.variantIds.map(variantId=>{
     const mapped=[...(mappings.find(row=>row.localVariantId===variantId)?.images??[])].sort((a,b)=>Number(a.basis==='spec-value')-Number(b.basis==='spec-value')).map(i=>i.imageId);
-    let ids=source?.kind==='native1688'?mapped.filter(id=>imageUrl(id).trim()):receipt?.snapshot.images.filter(image=>image.url.trim() && (mapped.includes(image.id) || allowUnbound)).map(image=>image.id)??[];
+    // Explicit supplier SKU images outrank generic single-SKU gallery order.
+    // Do not let a generic original satisfy a mapped SKU then fail consistency later.
+    let ids=mapped.length?mapped.filter(id=>imageUrl(id).trim()):source?.kind==='native1688'?[]:receipt?.snapshot.images.filter(image=>image.url.trim() && allowUnbound).map(image=>image.id)??[];
     const variant=product.variants.find(v=>v.id===variantId)!,spec=(variant.sourceSpec||variant.originalSpec).trim();
     if(!ids.length&&!mapped.length&&mappings.some(m=>m.localVariantId===variantId)&&spec&&!/规格待核对/.test(spec)){
       // Known sibling thumbnails are not generic gallery references.

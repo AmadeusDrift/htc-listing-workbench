@@ -31,6 +31,51 @@ test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP
   const raw=await readFile(server.ledgerPath,'utf8');assert.ok(!/s10-acs-secret|s10-miaoshou-secret|authorization|x-sign/.test(raw));
 });
 
+test('actual AmazonTransport verifies LWA, exact preview/formal/readback queries and full-schema download checksum over owned HTTP',async t=>{
+  const root=await directory(),{schemaFixture}=require(resolve('tests/fixtures/stabilization/pipeline-normal-draft.mjs')),fixture=await schemaFixture('drink-coaster-us');
+  const body={productType:'DRINK_COASTER',requirements:'LISTING',attributes:{item_name:[{value:'Synthetic coaster',marketplace_id:'ATVPDKIKX0DER',language_tag:'en_US'}]}},bodySha256=createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  const base='https://sellingpartnerapi-na.amazon.com',path='/listings/2021-08-01/items/S10SELLER/S10-SKU',query={marketplaceIds:'ATVPDKIKX0DER',issueLocale:'en_US'},auth={kind:'amazon',sellerId:'S10SELLER',sku:'S10-SKU',accessToken:'s10-amazon-token',now};
+  const url=(p:string,q:Record<string,string>)=>base+p+'?'+new URLSearchParams(q);
+  const routes=[{id:'lwa',method:'POST',path:'/protocol/lwa',publicUrl:'https://api.amazon.com/auth/o2/token',protocol:{kind:'lwa',clientId:'s10-client-id',clientSecret:'s10-client-secret',refreshToken:'s10-refresh-token'},response:{json:{access_token:'s10-amazon-token',token_type:'bearer',expires_in:3600}}},
+    {id:'library',method:'GET',path:'/protocol/library',publicUrl:url('/definitions/2020-09-01/productTypes',{marketplaceIds:'ATVPDKIKX0DER',locale:'en_US'}),protocol:{...auth,operation:'library'},response:{json:{productTypes:[{name:'DRINK_COASTER',displayName:'Drink coaster',marketplaceIds:['ATVPDKIKX0DER']}]}}},
+    {id:'schema',method:'GET',path:'/protocol/schema',publicUrl:fixture.schema.url,protocol:{kind:'public-bytes'},response:{bytes:fixture.schema.bytes,contentType:'application/json'}},
+    {id:'preview',method:'PUT',path:'/protocol/preview',publicUrl:url(path,{...query,mode:'VALIDATION_PREVIEW',includedData:'issues'}),protocol:{...auth,operation:'preview',bodySha256},response:{json:{sku:'S10-SKU',status:'VALID',submissionId:'s10-preview',issues:[]}}},
+    {id:'submit',method:'PUT',path:'/protocol/submit',publicUrl:url(path,{...query,includedData:'issues'}),protocol:{...auth,operation:'submit',bodySha256},response:{json:{sku:'S10-SKU',status:'ACCEPTED',submissionId:'s10-submit',issues:[]}}},
+    {id:'readback',method:'GET',path:'/protocol/readback',publicUrl:url(path,{...query,includedData:'summaries,issues,attributes,offers,fulfillmentAvailability,relationships'}),protocol:{...auth,operation:'readback'},response:{json:{sku:'S10-SKU',summaries:[{marketplaceId:'ATVPDKIKX0DER',status:['BUYABLE']}],issues:[]}}},
+    {id:'definition',method:'GET',path:'/protocol/definition',publicUrl:url('/definitions/2020-09-01/productTypes/DRINK_COASTER',{sellerId:'S10SELLER',marketplaceIds:'ATVPDKIKX0DER',requirements:'LISTING',requirementsEnforced:'ENFORCED',parentageLevel:'NONE',locale:'en_US',productTypeVersion:'LATEST'}),protocol:{...auth,operation:'definitions',productType:'DRINK_COASTER',parentageLevel:'NONE'},response:{json:fixture.definition}}];
+  const server=await createFakeProvider({directory:join(root,'server'),routes});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {AmazonTransport} from './src/main/amazon/transport.ts';
+    const target={id:'01234567-89ab-4cde-8fab-0123456789ab',sellerId:'S10SELLER',marketplaceId:'ATVPDKIKX0DER',region:'na',locale:'en_US',mode:'live'},events=[];
+    const transport=new AmazonTransport({active:()=>target,generation:()=>1,credentials:()=>({clientId:'s10-client-id',clientSecret:'s10-client-secret',refreshToken:'s10-refresh-token'}),pause:()=>{throw Error('unexpected pause');},audit:value=>events.push(value),redact:value=>value,remember:()=>{}},{fetch,schemaFetch:fetch,now:()=>Date.parse('${now}'),resolveAddresses:async host=>{assert.equal(host,'selling-partner-definitions-prod-iad.s3.amazonaws.com');return ['198.18.0.1'];},sleep:async()=>{}});
+    const library=await transport.api(target,'searchDefinitionsProductTypes','/definitions/2020-09-01/productTypes',{marketplaceIds:'ATVPDKIKX0DER',locale:'en_US'});assert.equal(library.data.productTypes[0].name,'DRINK_COASTER');
+    const definition=await transport.api(target,'getDefinitionsProductType','/definitions/2020-09-01/productTypes/DRINK_COASTER',{sellerId:'S10SELLER',marketplaceIds:'ATVPDKIKX0DER',requirements:'LISTING',requirementsEnforced:'ENFORCED',parentageLevel:'NONE',locale:'en_US',productTypeVersion:'LATEST'});assert.equal(definition.data.productType,'DRINK_COASTER');
+    const downloaded=await transport.schemaLink(target,${JSON.stringify(fixture.definition.schema)});assert.equal(Object.keys(downloaded.schema.properties).length,106);
+    await assert.rejects(transport.schemaLink(target,{...${JSON.stringify(fixture.definition.schema)},checksum:'AAAAAAAAAAAAAAAAAAAAAA=='}),/checksum/);
+    const path='${path}',query=${JSON.stringify(query)},body=${JSON.stringify(body)};
+    assert.equal((await transport.api(target,'previewListingsItem',path,{...query,mode:'VALIDATION_PREVIEW',includedData:'issues'},body)).data.status,'VALID');
+    assert.equal((await transport.api(target,'putListingsItem',path,{...query,includedData:'issues'},body)).data.status,'ACCEPTED');
+    assert.deepEqual((await transport.api(target,'getListingsItem',path,{...query,includedData:'summaries,issues,attributes,offers,fulfillmentAvailability,relationships'})).data.summaries[0].status,['BUYABLE']);
+    const preview=${JSON.stringify(routes[3].publicUrl)},headers={'x-amz-access-token':'s10-amazon-token','x-amz-date':'20261015T000000Z','content-type':'application/json'};
+    const bad=[[preview+'&mode=VALIDATION_PREVIEW',{}],[preview.replace('mode=','%6Dode='),{}],[preview.replace('VALIDATION_PREVIEW','validation_preview'),{}],[preview,{headers:{...headers,'x-amz-access-token':'s10-other-token'}}],[preview,{headers:{...headers,'x-amz-date':'20261016T000000Z'}}],[preview,{headers:{...headers,authorization:'Bearer s10-other'}}],[preview,{body:'{}'}],[preview,{method:'PATCH'}]];
+    for(const [url,override]of bad)await assert.rejects(async()=>fetch(url,{method:'PUT',headers,body:JSON.stringify(body),redirect:'error',...override}));
+    const form=new URLSearchParams({grant_type:'refresh_token',client_id:'s10-client-id',client_secret:'s10-client-secret',refresh_token:'s10-refresh-token'}).toString();
+    for(const body of [form+'&refresh_token=s10-refresh-token',form.replace('client_id=','%63lient_id='),form.replace('s10-client-id','s10-other-id')])await assert.rejects(async()=>fetch('https://api.amazon.com/auth/o2/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded;charset=UTF-8'},body,redirect:'manual'}));
+    console.log(JSON.stringify({rejected:bad.length+3,events:events.map(row=>row.operation),guard:globalThis.__s10Guard}));`;
+  const output=await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});assert.equal(JSON.parse(output.stdout).rejected,11);
+  const rows=server.ledger(),requests=rows.filter((row:any)=>row.event==='request');assert.deepEqual(requests.map((row:any)=>row.routeId),['lwa','library','definition','schema','schema','preview','submit','readback']);assert.equal(rows.filter((row:any)=>row.event==='arrival').length,8);assert.ok(requests.every((row:any)=>row.protocolVerified));
+});
+
+test('signed protocol error/manual redirects never follow the owned bait route',async t=>{
+  const root=await directory(),route=ocrRoute();Object.assign(route.response,{status:307,redirectToPath:'/bait'});
+  const server=await createFakeProvider({directory:join(root,'server'),routes:[route,{id:'bait',method:'GET',path:'/bait',response:{json:{bait:true}}}]});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {signAcs3} from './src/main/ai/acs3.ts';const body=Buffer.from('s10-redirect'),s=signAcs3({host:'ocr-api.cn-hangzhou.aliyuncs.com',action:'RecognizeAllText',version:'2021-07-07',query:{Type:'Commerce'},body,contentType:'application/octet-stream',now:new Date('${now}'),nonce:'${nonce}',accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret'});
+    await assert.rejects(async()=>fetch(s.url,{method:'POST',headers:s.headers,body,redirect:'error'}),/S10_PROTOCOL_REDIRECT/);
+    const response=await fetch(s.url,{method:'POST',headers:s.headers,body,redirect:'manual'});assert.equal(response.status,307);assert.equal(response.headers.get('location'),'${server.origin}/bait');await response.text();
+    await assert.rejects(async()=>fetch(s.url,{method:'POST',headers:s.headers,body,redirect:'follow'}),/S10_NETWORK_BLOCKED/);console.log('redirects-contained');`;
+  await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});
+  const requests=server.ledger().filter((row:any)=>row.event==='request');assert.equal(requests.length,2);assert.ok(requests.every((row:any)=>row.routeId==='ocr'));assert.equal(server.ledger().filter((row:any)=>row.event==='arrival').length,2);
+});
+
 test('actual Ali risk adapter performs token, exact candidate OSS4 upload and moderation as three owned verified effects',async t=>{
   const {materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),root=await directory();
   const fixtures=await materializeFixtures(join(root,'fixtures')),bytes=await readFile(fixtures[0].absolutePath),sha256=createHash('sha256').update(bytes).digest('hex');

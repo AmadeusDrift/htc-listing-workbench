@@ -51,7 +51,8 @@ export async function createFakeProvider({directory,routes,ftp=false,maxRequestB
         json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};
       }
       const bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(json));
-      response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':String(row.sequence),'content-length':String(bytes.length)});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestSequence:row.sequence,status:output.status??200});
+      if(output.redirectToPath)assert.ok(safePath(output.redirectToPath),'S10_REDIRECT_FIXTURE');
+      response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':String(row.sequence),'content-length':String(bytes.length),...(output.redirectToPath?{location:`http://127.0.0.1:${port}${output.redirectToPath}`}:{})});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestSequence:row.sequence,status:output.status??200});
       const finish=()=>{if(!response.destroyed){response.end(bytes);ledger.append({event:'body',routeId:route.id,requestSequence:row.sequence,bodySha256:digest(bytes),bodyBytes:bytes.length});}};
       if(output.holdBody){const pending=held.get(route.id)??[];pending.push(finish);held.set(route.id,pending);}else finish();
     }catch(error){if(!response.destroyed){response.writeHead(500);response.end();}ledger.append({event:'transport-error',routeId:route.id,errorCode:error.code??'LOCAL_ERROR'});}

@@ -28,7 +28,7 @@ function mapped(input,init={},transport='fetch'){
   const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
-    if(transport!=='fetch'||raw!==route.publicUrl||init.redirect!==undefined&&init.redirect!=='error')return deny('protocol-transport');
+    if(transport!=='fetch'||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');
     try{verifyProtocol(route,headers,wireBody(init.body));}catch{return deny('protocol-auth');}
     state.allowed++;return {url:origin.origin+route.path,method,headers,route};
@@ -43,7 +43,7 @@ function sendProtocol(request,init){
   const bytes=wireBody(init.body),headers=Object.freeze({...Object.fromEntries(request.headers),host:new URL(request.route.publicUrl).host,'content-length':String(bytes.length)});
   return httpScope.run(true,()=>new Promise((done,reject)=>{
     const req=protocolRequest({hostname:'127.0.0.1',port:Number(origin.port),path:request.route.path,method:request.method,headers,agent:false},response=>{
-      if(response.statusCode>=300&&response.statusCode<400){response.destroy();reject(Error('S10_PROTOCOL_REDIRECT'));return;}
+      if(response.statusCode>=300&&response.statusCode<400&&init.redirect!=='manual'){response.destroy();reject(Error('S10_PROTOCOL_REDIRECT'));return;}
       const output=new Response(Readable.toWeb(response),{status:response.statusCode,headers:response.headers});Object.defineProperty(output,'url',{value:request.route.publicUrl});done(output);
     });
     const abort=()=>req.destroy(init.signal?.reason instanceof Error?init.signal.reason:Error('S10_PROTOCOL_ABORTED'));

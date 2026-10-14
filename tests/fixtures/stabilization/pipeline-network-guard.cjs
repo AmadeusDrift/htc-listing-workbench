@@ -70,7 +70,7 @@ for(const name of ['node:http','node:https'])for(const method of ['request','get
     let url;try{url=new URL(raw);}catch{return deny(name+'.target');}
     const expected={protocol:url.protocol,hostname:url.hostname,host:url.hostname,port:url.port,path:url.pathname};
     for(const [key,value] of Object.entries(expected))if(Object.hasOwn(opts,key)&&(key==='port'?String(opts[key]):opts[key])!==value)return deny(name+'.target-override');
-    if(url.protocol!==scheme||opts.auth!==undefined||opts.socketPath!==undefined||opts.createConnection!==undefined)return deny(name+'.target-override');
+    if(url.protocol!==scheme||opts.auth!==undefined||opts.socketPath!==undefined||opts.createConnection!==undefined||opts.agent!==undefined&&opts.agent!==false)return deny(name+'.target-override');
     let headerInput=opts.headers;
     if(Array.isArray(headerInput)&&headerInput.every(value=>typeof value==='string')){
       if(headerInput.length%2)return deny(name+'.headers');headerInput=Array.from({length:headerInput.length/2},(_,index)=>[headerInput[index*2],headerInput[index*2+1]]);
@@ -79,8 +79,12 @@ for(const name of ['node:http','node:https'])for(const method of ['request','get
     if(headers.has('host')&&headers.get('host')!==url.host)return deny(name+'.host-header');
     const request=mapped(raw,{method:String(opts.method??'GET').toUpperCase(),headers},name+'.'+method);if(url.origin!==origin.origin||request.url!==raw)return deny(name+'.direct-route');
     headers.set('host',url.host);
-    const frozen=Object.freeze({...opts,protocol:url.protocol,hostname:url.hostname,host:url.hostname,port:Number(url.port),path:url.pathname,method:request.method,headers:Object.freeze(Object.fromEntries(headers))});
-    return httpScope.run(true,()=>original.call(module,frozen,typeof options==='function'?options:callback));
+    const frozen=Object.freeze({...opts,protocol:url.protocol,hostname:url.hostname,host:url.hostname,port:Number(url.port),path:url.pathname,method:request.method,headers:Object.freeze(Object.fromEntries(headers)),agent:false});
+    const result=httpScope.run(true,()=>original.call(module,frozen,typeof options==='function'?options:callback));
+    const mutation=()=>{result.destroy();return deny(name+'.request-mutation');};
+    for(const key of ['path','method','host','protocol']){const value=result[key];Object.defineProperty(result,key,{get:()=>value,set:mutation,configurable:false});}
+    for(const key of ['setHeader','removeHeader','appendHeader','addTrailers'])Object.defineProperty(result,key,{value:mutation,writable:false,configurable:false});
+    return result;
   };
 }
 require('node:module').syncBuiltinESMExports();

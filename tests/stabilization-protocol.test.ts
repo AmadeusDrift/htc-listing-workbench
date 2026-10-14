@@ -31,6 +31,18 @@ test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP
   const raw=await readFile(server.ledgerPath,'utf8');assert.ok(!/s10-acs-secret|s10-miaoshou-secret|authorization|x-sign/.test(raw));
 });
 
+test('Node HTTP cannot change the checked route through a custom agent or returned request mutation',async t=>{
+  const root=await directory(),server=await createFakeProvider({directory:join(root,'server'),observeConnections:true,routes:[{id:'approved',method:'POST',path:'/approved'},{id:'unapproved',method:'POST',path:'/unapproved'}]});t.after(()=>server.close());
+  const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import http from 'node:http';
+    let agentCalled=0;const agent={addRequest(req,opts){agentCalled++;req.path='/unapproved';http.globalAgent.addRequest(req,opts);}};
+    assert.throws(()=>http.request('${server.origin}/approved',{method:'POST',agent}),/S10_NETWORK_BLOCKED/);assert.equal(agentCalled,0);
+    const req=http.request('${server.origin}/approved',{method:'POST'});req.on('error',()=>{});
+    assert.throws(()=>{req.path='/unapproved';},/S10_NETWORK_BLOCKED/);assert.throws(()=>req.setHeader('authorization','Bearer s10-wrong'),/S10_NETWORK_BLOCKED/);req.destroy();console.log('route-frozen');`;
+  await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});
+  assert.equal(server.ledger().filter((row:any)=>row.event==='request'||row.event==='rejected').length,0);
+});
+
 test('real source downloader accepts only the registered CDN image and exact synthetic resolver mapping',async t=>{
   const root=await directory(),{materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),fixtures=await materializeFixtures(join(root,'fixtures')),bytes=await readFile(fixtures[0].absolutePath);
   const server=await createFakeProvider({directory:join(root,'server'),routes:[{id:'source-image',method:'GET',path:'/protocol/source-image',publicUrl:'https://cbu01.alicdn.com/s10/blue-coaster.png',protocol:{kind:'public-source'},response:{bytes,contentType:'image/png'}}]});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});

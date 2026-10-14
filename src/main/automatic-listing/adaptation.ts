@@ -142,4 +142,17 @@ export function assertTaskAdaptationHistory(db:DatabaseSync,task:AutomaticListin
   const previous=[...(before.adaptation?.previousRules??[]),{stamp:before.rulesStamp,revision:before.ruleRevision}].filter((r,i,a)=>a.findIndex(v=>v.stamp===r.stamp&&v.revision===r.revision)===i);
   const blocked=proof.changes.filter((c:AutomaticAdaptationChange)=>c.kind==='BLOCKED').map((c:AutomaticAdaptationChange)=>c.key);
   if(proof.taskId!==task.id||before.id!==task.id||fingerprint(previous)!==fingerprint(task.adaptation.previousRules)||fingerprint(blocked)!==fingerprint(task.adaptation.blockedKeys))throw new UserFacingError('旧任务适配检查点与原始历史不一致');
+  for(const key of task.adaptation.unitResolvedKeys??[]){
+    if(!onlyUnitAdaptationBlock(proof.changes,key))throw new UserFacingError('原适配阻断并非仅计量，不能随单位采用解除其他阻断');
+    const row=task.items.find(r=>r.key===key),savedUnits=db.prepare("SELECT detail_json FROM audit_events WHERE action='automatic-listing.sales-units.adopted' AND json_extract(detail_json,'$.taskId')=? AND json_extract(detail_json,'$.itemKey')=? AND json_extract(detail_json,'$.before.adaptation.token')=? LIMIT 2").all(task.id,key,task.adaptation.token);
+    if(savedUnits.length!==1||!row?.salesPlan?.unitAdoption)throw new UserFacingError('原任务计量解除缺少唯一采用证明');
+    const units=JSON.parse(String(savedUnits[0].detail_json)),old=units.before?.items?.find((r:AutomaticListingItem)=>r.key===key);
+    if(units.before.id!==task.id||units.before.targetId!==task.targetId||units.before.sellerId!==task.sellerId||units.before.marketplaceId!==task.marketplaceId||units.before.mode!==task.mode||old?.sku!==row.sku||old?.draftId!==row.draftId||old?.productId!==row.productId||old?.variantId!==row.variantId||!old.salesPlan
+      ||fingerprint(old.salesPlan.recipe)!==fingerprint(row.salesPlan.unitAdoption.previousRecipe)||fingerprint(units.afterPlan)!==fingerprint(row.salesPlan)
+      ||['namingGroupId','sourceGroupKey','sku','baseSku','namingChildKey'].some(field=>old.salesPlan[field]!==units.afterPlan?.[field]))throw new UserFacingError('原任务计量解除与原 SKU、配方或命名身份不一致');
+  }
+}
+export function onlyUnitAdaptationBlock(changes:AutomaticAdaptationChange[],key:string):boolean {
+  const blocked=changes.filter(c=>c.key===key&&c.kind==='BLOCKED');
+  return blocked.length===1&&fingerprint(blocked[0].steps)===fingerprint(['计量对照与明确采用'])&&fingerprint(blocked[0].fields)===fingerprint(['number_of_items','unit_count','purchasable_offer']);
 }

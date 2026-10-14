@@ -9,7 +9,7 @@ import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
 import type { TaskBatchPlan } from '../../shared/ai-batch-contracts.ts';
 import { isSchemaTransientError, type SchemaTransientError } from '../amazon/schema-retry.ts';
 import { canResumeRiskAdaptation } from './risk-adaptation.ts';
-import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory } from './adaptation.ts';
+import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory,onlyUnitAdaptationBlock } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
@@ -68,7 +68,7 @@ export interface AutomaticListingDependencies {
   batch?:TaskBatchRuntime;batchPlan?:()=>TaskBatchPlan;
   store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'|'hasProducts'>>;
   rules(): ListingRules;
-  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
+  amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'|'previewSalesUnitAdoption'|'applySalesUnitAdoption'>>;
   hosting: Pick<HostingService, 'getProfile'> & Partial<Pick<HostingService,'listUploads'|'checkLocalAssets'>>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     inspectApproval?:ImageWorkflowService['inspectApproval'];
@@ -104,6 +104,7 @@ export interface AutomaticListingDependencies {
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
 const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
+const adaptationBlocked=(task:AutomaticListingTask,key:string):boolean=>!!task.adaptation?.blockedKeys.includes(key)&&!task.adaptation.unitResolvedKeys?.includes(key);
 const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
 const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
 const imageReady = hasSevenApprovedImages;
@@ -157,13 +158,13 @@ export class AutomaticListingService {
   }
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
-  private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = []): void {
+  private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = [], at?:string): void {
     transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
     const priorStages = new Map(db.prepare("SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.status') status FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?").all(task.id).map(row => [String(row.key), { stage: String(row.stage), status: String(row.status) }]));
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
     for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
-    task.revision++; task.updatedAt = new Date().toISOString();
+    task.revision++; task.updatedAt = at??new Date().toISOString();
     validateAutomaticListingTask(task);
     assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
@@ -202,6 +203,64 @@ export class AutomaticListingService {
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
+  /** Owner query includes original rows whose draft was never created. */
+  readSalesPlans(productId:string,targetId:string){
+    this.ensureOpen();identifier(productId);identifier(targetId);
+    return this.db.prepare("SELECT record_json FROM automatic_listing_tasks WHERE json_extract(record_json,'$.targetId')=? AND EXISTS(SELECT 1 FROM json_each(record_json,'$.items') i WHERE json_extract(i.value,'$.productId')=?)").all(targetId,productId).flatMap(saved=>{
+      const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+      return task.items.filter(row=>row.productId===productId&&row.salesPlan).map(row=>({productId,targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,mode:task.mode,plan:structuredClone(row.salesPlan!)}));
+    });
+  }
+  private unitOwner(raw:unknown){
+    const input=record(raw,'原任务计量采用',['taskId','taskRevision','itemKey','platformPieces','basis']),id=identifier(input.taskId),key=text(input.itemKey,'原任务行',200,true);
+    if(!Number.isSafeInteger(input.taskRevision)||Number(input.taskRevision)<1)throw new UserFacingError('原任务版本无效');
+    const memory=this.get(id),saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(id);
+    if(!saved)throw new UserFacingError('原任务不存在');
+    const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
+    if(task.revision!==input.taskRevision||fingerprint(task)!==fingerprint(memory))throw new UserFacingError('原任务检查点已变化，请重新读取');
+    if(!['PAUSED','NEEDS_ATTENTION'].includes(task.status)||this.activeId===id||this.confirming.has(id)||this.observing)throw new UserFacingError('原任务尚未安全暂停，请先等待在途处理结束');
+    const row=task.items.find(r=>r.key===key);if(!row?.draftId||!row.salesPlan)throw new UserFacingError('原任务行缺少可采用的原草稿或销售配方');
+    if(row.status==='RUNNING'||row.batchWait||row.schemaRetry?.state==='IN_FLIGHT'||row.familyTransition||row.repair?.phase==='FIELDS_STARTED'||['READBACK','LABELS','COMPLETE'].includes(row.stage)||this.unknownCode(row,task))throw new UserFacingError('原任务行有在途、提交或未知结果，请按原身份核对');
+    const draft=this.deps.amazon.getDraft(row.draftId);
+    const source=this.deps.store.getProductSnapshot?.(row.productId)??this.deps.store.getProduct(row.productId);
+    if(!this.matching(task,row,draft)||draft.productRevision!==row.productRevision||source.revision!==row.productRevision||sourceStamp(source)!==row.sourceStamp||submitted(draft)||fingerprint(draft.salesPlan)!==fingerprint(row.salesPlan))throw new UserFacingError('原任务与草稿身份、冻结来源或销售配方不一致');
+    return {input,task,row,draft};
+  }
+  previewSalesUnitAdoption(raw:unknown){
+    const {input,task,row,draft}=this.unitOwner(raw),preview=this.deps.amazon.previewSalesUnitAdoption;
+    if(!preview)throw new UserFacingError('计量预览服务不可用');
+    const unitPreview=preview.call(this.deps.amazon,{id:draft.id,revision:draft.revision,taskId:task.id,...(input.platformPieces===undefined?{}:{platformPieces:input.platformPieces}),...(input.basis===undefined?{}:{basis:input.basis})});
+    return {taskId:task.id,taskRevision:task.revision,itemKey:row.key,unitPreview,token:fingerprint({task,row,unitPreview})};
+  }
+  adoptSalesUnit(raw:unknown):AutomaticListingTask {
+    const input=record(raw,'原任务计量确认',['taskId','taskRevision','itemKey','platformPieces','basis','token','confirmed']);
+    if(input.confirmed!==true)throw new UserFacingError('请明确确认原销售单位差异');
+    const request={taskId:input.taskId,taskRevision:input.taskRevision,itemKey:input.itemKey,platformPieces:input.platformPieces,basis:input.basis},token=text(input.token,'计量对照标识',64,true);
+    const apply=this.deps.amazon.applySalesUnitAdoption;if(!apply)throw new UserFacingError('计量采用服务不可用');
+    let committed:AutomaticListingTask|undefined;
+    transaction(this.db,()=>{
+      const preview=this.previewSalesUnitAdoption(request);if(preview.token!==token||!preview.unitPreview.canApply)throw new UserFacingError(preview.unitPreview.blockers.join('；')||'计量对照后原任务或资料已变化');
+      const {task,row,draft}=this.unitOwner(request),before=structuredClone(task);
+      const after=apply.call(this.deps.amazon,{id:draft.id,revision:draft.revision,platformPieces:input.platformPieces,basis:input.basis},preview.unitPreview.token,this.db,task.id);
+      const images=this.deps.images.getProgress(draft.id);
+      if(row.imageStarted||images?.slots?.some(slot=>slot.status==='PASSED')){
+        if(!images)throw new UserFacingError('原图片记录缺失，不能修改计量后重新生图');
+        row.imageStarted=true;row.unitRecheck={sourceWorkflowId:images.id,draftRevision:after.revision,draftStamp:imageWorkflowDraftStamp(after)};
+      }
+      rememberFailure(row,null);row.salesPlan=after.salesPlan;delete row.outcome;delete row.pricingRefresh;
+      row.status='FAILED';row.error='已本地采用计量；保留原图片、费用和请求，继续前重新核对必要字段与图片';
+      if(row.repair)row.repair={...row.repair,draftRevision:after.revision,draftStamp:imageWorkflowDraftStamp(after)};
+      task.status='PAUSED';task.error=row.error;
+      if(task.adaptation?.blockedKeys.includes(row.key)){
+        const proof=this.db.prepare("SELECT detail_json FROM audit_events WHERE action='automatic-listing.adapted' AND json_extract(detail_json,'$.token')=?").get(task.adaptation.token);
+        if(proof&&onlyUnitAdaptationBlock(JSON.parse(String(proof.detail_json)).changes,row.key))task.adaptation.unitResolvedKeys=[...new Set([...(task.adaptation.unitResolvedKeys??[]),row.key])];
+      }
+      const at=new Date().toISOString(),afterTask={...structuredClone(task),revision:task.revision+1,updatedAt:at};
+      appendAuditEvent(this.db,randomUUID(),row.productId,'automatic-listing.sales-units.adopted','原任务显式采用计量，未启动后续调度',JSON.stringify({taskId:task.id,itemKey:row.key,token,before,afterPlan:after.salesPlan,afterDraftRevision:after.revision,afterTask}),at);
+      this.save(task,this.db,[],at);committed=task;
+    });
+    this.tasks.set(committed!.id,committed!);return structuredClone(committed!);
+  }
   private *adaptationStateSteps(task:AutomaticListingTask){
     const products=[...new Set(task.items.map(row=>row.productId))],drafts=task.items.flatMap(row=>row.draftId?[row.draftId]:[]);
     const calls=this.db.prepare("SELECT id,json_extract(record_json,'$.status') status,json_extract(record_json,'$.finishedAt') finishedAt,json_extract(record_json,'$.responseReceived') responseReceived FROM ai_calls WHERE json_extract(record_json,'$.productId') IN (SELECT value FROM json_each(?)) ORDER BY id").all(JSON.stringify(products));
@@ -308,7 +367,7 @@ export class AutomaticListingService {
   }
   private assertScope(task: AutomaticListingTask, row?: AutomaticListingItem, allowSourceRecovery=false,selection?:AutomaticResumeSelection): void {
     const selected=selection?task.items.filter(item=>rowSelected(selection,item.key)):task.items;
-    const rows = row ? [row] : task.items.filter(value => (!selection||selected.some(item=>item.key===value.key||item.productId===value.productId||item.salesPlan?.sourceGroupKey&&item.salesPlan.sourceGroupKey===value.salesPlan?.sourceGroupKey))&&!task.adaptation?.blockedKeys.includes(value.key)&&value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
+    const rows = row ? [row] : task.items.filter(value => (!selection||selected.some(item=>item.key===value.key||item.productId===value.productId||item.salesPlan?.sourceGroupKey&&item.salesPlan.sourceGroupKey===value.salesPlan?.sourceGroupKey))&&!adaptationBlocked(task,value.key)&&value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
     if (!rows.length) return;
     this.assertConnections(task);
     const sources=new Map<string,{source:ProductDetail;stamp:string}>();
@@ -513,7 +572,7 @@ export class AutomaticListingService {
         }
         const variantId=canonical?.variantId??variant.id;
         return {
-        key: source.id + ':' + (plan?.recipe.key??variantId), productId: source.id, productRevision: source.revision, sourceStamp: sourceStamp(source), productTitle: source.title,
+        key: source.id + ':' + (plan?.unitAdoption?.originalRecipeKey??plan?.recipe.key??variantId), productId: source.id, productRevision: source.revision, sourceStamp: sourceStamp(source), productTitle: source.title,
         variantId, sku: canonical?.sku??legacy?.sku??plan?.sku??variant.sku, ...(plan?{salesPlan:plan}:{}), stockSets: rules.product.stockSets, sourcesPrepared: false,
         status: 'PENDING', stage: 'SOURCES', draftId: null, executionTaskIds: [], imageStarted: false, imageAttempts: 0, repairAttempts: 0, repairPolicyVersion: FIELD_REPAIR_POLICY_VERSION, categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION, repair: null, batchId: null, error: null,
       } as AutomaticListingItem;});
@@ -657,12 +716,12 @@ export class AutomaticListingService {
       // siblings retain their exact draft/product revision and never repeat paid work.
       for(const row of task.items)if(rowSelected(task.resumeScope,row.key)&&this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
       for(const row of task.items)if(rowSelected(task.resumeScope,row.key))this.migrateRepairPolicy(task,row);
-      for (const row of task.items) if (rowSelected(task.resumeScope,row.key)&&(!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status === 'FAILED'&&row.stage!=='PLAN'&&!task.adaptation?.blockedKeys.includes(row.key)) {
+      for (const row of task.items) if (rowSelected(task.resumeScope,row.key)&&(!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status === 'FAILED'&&row.stage!=='PLAN'&&!adaptationBlocked(task,row.key)) {
         if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!recoverableAiUnknown(code))continue;}
         if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
           const old=this.deps.amazon.getDraft(row.draftId);
           const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
-          if(!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
+          if(!row.unitRecheck&&!activeCompletion&&old.listingProgram==='haul'&&!submitted(old)&&(row.pricingRefresh||old.businessRules?.quote===null&&(!old.businessRules.pricingDecision||old.businessRules.pricingDecision.status==='needs_input'))){
             let refreshed=old;
             if(!row.pricingRefresh){
               try{
@@ -857,6 +916,22 @@ export class AutomaticListingService {
       && draft.sellerId === task.sellerId && draft.marketplaceId === task.marketplaceId && draft.mode === task.mode;
   }
   private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
+  /** A unit change can recheck existing pictures, never enter their generation path. */
+  private async finishUnitRecheck(task:AutomaticListingTask,row:AutomaticListingItem):Promise<AmazonDraft>{
+    const proof=row.unitRecheck!,draft=this.deps.amazon.getDraft(row.draftId!);
+    if(!this.matching(task,row,draft)||submitted(draft)||draft.revision!==proof.draftRevision||imageWorkflowDraftStamp(draft)!==proof.draftStamp)throw new UserFacingError('计量采用后草稿检查点已变化，请核对原记录；未重新生图');
+    const prior=this.deps.images.getProgress(draft.id);
+    if(!this.deps.recheckImage||!prior||!this.imageReady(prior))throw new UserFacingError('计量变化需复核原成功图片；当前原七图或复核服务不完整，未重新生图');
+    const after=await this.deps.recheckImage({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId},this.controller?.signal??new AbortController().signal);
+    this.checkpoint(task,row);
+    if(!this.matching(task,row,after)||submitted(after))throw new UserFacingError('原图复核后的草稿身份变化');
+    const next=structuredClone(task),checkpoint=next.items.find(item=>item.key===row.key)!;
+    delete checkpoint.unitRecheck;this.save(next);
+    // Publish the local checkpoint only after the SQLite write committed. A
+    // failed task write keeps both memory and disk pointing at the saved result.
+    delete row.unitRecheck;task.revision=next.revision;task.updatedAt=next.updatedAt;
+    this.tasks.set(task.id,task);return after;
+  }
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
   private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
     const unknown=this.unknownCode(row,task);
@@ -996,6 +1071,7 @@ export class AutomaticListingService {
     assertCurrentPricingForPaid(draft,this.deps.rules());
     const pricingIssue=pricingBlockingReason(draft,this.deps.rules());
     if(pricingIssue){row.stage='DRAFT';this.save(task);throw new UserFacingError(pricingIssue);}
+    if(row.unitRecheck)draft=await this.finishUnitRecheck(task,row);
     if(row.familyTransition)draft=await this.finishFamilyTransition(task,row);
     if (!row.executionTaskIds.length||this.deps.execution.get(row.executionTaskIds.at(-1)!).status==='CANCELLED') {
       const prior = this.deps.images.getProgress(draft.id);

@@ -154,6 +154,8 @@ export interface SalesUnitAdoptionPreview {
  fields:string[];purchaseBefore:string;purchaseAfter:string|null;
 }
 export interface AmazonApi {
+  previewAmazonSalesUnitAdoption(input:Omit<SalesUnitAdoptionInput,'taskId'>):Promise<SalesUnitAdoptionPreview>;
+  adoptAmazonSalesUnit(input:DraftReference&{platformPieces:number;basis:string;token:string;confirmed:true}):Promise<AmazonDraft>;
  getActualQuoteDetails(draftId:string):Promise<ActualQuoteDetails>;
   listAmazonTargets(): Promise<AmazonTarget[]>;
   getAmazonCredentialDiagnostics(): Promise<AmazonCredentialDiagnostics>;

@@ -55,6 +55,7 @@ export interface AutomaticProductGroup {
   sourceUrl: string;
   coverUrl: string | null;
   sourceVariantCount: number | null;
+  sourceCountSnapshot?: boolean;
   excludedCount: number | null;
   sourceVariants: { variant: Variant; items: AutomaticListingItem[] }[];
   items: AutomaticListingItem[];
@@ -97,7 +98,7 @@ export function buildAutomaticProductGroups(items: AutomaticListingItem[], produ
     return {
       productId, title: detail?.title || summary?.title || rows[0].productTitle || '未命名商品', sourceUrl: detail?.sourceUrl ?? summary?.sourceUrl ?? '',
       coverUrl: sourceAssets.find(asset => asset.role === 'main')?.previewUrl ?? sourceAssets[0]?.previewUrl ?? summary?.coverUrl ?? null,
-      sourceVariantCount: detail ? detail.variants.length : null,
+      sourceVariantCount: detail ? detail.variants.length : summary?.variantCount ?? null,
       excludedCount: detail ? sourceVariants.filter(row => !row.items.length).length : null,
       sourceVariants, items: rows, families: [...families.values()], parentSkus: [...new Set(rows.flatMap(item => item.salesPlan?.parentSku ? [item.salesPlan.parentSku] : []))], statusCounts, stageCounts, outcomeCounts: summarizeAutomaticItems(rows),
     };

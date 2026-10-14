@@ -1,0 +1,70 @@
+import { electron } from './e2e-core-runtime.mjs';
+import { expect } from '@playwright/test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+await mkdir(resolve('.test-data'),{recursive:true});
+const root=await mkdtemp(resolve('.test-data/source-status-ui-'));
+await writeFile(join(root,'fixture.tsx'),String.raw`
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {AutomaticTaskPanel} from '../../src/renderer/AutomaticTaskPanel';
+const source={id:'p1',title:'测试来源',revision:1,variantCount:3,assets:[],variants:[{id:'v1',sku:'S1'},{id:'v2',sku:'S2'},{id:'v3',sku:'S3'}]};
+const item={key:'i1',productId:'p1',variantId:'v1',sku:'S1',stockSets:1,status:'FAILED',stage:'SOURCES',error:'旧请求未知',lastContinuedAt:'2026-10-14T02:00:00Z',failureHistory:[{stage:'SOURCES',reason:'历史鉴权失败',occurredAt:'2026-10-14T01:00:00Z',source:'request-proof'},{stage:'SOURCES',reason:'本地配置变化，本次未发送',occurredAt:'2026-10-14T03:00:00Z',source:'local-check'}],outcome:{kind:'UNKNOWN',code:'SOURCE_CONSISTENCY_SENT_UNKNOWN'}};
+const task={id:'t1',revision:1,status:'PAUSED',targetName:'隔离测试',mode:'live',ruleRevision:1,createdAt:'2026-10-14T00:00:00Z',updatedAt:'2026-10-14T00:00:00Z',items:[item]};
+const state=window.fixture={task,source,calls:[],fail:false,hold:false,summary:true};
+const copy=x=>structuredClone(x);
+window.red={listAutomaticListingTasks:async()=>[copy(task)],getAutomaticListingTask:async()=>copy(task),getAutomaticBatchSummary:async()=>null,previewAutomaticListingAdaptation:async()=>{state.calls.push('check');if(state.hold)await new Promise(resolve=>state.release=resolve);if(state.fail)throw Error('本地来源读取测试失败');return {sources:[copy(source)],changes:[],blockers:[],canApply:false};}};
+window.renderFixture=()=>root.render(<AutomaticTaskPanel products={state.summary?[source]:[]} startedTask={null} busy={false} onManual={()=>state.calls.push('manual')}/>);
+const root=createRoot(document.getElementById('root'));window.renderFixture();
+`);
+await build({entryPoints:[join(root,'fixture.tsx')],bundle:true,outfile:join(root,'fixture.js'),platform:'browser',format:'iife',jsx:'automatic',logLevel:'silent'});
+await writeFile(join(root,'index.html'),'<meta charset="utf-8"><div id="root"></div><script src="fixture.js"></script>');
+await writeFile(join(root,'main.cjs'),`const {app,BrowserWindow,session}=require('electron');app.setPath('userData',${JSON.stringify(join(root,'profile'))});app.whenReady().then(()=>{session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_,done)=>done({cancel:true}));const win=new BrowserWindow({show:false,webPreferences:{contextIsolation:false,nodeIntegration:false,backgroundThrottling:false}});win.loadFile(${JSON.stringify(join(root,'index.html'))});});app.on('window-all-closed',()=>app.quit());`);
+const env={...process.env,RED_E2E:'1',RED_DATA_DIR:join(root,'data')};delete env.ELECTRON_RUN_AS_NODE;
+const require=createRequire(import.meta.url);let app;
+try{
+ app=await electron.launch({executablePath:require('electron'),args:[join(root,'main.cjs')],cwd:resolve('.'),env,timeout:35000});
+ const page=await app.firstWindow();await page.clock.install();page.setDefaultTimeout(4000);
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const scope=page.locator('[aria-label="当前任务范围"]');
+ await expect(page.locator('[aria-label="定向接续与从头检查"]')).toHaveCount(1);
+ // Both keyed siblings must remain unique through the real task poll lifecycle.
+ for(let i=0;i<5;i++){
+  await page.evaluate(i=>{window.fixture.task.revision++;window.fixture.task.status=i%2?'PAUSED':'RUNNING';},i);
+  await page.clock.fastForward(30_001);await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await expect(page.locator('[aria-label="定向接续与从头检查"]')).toHaveCount(i%2?1:0);
+  await expect(page.locator('.automatic-source-groups')).toHaveCount(1);
+ }
+ await page.evaluate(()=>{window.fixture.task.status='PAUSED';window.fixture.task.revision++;});await page.clock.fastForward(30_001);await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+ await expect(page.locator('[aria-label="定向接续与从头检查"]')).toHaveCount(1);
+ assert.deepEqual(await page.evaluate(()=>window.fixture.calls),[],'polling UNKNOWN must not trigger check/retry');
+ await expect(scope).toContainText('来源规格3');
+ await page.getByRole('button',{name:'展开来源商品 测试来源'}).click();
+ await expect(page.locator('.automatic-source-body')).toContainText('来源规格详情尚未读取');
+ await expect(page.locator('.automatic-source-variants')).toHaveCount(0);
+ await page.locator('.automatic-sale-toggle').click();
+ await page.getByText('历史与本次失败证据（刷新不会发起新请求）',{exact:true}).click();
+ await expect(page.locator('.automatic-sale-body')).toContainText('历史失败记录时间');
+ await expect(page.locator('.automatic-sale-body')).toContainText('本次检查失败记录时间');
+ await expect(page.locator('.automatic-sale-body')).toContainText('本地检查记录，不是原请求时间');
+ await page.evaluate(()=>{window.fixture.summary=false;window.renderFixture();});
+ await expect(scope).toContainText('尚未读取');await expect(scope).not.toContainText('失败');
+ await page.locator('[aria-label="旧任务适配检查"] summary').click();
+ await page.evaluate(()=>{window.fixture.hold=true;});await page.getByRole('button',{name:'检查当前规则与资料',exact:true}).click();
+ await expect(scope).toContainText('读取中');
+ await page.evaluate(()=>{window.fixture.fail=true;window.fixture.release();});
+ await expect(scope).toContainText('读取失败');
+ await expect(page.locator('.automatic-source-body')).toContainText('来源规格读取失败');
+ await expect(page.locator('.automatic-source-body')).toContainText('请点击“检查当前规则与资料”重试');
+ await page.evaluate(()=>{window.fixture.fail=false;window.fixture.hold=false;});await page.getByRole('button',{name:'检查当前规则与资料',exact:true}).click();
+ await expect(scope).toContainText('来源规格3');
+ await page.evaluate(()=>{window.fixture.task.revision++;});await page.clock.fastForward(30_001);await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+ await expect(scope).toContainText('来源规格3（含已读快照）');
+ await page.evaluate(()=>{window.fixture.summary=true;window.fixture.source.variantCount=4;window.fixture.source.revision++;window.renderFixture();});
+ await expect(scope).toContainText('来源规格4');await expect(scope).not.toContainText('快照');
+ assert.deepEqual(await page.evaluate(()=>window.fixture.calls),['check','check']);assert.deepEqual(errors,[]);
+ console.log('PASS source status: summary, unloaded, loading, failure, cached count; polling keeps unique panels and UNKNOWN sends no request');
+}finally{await app?.close();}

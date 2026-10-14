@@ -98,3 +98,11 @@ test('historical 103 SKUs count selection, profit and exceptions exactly once',(
   assert.equal(counts.submittedAwaitingReadback,3);assert.equal(counts.labels,1);
   assert.equal(Object.values(counts).reduce((a:number,b:any)=>a+b,0),103);
 });
+
+test('summary counts remain available without falsely claiming source details or excluded counts', () => {
+  const source=product('summary',3), saved=item(source,0);
+  const [group]=buildAutomaticProductGroups([saved],[],[{...source,variantCount:3,assetCount:0,coverUrl:null}]);
+  assert.equal(group.sourceVariantCount,3);
+  assert.equal(group.excludedCount,null);
+  assert.deepEqual(group.sourceVariants,[]);
+});

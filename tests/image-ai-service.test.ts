@@ -106,7 +106,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
   const reviewed = await listing.reviewCurrentForImages({ draftId: draft.id, draftRevision: draft.revision });
   const context: ProductImageContext = { listing: reviewed.context, currentListingCopy: reviewed.currentListingCopy, listingReviewResultId: reviewed.review.id, referenceAssets: product.assets.map(asset=>({assetId:asset.id,sha256:store.getAssetRecord(asset.id)!.sha256,variantId:product.variants[0].id})), purpose: 'main', policyVersion: PRODUCT_IMAGE_POLICY_VERSION,ipSource:imageRiskSourceSnapshot(product,product.variants[0].id) };
   const candidate: CandidateImageIdentity = { id: randomUUID(), sha256: createHash('sha256').update(bytes).digest('hex'), width: 256, height: 256 };
-  return { directory, store, product, amazon, draft, ai, listing, context, candidate, bytes, requests, cleanup:(value:()=>Promise<void>)=>cleanups.push(value), respond: (value: typeof respond) => { respond = value; } };
+  return { directory, store, product, amazon, draft, ai, hosting, listing, context, candidate, bytes, requests, cleanup:(value:()=>Promise<void>)=>cleanups.push(value), respond: (value: typeof respond) => { respond = value; } };
 }
 
 // Historical records must contain the original limited-field context, not a v4 context with an old version stamp.
@@ -1860,4 +1860,46 @@ for(const code of ['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'] as const)test(
  const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
  const before=f.requests.length;for(let n=0;n<2;n++)await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.code===code);
  assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(call.id),call);
+});
+
+ test('confirmed OpenRouter403 image planning continuation retries once and preserves original attempts',async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');
+ const f=await fixture(t),workflowId=randomUUID();f.ai.saveConnection({id:'openrouter',apiKey:'offline-image-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(op=>op==='image-plan'?new Response(JSON.stringify({error:{code:403,message:'This model is not available in your region.'}}),{status:403}):undefined);
+ const count=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(f.requests.length,count+1);
+ const scope={taskId:randomUUID(),rowKey:'image',phase:'IMAGES',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};
+ await taskAiContext.run(scope,()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)));assert.equal(f.requests.length,count+2);
+ await taskAiContext.run({...scope,explicitContinueAt:'2099-01-02T00:00:00.000Z'},()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)));assert.equal(f.requests.length,count+2);
+ await f.ai.close();let restartedPosts=0;const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:async()=>{restartedPosts++;throw Error('must not send');}});try{await taskAiContext.run({...scope,explicitContinueAt:'2099-01-03T00:00:00.000Z'},()=>assert.rejects(restarted.imagePlan(f.context,()=>{},undefined,undefined,workflowId)));assert.equal(restartedPosts,0);}finally{await restarted.close();}
+ });
+
+test('403 image retry blocked by quota neither sends nor consumes manual authorization',async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');const f=await fixture(t),workflowId=randomUUID();
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-image-quota'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(op=>op==='image-plan'?new Response(JSON.stringify({error:{code:403,message:'Forbidden'}}),{status:403}):undefined);await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));const before=f.requests.length;
+ const scope={taskId:randomUUID(),rowKey:'image',phase:'IMAGES',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:1,dailyTokenLimit:null});
+ await taskAiContext.run(scope,()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)));assert.equal(f.requests.length,before);
+ const db=openDatabase(f.directory);try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);}finally{db.close();}
+ f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:null,dailyTokenLimit:null});await taskAiContext.run(scope,()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)));assert.equal(f.requests.length,before+1);
+});
+
+test('successful403 image retry is reused and does not block a later distinct repair',async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');const f=await fixture(t),workflowId=randomUUID();
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-image-success'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ for(const p of f.ai.getPurposeProfiles())if(['image_plan','image_plan_repair'].includes(p.purposeId))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(op=>op==='image-plan'?new Response(JSON.stringify({error:{code:403,message:'Forbidden'}}),{status:403}):undefined);await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));
+ f.respond(()=>undefined);const scope={taskId:randomUUID(),rowKey:'image',phase:'IMAGES',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};
+ const plan=await taskAiContext.run(scope,()=>f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)),before=f.requests.length;
+ assert.equal((await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId)).id,plan.id);assert.equal(f.requests.length,before);
+ const repaired=await f.ai.imagePlan(f.context,()=>{},{previousPlanId:plan.id,issues:['Improve the scene.']},undefined,workflowId);assert.equal(repaired.output.kind,'image-plan');assert.equal(f.requests.length,before+1);
+});
+
+test('403 image continuation cannot increase exhausted original three-call planning allowance',async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');const f=await fixture(t),workflowId=randomUUID();
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-image-exhausted'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ let calls=0;f.respond(op=>{if(op!=='image-plan')return;const status=++calls<3?429:403;return new Response(JSON.stringify({error:{code:status,message:status===403?'Forbidden':'Rate limited'}}),{status});});
+ for(let i=0;i<3;i++)await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(calls,3);
+ const scope={taskId:randomUUID(),rowKey:'image',phase:'IMAGES',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};await taskAiContext.run(scope,()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),/次数|三次|上限|3 次尝试/));assert.equal(calls,3);
+ const db=openDatabase(f.directory);try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);}finally{db.close();}
 });

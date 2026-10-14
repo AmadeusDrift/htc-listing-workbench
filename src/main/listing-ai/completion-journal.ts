@@ -1,3 +1,5 @@
+import { confirmedForbiddenRejection,confirmedAuthenticationRejection } from '../ai/receipts.ts';
+import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from '../ai/confirmed-forbidden-retry.ts';
 import { AiError } from '../ai/errors.ts';
 import { readCopyReview,copyReviewResult } from '../ai/copy-review-upgrade.ts';
 import { isDefinitiveFieldRejection } from './request-outcome.ts';
@@ -173,7 +175,9 @@ export class CompletionJournal {
     }
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;
     if(this.previousUnknown(op))unknownCompletion();
-    if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(legacyStepDebt(op,round,entry===round.candidate?'candidate':'review')+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');entry.sent=true;this.save(op);
+    if(entry.sent||entry.resultId||round.resolved)unknownCompletion();if(legacyStepDebt(op,round,entry===round.candidate?'candidate':'review')+(entry.previous?.length??0)>=3)throw new UserFacingError('旧字段请求已用完三次尝试，原请求与费用记录保留');const previous=entry.previous?.at(-1);
+    if(previous){const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(previous.id);if(row){const prior=validateAiCall(JSON.parse(String(row.record_json)));if(confirmedForbiddenRejection(this.db,prior))claimConfirmedForbiddenRetry(this.db,prior,call,this.forbiddenScope(op,round,entry===round.candidate?'candidate':'review'));}}
+    entry.sent=true;this.save(op);
   }
   /** Result/call/usage and journal result reference commit together. */
   recordResult(request:CompletionRequest,result:AiResult):void {
@@ -187,9 +191,12 @@ export class CompletionJournal {
   private previousUnknown(op:CompletionOperation):boolean {
     return op.rounds.some(round=>(['candidate','review'] as const).some(kind=>round[kind]?.previous?.some(call=>call.sent&&!call.resultId&&!this.definitiveRejection(call.id)&&!this.received(call,round,kind==='candidate'?'amazon-fields':'amazon-fields-review'))));
   }
+  private forbiddenScope(op:CompletionOperation,round:CompletionRound,kind:'candidate'|'review'):string{return `field:${op.id}:${op.rounds.indexOf(round)}:${kind}`;}
   definitiveRejection(callId:string):boolean {
     const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(callId);
-    return !!row&&isDefinitiveFieldRejection(validateAiCall(JSON.parse(String(row.record_json))));
+    if(!row)return false;const call=validateAiCall(JSON.parse(String(row.record_json)));
+    if(call.providerId.startsWith('openrouter')&&['AUTH_FAILED','MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN','SERVICE_PERMISSION_REQUIRED'].includes(call.errorCode??''))return confirmedForbiddenRejection(this.db,call)||confirmedAuthenticationRejection(this.db,call);
+    return isDefinitiveFieldRejection(call);
   }
   /** Only explicit rejections or the existing controlled review repair may obtain another call ID. */
   retryMissing(id:string,kind:'candidate'|'review'):void {
@@ -204,8 +211,9 @@ export class CompletionJournal {
     const owner=call.presentationContext;
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
-    if(call.errorCode==='MODEL_REGION_RESTRICTED'||call.errorCode==='ROUTING_FORBIDDEN')throw new AiError(call.errorCode);
-    if(!isDefinitiveFieldRejection(call)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
+    if(confirmedForbiddenRejection(this.db,call))assertConfirmedForbiddenRetry(this.db,call,this.forbiddenScope(op,round,kind));
+    else if(call.errorCode==='MODEL_REGION_RESTRICTED'||call.errorCode==='ROUTING_FORBIDDEN')throw new AiError(call.errorCode);
+    if(!this.definitiveRejection(call.id)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if(this.received(entry,round)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if((entry.previous?.length??0)+legacyStepDebt(op,round,kind)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');
     const {previous,...old}=entry;

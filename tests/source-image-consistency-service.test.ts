@@ -379,11 +379,53 @@ test('legacy OpenRouter region refusal resumes once only after explicit continue
 });
 
 
-test('legacy forbidden without exact region proof and missing receipts never unlock source sends',async t=>{
+test('legacy forbidden uses matching403 proof while missing receipts never unlock source sends',async t=>{
  for(const missing of [false,true]){
   const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
   f.respond(()=>Response.json({error:{message:missing?'This model is not available in your region.':'Forbidden',code:403}},{status:403}));await assert.rejects(f.observe());
   const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED',...(missing?{providerReceiptId:undefined}:{})}),prior.id);
-  f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+  f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),missing?1:2);
  }
+});
+
+for(const message of ['This model is not available in your region.','Forbidden'])test(`confirmed403 ${message} manually resumes once without new credentials and remains blocked after restart`,async t=>{
+ const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+ f.respond(()=>Response.json({error:{message,code:403}},{status:403}));await assert.rejects(f.observe());const before=f.ai.listCalls()[0];
+ await assert.rejects(f.observe());assert.equal(f.count(),1);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
+ try{await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
+ assert.deepEqual(JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(before.id)!.record_json)),before);
+});
+
+async function routerForbiddenFixture(t:test.TestContext){
+ const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+ f.respond(()=>Response.json({error:{message:'This model is not available in your region.',code:403}},{status:403}));await assert.rejects(f.observe());await new Promise(resolve=>setTimeout(resolve,5));return f;
+}
+test('confirmed403 retry respects quota, concurrent continuation reserves exactly once and historical raw remains immutable',async t=>{
+ const f=await routerForbiddenFixture(t),before=f.ai.listCalls()[0];f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:1,dailyTokenLimit:null});
+ await assert.rejects(explicitlyContinue(()=>f.observe()),/额度/);assert.equal(f.count(),1);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:3,dailyTokenLimit:null});const other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
+ try{await Promise.allSettled([explicitlyContinue(()=>f.observe()),explicitlyContinue(()=>other.observeSourceConsistency(f.context(),()=>{}))]);assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);}finally{await other.close();}
+ assert.deepEqual(f.ai.listCalls().find(c=>c.id===before.id),before);
+});
+for(const damage of ['missing','body','metadata','unknown'])test(`confirmed403 ${damage} cannot authorize a new source send`,async t=>{
+ const f=await routerForbiddenFixture(t),call=f.ai.listCalls()[0];
+ if(damage==='missing')f.db.prepare('DELETE FROM ai_provider_receipts WHERE id=?').run(call.providerReceiptId!);
+ if(damage==='body'){const r=JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId!)!.record_json));writeFileSync(join(f.directory,r.relativePath),'{}');}
+ if(damage==='metadata'){const r=JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId!)!.record_json));r.model='openai/gpt-6-astra';f.db.prepare('UPDATE ai_provider_receipts SET record_json=? WHERE id=?').run(JSON.stringify(r),r.id);}
+ if(damage==='unknown'){f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...call,errorCode:'NETWORK_ERROR'}),call.id);}
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+});
+test('confirmed403 success resumes existing source locally without repeating result',async t=>{
+ const f=await routerForbiddenFixture(t),before=f.store.getProduct(f.p.id);f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:p.claims.map((c:any)=>({claimId:c.id,value:c.axis==='color'?'Blue':'Round',visibility:'visible'}))}))}));
+ const result=await explicitlyContinue(()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.equal((await f.observe()).id,result.id);assert.equal(f.count(),2);assert.deepEqual(f.store.getProduct(f.p.id),before);
+});
+test('confirmed403 retry claim survives restoring older encrypted backup and cannot grant another retry',async t=>{
+ const f=await routerForbiddenFixture(t),file=join(f.directory,'before-retry.htcbackup'),pass='synthetic-forbidden-backup';await createWorkspaceBackup(f.directory,file,pass);
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);const claim=f.db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!;
+ const snapshot=await prepareWorkspaceRestore(f.directory,file,pass);await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
+ const store=new WorkspaceStore(f.directory),db=openDatabase(f.directory),hosting=new HostingService(f.directory,store,mockStorage),ai=new AiService(f.directory,store,hosting,mockStorage,f.dependencies);
+ try{assert.equal(db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.detail_json,claim.detail_json);ai.saveConnection({id:'openrouter',apiKey:'restored-synthetic-key'});await assert.rejects(explicitlyContinue(()=>ai.observeSourceConsistency(ai.sourceConsistencyContext({productId:f.p.id,productRevision:store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}),()=>{})));assert.equal(f.count(),2);}finally{await ai.close();await hosting.close();db.close();store.close();}
 });

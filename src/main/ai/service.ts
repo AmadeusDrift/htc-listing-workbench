@@ -1,4 +1,5 @@
 import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
+import { fieldGroupCallId,fieldGroupRetryScope,assertFieldGroupHistory } from './field-purpose-groups.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { imagePlanFailureConfirmed } from './image-plan-retry.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
@@ -500,24 +501,30 @@ export class AiService {
   }
   private async runFieldGroups(initial:FieldGroupOperation,context:ListingAiContext,assertFresh:()=>Promise<void>,signal?:AbortSignal,completion?:CompletionRequest):Promise<AiResult>{
     await assertFresh();signal?.throwIfAborted();
-    let operation=readFieldGroup(this.db,initial.id)!;
+    let operation=readFieldGroup(this.db,initial.id)!;assertFieldGroupHistory(this.db,initial.id);
     if(operation.resultId){const result=this.getResult(operation.resultId);if(!result)throw new AiError('SOURCE_CHANGED');return result;}
     for(const member of operation.members)if(!member.sent)this.frozenPurposeProfile(member.purpose);
     const all=operation.members.flatMap(m=>m.assignments);
     for(let index=0;index<operation.members.length;index++){
       operation=readFieldGroup(this.db,initial.id)!;const member=operation.members[index];
       if(member.resultId){const saved=this.getResult(member.resultId);if(!saved)throw new AiError('SOURCE_CHANGED');continue;}
-      if(member.sent&&!this.batchTasks.find(member.callId)){
+      let retryOf:AiCall|undefined;
+      if(member.sent&&!this.batchTasks.find(fieldGroupCallId(member))){
         const recovered=await this.recoverGroupedField(operation,index,context);
         if(recovered)continue;
-        const error=new AiError('INTERRUPTED');error.message=`字段分组 ${member.assignments.map(a=>a.field).join('、')} 的原请求尚未完成本地回收；已保留成果和费用，未复制重发`;throw error;
+        const prior=this.getCall(fieldGroupCallId(member));
+        if(!prior||!confirmedForbiddenRejection(this.db,prior)){const error=new AiError('INTERRUPTED');error.message=`字段分组 ${member.assignments.map(a=>a.field).join('、')} 的原请求尚未完成本地回收；已保留成果和费用，未复制重发`;throw error;}
+        assertConfirmedForbiddenRetry(this.db,prior,fieldGroupRetryScope(operation,member));retryOf=prior;
       }
       const fields=groupFields(context,member.assignments,all),profile=this.frozenPurposeProfile(member.purpose);
       await this.listingFieldsOnce(context,assertFresh,profile,undefined,signal,undefined,{
-        id:member.callId,assignments:member.assignments,part:{operationId:operation.id,fields},
+        id:retryOf?randomUUID():fieldGroupCallId(member),assignments:member.assignments,part:{operationId:operation.id,fields},
         sent:call=>{
-          const current=readFieldGroup(this.db,initial.id)!,part=current.members[index];if(part.sent)throw new AiError('INTERRUPTED');part.sent=true;saveFieldGroup(this.db,current);
-          if(index===0&&completion)this.completionJournal.markSent(completion,call);
+          const current=readFieldGroup(this.db,initial.id)!,part=current.members[index];
+          if(retryOf){if(part.retryCallId||!part.sent||part.resultId||part.callId!==retryOf.id)throw new AiError('INTERRUPTED');claimConfirmedForbiddenRetry(this.db,retryOf,call,fieldGroupRetryScope(current,part));part.retryCallId=call.id;}
+          else{if(part.sent)throw new AiError('INTERRUPTED');part.sent=true;}
+          saveFieldGroup(this.db,current);
+          if(index===0&&completion&&!retryOf)this.completionJournal.markSent(completion,call);
         },
         result:result=>{const current=readFieldGroup(this.db,initial.id)!;current.members[index].resultId=result.id;saveFieldGroup(this.db,current);},
       });
@@ -533,7 +540,7 @@ export class AiService {
     });
   }
   private async recoverGroupedField(operation:FieldGroupOperation,index:number,context:ListingAiContext):Promise<boolean>{
-    const member=operation.members[index],call=this.getCall(member.callId);
+    const member=operation.members[index],call=this.getCall(fieldGroupCallId(member));
     if(!call||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID'||!call.finishedAt||!isFullSchema(context))return false;
     const fields=groupFields(context,member.assignments,operation.members.flatMap(m=>m.assignments));
     const rawOutputs=readInvalidAiOutputs(this.directory,call,'amazon-fields');

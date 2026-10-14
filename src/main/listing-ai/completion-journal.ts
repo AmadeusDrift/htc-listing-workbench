@@ -9,7 +9,7 @@ import { LEGACY_THEME_REPAIR_VERSION, legacyThemeSource, type LegacyThemeRepair 
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
 import type { ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
 import { isReviewCoverageOmission } from './review-omission.ts';
-import { readFieldGroup } from '../ai/field-purpose-groups.ts';
+import { readFieldGroup,fieldGroupCallId,assertFieldGroupHistory } from '../ai/field-purpose-groups.ts';
 import { recordRecoveredAiResult } from '../ai/results.ts';
 import {legacyCompletionOwners,recoverLegacyCompletion,linkLegacyCompletionOwners,legacyStepDebt} from './legacy-completion.ts';
 import type {LegacyCompletionHistory} from './legacy-completion.ts';
@@ -182,7 +182,7 @@ export class CompletionJournal {
   /** Result/call/usage and journal result reference commit together. */
   recordResult(request:CompletionRequest,result:AiResult):void {
     const op=this.get(request.operationId),round=op.rounds.find(r=>[r.candidate.id,r.review?.id].includes(request.callId));
-    if(!round||round.contextHash!==request.contextHash||result.callId!==request.callId||result.sourceSha256!==request.contextHash)invalid();
+    if(!round||round.contextHash!==request.contextHash||!this.groupResultMatches(request.callId,result)||result.sourceSha256!==request.contextHash)invalid();
     const entry=round.candidate.id===request.callId?round.candidate:round.review!;if(!entry.sent||entry.resultId)invalid();entry.resultId=result.id;this.save(op);
   }
   unknown(id:string):boolean {
@@ -281,12 +281,21 @@ export class CompletionJournal {
       return unavailable();
     }catch(error){this.db.exec('ROLLBACK');throw error;}
   }
+  private groupResultMatches(originalId:string,result:AiResult):boolean {
+    if(result.callId===originalId)return true;
+    const group=readFieldGroup(this.db,originalId);
+    if(!group||group.resultId!==result.id||result.fieldGroupAssembly?.operationId!==group.id||fieldGroupCallId(group.members[0])!==result.callId)return false;
+    assertFieldGroupHistory(this.db,originalId);
+    return group.members.every((member,index)=>member.resultId===result.fieldGroupAssembly!.sources[index]?.id&&fieldGroupCallId(member)===result.fieldGroupAssembly!.sources[index]?.callId);
+  }
   result(call:CompletionCall,round:CompletionRound):AiResult|undefined {
     if(!call.resultId)return undefined;
-    const row=this.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(call.resultId),callRow=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
+    const row=this.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(call.resultId);
+    const activeId=readFieldGroup(this.db,call.id)?.members[0];
+    const callRow=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(activeId?fieldGroupCallId(activeId):call.id);
     if(!row||!callRow)invalid();const result=validateStoredAiResult(JSON.parse(String(row.record_json))),saved=validateAiCall(JSON.parse(String(callRow.record_json)));
     if(result.localRecovery){const owner=this.get(result.localRecovery.operationId);if(!owner.rounds.some(r=>r.contextHash===round.contextHash&&r.candidate.id===call.id&&r.candidate.resultId===result.id))invalid();}
-    if(result.id!==call.resultId||result.callId!==call.id||saved.id!==call.id||!resultHasOwner(result,saved)||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==result.providerId||saved.model!==result.model||!result.listingContext||result.sourceSha256!==round.contextHash||listingFingerprint(result.listingContext)!==round.contextHash||result.output.kind!==(call.id===round.candidate.id?'amazon-fields':'amazon-fields-review')||call.id!==round.candidate.id&&result.sourceResultIds[0]!==round.candidate.resultId)invalid();return result;
+    if(result.id!==call.resultId||!this.groupResultMatches(call.id,result)||saved.id!==result.callId||!resultHasOwner(result,saved)||saved.productId!==round.context.productId||saved.productRevision!==round.context.productRevision||saved.providerId!==result.providerId||saved.model!==result.model||!result.listingContext||result.sourceSha256!==round.contextHash||listingFingerprint(result.listingContext)!==round.contextHash||result.output.kind!==(call.id===round.candidate.id?'amazon-fields':'amazon-fields-review')||call.id!==round.candidate.id&&result.sourceResultIds[0]!==round.candidate.resultId)invalid();return result;
   }
 }
 

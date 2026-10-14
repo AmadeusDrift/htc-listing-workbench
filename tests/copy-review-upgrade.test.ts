@@ -65,7 +65,7 @@ for(const phase of ['before-first','after-first','after-second'] as const)test(`
 });
 test('A19 cumulative completion retry debt blocks upgrade at the original three-send limit',async t=>{
  const f=await fixture(t);target(f);let reviews=0;f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[{code:'90220',message:'Missing material',severity:'ERROR',attributeNames:['material'],autoFixable:false,source:'amazon',category:'field'}]});
- f.respond(p=>{if(!p.candidate)return chat(candidateFor(p));if(++reviews<3)throw new Error('transport unknown');return chat(uncertain(p));});
+ f.respond(p=>{if(!p.candidate)return chat(candidateFor(p));if(++reviews<3)return Response.json({error:'synthetic authentication rejection'},{status:401});return chat(uncertain(p));});
  await assert.rejects(f.listing.complete(f.reference));await assert.rejects(f.listing.complete(f.reference));await assert.rejects(f.listing.complete(f.reference),/三次请求上限/);assert.equal(reviews,3);assert.equal(f.requests.length,4);assert.equal(f.listing.completionOperations(f.draft.id)[0].rounds.length,1);
 });
 for(const model of ['openai/gpt-6-luna','openai/gpt-6.1-sol','openai/gpt-6-astra'])test(`A19 ${model} target uses only its OpenRouter key`,async t=>{

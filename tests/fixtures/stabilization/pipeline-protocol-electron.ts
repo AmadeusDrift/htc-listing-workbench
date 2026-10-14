@@ -13,9 +13,9 @@ void app.whenReady().then(async()=>{
   const report={protocolOnly:true,businessStarted:false,identity:{pid:process.pid,executable:process.execPath,dataRoot:root,userData:app.getPath('userData'),electron:process.versions.electron},blocked:guard.blocked};
   Object.assign(globalThis,{__s10Dryrun:report,__s10RunNativeProtocol:async()=>{
     const route=policy.routes.find((row:{id:string})=>row.id==='ocr'),p=route.protocol;
-    const result=await recognizeWithAliyun(Buffer.from('s10-owned-image-bytes'),{width:256,height:256},{accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret},new AbortController().signal,{fetch:(url,init)=>net.fetch(url instanceof URL?url.href:url,init),now:()=>new Date(p.now),nonce:()=>p.nonce,maxResponseBytes:1048576});
+    const result=await recognizeWithAliyun(readFileSync(join(root,'source-blue.png')),{width:256,height:256},{accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret},new AbortController().signal,{fetch:(url,init)=>net.fetch(url instanceof URL?url.href:url,init),now:()=>new Date(p.now),nonce:()=>p.nonce,maxResponseBytes:1048576});
     assert.equal(result.output.kind,'ocr');assert.equal(result.requestId,'s10-native-ocr');
-    const body=Buffer.from('s10-native-frozen-body'),signed=signAcs3({host:'ocr-api.cn-hangzhou.aliyuncs.com',action:p.action,version:p.version,query:{Type:'Commerce'},body,contentType:p.contentType,now:new Date(p.now),nonce:p.nonce,accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret});
+    const body=readFileSync(join(root,'source-red.png')),signed=signAcs3({host:'ocr-api.cn-hangzhou.aliyuncs.com',action:p.action,version:p.version,query:{Type:'Commerce'},body,contentType:p.contentType,now:new Date(p.now),nonce:p.nonce,accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret});
     let denied=0;const deny=async(action:()=>unknown)=>{try{await action();throw Error('native protocol escaped');}catch(error){assert.match(String(error),/S10_NETWORK_BLOCKED/);denied++;}};
     for(const target of [route.publicUrl+'&Type=Commerce','http://127.0.0.1:1/protocol/ocr','https://outside.invalid/'])await deny(()=>net.fetch(target,{method:'POST'}));
     const base={method:'POST',headers:signed.headers,body:new Uint8Array(body),redirect:'error' as const};

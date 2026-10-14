@@ -15,14 +15,15 @@ const ocrRoute=()=>({id:'ocr',method:'POST',path:'/protocol/ocr',publicUrl:'http
 async function directory(){await mkdir(resolve('.test-data'),{recursive:true});return mkdtemp(resolve('.test-data/s10-protocol-'));}
 
 test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP, validating original bytes on server',async t=>{
-  const root=await directory(),routes=[{id:'miaoshou-detail',method:'POST',path:'/protocol/miaoshou',publicUrl:'https://openapi-erp.91miaoshou.com/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_detail',protocol:{kind:'miaoshou',appKey:'s10-miaoshou-key',appSecret:'s10-miaoshou-secret',timestamp:'1792022400'},response:{json:{result:'success',code:'success',data:{ok:true}}}},
+  const root=await directory(),{materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),fixtures=await materializeFixtures(join(root,'fixtures'));
+  const routes=[{id:'miaoshou-detail',method:'POST',path:'/protocol/miaoshou',publicUrl:'https://openapi-erp.91miaoshou.com/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_detail',protocol:{kind:'miaoshou',appKey:'s10-miaoshou-key',appSecret:'s10-miaoshou-secret',timestamp:'1792022400'},response:{json:{result:'success',code:'success',data:{ok:true}}}},
     {id:'ocr',method:'POST',path:'/protocol/ocr',publicUrl:'https://ocr-api.cn-hangzhou.aliyuncs.com/?Type=Commerce',protocol:{kind:'acs3',accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret',action:'RecognizeAllText',version:'2021-07-07',now,nonce,contentType:'application/octet-stream'},response:{json:{Code:'success',RequestId:'s10-ocr-1',Data:{Width:256,Height:256,Content:'',SubImageCount:0,SubImages:[]}}}}];
   const server=await createFakeProvider({directory:join(root,'server'),routes});t.after(()=>server.close());
   const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
-  const code=`import assert from 'node:assert/strict';import {readMiaoshou} from './src/main/miaoshou/protocol.ts';import {recognizeWithAliyun} from './src/main/ai/adapters.ts';
+  const code=`import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {readMiaoshou} from './src/main/miaoshou/protocol.ts';import {recognizeWithAliyun} from './src/main/ai/adapters.ts';
     const signal=new AbortController().signal,now=new Date('${now}');
     const source=await readMiaoshou('detail',{commonCollectBoxDetailId:'91015000000000001'},{appKey:'s10-miaoshou-key',appSecret:'s10-miaoshou-secret'},fetch,now,signal);assert.equal(source.data.ok,true);
-    const result=await recognizeWithAliyun(Buffer.from('s10-owned-image-bytes'),{width:256,height:256},{accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret'},signal,{fetch,now:()=>now,nonce:()=>'${nonce}',maxResponseBytes:1048576});assert.equal(result.output.kind,'ocr');assert.equal(result.output.text,'');
+    const result=await recognizeWithAliyun(await readFile(${JSON.stringify(fixtures[0].absolutePath)}),{width:256,height:256},{accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret'},signal,{fetch,now:()=>now,nonce:()=>'${nonce}',maxResponseBytes:1048576});assert.equal(result.output.kind,'ocr');assert.equal(result.output.text,'');
     console.log(JSON.stringify({source:true,ocr:result.requestId,guard:globalThis.__s10Guard}));`;
   const output=await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});
   assert.equal(JSON.parse(output.stdout).ocr,'s10-ocr-1');

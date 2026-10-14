@@ -11,6 +11,7 @@ import { InboxSyncBar } from './InboxSyncBar';
 import { InboxProductDetail } from './InboxProductDetail';
 import { InboxSourceImage } from './InboxSourceImage';
 import './inbox.css';
+import { loadInboxSummaryPage } from './inbox-summary-page';
 
 interface Props {
   products: ProductSummary[]; placements: WorkspacePlacement[]; busy: boolean;
@@ -40,10 +41,10 @@ export function InboxPage({ products, placements, busy, onImport, onExamples, on
   useEffect(() => {
     let active = true;
     const productIds = (JSON.parse(pageKey) as [string, string][]).map(([id]) => id);
-    setSummaryError(''); setSummaryLoading(productIds.length > 0);
+    setSummaries({}); setSummaryError(''); setSummaryLoading(productIds.length > 0);
     if (!productIds.length) return;
-    void window.red.getMiaoshouInboxSummaries({ productIds }).then(rows => {
-      if (active) setSummaries(Object.fromEntries(rows.map(row => [row.productId, row])));
+    void loadInboxSummaryPage(productIds, input => window.red.getMiaoshouInboxSummaries(input), () => active).then(rows => {
+      if (active && rows) setSummaries(Object.fromEntries(rows.map(row => [row.productId, row])));
     }, cause => { if (active) setSummaryError(errorText(cause)); }).finally(() => { if (active) setSummaryLoading(false); });
     return () => { active = false; };
   }, [pageKey, reload]);

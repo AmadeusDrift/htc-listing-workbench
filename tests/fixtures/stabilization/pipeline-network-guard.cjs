@@ -90,7 +90,8 @@ function installElectron(electron){
     const frozen=snapshotInit(init),request=mapped(input,frozen,'electron.net.fetch');
     if(!request.route.protocol)return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:request.headers,redirect:'error'}));
     const capability=require('node:crypto').randomUUID();nativePending.set(capability,{request,bytes:wireBody(frozen.body),sent:false});
-    return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:{...Object.fromEntries(request.headers),'x-s10-native-capability':capability},redirect:frozen.redirect??'error'})).finally(()=>nativePending.delete(capability));
+    const nativeHeaders={...Object.fromEntries(request.headers),'x-s10-native-capability':capability};delete nativeHeaders.host;
+    return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:nativeHeaders,redirect:frozen.redirect??'error'})).catch(error=>{state.nativeProtocolFailure={name:error.name??null,code:error.code??null,causeCode:error.cause?.code??null,headerRejected:/host|unsafe.?header|forbidden.?header/i.test(String(error.message))};throw error;}).finally(()=>nativePending.delete(capability));
   };}
   const nativeRequest=electron.net.request.bind(electron.net);electron.net.request=input=>{const expected=electronScope.getStore(),url=typeof input==='string'?input:input?.url;
     if(!expected||url!==expected.url||String(input?.method??'GET').toUpperCase()!==expected.method)return deny('electron.net.request');return nativeRequest(input);

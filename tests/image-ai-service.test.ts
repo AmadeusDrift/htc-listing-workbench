@@ -1702,3 +1702,66 @@ test('A19 image workflow resumes a pending current-copy upgrade before consideri
  const {workflow,posts}=productionWorkflow(f),listing=(workflow as any).listing;let resumed=0,repairs=0;listing.complete=async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]});listing.reviewCurrentForImages=async()=>{resumed++;throw new Error('resume original upgrade');};listing.repairCurrentForImages=async()=>{repairs++;throw new Error('must not repair while upgrade pending');};
  const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(resumed,1,result.workflow.error??'expected original review entry');assert.equal(repairs,0);assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(posts(),0);assert.equal(reviewCalls,1);
 });
+
+for(const quality of ['appearance','text'] as const)for(const risk of [true,false])test(`retry generation grant uses real planner guard after three ${quality} failures risk=${risk}`,async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);let reject=true;
+ workflow.saveRiskSettings({enabled:risk});workflow.saveAppearanceReviewSettings({enabled:quality==='appearance'});if(quality==='appearance')enableAppearance(f);
+ f.respond((operation,payload)=>{
+  if(operation==='ip-upload')return new Response(null,{status:200});
+  if(operation==='image-appearance-review')return appearanceReply(payload,reject&&posts()<=3?'MISMATCH':'PASS');
+  if(quality==='text'&&reject&&posts()>0&&operation==='ocr')return Response.json({Code:'success',Data:{Width:256,Height:256,Content:'UNWANTED',SubImageCount:1,SubImages:[{SubImageId:0,BlockInfo:{BlockCount:1,BlockDetails:[{BlockId:0,BlockContent:'UNWANTED',BlockConfidence:99}]}}]}});
+  if(quality==='text'&&reject&&operation==='image-text-review')return chat({verdict:'NEEDS_CHANGES',checks:payload.reviewItems.map((item:any)=>({...item,verdict:'UNSUPPORTED',evidenceIds:[],reason:'Unexpected text on a text-free main image.'})),expectedTextChecks:[],noTextVerified:false,issues:['Remove the unwanted OCR text.']});
+ });
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}),prior=structuredClone(first.workflow.slots!);
+ assert.equal(prior[0].attempts.length,3,first.workflow.error??'');assert.equal(prior[0].status,'FAILED');
+ const calls=f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===first.workflow.id&&c.presentationContext.slot===1&&c.purposeSnapshot?.purposeId?.startsWith('image_plan'));
+ assert.equal(calls.length,3);assert.ok(calls.every(c=>c.status==='SUCCEEDED'));
+ if(!risk){
+  assert.equal(prior[0].attempts.at(-1)!.ipReviewResultId,null);assert.ok(prior[0].attempts.at(-1)!.riskBypass);
+  workflow.saveRiskSettings({enabled:true});await assert.rejects(workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:prior[0].attempts.at(-1)!.requestId,commandId:randomUUID()}));workflow.saveRiskSettings({enabled:false});
+  const guardDb=openDatabase(f.directory),saved=String(guardDb.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json),forged=JSON.parse(saved);forged.slots[0].attempts.at(-1).riskBypass.candidate.sha256='b'.repeat(64);guardDb.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(forged),first.workflow.id);
+  try{await assert.rejects(workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:prior[0].attempts.at(-1)!.requestId,commandId:randomUUID()}));}finally{guardDb.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(saved,first.workflow.id);guardDb.close();}
+ }
+ const usage=f.ai.getUsageSummary('deepseek');
+ const granted=await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:prior[0].attempts.at(-1)!.requestId,commandId:randomUUID()});assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);assert.equal(granted.retryAllowance!.grants.length,1);
+ reject=false;const before=f.requests.filter(r=>r.operation==='image-plan').length;
+ const result=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});
+ assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(result.workflow.slots![0].attempts.length,4);assert.equal(f.requests.filter(r=>r.operation==='image-plan').length,before+1);assert.equal(posts(),10);assert.deepEqual(result.workflow.slots!.slice(1),prior.slice(1));
+ const db=openDatabase(f.directory);try{assertImageWorkflowHistory(db,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c])));}finally{db.close();}
+});
+
+test('retry mixed generation/planning grants preserve real guard bounds, budget and restore proof',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});let phase:'quality'|'invalid-plan'|'pass'='quality';
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-appearance-review'?appearanceReply(payload,phase==='quality'&&posts()<=3?'MISMATCH':'PASS'):operation==='image-plan'&&phase==='invalid-plan'?chat({invalid:'fixture'}):undefined);
+ const initial=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision}),runId=initial.workflow.id;
+ assert.equal(initial.workflow.slots![0].attempts.length,3,initial.workflow.error??'');
+ await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:initial.workflow.slots![0].attempts.at(-1)!.requestId,commandId:randomUUID()});
+ const before=f.requests.length;f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:null});
+ const stopped=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.notEqual(stopped.workflow.status,'COMPLETED');assert.equal(f.requests.length,before);assert.equal(posts(),9);
+ f.ai.setUsagePolicy({providerId:'deepseek',dailyCallLimit:null,dailyTokenLimit:null});
+ const db=openDatabase(f.directory),saved=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(runId)!.record_json),run=JSON.parse(saved);
+ try{
+  const previous=f.ai.getResult(run.slots[0].attempts[2].planResultId)!;assert.ok(previous.imageContext);
+  for(const state of ['UNKNOWN','BLOCKED'] as const){const blocked=structuredClone(run);blocked.slots[0].status=state;blocked.slots[0].attempts.at(-1).state=state;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(blocked),runId);await assert.rejects(workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:blocked.slots[0].attempts.at(-1).requestId,commandId:randomUUID()}));await assert.rejects(f.ai.imagePlan(previous.imageContext!,()=>{},{previousPlanId:previous.id,issues:['Necessary repair']},undefined,runId));assert.equal(f.requests.length,before);}
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(saved,runId);
+  await assert.rejects(f.ai.imagePlan(previous.imageContext!,()=>{},{previousPlanId:run.slots[0].attempts[0].planResultId,issues:['Wrong earlier plan']},undefined,runId));assert.equal(f.requests.length,before);
+ }finally{db.close();}
+ phase='invalid-plan';const exhausted=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(exhausted.workflow.slots![0].attempts.length,4);assert.equal(exhausted.workflow.slots![0].attempts[3].state,'PLANNING');
+ const planningCalls=f.ai.listCalls().filter(c=>c.presentationContext?.workflowId===runId&&c.presentationContext.slot===1&&c.purposeSnapshot?.purposeId?.startsWith('image_plan'));assert.equal(planningCalls.length,6);assert.equal(planningCalls.filter(c=>c.status==='SUCCEEDED').length,3);const atLimit=f.requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(f.requests.length,atLimit,'exhausted generation grant must not loop planning requests');
+ const path=join(f.directory,'mixed-retry-before-planning-grant.htcbackup'),passphrase='synthetic mixed grant restore proof';await createWorkspaceBackup(f.directory,path,passphrase);
+ const granted=await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:exhausted.workflow.slots![0].attempts[3].requestId,commandId:randomUUID()});assert.deepEqual(granted.retryAllowance!.grants.map(g=>g.scope),['generation','planning']);assert.equal(granted.maxAttempts,3);
+ phase='pass';const completed=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(posts(),10);
+ const prepared=await prepareWorkspaceRestore(f.directory,path,passphrase),snapshot=openDatabase(prepared.stagingDirectory);
+ try{const {assertImageRetryHistory,retryGrants}=await import('../src/main/image-workflow/retry-allowance.ts');assertImageRetryHistory(snapshot);assert.equal(retryGrants(snapshot).length,2);const planning=retryGrants(snapshot).find(g=>g.scope==='planning')!;assert.equal(planning.initialPlanningCallIds!.length,6);assert.equal(planning.savedPlanningCalls!.filter(c=>c.status==='SUCCEEDED').length,4);}finally{snapshot.close();}
+});
+
+test('retry planning-first then generation grant keeps separate quotas across restore',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});let phase:'invalid'|'quality'|'pass'='invalid';
+ f.respond((operation,payload)=>operation==='ip-upload'?new Response(null,{status:200}):operation==='image-plan'&&payload.slot&&phase==='invalid'?chat({invalid:'fixture'}):operation==='image-appearance-review'?appearanceReply(payload,phase==='quality'&&posts()<=3?'MISMATCH':'PASS'):undefined);
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.slots![0].attempts[0].state,'PLANNING');assert.equal(posts(),0);
+ const planGrant=await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:first.workflow.slots![0].attempts[0].requestId,commandId:randomUUID()});assert.equal(planGrant.retryAllowance!.grants[0].scope,'planning');const {imageSlotAttemptLimit}=await import('../src/shared/image-workflow-contracts.ts');assert.equal(imageSlotAttemptLimit(planGrant,1),3);
+ phase='quality';const failed=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(failed.workflow.slots![0].attempts.length,3,failed.workflow.error??'');assert.equal(posts(),9);
+ const path=join(f.directory,'planning-first.htcbackup'),passphrase='synthetic planning-first mixed grants';await createWorkspaceBackup(f.directory,path,passphrase);
+ await workflow.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:failed.workflow.slots![0].attempts[2].requestId,commandId:randomUUID()});phase='pass';const completed=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(completed.workflow.status,'COMPLETED',completed.workflow.error??'');assert.equal(posts(),10);
+ const restored=await prepareWorkspaceRestore(f.directory,path,passphrase),db=openDatabase(restored.stagingDirectory);try{const {assertImageRetryHistory,retryGrants}=await import('../src/main/image-workflow/retry-allowance.ts');assertImageRetryHistory(db);const grants=retryGrants(db);assert.deepEqual(grants.map(g=>g.scope),['planning','generation']);assert.equal(grants[0].initialPlanningCallIds!.length,3);}finally{db.close();}
+});

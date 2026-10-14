@@ -8,7 +8,7 @@ import {taskAiContext} from '../src/main/ai/batch/task-context.ts';
 import {RunReportReader} from '../src/main/diagnostics/run-report.ts';
 import {localAiRequestResolved} from '../src/main/ai/request-certainty.ts';
 
-function scope(db:ReturnType<typeof openDatabase>,product:{id:string;variants:{id:string}[]},draftId=randomUUID(),sku='S02-REPORT-SYNTHETIC'){
+function scope(db:ReturnType<typeof openDatabase>,product:{id:string;variants:{id:string}[]},draftId:string=randomUUID(),sku='S02-REPORT-SYNTHETIC'){
   const taskId=randomUUID(),item={key:product.id+':'+product.variants[0].id,productId:product.id,variantId:product.variants[0].id,sku,draftId,stage:'FIELDS',status:'FAILED',executionTaskIds:[]};
   db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(taskId,JSON.stringify({id:taskId,revision:1,status:'PAUSED',items:[item]}));
   return {taskId,item,context:{taskId,rowKey:item.key,phase:'FIELDS',mode:'immediate' as const,authorize:()=>true}};

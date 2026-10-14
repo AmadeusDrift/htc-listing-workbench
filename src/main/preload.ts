@@ -49,6 +49,7 @@ const api: RedApi = {
   saveAppearanceReviewSettings:input=>invoke('red:appearance-review:save',input),
   getCopyReviewSettings:()=>invoke('red:copy-review:settings'),
   saveCopyReviewSettings:input=>invoke('red:copy-review:save',input),
+  addImageRetryAllowance:input=>invoke('red:automatic-product:retry-allowance',input),
   approveUnknownImageRetry:input=>invoke('red:automatic-product:unknown-retry',input),
   completeAutomaticProduct: input => invoke('red:automatic-product:complete', input),
   prepareAutomaticProductSources: input => invoke('red:automatic-product:sources', input),

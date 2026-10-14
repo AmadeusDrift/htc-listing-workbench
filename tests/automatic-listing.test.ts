@@ -1896,3 +1896,21 @@ test('a readonly observer can conservatively expire one preview but explicit ref
  const pending=f.service.previewAdaptationForUi(task.id);(f.service as any).observing=Promise.resolve();const stale=await pending;assert.equal(stale.canApply,false);assert.equal(reads,0);assert.equal((f.service as any).previewFlights.size,0);
  (f.service as any).observing=null;const fresh=await f.service.previewAdaptationForUi(task.id);assert.equal(fresh.canApply,true);assert.equal(reads,1);assert.equal((f.service as any).previewFlights.size,0);
 });
+
+test('working batch archive pauses in-flight image work before new empty batch; original task can still resume',async t=>{
+ const f=fixture(t),task=await f.create(),before=f.service.listWorkBatches().find(b=>!b.archivedAt)!;
+ let started!:()=>void;const began=new Promise<void>(resolve=>started=resolve);f.holdImages(started);
+ f.service.startAuthorized(f.service.prepareStart(task.id));await reachedStage(began,f.service.waitForIdle(),()=>f.service.get(task.id));
+ let done=false;const archive=f.service.archiveWorkBatch(before.id).then(v=>{done=true;return v;});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(done,false,'archive waits for the local late result');
+ assert.equal(f.service.get(task.id).status,'PAUSED');assert.throws(()=>f.service.prepareStart(task.id),/归档/);
+ f.releaseImages();const next=await archive;assert.deepEqual(next.productIds,[]);assert.deepEqual(next.taskIds,[]);
+ const after=f.service.get(task.id);assert.equal(after.status,'PAUSED');assert.equal(f.calls.submissions,0);assert.equal(f.service.listWorkBatches().find(b=>b.id===before.id)!.taskIds[0],task.id);
+ assert.equal(f.service.prepareStart(task.id).id,task.id);assert.equal(f.service.listWorkBatches().find(b=>!b.archivedAt)!.id,next.id);
+});
+test('adding historical product to new batch does not evade global original-task guard or send',async t=>{
+ const f=fixture(t),task=await f.create(),before=f.service.listWorkBatches().find(b=>!b.archivedAt)!;
+ const next=await f.service.archiveWorkBatch(before.id);f.service.addWorkBatchProducts({batchId:next.id,productIds:[f.product.id]});
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].rows[0].taskId,task.id);
+ await assert.rejects(()=>f.service.create({workBatchId:next.id,productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'}),/原任务/);assert.deepEqual(f.calls,{sources:0,images:0,submissions:0,batches:0,labels:0});
+});

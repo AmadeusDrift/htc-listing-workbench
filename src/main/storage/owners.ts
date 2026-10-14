@@ -13,7 +13,7 @@ export const MODULE_TABLES:Readonly<Partial<Record<DataOwner,readonly string[]>>
   images:['image_versions','image_selections','image_write_operations','image_workflow_runs'],
   assets:['assets','hosting_profiles','hosting_uploads','image_reference_pins'],
   publish:['amazon_write_locks','amazon_exchanges','amazon_calls','execution_tasks','listing_corrections','listing_correction_attempts'],
-  tasks:['automatic_listing_tasks'],
+  tasks:['automatic_listing_tasks','automatic_work_batches'],
   observations:['listing_followups'],
   procurement:['procurement_batches'],
   labels:['item_labels'],

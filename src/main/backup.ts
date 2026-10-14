@@ -1,3 +1,4 @@
+import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import {referencePinHistory,retainReferencePinHistory} from './hosting/reference-history.ts';
 import {referencePinArtifactPaths} from './hosting/reference-pins.ts';
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
@@ -185,6 +186,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 20) Object.assign(approved, CONSISTENCY_TABLES);
     if (version >= 21) {Object.assign(approved,CORRECTION_TABLES);approved.amazon_write_locks=[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id'];assertCorrectionHistory(database);}
     if(version>=22){Object.assign(approved,MIGRATION_TABLES);assertMigrationJournal(database);}
+    if(version>=32){Object.assign(approved,WORK_BATCH_TABLES);assertWorkBatches(database);}
     if(version>=30){Object.assign(approved,PRODUCT_FACT_MODEL_TABLES);assertProductFactModels(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
     if(version>=24){Object.assign(approved,SCHEMA_OPERATION_TABLES);assertSchemaOperationHistory(database);}
@@ -363,7 +365,9 @@ function snapshotRetention(path: string): BackupRetention {
   } finally { database.close(); }
 }
 
-function disconnectSnapshot(path: string): void {
+function disconnectSnapshot(path: string): boolean {
+  const original=new DatabaseSync(path,{readOnly:true});let migratedWorkBatches:boolean;
+  try{migratedWorkBatches=Number(original.prepare('PRAGMA user_version').get()!.user_version)<32;}finally{original.close();}
   const database = openDatabase(dirname(path));
   try {
     revokeSchemaInFlight(database);
@@ -400,9 +404,10 @@ function disconnectSnapshot(path: string): void {
     // deleted API payloads and old credential references cannot enter exports.
     database.exec('VACUUM');
   } finally { database.close(); }
+  return migratedWorkBatches;
 }
 
-function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
+function retainSafetyHistory(currentPath: string, snapshotPath: string, migratedWorkBatches=false): void {
   if (!existsSync(currentPath)) return;
   const current = new DatabaseSync(currentPath, { readOnly: true });
   const snapshot = new DatabaseSync(snapshotPath);
@@ -424,6 +429,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
+    retainWorkBatches(current,snapshot,migratedWorkBatches);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
@@ -523,11 +529,11 @@ export async function prepareWorkspaceRestore(directory: string, sourceFile: str
     }
     if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
     guard.assertTree();
-    disconnectSnapshot(snapshot);
+    const migratedWorkBatches=disconnectSnapshot(snapshot);
     const retention = snapshotRetention(snapshot);
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
     guard.assertTree();
-    retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
+    retainSafetyHistory(join(root, 'red.sqlite'), snapshot,migratedWorkBatches);
     await retainCandidateFiles(root,staging);
     guard.assertTree();
     return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: [...value.assets.map(asset => ({ path: asset.path, sha256: asset.sha256, byteSize: Buffer.byteLength(asset.data, 'base64') })),...await candidateBackupFiles(staging)] };

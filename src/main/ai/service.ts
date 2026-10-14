@@ -1,3 +1,4 @@
+import { imagePlanFailureConfirmed } from './image-plan-retry.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
 import { decideListingEnums } from './enum-decisions.ts';
 import { factsForVariant, productFactEvidence } from '../../shared/fact-scopes.ts';
@@ -809,12 +810,25 @@ export class AiService {
     if (repair && !prior) throw new AiError('SOURCE_CHANGED');
     {
       const requestHash=listingFingerprint({context,repair:repair??null});
-      const call=this.listCalls().filter(call=>(call.presentationContext?.imagePlanRequestSha256===requestHash||!repair&&call.presentationContext?.imagePlanRequestSha256===undefined)&&call.presentationContext?.sourceSha256===listingFingerprint(context)&&call.presentationContext?.workflowId===workflowId).sort((a,b)=>b.startedAt.localeCompare(a.startedAt))[0];
+      const calls=this.listCalls().filter(call=>call.presentationContext?.sourceSha256===listingFingerprint(context)&&call.presentationContext?.workflowId===workflowId&&(call.purposeSnapshot?['image_plan','image_plan_repair'].includes(call.purposeSnapshot.purposeId):isGenerationProvider(call.providerId)&&call.model==='deepseek-flash')).sort((a,b)=>b.startedAt.localeCompare(a.startedAt));
+      const call=calls.find(call=>call.presentationContext?.imagePlanRequestSha256===requestHash||!repair&&call.presentationContext?.imagePlanRequestSha256===undefined);
       if(call?.status==='SUCCEEDED'){
         const refusal=this.listResults(call.productId).find(result=>result.callId===call.id&&result.output.kind==='image-plan'&&(result.output.productUnderstanding?.sufficient===false||!!workflowId&&call.presentationContext?.imagePlanRequestSha256===requestHash)&&result.sourceSha256===listingFingerprint(context));
         if(refusal){await this.assertImageFresh(context,assertContextFresh,signal??new AbortController().signal);this.successfulResult(refusal);return refusal;}
       }
-      if(call){const recovered=await this.recoverImagePlan(call.id,context,assertContextFresh,signal,repair);if(recovered)return recovered;if(imagePlanRetryForbidden(this.directory,call))throw new AiError('OUTPUT_INVALID');}
+      if(call){
+        const recovered=await this.recoverImagePlan(call.id,context,assertContextFresh,signal,repair);if(recovered)return recovered;
+        if(imagePlanRetryForbidden(this.directory,call))throw new AiError('OUTPUT_INVALID');
+      }
+      // New repair wording cannot discard an unresolved request for the same source/workflow.
+      for(const previous of calls.filter(previous=>previous.status!=='SUCCEEDED')){
+        // Only the exact waiting Batch identity may enter start's guarded receipt replay.
+        const waiting=taskAiContext.getStore()?.waitingOperationId===previous.id&&this.batchTasks.find(previous.id);
+        if(!imagePlanFailureConfirmed(this.directory,previous)&&!(waiting&&!waiting.adoption)){
+          const unknown=new AiError('INTERRUPTED');unknown.callId=previous.id;unknown.diagnosticReason='IMAGE_PLAN_RESULT_UNKNOWN';
+          unknown.message='图片规划原请求结果未知，已保留调用与费用记录；本次未发送新请求，请先核对原结果';throw unknown;
+        }
+      }
     }
     return this.start(profile, context.listing, { operation: 'image-plan', context, repair, ...(workflowId?{workflowId:uuid(workflowId)}:{}) }, async activeSignal => {
       const assertFresh = async () => { await this.assertImageFresh(context, assertContextFresh, activeSignal); if (prior) this.imageResult(prior, context, 'image-plan'); };

@@ -47,3 +47,14 @@ test('same task missing a later SKU row fails restore and leaves live database b
  const later={...task.items[0],variantId:randomUUID(),sku:'KEEP-LATER-SKU'};later.key=later.productId+':'+later.variantId;task.items.push(later);const db=openDatabase(f.directory);db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(task),task.id);db.close();
  const before=await readFile(join(f.directory,'red.sqlite'));await assert.rejects(()=>prepareWorkspaceRestore(f.directory,f.file,passphrase),/后续.*SKU/);assert.deepEqual(await readFile(join(f.directory,'red.sqlite')),before);
 });
+for(const change of ['member','task','archive'] as const)test(`restore rechecks unused-placeholder proof after preparation when live adds ${change}`,async t=>{
+ const f=await fixture(t),target=join(f.root,'manual-target');let store=new WorkspaceStore(target);const product=store.createProduct();store.close();
+ await createWorkspaceBackup(f.directory,f.file,passphrase);const prepared=await prepareWorkspaceRestore(target,f.file,passphrase);
+ if(change==='member'){store=new WorkspaceStore(target);store.moveWorkspaceProducts({productIds:[product.id],destination:'automatic'});store.close();}
+ else if(change==='task')await createInertBatchTask(target,product.id);
+ else {const db=openDatabase(target);archiveWorkBatch(db,currentWorkBatch(db).id);db.close();}
+ const before=await readFile(join(target,'red.sqlite'));const db=openDatabase(target),batches=listWorkBatches(db);db.close();
+ await assert.rejects(()=>commitWorkspaceRestore(target,prepared),/序号重复|原任务身份/);
+ assert.deepEqual(await readFile(join(target,'red.sqlite')),before,'rejected install must preserve live SQLite bytes');
+ const check=openDatabase(target);assert.deepEqual(listWorkBatches(check),batches);check.close();store=new WorkspaceStore(target);assert.deepEqual(store.listProducts().map(p=>p.id),[product.id]);store.close();
+});

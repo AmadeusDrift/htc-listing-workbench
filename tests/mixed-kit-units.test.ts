@@ -116,6 +116,29 @@ test('stored guard uses exact original source revision from owner history instea
   assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/套装|计量/);assert.equal(result.report.pricingDecision?.status,'quoted','historical quoted result remains history');
  }finally{db.close();}
 });
+test('legacy normalized counts cannot prove original quote units after an unrelated revision',()=>{
+ const p=kitProduct();p.variants=p.variants.slice(0,1);const v=p.variants[0];v.normalizedSpec='黄色 50pc';
+ const rules=defaultListingRules();rules.pricing.maxPrice=100;rules.pricing.promoEnabled=false;
+ const normal={...p,title:'普通夹子',variants:[{...v,originalSpec:'黄色 50pc'}]};
+ const recipe=buildSalesRecipes(normal,null,rules)[0];delete recipe.quantityVersion;delete recipe.platformPieces;
+ const schema=realAmazonSchema(),target={id:'target',name:'U2',mode:'demo',marketplaceId:'ATVPDKIKX0DER'} as AmazonTarget;
+ const result=applyBusinessRules({product:normal,variant:normal.variants[0],target,schema,attributes:{},measurements:{},costCny:8.2,saleUnit:recipe,packageMatchesSaleUnit:true,now:new Date()},rules);
+ assert.equal(result.report.pricingDecision?.status,'quoted');assert.equal(recipe.components[0].specification,'黄色 50pc');
+ const draft={id:'draft',sku:'KEEP-SKU',productId:p.id,productRevision:1,variantId:v.id,listingProgram:'haul',marketplaceId:target.marketplaceId,schema,attributes:result.attributes,businessRules:result.report,salesPlan:{recipe},previewResponse:{original:'retained'}};
+ const db=new DatabaseSync(':memory:');try{
+  db.exec('CREATE TABLE listing_drafts(id TEXT,record_json TEXT); CREATE TABLE products(id TEXT,title TEXT,description TEXT,revision INTEGER); CREATE TABLE variants(id TEXT,product_id TEXT,original_spec TEXT,normalized_spec TEXT); CREATE TABLE amazon_settings(key TEXT,value_json TEXT); CREATE TABLE audit_events(product_id TEXT,action TEXT,detail_json TEXT)');
+  db.prepare('INSERT INTO listing_drafts VALUES(?,?)').run('draft',JSON.stringify({draft}));db.prepare('INSERT INTO products VALUES(?,?,?,?)').run(p.id,p.title,p.description,1);db.prepare('INSERT INTO variants VALUES(?,?,?,?)').run(v.id,p.id,v.originalSpec,v.normalizedSpec);db.prepare('INSERT INTO amazon_settings VALUES(?,?)').run('listing_rules_v1',JSON.stringify(rules));
+  const before=JSON.stringify(db.prepare('SELECT * FROM listing_drafts').all());
+  assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/套装|计量/);
+  db.prepare('UPDATE products SET revision=2,description=?').run('仅补备注');
+  const cases=[null,{...p,variants:[]},{...p,variants:[{...v,originalSpec:undefined}]},{...p,title:'普通夹子',variants:[{...v,originalSpec:'黄色'}]}];
+  for(const basis of cases){
+   db.exec('DELETE FROM audit_events');if(basis)db.prepare('INSERT INTO audit_events VALUES(?,?,?)').run(p.id,'product.updated',JSON.stringify({before:basis,after:{...p,revision:1}}));
+   assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/原.*依据|计量|套装/,'absent/incomplete/normalized-only owner history must keep the paid lock');
+   assert.equal(JSON.stringify(db.prepare('SELECT * FROM listing_drafts').all()),before,'guard preserves original SKU, quote, recipe and receipt bytes');
+  }
+ }finally{db.close();}
+});
 test('UNKNOWN and submitted/readback rows preserve old identity and suppress replacement NEW recipes',()=>{
  for(const [state,stage] of [['UNKNOWN','READBACK'],['SUBMITTED','IMAGES'],['SUBMITTING','IMAGES'],['DRAFT','READBACK'],['DRAFT','LABELS'],['DRAFT','COMPLETE']]){
   const p=kitProduct(),rules=defaultListingRules(),recipe=buildSalesRecipes(p,null,rules)[0],c={...recipe.components[0],quantity:50,piecesPerQuote:50,sourcePackPieces:50};delete c.unitSemantics;

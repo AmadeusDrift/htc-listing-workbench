@@ -22,7 +22,9 @@ function originalUnitIssue(db:DatabaseSync,draft:AmazonDraft):string|null {
         for(const id of ids){
           const variant=source.variants.find(v=>v.id===id),component=components.find(c=>c.variantId===id);
           if(!variant||typeof variant.originalSpec!=='string'||typeof variant.normalizedSpec!=='string'||component&&variant.sku!==component.sourceSku){complete=false;break;}
-          const quantity=productSourceQuantity(source,variant);
+          // Normalization may already contain the erroneous accessory count. Only
+          // original owner evidence can establish the adopted quote's unit basis.
+          const quantity=productSourceQuantity(source,{...variant,normalizedSpec:''});
           if(quantity.unitSemantics)return '原采用修订中的套装计量仍需明确确认；无关资料修订不解除历史错误报价';
           if(quantity.conflict||component&&(quantity.piecesPerQuote!==component.piecesPerQuote||quantity.piecesPerPack!==component.sourcePackPieces))return '原采用修订的件数或报价单位与历史配方不一致，请核对原计量依据';
         }
@@ -30,8 +32,7 @@ function originalUnitIssue(db:DatabaseSync,draft:AmazonDraft):string|null {
       }
     }
   }
-  // Explicit original component packaging remains a valid independent basis for ordinary homogeneous goods.
-  if(components.length&&components.every(c=>{const q=sourceQuantity(c.specification);return q.source==='explicit'&&!q.conflict&&!q.unitSemantics&&q.piecesPerPack===c.sourcePackPieces&&q.piecesPerQuote===c.piecesPerQuote;}))return null;
+  // Legacy component wording is derived, not proof of the original supplier unit.
   return '原采用修订的计量依据未能可靠定位，请核对原销售单位；不能因无关修订变化继续判定旧报价合格';
 }
 

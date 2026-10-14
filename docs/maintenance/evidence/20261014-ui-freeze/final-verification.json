@@ -1,0 +1,24 @@
+{
+  "sourceCommit": "ff994ac39ebc122843b13032457c570d2e989358",
+  "manifestSha256": "83df6da012189f59f5d6393fa9eeac29d83c34819eac2ac1744ffe4b6978e1e2",
+  "candidatePassed": true,
+  "candidateChecks": [
+    "candidate execPath/appPath/version, hidden sandbox, exact public IPC API",
+    "actual Electron safeStorage, SQLite write, nativeImage PNG",
+    "real preload/IPC sample persistence and managed image rendering",
+    "compatibility IPC retains independent thinking/key and rejects invalid input; real purpose UI independently saves model/effort without mutating other purposes, legacy settings or calling providers",
+    "restarted actual EXE displays exact persisted purpose models/efforts/revisions and retains compatibility thinking without re-entering the shared synthetic key",
+    "same candidate restart preserves SQLite, encrypted synthetic secret and product IDs; no outbound"
+  ],
+  "candidateErrors": [],
+  "fullSuite": {
+    "tests": 3007,
+    "passed": 3004,
+    "failed": 0,
+    "skipped": 3,
+    "cancelled": 0,
+    "exitCode": 0,
+    "durationMs": 714694.1378
+  },
+  "activated": false
+}

@@ -1,3 +1,4 @@
+import { assertTaskImageRetryAllowance } from '../image-workflow/retry-allowance.ts';
 import { fingerprint } from '../execution/records.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AutomaticListingTask } from '../../shared/automatic-listing-contracts.ts';
@@ -6,6 +7,7 @@ import { assertWorkflowRejectionOwner,readCompletionForRejection } from '../imag
 import { validateAiCall,validateStoredAiResult } from '../ai/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 export function assertAutomaticRejectionHistory(db:DatabaseSync,task:AutomaticListingTask):void{
+ assertTaskImageRetryAllowance(db,task);
  for(const item of task.items){const r=item.rejection;if(!r)continue;
   const row=db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(r.workflowId);
   if(!row)throw new UserFacingError('拒绝原因工作流记录缺失');

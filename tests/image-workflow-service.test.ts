@@ -1256,3 +1256,77 @@ test('Schema generation preflight preserves NOT_SENT identity and never marks an
   const prior=f.service.getProgress(f.draft.id)!;assert.equal(prior.slots![0].attempts[0].state,'READY');assert.equal(f.calls.includes('generate'),false);
   failing=false;const resumed=await f.run();assert.equal(resumed.workflow.id,prior.id);assert.equal(resumed.workflow.slots![0].attempts[0].requestId,prior.slots![0].attempts[0].requestId);
 });
+
+test('image retry allowance: manual +3 preserves paid attempts, is idempotent and sends nothing',async t=>{
+  const f=await fixture(t,{knownGenerationFailures:3}),first=await f.run(),before=structuredClone(first.workflow),calls=f.calls.length;
+  assert.equal(before.slots![0].attempts.length,3,first.workflow.error??'');
+  const input={draftId:f.draft.id,slot:1,requestId:before.slots![0].attempts.at(-1)!.requestId,commandId:randomUUID()};
+  const granted=await f.service.addRetryAllowance(input);
+  assert.deepEqual(granted.slots,before.slots);assert.equal(f.calls.length,calls);assert.equal(granted.retryAllowance?.grants.length,1);
+  assert.deepEqual((await f.service.addRetryAllowance(input)).retryAllowance,granted.retryAllowance);
+  await assert.rejects(f.service.addRetryAllowance({...input,commandId:randomUUID()}),/耗尽/);
+  const resumed=await f.run();assert.equal(resumed.workflow.status,'COMPLETED');
+  assert.deepEqual(resumed.workflow.slots![0].attempts.slice(0,3),before.slots![0].attempts);
+  assert.equal(resumed.workflow.slots![0].attempts.length,4);assert.equal(f.calls.filter(c=>c==='generate').length,10);
+  assert.deepEqual(resumed.workflow.slots!.slice(1),before.slots!.slice(1));
+});
+
+test('image retry allowance: ambiguous legacy failure, unknown and blocked slots cannot receive credit',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:3});await f.run();const db=openDatabase(f.root);
+ const original=f.service.getProgress(f.draft.id)!;
+ for(const state of ['RETRYABLE_FAILURE','UNKNOWN','BLOCKED'] as const){const run=structuredClone(original),slot=run.slots![0],last=slot.attempts.at(-1)!;delete last.failureProof;last.state=state;last.error='FAILED';slot.status=state==='UNKNOWN'?'UNKNOWN':state==='BLOCKED'?'BLOCKED':'FAILED';db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(run),run.id);
+ await assert.rejects(f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:last.requestId,commandId:randomUUID()}));}db.close();
+});
+
+test('image retry allowance: frozen historical failure receives exactly one grant on explicit continue',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:3}),first=await f.run(),count=f.calls.length;
+ const {initializeImageRetryAllowances,retryGrants}=await import('../src/main/image-workflow/retry-allowance.ts');
+ const db=openDatabase(f.root);db.exec('DROP TABLE image_retry_allowances');initializeImageRetryAllowances(db);db.close();
+ assert.equal(f.service.hasHistoricalRetryAllowance(f.draft.id),true);
+ assert.equal(f.service.getProgressPresentation(f.draft.id)!.retryAllowanceStatus![0].automatic,true);
+ assert.equal(f.service.getProgress(f.draft.id)!.retryAllowance,undefined);assert.equal(f.calls.length,count);
+ const result=await f.run();assert.equal(result.workflow.status,'COMPLETED');assert.equal(result.workflow.retryAllowance?.grants.length,1);assert.deepEqual(result.workflow.slots![0].attempts.slice(0,3),first.workflow.slots![0].attempts);
+ const ledger=openDatabase(f.root);assert.equal(retryGrants(ledger)[0].mode,'historical');ledger.close();
+ assert.equal(f.service.hasHistoricalRetryAllowance(f.draft.id),false);await f.run();assert.equal(f.calls.filter(c=>c==='generate').length,10);
+});
+
+test('image retry allowance: new failures are not automatically included and budget still blocks sends',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:3}),first=await f.run(),last=first.workflow.slots![0].attempts.at(-1)!;
+ assert.equal(f.service.hasHistoricalRetryAllowance(f.draft.id),false);
+ await f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:last.requestId,commandId:randomUUID()});const count=f.calls.length;
+ f.amazon.assertPricingForPaid=()=>{throw new Error('budget denied fixture');};const result=await f.run();assert.notEqual(result.workflow.status,'COMPLETED');assert.equal(f.calls.length,count);assert.deepEqual(result.workflow.slots![0].attempts.slice(0,3),first.workflow.slots![0].attempts);
+});
+
+test('image retry allowance: exhausted definite planning output failures receive scoped planning credit only',async t=>{
+ const f=await fixture(t),normal=f.ai.imagePlan;
+ f.ai.imagePlan=async(context,...rest)=>{if(!context.slot)return normal(context,...rest);const db=openDatabase(f.root),workflow=f.service.getProgress(f.draft.id)!;try{for(let i=0;i<3;i++){const id=randomUUID(),at=new Date().toISOString();db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(id,JSON.stringify({id,providerId:'deepseek',productId:f.product.id,productRevision:f.product.revision,model:'deepseek-flash',generation:1,status:'FAILED',errorCode:'OUTPUT_INVALID',requestId:null,startedAt:at,finishedAt:at,usage:{promptTokens:0,completionTokens:0,processedImages:0},responseReceived:true,presentationContext:{kind:'image',workflowId:workflow.id,draftId:f.draft.id,variantId:f.draft.variantId,slot:context.slot.index,sourceSha256:listingFingerprint(context)}}));}}finally{db.close();}throw new AiError('OUTPUT_INVALID');};
+ const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'PLANNING');
+ const id=first.workflow.slots![0].attempts[0].requestId;const granted=await f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:id,commandId:randomUUID()});
+ assert.equal(granted.retryAllowance?.grants[0].scope,'planning');assert.equal(granted.maxAttempts,3);assert.equal(f.calls.filter(c=>c==='generate').length,0);
+ f.ai.imagePlan=normal;const result=await f.run();assert.equal(result.workflow.status,'COMPLETED');assert.equal(result.workflow.slots![0].attempts[0].requestId,id);
+});
+
+test('image retry allowance: cumulative attempts exceed 21 only with trusted slot grants',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:100}),first=await f.run();assert.equal(first.workflow.attempt,21);
+ for(const slot of first.workflow.slots!)await f.service.addRetryAllowance({draftId:f.draft.id,slot:slot.index,requestId:slot.attempts.at(-1)!.requestId,commandId:randomUUID()});
+ const second=await f.run();assert.equal(second.workflow.attempt,42);assert.equal(second.workflow.maxAttempts,3);assert.equal(second.workflow.retryAllowance?.grants.length,7);
+ const forged=structuredClone(second.workflow);delete forged.retryAllowance;assert.throws(()=>validateImageWorkflowRun(forged));
+ assert.equal(new Set(second.workflow.slots!.flatMap(s=>s.attempts.map(a=>a.requestId))).size,42);
+ assert.equal(f.calls.filter(c=>c==='plan').length,21,'extra generation attempts reuse valid paid plans');
+});
+
+test('image retry allowance: restart retains command identity and an existing recovered candidate takes precedence',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:3}),first=await f.run(),last=first.workflow.slots![0].attempts.at(-1)!,input={draftId:f.draft.id,slot:1,requestId:last.requestId,commandId:randomUUID()};
+ await f.service.addRetryAllowance(input);const count=f.calls.length;await f.service.close();const restarted=f.reopen();try{assert.equal((await restarted.addRetryAllowance(input)).retryAllowance!.grants.length,1);assert.equal(f.calls.length,count);}finally{await restarted.close();}
+ const g=await fixture(t,{knownGenerationFailures:3}),initial=await g.run(),failed=initial.workflow.slots![0].attempts.at(-1)!,existing=(await g.generation.readCandidate(initial.workflow.slots![1].attempts.at(-1)!.candidateId!)).candidate,baseline=g.calls.length;
+ g.generation.reconcileWorkflowGeneration=async()=>({...existing,id:failed.requestId});
+ const recovered=await g.service.addRetryAllowance({draftId:g.draft.id,slot:1,requestId:failed.requestId,commandId:randomUUID()});assert.equal(recovered.retryAllowance,undefined);assert.equal(recovered.slots![0].attempts.at(-1)!.state,'GENERATED');assert.equal(g.calls.length,baseline);
+});
+
+test('image retry allowance: old structured definitive audit supports grant without trusting FAILED text',async t=>{
+ const f=await fixture(t,{knownGenerationFailures:3}),first=await f.run(),run=structuredClone(first.workflow),last=run.slots![0].attempts.at(-1)!;delete last.failureProof;
+ const db=openDatabase(f.root);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(run),run.id);
+ db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'operation.failed','synthetic',JSON.stringify({version:1,stage:'image-generation.request',productId:run.productId,requestId:last.requestId,requestOutcome:'DEFINITIVE_FAILURE',httpStatus:400,code:'PROVIDER_ERROR'}),new Date().toISOString());db.close();
+ assert.equal(f.service.getProgressPresentation(f.draft.id)!.retryAllowanceStatus![0].manual,true);
+ await f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:last.requestId,commandId:randomUUID()});const count=f.calls.filter(c=>c==='plan').length;const resumed=await f.run();assert.equal(resumed.workflow.status,'COMPLETED');assert.equal(f.calls.filter(c=>c==='plan').length,count);assert.equal(resumed.workflow.slots![0].attempts[2].failureProof,undefined);
+});

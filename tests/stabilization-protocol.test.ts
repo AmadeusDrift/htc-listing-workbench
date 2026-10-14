@@ -31,6 +31,38 @@ test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP
   const raw=await readFile(server.ledgerPath,'utf8');assert.ok(!/s10-acs-secret|s10-miaoshou-secret|authorization|x-sign/.test(raw));
 });
 
+test('FTP passive replies cannot redirect a guarded worker to another loopback port or public host',async t=>{
+  const root=await directory(),bait=await createFakeProvider({directory:join(root,'bait'),observeConnections:true,routes:[{id:'bait',method:'GET',path:'/bait'}]});t.after(()=>bait.close());
+  for(const kind of ['epsv-port','pasv-host']){
+    const server=await createFakeProvider({directory:join(root,kind),ftp:true,passiveFault:{kind,port:bait.port},routes:[{id:'unused',method:'GET',path:'/unused'}]});t.after(()=>server.close());
+    const policy=await writePolicy({directory:join(root,'worker-'+kind),provider:server,guardFile:guard});
+    const code=`import assert from 'node:assert/strict';import {Client} from 'basic-ftp';import {Readable} from 'node:stream';const client=new Client(2000,{allowSeparateTransferHost:false});try{await client.access({host:'127.0.0.1',port:${server.ftp.port},user:'s10-user',password:'s10-password',secure:false});await assert.rejects(client.uploadFrom(Readable.from(Buffer.from('s10-passive-bait')),'/s10/bait.png'));console.log(JSON.stringify({guard:globalThis.__s10Guard}));}finally{client.close();}`;
+    await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});
+    assert.equal(server.ledger().filter((row:any)=>row.event==='ftp-upload').length,0);assert.ok(server.ledger().some((row:any)=>row.event==='ftp-command'&&row.command===(kind==='pasv-host'?'PASV':'EPSV')));
+  }
+  assert.equal(bait.ledger().filter((row:any)=>row.event==='http-connection').length,0);
+});
+
+test('real HostingService FTP transport and public image probe verify the uploaded bytes and reuse remote version after reopen',async t=>{
+  const root=await directory(),{materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),fixtures=await materializeFixtures(join(root,'fixtures'));
+  const bytes=await readFile(fixtures[0].absolutePath),sha256=createHash('sha256').update(bytes).digest('hex'),remotePath='/s10/references/'+sha256+'.png',publicUrl='https://htc.185858.xyz/AAA/references/'+sha256+'.png';
+  const server=await createFakeProvider({directory:join(root,'server'),ftp:true,routes:[{id:'hosted',method:'GET',path:'/protocol/hosted',publicUrl,protocol:{kind:'public-image',remotePath,sha256},response:{fromFtpPath:remotePath,contentType:'image/png'}}]});t.after(()=>server.close());
+  const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {WorkspaceStore} from './src/main/store.ts';import {HostingService} from './src/main/hosting/service.ts';import {createPublicImageProbe} from './src/main/hosting/public-probe.ts';import {testMiaoshouStorage} from './tests/helpers/miaoshou-fixture.ts';
+    const store=new WorkspaceStore(process.env.RED_DATA_DIR),storage=testMiaoshouStorage(),bytes=await readFile(${JSON.stringify(fixtures[0].absolutePath)});
+    const probe=createPublicImageProbe({lookup:async host=>{assert.equal(host,'htc.185858.xyz');return [{address:'198.18.0.1',family:4}];},nativeFetch:fetch}),make=()=>new HostingService(process.env.RED_DATA_DIR,store,storage,{probe});
+    let service=make();service.importProfile({id:'alpha',host:'127.0.0.1',port:${server.ftp.port},secure:false,username:'s10-user',password:'s10-password',remoteRoot:'/s10',publicBaseUrl:'https://htc.185858.xyz/AAA/'});const profile=service.setEnabled({id:'alpha',enabled:true});
+    const version={assetId:'01234567-89ab-4cde-8fab-0123456789ab',sha256:'${sha256}',sourceKind:'source',sourceVersion:'s10-protocol-source',originalPath:'assets/01234567-89ab-4cde-8fab-0123456789ab.png',byteSize:bytes.length,mimeType:'image/png'};
+    try{assert.equal(await service.uploadReferenceVersion('alpha',profile.generation,version,bytes),'${publicUrl}');await service.close();service=make();assert.equal(await service.uploadReferenceVersion('alpha',profile.generation,version,bytes),'${publicUrl}');
+      await assert.rejects(probe({url:'${publicUrl}',sha256:'0'.repeat(64),byteSize:bytes.length,mimeType:'image/png'},new AbortController().signal));
+      for(const url of ['${publicUrl}?x=1','${publicUrl}'.replace('/AAA/','/BBB/'),'https://outside.invalid/image.png'])await assert.rejects(async()=>fetch(url));
+      console.log(JSON.stringify({referenceProtocolOnly:true,normalPipeline:false,guard:globalThis.__s10Guard}));
+    }finally{await service.close();store.close();}`;
+  await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});
+  const rows=server.ledger();assert.equal(rows.filter((row:any)=>row.event==='ftp-upload').length,1);assert.equal(rows.filter((row:any)=>row.event==='request').length,3);assert.equal(rows.filter((row:any)=>row.event==='arrival').length,3);
+  assert.ok(rows.filter((row:any)=>row.event==='body'&&row.routeId==='hosted').every((row:any)=>row.bodySha256===sha256));assert.deepEqual(await server.readFtp(remotePath),bytes);
+});
+
 test('actual AmazonTransport verifies LWA, exact preview/formal/readback queries and full-schema download checksum over owned HTTP',async t=>{
   const root=await directory(),{schemaFixture}=require(resolve('tests/fixtures/stabilization/pipeline-normal-draft.mjs')),fixture=await schemaFixture('drink-coaster-us');
   const body={productType:'DRINK_COASTER',requirements:'LISTING',attributes:{item_name:[{value:'Synthetic coaster',marketplace_id:'ATVPDKIKX0DER',language_tag:'en_US'}]}},bodySha256=createHash('sha256').update(JSON.stringify(body)).digest('hex');

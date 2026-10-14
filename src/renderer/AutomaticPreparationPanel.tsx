@@ -158,7 +158,7 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
       </fieldset>
 
       <div className="workflow-actions automatic-launch-actions"><strong>已选 {selected.length} 件商品 · 可启动 {salesRows.length} 个销售 SKU</strong><button type="button" className="button primary" disabled={!canStart} aria-describedby="automatic-start-hint" onClick={() => { void start(); }}><Play size={16} />{starting ? '正在创建任务…' : '启动并自动发布'}</button><span id="automatic-start-hint" className="small-copy">{canStart ? '任务保存在本机。启动后可切换页面；暂停或取消请使用下方任务操作。' : startHint}</span></div>
-      <p className="small-copy automatic-review-scope">每个销售 SKU 生成 7 张图，{riskEnabled?'全部检查侵权风险':'当前已关闭图片风险拦截'}；只检查第一张主图是否带字，其余图片不做 OCR 或文字复核。已通过图片保留，仅主图文字问题最多重试两次。</p>
+      <p className="small-copy automatic-review-scope">每个销售 SKU 生成 7 张图，{riskEnabled?'全部检查侵权风险':'当前已关闭图片风险拦截'}；只检查第一张主图是否带字，其余图片不做 OCR 或文字复核。每个图位初始最多3次尝试；符合条件的失败图位可追加3次，已通过图片保留。</p>
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}
     </section>

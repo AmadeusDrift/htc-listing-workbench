@@ -11,7 +11,7 @@ import { keys, uuid } from "../ai/primitives.ts";
 import { readManagedImage, sameAsset, validateImage } from '../ai/source.ts';
 import { inspectRaster } from '../image-format.ts';
 import { OpenRouterImageAdapter,decodeOpenRouterImage } from '../ai/adapters/openrouter-images.ts';
-import { openRouterFailure } from '../ai/adapters/openrouter-http.ts';
+import { openRouterFailure,openRouterReceiptState } from '../ai/adapters/openrouter-http.ts';
 import { OPENROUTER_IMAGE_MODELS } from '../../shared/image-generation-contracts.ts';
 import { openDatabase } from '../database.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -182,6 +182,7 @@ export class ImageGenerationService {
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
       const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
+      const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
       const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
       const candidate:GeneratedImageCandidate={id:intent.id,provider:intent.provider,model:intent.model,productId:intent.productId,productRevision:intent.productRevision,createdAt:intent.createdAt,mode:intent.mode,sourceAssets:intent.sourceAssets,...(intent.editSource?{editSource:intent.editSource}:{}),requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
       delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
@@ -203,6 +204,7 @@ export class ImageGenerationService {
   private imageOutcome(intent:ImageRequestIntent):{kind:'unknown'|'invalid'|'raw'|'candidate';candidate?:GeneratedImageCandidate} {
     if(existsSync(join(this.directory,'image-generation','candidates',intent.id))){const candidate=readCandidateFilesSync(this.directory,intent.id,this.decodePreview).candidate;if(candidate.productId!==intent.productId||candidate.productRevision!==intent.productRevision||candidate.model!==intent.model||listingFingerprint(candidate.sourceAssets)!==listingFingerprint(intent.sourceAssets)||listingFingerprint(candidate.editSource??null)!==listingFingerprint(intent.editSource??null))throw new AiError('SOURCE_CHANGED');return {kind:'candidate',candidate};}
     const saved=readImageReceiptSync(this.db,this.directory,intent);if(!saved)return {kind:'unknown'};
+    const state=openRouterReceiptState(saved.record.status,saved.capture.body);if(state==='unknown'||state==='invalid')return {kind:state};
     const failure=openRouterFailure(saved.record.status,saved.capture.body);if(failure)return {kind:failure.definitive?'invalid':'unknown'};
     if(saved.capture.body==null)return {kind:'invalid'};
     if(saved.capture.body==='[omitted: credential echo]')return {kind:'unknown'};

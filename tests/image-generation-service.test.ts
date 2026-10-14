@@ -13,6 +13,7 @@ import { AiError } from '../src/main/ai/errors.ts';
 import type { SecretStorage } from '../src/main/amazon/vault.ts';
 import { DEFAULT_OPENROUTER_IMAGE_MODEL as model } from '../src/shared/image-generation-contracts.ts';
 import { readProviderReceipt } from '../src/main/ai/receipts.ts';
+import {readImageRequestIntent,readImageReceiptSync} from '../src/main/ai/receipts.ts';
 import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
 
 const key = randomBytes(32), secret = 'sk-fixture-image-secret';
@@ -100,6 +101,19 @@ test('older backup retains whole unresolved manual image intent and blocks chang
   const prepared=await prepareWorkspaceRestore(f.directory,backup,'s02-synthetic-passphrase'),staged=openDatabase(prepared.stagingDirectory);try{assert.equal(staged.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id)?.record_json,raw);}finally{staged.close();}
   await f.service.close();f.closeStore();await commitWorkspaceRestore(f.directory,prepared);const store=new WorkspaceStore(f.directory);let posts=0;const service=new ImageGenerationService(f.directory,store,storage,{decodePreview:b=>b,fetch:async()=>{posts++;throw Error('must not send');}});
   try{service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-restored-key'});await assert.rejects(service.generate({...f.input,prompt:'Changed after restore'}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id);await assert.rejects(service.generateForWorkflow(f.input,{requestId:randomUUID()}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id);assert.equal(posts,0);}finally{await service.close();store.close();}
+});
+
+for(const variant of ['empty401','whitespace401','echo401','utf8401','missing401','plain503','processing200'] as const)test(`unsafe ${variant} image receipt remains the original UNKNOWN across manual/reconcile/restart/old backup`,async t=>{
+  const status=variant==='plain503'?503:variant==='processing200'?200:401,body=variant==='empty401'?'':variant==='whitespace401'?'   ':variant==='utf8401'?Buffer.from([0xff,0x61]):JSON.stringify({error:{code:status,message:variant==='echo401'?secret:variant==='plain503'?'Upstream unavailable':'Synthetic processing failure'}});
+  const f=await fixture(t,{fetch:async()=>variant==='missing401'?new Response(null,{status}):new Response(body,{status})});f.enable();const backup=join(f.directory,'before-unsafe-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'s02-synthetic-passphrase');const first:any=await f.service.generate(f.input).catch(e=>e);assert.equal(first.certainty,'SENT_UNKNOWN');
+  const db=openDatabase(f.directory);let id:string,rawIntent:string,rawReceipts:string,rawBytes:Buffer|undefined;try{const row=db.prepare('SELECT id,record_json FROM ai_image_requests').get()!;id=String(row.id);rawIntent=String(row.record_json);rawReceipts=JSON.stringify(db.prepare('SELECT * FROM ai_provider_receipts ORDER BY rowid').all());const intent=readImageRequestIntent(db,id)!,saved=readImageReceiptSync(db,f.directory,intent);if(saved){rawBytes=await readFile(join(f.directory,saved.record.relativePath));assert.equal(saved.record.costUsd,null);if(variant==='echo401')assert.equal(saved.capture.body,'[omitted: credential echo]');}}finally{db.close();}
+  const blocked=(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id;
+  await assert.rejects(f.service.generate(f.input),blocked);await assert.rejects(f.service.generate({...f.input,prompt:'Changed prompt',referenceAssetIds:[f.product.assets[0].id]}),blocked);
+  if(variant==='missing401')assert.equal(await f.service.reconcileWorkflowGeneration(id),null);else await assert.rejects(f.service.reconcileWorkflowGeneration(id),(e:any)=>e.certainty==='SENT_UNKNOWN');
+  f.service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-new-image-key'});await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);assert.equal(f.calls.length,1);
+  await f.service.close();let newPosts=0;const reopened=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:b=>b,fetch:async()=>{newPosts++;throw Error('must not send');}});try{await assert.rejects(reopened.generate(f.input),blocked);}finally{await reopened.close();}assert.equal(newPosts,0);
+  const prepared=await prepareWorkspaceRestore(f.directory,backup,'s02-synthetic-passphrase');f.closeStore();await commitWorkspaceRestore(f.directory,prepared);const store=new WorkspaceStore(f.directory),service=new ImageGenerationService(f.directory,store,storage,{decodePreview:b=>b,fetch:async()=>{newPosts++;throw Error('must not send');}});
+  try{service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-after-restore-key'});await assert.rejects(service.generate({...f.input,prompt:'Changed after restore'}),blocked);await assert.rejects(service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);const restored=openDatabase(f.directory);try{assert.equal(restored.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id)?.record_json,rawIntent);assert.equal(JSON.stringify(restored.prepare('SELECT * FROM ai_provider_receipts ORDER BY rowid').all()),rawReceipts);const saved=readImageReceiptSync(restored,f.directory,readImageRequestIntent(restored,id)!);if(rawBytes)assert.deepEqual(await readFile(join(f.directory,saved!.record.relativePath)),rawBytes);assert.equal(restored.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,1);}finally{restored.close();}assert.equal(newPosts,0);assert.equal(f.calls.length,1);}finally{await service.close();store.close();}
 });
 test('saving encrypts key, exposes only metadata, makes no network calls and survives restart', async t => {
   const f = await fixture(t);
@@ -332,12 +346,12 @@ test('generation preview records original error code before safe mapping and kee
   assert.doesNotMatch(JSON.stringify(audit),/sk-fixture-image-secret/);
 });
 
-for(const failure of [400,502,'network','notSent'] as const)test(`generation persists ${failure} evidence without changing dispatch count`,async t=>{
-  const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('Bearer sk-private https://private.test/path');return Response.json({error:{message:'private '+secret}},{status:typeof failure==='number'?failure:500});}});
+for(const failure of [400,'safe400',502,'network','notSent'] as const)test(`generation persists ${failure} evidence without changing dispatch count`,async t=>{
+  const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('Bearer sk-private https://private.test/path');return Response.json({error:{message:failure==='safe400'?'Synthetic parameter refusal':'private '+secret}},{status:typeof failure==='number'?failure:failure==='safe400'?400:500});}});
   if(failure!=='notSent')f.enable();
   const requestId=randomUUID();await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}));
   const db=openDatabase(f.directory);let detail:any;try{detail=JSON.parse(String(db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' ORDER BY rowid DESC LIMIT 1").get()!.detail_json));}finally{db.close();}
-  assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,failure==='notSent'?'NOT_SENT':failure===400?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN');
-  assert.equal(detail.httpStatus,typeof failure==='number'?failure:undefined);
+  assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,failure==='notSent'?'NOT_SENT':failure==='safe400'?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN');
+  assert.equal(detail.httpStatus,typeof failure==='number'?failure:failure==='safe400'?400:undefined);
   assert.equal(f.calls.length,failure==='notSent'?0:1);assert.doesNotMatch(JSON.stringify(detail),/sk-private|private.test|sk-fixture-image-secret/);
 });

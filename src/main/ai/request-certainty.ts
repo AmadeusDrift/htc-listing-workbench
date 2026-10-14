@@ -2,7 +2,7 @@ import type {DatabaseSync} from 'node:sqlite';
 import {validateAiCall,validateStoredAiResult} from './validation.ts';
 import {resultHasOwner} from './result-owner.ts';
 import {readCallReceiptSync} from './receipts.ts';
-import {openRouterFailure} from './adapters/openrouter-http.ts';
+import {openRouterFailure,openRouterReceiptState} from './adapters/openrouter-http.ts';
 import {assertReceiptRecovery} from './receipt-recovery.ts';
 import {httpError,receivedDeepSeekRejection} from './errors.ts';
 
@@ -16,9 +16,10 @@ export function localAiRequestResolved(db:DatabaseSync,directory:string,id:strin
     }
     const saved=readCallReceiptSync(db,directory,call);if(!saved)return false;
     const {record,capture}=saved,body=capture.body as any;
+    const state=openRouterReceiptState(record.status,body);if(state==='unknown')return false;
     // HTTP 200 may contain an upstream processing error; a complete envelope is
     // not proof of rejection before processing, nor a valid domain result.
-    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!=='[omitted: credential echo]'&&!openRouterFailure(record.status,body);
+    if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID';
     if(call.status!=='FAILED'||body===undefined||typeof body==='string'&&!body.trim()||body==='[omitted: credential echo]')return false;
     const error=record.gateway==='openrouter'?openRouterFailure(record.status,body):httpError(record.status,body?.error?.code);
     const definitive=record.gateway==='openrouter'?!!error&&'definitive' in error&&error.definitive===true:receivedDeepSeekRejection(record.status,body,call.errorCode!);

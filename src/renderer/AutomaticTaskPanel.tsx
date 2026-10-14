@@ -48,15 +48,17 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     let active = true, timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       const request = version.current;
+      let pollDelay = 30_000;
       try {
         const values = await api.listAutomaticListingTasks();
+        if(values.some(value=>['RUNNING','QUEUED','WAITING'].includes(value.status)))pollDelay=10_000;
         const id = selectedId || values[0]?.id;
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         let batch:TaskBatchSummary|null=null,batchFailure='';
         if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
         if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
-      finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, 2000); } }
+      finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, pollDelay); } }
     };
     void poll();
     // Navigation only stops reads. Task lifetime belongs to the main process.

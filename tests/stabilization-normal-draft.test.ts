@@ -62,5 +62,5 @@ test('controller normal-plan mode emits the WIP inventory without opening worker
   assert.equal(report.businessStarted,false);assert.equal(report.providerStarted,false);assert.equal(report.workerStarted,false);
   assert.deepEqual(report.schemaFixtures.map((row:any)=>[row.name,row.propertyCount]),[['drink-coaster-us',106],['figurine-parent-us',87]]);
   assert.ok(report.schemaFixtures.every((row:any)=>/^[a-f0-9]{64}$/.test(row.sha256)));
-  assert.throws(()=>execFileSync(process.execPath,[resolve('scripts/e2e-stabilization-pipeline.mjs'),'--normal-plan'],{cwd:resolve('..'),encoding:'utf8',windowsHide:true,stdio:['ignore','pipe','pipe']}),/S10_EXPLICIT_WORKTREE_REQUIRED/);
+  assert.throws(()=>execFileSync(process.execPath,[resolve('scripts/e2e-stabilization-pipeline.mjs'),'--normal-plan'],{cwd:resolve('..'),encoding:'utf8',windowsHide:true,stdio:['ignore','pipe','pipe']}),/S10_EXPLICIT_WORKTREE_REQUIRED|STABILIZATION_WORKTREE_REQUIRED/);
 });

@@ -21,6 +21,9 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
   handle('red:automatic-listing:batch-summary',1,id=>service.batchSummary(identifier(id)));
   handle('red:automatic-listing:execution-mode',1,input=>service.setExecutionMode(input));
   handle('red:automatic-listing:batch-plan',0,()=>service.getBatchPlan());
+  handle('red:automatic-listing:work-batches',0,()=>service.listWorkBatches());
+  handle('red:automatic-listing:work-batch-add',1,input=>service.addWorkBatchProducts(input));
+  handle('red:automatic-listing:work-batch-archive',1,async id=>{const batch=await service.archiveWorkBatch(identifier(id));hooks.audit('automatic-listing.archived','归档当前工作批次并新建空批次');return batch;});
   handle('red:automatic-listing:list', 0, () => service.list());
   handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));

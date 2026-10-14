@@ -1,5 +1,6 @@
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
+import { listWorkBatches, currentWorkBatch, archiveWorkBatch, addWorkBatchProducts, bindWorkBatchTask } from './work-batches.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { BatchWaitingError } from '../ai/batch/task-context.ts';
 import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
@@ -63,7 +64,7 @@ import { selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
   batch?:TaskBatchRuntime;batchPlan?:()=>TaskBatchPlan;
-  store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'>>;
+  store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'|'hasProducts'>>;
   rules(): ListingRules;
   amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
   hosting: Pick<HostingService, 'getProfile'> & Partial<Pick<HostingService,'listUploads'|'checkLocalAssets'>>;
@@ -134,6 +135,7 @@ export class AutomaticListingService {
   private closed = false;
   private schedulingSuspended = false;
   private closing: Promise<void> | null = null;
+  private archiving = false;
   constructor(directory: string, dependencies: AutomaticListingDependencies) {
     this.deps = dependencies; this.db = openDatabase(directory);
     try {
@@ -163,6 +165,26 @@ export class AutomaticListingService {
     assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
     });
+  }
+  listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
+  addWorkBatchProducts(raw:unknown) {
+    this.ensureOpen(); if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
+    const input=record(raw,'批次商品',['batchId','productIds']),id=identifier(input.batchId);
+    if(!Array.isArray(input.productIds)||!input.productIds.length||input.productIds.length>1000)throw new UserFacingError('请选择1–1000个商品');
+    const ids=input.productIds.map(identifier);if(!this.deps.store.hasProducts?.(ids))throw new UserFacingError('加入批次的商品不存在，请刷新后重试');
+    addWorkBatchProducts(this.db,id,ids);return currentWorkBatch(this.db,id);
+  }
+  async archiveWorkBatch(id:string) {
+    this.ensureOpen(); if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
+    const batch=currentWorkBatch(this.db,id);this.archiving=true;
+    const release=this.holdForMaintenance();
+    try {
+      for(const taskId of batch.taskIds){const task=this.task(taskId);if(!final(task))this.pause(taskId);}
+      await this.waitForIdle(); await this.deps.execution.waitForIdle();
+      this.ensureOpen();
+      for(const taskId of batch.taskIds)if(['RUNNING','QUEUED','WAITING'].includes(this.task(taskId).status))throw new UserFacingError('尚未确认停止本地调度，请稍后重试');
+      return archiveWorkBatch(this.db,id);
+    } finally {this.archiving=false;release();}
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
@@ -415,7 +437,9 @@ export class AutomaticListingService {
   }
   async create(raw: unknown): Promise<AutomaticListingTask> {
     this.ensureOpen();
-    const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId','executionMode']);
+    const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId','executionMode','workBatchId']);
+    if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
+    const workBatch=currentWorkBatch(this.db,input.workBatchId===undefined?undefined:identifier(input.workBatchId));
     if (!Array.isArray(input.productIds) || !input.productIds.length || input.productIds.length > 1000) throw new UserFacingError('请选择 1–1000 个商品');
     const executionMode=input.executionMode??'immediate';
     if(!['immediate','deferred_batch'].includes(String(executionMode)))throw new UserFacingError('执行模式无效');
@@ -427,7 +451,9 @@ export class AutomaticListingService {
     const profileId = text(input.profileId, '图床', 30, true), profile = this.deps.hosting.getProfile(profileId), rules = this.deps.rules();
     if (!target.target.configured || target.target.paused) throw new UserFacingError('请选择已配置且启用的目标店铺');
     if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用图片托管');
+    if(input.workBatchId!==undefined&&ids.some(id=>!workBatch.productIds.includes(id)))throw new UserFacingError('商品不在当前批次，请刷新后选择');
     const queue=await this.queue({productIds:ids,targetId}),eligible=new Set(queue.products.flatMap(p=>p.rows.filter(r=>r.eligible).map(r=>r.key)));
+    if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');currentWorkBatch(this.db,workBatch.id);
     if(!eligible.size)throw new UserFacingError(queue.products.find(p=>p.inputIssue)?.inputIssue??'所选商品没有可启动的销售 SKU（说明性选项不入选，每来源最多 4 个代表规格）；请查看规则淘汰或待核对原因，已在自动任务中的销售 SKU 请继续原任务');
     if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile))throw new UserFacingError('创建期间范围已变化，请刷新');
     this.deps.preflight?.();
@@ -480,7 +506,7 @@ export class AutomaticListingService {
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
     for(const row of items)if(row.stage==='PLAN')row.outcome={version:1,kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED',message:row.error!,classifiedAt:now,scope:outcomeScope(task,row),draftId:null,draftRevision:null};
-    transaction(this.db,()=>{for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);});
+    transaction(this.db,()=>{if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');currentWorkBatch(this.db,workBatch.id);for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);addWorkBatchProducts(this.db,workBatch.id,[...ids,...items.map(item=>item.productId)]);bindWorkBatchTask(this.db,workBatch.id,task.id);});
     this.tasks.set(task.id, task); return structuredClone(task);
   }
   batchSummary(id:string){
@@ -497,6 +523,7 @@ export class AutomaticListingService {
   }
   getBatchPlan():TaskBatchPlan{if(!this.deps.batchPlan)throw new UserFacingError('Batch运行层未初始化');return structuredClone(this.deps.batchPlan());}
   prepareStart(id: string,selection?:AutomaticResumeSelection): AutomaticListingTask {
+    if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
     const task = this.task(id);
     if (!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status) || this.activeId === id) throw new UserFacingError('此任务正在运行、等待平台或已经结束');
     this.assertScope(task,undefined,true,selection); return structuredClone(task);

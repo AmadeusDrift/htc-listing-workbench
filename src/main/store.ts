@@ -1,3 +1,4 @@
+import { addWorkBatchProducts, currentWorkBatch } from './automatic-listing/work-batches.ts';
 import { readFactScope, saveFactScopes, readProductFactModel, writeProductFactModel } from './products/public.ts';
 import { appendAuditEvent } from './storage/audit.ts';
 import { readNativeImageReceipt } from './source-images.ts';
@@ -99,6 +100,11 @@ export class WorkspaceStore {
       origin: p.origin as ProductOrigin, variantCount: Number(p.variant_count), assetCount: Number(p.asset_count),
       coverUrl: p.cover_id ? `red-asset://image/${p.cover_id}` : null, updatedAt: String(p.updated_at) }));
   }
+  /** Batch membership needs only existence, never source repair or full product hydration. */
+  hasProducts(productIds:readonly string[]):boolean {
+    const ids=[...new Set(productIds.map(identifier))];
+    return Number(this.db.prepare('SELECT count(*) AS n FROM products WHERE id IN (SELECT value FROM json_each(?))').get(JSON.stringify(ids))!.n)===ids.length;
+  }
   listWorkspacePlacements(): WorkspacePlacement[] { return readWorkspacePlacements(this.db); }
   moveWorkspaceProducts(raw: unknown): WorkspacePlacement[] {
     const input = parseMoveWorkspaceProducts(raw);
@@ -108,6 +114,7 @@ export class WorkspaceStore {
       const updatedAt = now(), names = { inbox: '采集收件箱', manual: '人工上架', automatic: '自动准备', ignored: '已忽略' };
       const save = this.db.prepare(`INSERT INTO product_workspaces(product_id,lane,updated_at) VALUES(?,?,?)
         ON CONFLICT(product_id) DO UPDATE SET lane=excluded.lane,updated_at=excluded.updated_at`);
+      if(input.destination==='automatic')addWorkBatchProducts(this.db,currentWorkBatch(this.db).id,input.productIds);
       return input.productIds.map(productId => {
         const previous = placements.get(productId)!;
         if (previous.lane === input.destination) return previous;
@@ -276,7 +283,7 @@ export class WorkspaceStore {
     }
     return this.transaction(() => {
       const existing = this.getSampleProductIds(lane);
-      if (existing.length) return { productIds: existing, created: false };
+      if (existing.length) {if(lane==='automatic')addWorkBatchProducts(this.db,currentWorkBatch(this.db).id,existing);return { productIds: existing, created: false };}
       const insertAsset = this.db.prepare('INSERT INTO assets VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
       const linkVariant = this.db.prepare('INSERT INTO variant_assets VALUES (?,?,1,?)');
       const productIds = validated.map((input, index) => {
@@ -291,6 +298,7 @@ export class WorkspaceStore {
         this.audit(id, 'product.imported', '载入本地示例商品', { origin: 'sample', sampleLane: lane });
         return id;
       });
+      if(lane==='automatic')addWorkBatchProducts(this.db,currentWorkBatch(this.db).id,productIds);
       return { productIds, created: true };
     });
   }

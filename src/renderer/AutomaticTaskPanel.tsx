@@ -16,12 +16,13 @@ import { formatAutomaticTaskDate } from './automatic-task-date';
 
 const statusLabels: Record<AutomaticListingStatus, string> = { CREATED:'已创建', QUEUED:'等待执行', RUNNING:'运行中', WAITING:'等待平台或服务返回', PAUSED:'已暂停', NEEDS_ATTENTION:'需要处理', COMPLETED:'任务完成', CANCELLED:'已取消' };
 function tone(status: AutomaticListingStatus): SettingsStatusTone { return status === 'COMPLETED' ? 'success' : status === 'NEEDS_ATTENTION' ? 'danger' : status === 'PAUSED' ? 'warning' : status === 'CANCELLED' ? 'neutral' : 'info'; }
-interface Props { products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
+interface Props { taskIds?:string[]; products: ProductSummary[]; startedTask: AutomaticListingTask | null; busy: boolean; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
 
-export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onShipping }: Props) {
+export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManual, onShipping }: Props) {
   const api = window.red;
   const [batchSummary,setBatchSummary]=useState<TaskBatchSummary|null>(null),[batchError,setBatchError]=useState('');
   const [tasks, setTasks] = useState<AutomaticListingTask[]>([]);
+  const [taskRevisionSignature,setTaskRevisionSignature]=useState('');
   const [selectedId, setSelectedId] = usePageState('automatic:task', '');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,20 +52,21 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
       const request = version.current;
       let pollDelay = 30_000;
       try {
-        const values = await api.listAutomaticListingTasks();
+        const allValues = await api.listAutomaticListingTasks();
+        const values=taskIds?allValues.filter(value=>taskIds.includes(value.id)||value.id===startedTask?.id):allValues;
         if(values.some(value=>['RUNNING','QUEUED','WAITING'].includes(value.status)))pollDelay=10_000;
-        const id = selectedId || values[0]?.id;
+        const id = values.some(value=>value.id===selectedId)?selectedId:values[0]?.id;
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         let batch:TaskBatchSummary|null=null,batchFailure='';
         if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
-        if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
+        if (active && request === version.current && !actionPending.current) { setTaskRevisionSignature(JSON.stringify([...allValues].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])));setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
       finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, pollDelay); } }
     };
     void poll();
     // Navigation only stops reads. Task lifetime belongs to the main process.
     return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [api, selectedId, refresh, startedTask?.id]);
+  }, [api, selectedId, refresh, startedTask?.id,JSON.stringify(taskIds)]);
 
   // Full evidence validation is expensive: do it once per actual task revision,
   // never for unchanged status polls, and never duplicate it just to read sources.
@@ -114,7 +116,6 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
-  const taskRevisionSignature=useMemo(()=>JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])),[tasks]);
   const taskOptions=useMemo(()=>tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {formatAutomaticTaskDate(value.createdAt)}</option>),[tasks]);
   useEffect(()=>{window.dispatchEvent(new Event('automatic-listing-changed'));},[taskRevisionSignature]);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);

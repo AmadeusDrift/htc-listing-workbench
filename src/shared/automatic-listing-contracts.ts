@@ -91,10 +91,13 @@ export interface AutomaticListingTask {
   productType: string; locale: string; labelFormat: ItemLabelFormat; items: AutomaticListingItem[];
   createdAt: string; updatedAt: string; error: string | null;
 }
-export interface StartAutomaticListingInput { executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
+export interface StartAutomaticListingInput { workBatchId?:string; executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
   previewAutomaticResume(input:{taskId:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<{taskRevision:number;token:string;lines:string[]}>;
   resumeAutomaticSelection(input:{taskId:string;taskRevision:number;token:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<AutomaticListingTask|null>;
+  listAutomaticWorkBatches():Promise<import('./automatic-work-batches.ts').AutomaticWorkBatch[]>;
+  archiveAutomaticWorkBatch(id:string):Promise<import('./automatic-work-batches.ts').AutomaticWorkBatch>;
+  addAutomaticWorkBatchProducts(input:{batchId:string;productIds:string[]}):Promise<import('./automatic-work-batches.ts').AutomaticWorkBatch>;
   getAutomaticBatchSummary(id:string):Promise<import('./ai-batch-contracts.ts').TaskBatchSummary>;
   setAutomaticExecutionMode(input:{taskId:string;mode:import('./ai-batch-contracts.ts').ListingExecutionMode}):Promise<AutomaticListingTask>;
   getAutomaticBatchPlan():Promise<import('./ai-batch-contracts.ts').TaskBatchPlan>;

@@ -17,6 +17,7 @@ import type { SettingsModule } from './settings-navigation';
 import { AutomaticQueueProducts } from './AutomaticQueueProducts';
 
 interface Props {
+  workBatchId?:string;taskIds?:string[];archived?:boolean;
   products: ProductSummary[]; targets: AmazonTarget[]; busy: boolean;
   taskProducts:ProductSummary[];targetId:string;onTargetChange:(id:string)=>void;queue:AutomaticListingQueue|null;queueLoading:boolean;queueError:string;onRefreshQueue:()=>void;
   onManual: (productId: string, draftId?: string, context?: ProblemContext) => void; onSettings: (module?: SettingsModule) => void;
@@ -29,7 +30,7 @@ const requiredCapabilities = [
   { capability: 'image-risk', label: '阿里云图片侵权检测' },
 ] as const;
 
-export function AutomaticPreparationPanel({ products, taskProducts, targets, targetId, onTargetChange, queue, queueLoading, queueError, onRefreshQueue, busy, onManual, onSettings, onExamples, onInbox, onShipping }: Props) {
+export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,products, taskProducts, targets, targetId, onTargetChange, queue, queueLoading, queueError, onRefreshQueue, busy, onManual, onSettings, onExamples, onInbox, onShipping }: Props) {
   const api = window.red;
   const [executionMode,setExecutionMode]=useState<ListingExecutionMode>('immediate');
   const [batchPlan,setBatchPlan]=useState<TaskBatchPlan|null>(null),[batchError,setBatchError]=useState(''),[batchLoading,setBatchLoading]=useState(true);
@@ -67,7 +68,7 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
   const supported = target?.marketplaceId === 'ATVPDKIKX0DER' && target.locale === 'en_US';
   const missingCapabilities = requiredCapabilities.filter(required => (riskEnabled||required.capability!=='image-risk')&&!capabilities.some(value => value.capability === required.capability && value.available));
   const connectionsReady = !loadingCapabilities && !capabilityError && !missingCapabilities.length;
-  const canStart = (executionMode==='immediate'||!batchLoading&&!batchError&&batchAvailable) && !disabled && !queueLoading && !queueError && queue?.targetId===targetId && !loadingProducts && !loadingRules && !readErrors.length && !rulesError && connectionsReady && !loadingHosting && !hostingError && Boolean(profile && salesRows.length && target?.configured && !target.paused && supported);
+  const canStart = !archived && (executionMode==='immediate'||!batchLoading&&!batchError&&batchAvailable) && !disabled && !queueLoading && !queueError && queue?.targetId===targetId && !loadingProducts && !loadingRules && !readErrors.length && !rulesError && connectionsReady && !loadingHosting && !hostingError && Boolean(profile && salesRows.length && target?.configured && !target.paused && supported);
   const startHint = executionMode==='deferred_batch'&&(batchLoading||batchError||!batchAvailable)?'延迟批量覆盖尚未确认或没有可 Batch 步骤，请刷新或选择即时上架。': disabled ? '当前有操作进行中，请等待完成。' : !targetId ? '请先选择目标店铺。' : queueLoading || loadingProducts || loadingRules || loadingHosting || loadingCapabilities ? '正在核对商品、规则与连接，请稍候。' : queueError ? '队列读取失败，请刷新资料后再启动。' : !target?.configured || target.paused || !supported ? '请选择已配置、未暂停的美国站英文目标。' : !connectionsReady ? '请先处理上方连接配置问题。' : hostingError || !profile ? '请配置并选择已启用的图片托管服务器。' : rulesError || readErrors.length ? '商品或规则读取失败，请查看上方原因并刷新。' : !salesRows.length ? '请勾选含有可启动销售 SKU 的商品。' : '';
 
   useEffect(()=>{let active=true;setBatchLoading(true);setBatchError('');setBatchPlan(null);
@@ -108,8 +109,8 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
     if (!canStart || startPending.current) return;
     startPending.current = true; setStarting(true); setError(''); setNotice('');
     try {
-      const task = await api.startAutomaticListing({ productIds: selected.map(value => value.id), targetId, profileId, executionMode });
-      if (mounted.current) { if (task) setStartedTask(task); else setNotice('已取消启动，未创建自动上架任务。'); }
+      const task = await api.startAutomaticListing({workBatchId, productIds: selected.map(value => value.id), targetId, profileId, executionMode });
+      if (mounted.current) { if (task) {setStartedTask(task);onRefreshQueue();} else setNotice('已取消启动，未创建自动上架任务。'); }
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { startPending.current = false; if (mounted.current) { setStarting(false); } }
   }
@@ -161,6 +162,6 @@ export function AutomaticPreparationPanel({ products, taskProducts, targets, tar
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}
     </section>
-    <AutomaticTaskPanel products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
+    <AutomaticTaskPanel taskIds={taskIds} products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
   </>;
 }

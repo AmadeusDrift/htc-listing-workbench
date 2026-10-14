@@ -1302,7 +1302,11 @@ test('image retry allowance: exhausted definite planning output failures receive
  f.ai.imagePlan=async(context,...rest)=>{if(!context.slot)return normal(context,...rest);const db=openDatabase(f.root),workflow=f.service.getProgress(f.draft.id)!;try{for(let i=0;i<3;i++){const id=randomUUID(),at=new Date().toISOString();db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(id,JSON.stringify({id,providerId:'deepseek',productId:f.product.id,productRevision:f.product.revision,model:'deepseek-flash',generation:1,status:'FAILED',errorCode:'OUTPUT_INVALID',requestId:null,startedAt:at,finishedAt:at,usage:{promptTokens:0,completionTokens:0,processedImages:0},responseReceived:true,presentationContext:{kind:'image',workflowId:workflow.id,draftId:f.draft.id,variantId:f.draft.variantId,slot:context.slot.index,sourceSha256:listingFingerprint(context)}}));}}finally{db.close();}throw new AiError('OUTPUT_INVALID');};
  const first=await f.run();assert.equal(first.workflow.slots![0].attempts[0].state,'PLANNING');
  const id=first.workflow.slots![0].attempts[0].requestId;const granted=await f.service.addRetryAllowance({draftId:f.draft.id,slot:1,requestId:id,commandId:randomUUID()});
- assert.equal(granted.retryAllowance?.grants[0].scope,'planning');assert.equal(granted.maxAttempts,3);assert.equal(f.calls.filter(c=>c==='generate').length,0);
+ assert.equal(granted.retryAllowance?.grants[0].scope,'planning');
+ const ledger=openDatabase(f.root),grantId=granted.retryAllowance!.grants[0].id,original=String(ledger.prepare('SELECT record_json FROM image_retry_allowances WHERE id=?').get(grantId)!.record_json);
+ for(const patch of [{sourceSha256:'b'.repeat(64)},{slot:2},{workflowId:randomUUID()}]){const wrong=JSON.parse(original);Object.assign(wrong.savedPlanningCalls[0].presentationContext,patch);ledger.prepare('UPDATE image_retry_allowances SET record_json=? WHERE id=?').run(JSON.stringify(wrong),grantId);assert.throws(()=>f.service.getProgress(f.draft.id),'grant cannot adopt a different planning context or slot');}
+ ledger.prepare('UPDATE image_retry_allowances SET record_json=? WHERE id=?').run(original,grantId);ledger.close();
+ assert.equal(granted.maxAttempts,3);assert.equal(f.calls.filter(c=>c==='generate').length,0);
  f.ai.imagePlan=normal;const result=await f.run();assert.equal(result.workflow.status,'COMPLETED');assert.equal(result.workflow.slots![0].attempts[0].requestId,id);
 });
 

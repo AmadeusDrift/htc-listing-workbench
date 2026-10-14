@@ -1,3 +1,4 @@
+import { bindWorkBatchTask,currentWorkBatch } from '../src/main/automatic-listing/work-batches.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -50,7 +51,7 @@ test('v16 backup retains verified document bytes and pauses unfinished parent/la
   assert.equal(currentReport.pricingDecision?.version,3);assert.equal(currentReport.pricingDecision?.status,'business_blocked');
   const currentOutcome=currentScreen.items[0].outcome!;if(currentOutcome.kind!=='RULE_FILTERED')throw Error('fixture');const currentPricing=pricingOutcome({listingProgram:'haul',businessRules:currentReport,attributes:currentResult.attributes,marketplaceId:target.marketplaceId} as never,defaultListingRules());assert.equal(currentPricing?.kind,'RULE_FILTERED');assert.equal(currentPricing?.code,currentReport.pricingDecision?.code);currentOutcome.code=currentPricing!.code;currentOutcome.pricingReport=currentPricing!.pricingReport;
   const currentBytes=JSON.stringify(currentScreen),legacyBytes=JSON.stringify(screened);
-  const history=openDatabase(source);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(currentScreen.id,currentBytes);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(screened.id,JSON.stringify(screened));history.close();
+  const history=openDatabase(source);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(currentScreen.id,currentBytes);history.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(screened.id,JSON.stringify(screened));bindWorkBatchTask(history,currentWorkBatch(history).id,currentScreen.id);bindWorkBatchTask(history,currentWorkBatch(history).id,screened.id);history.close();
   const [batch]=procurement.ensureAutomaticBatch(task.id,[draft.id],{[draft.id]:5});
   const [label]=labels.prepareBatch(batch.id);await labels.runDue();const ready=labels.get(label.id);assert.equal(ready.status,'READY',JSON.stringify(ready));
   const current=procurement.get(batch.id);procurement.update({id:batch.id,revision:current.revision,lines:current.lines.map(({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})=>({id,purchaseQuantity,stockQuantity,purchasePrice,purchaseUnit,priceConfirmed})),shipmentConfirmationId:'FBA12345678'});

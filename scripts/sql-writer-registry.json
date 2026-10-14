@@ -855,6 +855,20 @@
         "saveFactScopes|2c857231c1e0a4831821ba1f94dc96edb64b2d51f7e31bd1c09e54b4f120a117": 1
       }
     },
+    "main/automatic-listing/work-batches.ts": {
+      "role": "tasks",
+      "review": "P04 owner; save batch references only; initialize migration32 only; retain DELETE limited to explicitly identified just-migrated staging current with no tasks. All real batch identity conflicts reject restore.",
+      "commands": [
+        "saveWorkBatch|INSERT|automatic_work_batches",
+        "initializeWorkBatches|CREATE|automatic_work_batches",
+        "retainWorkBatches|DELETE|automatic_work_batches"
+      ],
+      "statements": {
+        "saveWorkBatch|3f4e1d4ebc64222f12dcc4774fe416c66398d7d9b81419275e8217856d666317": 1,
+        "initializeWorkBatches|841524bec5f3921ca70dcfa15a84e236b73048044d1c360999667c5a8122b9e6": 1,
+        "retainWorkBatches|967414fce0d7d979126909acbb4b1da9dbbcd70c20c7158cbb2b570d9e5aaecd": 1
+      }
+    },
     "main/image-workflow/retry-allowance.ts": {
       "role": "images",
       "review": "Schema31 image retry owner. initialize runs only at migration; grant and consumption record scoped commands; retain merges only the staging restore database. Reviewed seven precise statements; no unrelated registry regeneration.",

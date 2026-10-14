@@ -46,7 +46,7 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   let ready = mode === 'demo', imageFailure = false, started: (() => void) | undefined, release: (() => void) | undefined;
   const workflow = new Map<string, any>();
   const dependencies: AutomaticListingDependencies = {
-    store: { getProduct: () => structuredClone(product) },
+    store: { getProduct: () => structuredClone(product),hasProducts:ids=>ids.every(id=>id===product.id) },
     prepareSourceConsistency:async input=>{materializeSourceSnapshot(directory,product,input.variantIds);const store=new WorkspaceStore(directory);try{await confirmSourceConsistencyFixture(directory,store,product.id,input.variantIds);}finally{store.close();}},
     rules: () => structuredClone(rules),
     previewSales: () => buildSalesRecipes(product,null,rules),
@@ -1968,4 +1968,51 @@ test('P05 ordinary continue after targeted operation confirms the full scope rat
  const f=fixture(t),task=await f.create(),saved=(f.service as any).tasks.get(task.id);saved.resumeScope={mode:'targeted',selections:[{key:task.items[0].key,slots:[1]}]};(f.service as any).save(saved);
  await f.service.confirmStart(task.id,async approved=>{assert.equal(approved.resumeScope,undefined);assert.equal(approved.items.length,task.items.length);return false;});
  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+
+test('working batch archive pauses in-flight image work before new empty batch; original task can still resume',async t=>{
+ const f=fixture(t),task=await f.create(),before=f.service.listWorkBatches().find(b=>!b.archivedAt)!;
+ let started!:()=>void;const began=new Promise<void>(resolve=>started=resolve);f.holdImages(started);
+ f.dependencies.images.cancel=()=>({cancelled:true}); // The remote request cannot be cancelled; its local result arrives later.
+ f.service.startAuthorized(f.service.prepareStart(task.id));await reachedStage(began,f.service.waitForIdle(),()=>f.service.get(task.id));
+ let done=false;const archive=f.service.archiveWorkBatch(before.id).then(v=>{done=true;return v;});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(done,false,'archive waits for the local late result');
+ assert.equal(f.service.get(task.id).status,'PAUSED');assert.throws(()=>f.service.prepareStart(task.id),/归档/);
+ f.releaseImages();const next=await archive;assert.deepEqual(next.productIds,[]);assert.deepEqual(next.taskIds,[]);
+ const after=f.service.get(task.id);assert.equal(after.status,'PAUSED');assert.equal(f.calls.submissions,0);assert.equal(f.service.listWorkBatches().find(b=>b.id===before.id)!.taskIds[0],task.id);
+ assert.equal(f.service.prepareStart(task.id).id,task.id);assert.equal(f.service.listWorkBatches().find(b=>!b.archivedAt)!.id,next.id);
+});
+test('adding historical product to new batch does not evade global original-task guard or send',async t=>{
+ const f=fixture(t),task=await f.create(),before=f.service.listWorkBatches().find(b=>!b.archivedAt)!;
+ const next=await f.service.archiveWorkBatch(before.id);f.service.addWorkBatchProducts({batchId:next.id,productIds:[f.product.id]});
+ const queue=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});assert.equal(queue.products[0].eligibleCount,0);assert.equal(queue.products[0].rows[0].taskId,task.id);
+ await assert.rejects(()=>f.service.create({workBatchId:next.id,productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'}),/原任务/);assert.deepEqual(f.calls,{sources:0,images:0,submissions:0,batches:0,labels:0});
+});
+
+test('historical batch resumes the same task while current batch stays empty and original SKU is preserved',async t=>{
+ const f=fixture(t),task=await f.create(),old=f.service.listWorkBatches().find(b=>!b.archivedAt)!,next=await f.service.archiveWorkBatch(old.id);
+ f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();const done=f.service.get(task.id);
+ assert.equal(done.status,'COMPLETED');assert.equal(done.items[0].sku,task.items[0].sku);assert.equal(f.calls.submissions,1);assert.equal(f.service.list().length,1);assert.deepEqual(f.service.listWorkBatches().find(b=>b.id===next.id)!.productIds,[]);assert.deepEqual(f.service.listWorkBatches().find(b=>b.id===old.id)!.taskIds,[task.id]);
+});
+for(const state of ['completed','unknown'] as const)test(`archive and re-add preserves global ${state} SKU guard`,async t=>{
+ const f=fixture(t),task=await f.create();if(state==='unknown')f.failImages();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const old=f.service.listWorkBatches().find(b=>!b.archivedAt)!,next=await f.service.archiveWorkBatch(old.id);f.service.addWorkBatchProducts({batchId:next.id,productIds:[f.product.id]});const before=structuredClone(f.calls),q=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+ assert.equal(q.products[0].eligibleCount,0);assert.equal(q.products[0].rows[0].kind,state==='completed'?'COMPLETED':'UNKNOWN');await assert.rejects(()=>f.service.create({workBatchId:next.id,productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'}),/原任务|没有可启动/);assert.deepEqual(f.calls,before);
+});
+test('archive invalidates a pending start confirmation before original execution grant',async t=>{
+ const f=fixture(t),task=await f.create();let enter!:()=>void,release!:(allowed:boolean)=>void;const entered=new Promise<void>(r=>enter=r),answer=new Promise<boolean>(r=>release=r);
+ const start=f.service.confirmStart(task.id,async()=>{enter();return answer;});await entered;await f.service.archiveWorkBatch(f.service.listWorkBatches().find(b=>!b.archivedAt)!.id);release(true);await assert.rejects(()=>start,/确认期间/);assert.deepEqual(f.calls,{sources:0,images:0,submissions:0,batches:0,labels:0});
+});
+
+test('archive during asynchronous queue admission rejects creation before allocating any new sales identity',async t=>{
+ const f=fixture(t),batch=f.service.listWorkBatches().find(b=>!b.archivedAt)!;f.service.addWorkBatchProducts({batchId:batch.id,productIds:[f.product.id]});
+ const projection=await f.service.queue({productIds:[f.product.id],targetId:f.target.id});let release!:()=>void,entered!:()=>void;const begin=new Promise<void>(r=>entered=r),wait=new Promise<void>(r=>release=r);let planned=0;
+ f.service.queue=async()=>{entered();await wait;return projection;};f.dependencies.planSales=()=>{planned++;throw Error('unexpected plan allocation');};
+ const creating=f.service.create({workBatchId:batch.id,productIds:[f.product.id],targetId:f.target.id,profileId:'alpha'});await begin;await f.service.archiveWorkBatch(batch.id);release();await assert.rejects(()=>creating,/当前批次/);assert.equal(planned,0);assert.equal(f.service.list().length,0);
+});
+
+test('adding batch members uses one readonly existence check and never full product reads',async t=>{
+ const f=fixture(t),batch=f.service.listWorkBatches().find(b=>!b.archivedAt)!;let reads=0;
+ f.dependencies.store.hasProducts=ids=>{reads++;return ids.length===1&&ids[0]===f.product.id;};f.dependencies.store.getProduct=()=>{throw Error('full product read must not run during membership changes');};
+ assert.deepEqual(f.service.addWorkBatchProducts({batchId:batch.id,productIds:[f.product.id]}).productIds,[f.product.id]);assert.equal(reads,1);
 });

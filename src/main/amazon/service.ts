@@ -322,6 +322,9 @@ export class AmazonService {
     } catch(error) { if(isSchemaTransientError(error)) error.selection={...selected}; throw error; }
   }
   listDrafts(productId: string): AmazonDraft[] { this.ensureOpen(); return this.persistence.records(textField(productId, '商品 ID', 100)).map(record => this.vault.redact(record.draft)); }
+  readSalesPlans(productId:string,targetId:string){
+    this.ensureOpen();return this.listDrafts(productId).filter(d=>d.targetId===targetId&&d.salesPlan).map(d=>({productId:d.productId,targetId:d.targetId,sellerId:d.sellerId,marketplaceId:d.marketplaceId,mode:d.mode,plan:clone(d.salesPlan!)}));
+  }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }
   getActualQuoteDetails(id:string) {
     const draft=this.getDraft(id),rules=readListingRules(this.persistence.db);

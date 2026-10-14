@@ -1,34 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash,randomUUID } from 'node:crypto';
-import { fixture,saveInput,chat } from './fixtures/listing-ai.ts';
+import { randomUUID,createHash } from 'node:crypto';
+import { saveInput,chat } from './fixtures/listing-ai.ts';
 import { saveProviderReceipt } from '../src/main/ai/receipts.ts';
 import { writeFileSync,readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SkuNamingService } from '../src/main/sku-naming/service.ts';
-import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
-import { defaultListingRules } from '../src/shared/listing-rules.ts';
-import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { openDatabase } from '../src/main/database.ts';
 import { assertSalesPlanNamingIdentity } from '../src/main/sales-plans/history.ts';
 import { validateSalesPlan } from '../src/main/sales-plans/records.ts';
 import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 import { DatabaseSync } from 'node:sqlite';
+import {AutomaticListingService} from '../src/main/automatic-listing/service.ts';
+import {validateAutomaticListingTask,sourceStamp} from '../src/main/automatic-listing/records.ts';
+import {readListingRules} from '../src/main/listing-rules.ts';
+import {assertTaskAdaptationHistory} from '../src/main/automatic-listing/adaptation.ts';
+import {planSalesListings} from '../src/main/sales-plans/planning.ts';
 
-async function oldKit(t:any){
- const f=await fixture(t),p=f.store.saveProduct({...saveInput(f.product),title:'过滤网支架',facts:[...f.product.facts,{id:randomUUID(),name:'采购币种',value:'CNY',state:'human_confirmed',source:'manual',sourceRef:'fixture'}],variants:saveInput(f.product).variants.map(v=>({...v,normalizedSpec:'',originalSpec:'黄色 / 支架+贴片+50只过滤网',purchasePrice:'8.2'}))});
- const v=p.variants[0],c={variantId:v.id,sourceKey:v.id,sourceSku:v.sku,specification:v.originalSpec,color:'Yellow',quantity:50,quotedCostCny:8.2,piecesPerQuote:50,sourcePackPieces:50};
- const key=createHash('sha256').update(JSON.stringify([[v.id,50]])).digest('hex'),recipe={key,groupKey:'a'.repeat(64),specification:v.originalSpec+' · 50 pc',color:'Yellow',components:[c],totalPieces:50,totalCostCny:8.2};
- const naming=new SkuNamingService(f.directory),target=f.amazon.listTargets()[0],sourceGroupKey=`local:${p.id}:${recipe.groupKey}`;
- const group=naming.allocate({storeScope:JSON.stringify([target.mode,target.sellerId]),storeCode:'U2',sourceGroupKey,collectedAt:p.createdAt,childKeys:[key]});naming.close();
- const plan={namingGroupId:group.id,sourceGroupKey,collectedAt:group.collectedAt,collectionBasis:'first_import' as const,sku:group.children[0].sku,baseSku:group.baseSku,recipe,parentage:'NONE' as const,parentSku:null,variationTheme:null,relationReason:'历史独立套装',familyResolved:true,namingChildKey:key};
- const db=openDatabase(f.directory),rules=defaultListingRules();rules.pricing.maxPrice=100;rules.pricing.promoEnabled=false;db.prepare('INSERT OR REPLACE INTO amazon_settings VALUES(?,?)').run('listing_rules_v1',JSON.stringify(rules));
- const schema={...realAmazonSchema(),...{targetId:target.id,mode:target.mode,key:f.draft.schema.key}},normal={...p,title:'普通夹子',variants:[{...v,originalSpec:'50 pc'}]};
- const result=applyBusinessRules({product:normal,variant:normal.variants[0],target,schema,attributes:{},measurements:{},costCny:8.2,saleUnit:{...recipe,components:[{...c,specification:'50pc'}]},packageMatchesSaleUnit:true,now:new Date()},rules);
- const persistence=(f.amazon as any).persistence,r=persistence.record(f.draft.id);Object.assign(r.draft,{productRevision:p.revision,sku:plan.sku,salesPlan:plan,listingProgram:'haul',schema,attributes:result.attributes,businessRules:result.report});r.previewResponse={history:'keep preview'};persistence.putRecord(r);
- db.close();return {...f,p,plan,db:persistence.db,persistence,ref:{id:r.draft.id,revision:r.draft.revision}};
-}
+import {oldKit,taskKit} from './fixtures/mixed-kit.ts';
 const history=(f:Awaited<ReturnType<typeof oldKit>>)=>JSON.stringify({draft:f.persistence.record(f.ref.id),calls:f.db.prepare('SELECT * FROM ai_calls').all(),usage:f.db.prepare('SELECT * FROM ai_usage_ledger').all(),receipts:f.db.prepare('SELECT * FROM ai_provider_receipts').all(),results:f.db.prepare('SELECT * FROM ai_results').all()});
 for(const [label,body] of [['null',null],['number',123],['string','invalid response content'],['raw JSON text','{broken json'],['boolean',false]] as const)test(`complete scalar ${label} response is received invalid and permits only authorized local unit adoption`,async t=>{
  const f=await oldKit(t);f.respond(()=>new Response('{}',{status:500}));await assert.rejects(()=>f.ai.suggest({productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id,ocrResultIds:[]}));
@@ -131,4 +121,102 @@ test('copy evidence uses the explicitly adopted platform count and never promote
  const next=f.amazon.adoptSalesUnit({...f.ref,platformPieces:52,basis:preview.basis,token:preview.token,confirmed:true});
  const legacy=buildListingContext(next,f.p,0,true);assert.equal(legacy.evidence.find(e=>e.id.endsWith(':sale-count'))?.value,'52 pieces');
  const full=buildListingContext(next,f.p,0);assert.equal((full.sourceProduct?.salesRecipe as any)?.unitAdoption,undefined,'historical erroneous recipe is audit data, not current copy evidence');
+});
+
+test('task-owned unit adoption commits draft and original row identity together, then updates memory without resuming',async t=>{
+ const f=await taskKit(t);try{
+  const row=f.task.items[0],request={taskId:f.task.id,taskRevision:f.task.revision,itemKey:row.key,platformPieces:1,basis:'合成按整套确认'},before=history(f);
+  const preview=(f.owner as any).previewSalesUnitAdoption(request);assert.equal(preview.unitPreview.canApply,true);assert.equal(history(f),before);
+  const next=(f.owner as any).adoptSalesUnit({...request,token:preview.token,confirmed:true});
+  assert.equal(next.status,'PAUSED');assert.equal(next.revision,f.task.revision+1);assert.equal(next.items[0].key,row.key);assert.equal(next.items[0].sku,row.sku);assert.equal(next.items[0].salesPlan.namingChildKey,f.plan.namingChildKey);assert.equal(next.items[0].salesPlan.recipe.quantityVersion,2);
+  assert.deepEqual(f.owner.get(f.task.id),next);assert.deepEqual(validateAutomaticListingTask(next),next);assert.equal(f.amazon.getDraft(f.ref.id).salesPlan?.recipe.key,next.items[0].salesPlan.recipe.key);assert.equal(f.requests.length,0);
+  const reopened=new AutomaticListingService(f.directory,f.deps);try{assert.deepEqual(reopened.get(next.id),next);}finally{await reopened.close();}
+ }finally{await f.owner.close();}
+});
+test('task-owner unit adoption rolls back draft, task, audit and memory if the task checkpoint fails',async t=>{
+ const f=await taskKit(t);try{
+  const request={taskId:f.task.id,taskRevision:f.task.revision,itemKey:f.task.items[0].key,platformPieces:1,basis:'合成按整套确认'},preview=(f.owner as any).previewSalesUnitAdoption(request),before=history(f),beforeTask=JSON.stringify(f.owner.get(f.task.id));
+  (f.owner as any).db.exec("CREATE TEMP TRIGGER fail_unit_task BEFORE UPDATE ON automatic_listing_tasks BEGIN SELECT RAISE(ABORT,'unit task checkpoint failure'); END");
+  assert.throws(()=>(f.owner as any).adoptSalesUnit({...request,token:preview.token,confirmed:true}),/unit task checkpoint failure/);
+  assert.equal(history(f),before);assert.equal(JSON.stringify(f.owner.get(f.task.id)),beforeTask);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='listing.sales-units.adopted'").get()?.n,0);assert.equal(f.requests.length,0);
+ }finally{await f.owner.close();}
+});
+test('planning reads original task-only unit identities before allocating a replacement SKU',async t=>{
+ const f=await taskKit(t),naming=new SkuNamingService(f.directory);try{
+  const task=(f.owner as any).tasks.get(f.task.id);task.items[0].draftId=null;(f.owner as any).save(task);
+  const before=JSON.stringify(f.db.prepare('SELECT * FROM sku_naming_identities').all()),target=f.amazon.getTarget(f.task.targetId);
+  const options={existingPlans:()=>[{productId:f.p.id,targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,mode:target.mode,plan:f.plan}]};
+  assert.throws(()=>(planSalesListings as any)(f.p,null,target,readListingRules(f.db),naming,options),/原.*单位|计量|套装/);
+  assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM sku_naming_identities').all()),before);assert.equal(f.requests.length,0);
+  assert.equal((f.owner as any).readSalesPlans(f.p.id,target.id)[0].plan.sku,f.plan.sku,'Task owner exposes persisted identity even without a draft');
+ }finally{naming.close();await f.owner.close();}
+});
+test('explicit unit adoption resolves only its original adaptation unit blocker with retained audit proof',async t=>{
+ const f=await taskKit(t);try{
+  const checked=f.owner.previewAdaptation(f.task.id),adapted=f.owner.applyAdaptation({taskId:f.task.id,token:checked.token});
+  assert.deepEqual(adapted.adaptation?.blockedKeys,[f.task.items[0].key]);
+  const request={taskId:adapted.id,taskRevision:adapted.revision,itemKey:adapted.items[0].key,platformPieces:1,basis:'合成原套销售单位明确确认'},preview=f.owner.previewSalesUnitAdoption(request);
+  const next=f.owner.adoptSalesUnit({...request,token:preview.token,confirmed:true});
+  assert.deepEqual(next.adaptation?.blockedKeys,adapted.adaptation?.blockedKeys);assert.equal(next.adaptation?.token,adapted.adaptation?.token);assert.deepEqual((next.adaptation as any)?.unitResolvedKeys,[request.itemKey]);
+  assertTaskAdaptationHistory(f.db,next);
+  const adopted=f.db.prepare("SELECT id,detail_json FROM audit_events WHERE action='automatic-listing.sales-units.adopted'").get()!,proof=JSON.parse(String(adopted.detail_json));
+  f.db.prepare('UPDATE audit_events SET detail_json=? WHERE id=?').run(JSON.stringify({...proof,afterPlan:{...proof.afterPlan,sku:'FOREIGN-SKU'}}),adopted.id);assert.throws(()=>assertTaskAdaptationHistory(f.db,next),/计量解除|身份/);
+  f.db.prepare('UPDATE audit_events SET detail_json=? WHERE id=?').run(adopted.detail_json,adopted.id);
+  const original=f.db.prepare("SELECT id,detail_json FROM audit_events WHERE action='automatic-listing.adapted'").get()!,adaptProof=JSON.parse(String(original.detail_json));
+  adaptProof.changes.push({...adaptProof.changes[0],kind:'BLOCKED',steps:['图片依赖'],fields:[]});f.db.prepare('UPDATE audit_events SET detail_json=? WHERE id=?').run(JSON.stringify(adaptProof),original.id);
+  assert.throws(()=>assertTaskAdaptationHistory(f.db,next),/历史|计量|阻断/);f.db.prepare('UPDATE audit_events SET detail_json=? WHERE id=?').run(original.detail_json,original.id);
+  const restart=new AutomaticListingService(f.directory,f.deps);try{assert.deepEqual(restart.get(next.id),next);}finally{await restart.close();}
+  f.db.prepare("DELETE FROM audit_events WHERE action='automatic-listing.sales-units.adopted'").run();assert.throws(()=>new AutomaticListingService(f.directory,f.deps),/证明/);
+  assert.equal(f.requests.length,0);
+ }finally{await f.owner.close();}
+});
+test('unit owner refuses unsafe task status, in-flight pause and stale preview without mutating the original draft',async t=>{
+ const f=await taskKit(t);try{
+  const request=()=>({taskId:f.task.id,taskRevision:f.owner.get(f.task.id).revision,itemKey:f.task.items[0].key,platformPieces:1,basis:'合成按整套确认'}),before=JSON.stringify(f.amazon.getDraft(f.ref.id));
+  for(const state of ['CREATED','QUEUED','RUNNING','WAITING','COMPLETED','CANCELLED']){const task=(f.owner as any).tasks.get(f.task.id);task.status=state;task.items[0].status=state==='COMPLETED'?'DONE':'FAILED';task.items[0].stage=state==='COMPLETED'?'COMPLETE':'DRAFT';(f.owner as any).save(task);assert.throws(()=>f.owner.previewSalesUnitAdoption(request()),/暂停/);assert.equal(JSON.stringify(f.amazon.getDraft(f.ref.id)),before);}
+  const task=(f.owner as any).tasks.get(f.task.id);task.status='PAUSED';(f.owner as any).save(task);(f.owner as any).activeId=task.id;assert.throws(()=>f.owner.previewSalesUnitAdoption(request()),/暂停/);(f.owner as any).activeId=null;
+  const input=request(),preview=f.owner.previewSalesUnitAdoption(input);task.error='其他本地检查点更新';(f.owner as any).save(task);assert.throws(()=>f.owner.adoptSalesUnit({...input,token:preview.token,confirmed:true}),/变化|检查点/);assert.equal(JSON.stringify(f.amazon.getDraft(f.ref.id)),before);assert.equal(f.requests.length,0);
+ }finally{await f.owner.close();}
+});
+
+test('planning reuses adopted original SKU and confirmed count, while an unrelated new variant remains eligible',async t=>{
+ const f=await oldKit(t),naming=new SkuNamingService(f.directory);try{
+  const p=f.amazon.previewSalesUnitAdoption({...f.ref,platformPieces:52,basis:'Synthetic explicitly verified platform count'}),adopted=f.amazon.adoptSalesUnit({...f.ref,platformPieces:52,basis:p.basis,token:p.token,confirmed:true}),target=f.amazon.getTarget(adopted.targetId),plan=adopted.salesPlan!;
+  const port={existingPlans:()=>f.amazon.readSalesPlans(f.p.id,target.id)},before=JSON.stringify(f.db.prepare('SELECT * FROM sku_naming_identities').all());
+  const planned=planSalesListings(f.p,null,target,readListingRules(f.db),naming,port);assert.equal(planned.length,1);assert.deepEqual(planned[0],plan);assert.equal(planned[0].recipe.platformPieces,52);assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM sku_naming_identities').all()),before);
+  const product={...f.p,variants:[...f.p.variants,{...f.p.variants[0],id:randomUUID(),sku:'SOURCE-ORDINARY-NEW',originalSpec:'蓝色 20 pc',normalizedSpec:'Blue 20pc'}]};
+  const withNew=planSalesListings(product,null,target,readListingRules(f.db),naming,port);assert.ok(withNew.some(row=>row.sku===plan.sku&&row.recipe.platformPieces===52));assert.ok(withNew.some(row=>row.recipe.components.some(c=>c.sourceSku==='SOURCE-ORDINARY-NEW')&&row.sku!==plan.sku));assert.equal(f.requests.length,0);
+ }finally{naming.close();}
+});
+
+async function oldMixedTaskPlanning(t:test.TestContext,ordinary=false){
+ const f=await taskKit(t);await f.owner.close();
+ const original=saveInput(f.p),product=f.store.saveProduct({...original,title:ordinary?'Ordinary Clips':f.p.title,variants:[...original.variants.map(v=>({...v,originalSpec:ordinary?'黄色 50pc':v.originalSpec})),{...original.variants[0],id:randomUUID(),sku:'SOURCE-SECOND-KIT',originalSpec:ordinary?'蓝色 50pc':'米色 / 支架+贴片+50只过滤网',normalizedSpec:''}]});
+ const components=product.variants.map(v=>({...f.plan.recipe.components[0],variantId:v.id,sourceKey:v.id,sourceSku:v.sku,specification:v.originalSpec,quantity:5})),key=createHash('sha256').update(JSON.stringify([...components].sort((a,b)=>a.sourceKey.localeCompare(b.sourceKey)).map(c=>[c.sourceKey,c.quantity]))).digest('hex');
+ const naming=new SkuNamingService(f.directory),target=f.amazon.getTarget(f.task.targetId),group=naming.allocate({storeScope:JSON.stringify([target.mode,target.sellerId]),storeCode:'U2',sourceGroupKey:f.plan.sourceGroupKey,collectedAt:f.plan.collectedAt,childKeys:[key]});
+ const plan=validateSalesPlan({...f.plan,sku:group.children.find(child=>child.key===key)!.sku,namingChildKey:key,recipe:{...f.plan.recipe,key,specification:'历史错误混色10pc',color:'Mixed colors',components,totalPieces:10,totalCostCny:1.64}});
+ const task=structuredClone(f.task);Object.assign(task.items[0],{key:product.id+':'+key,sku:plan.sku,salesPlan:plan,draftId:null,productRevision:product.revision,sourceStamp:sourceStamp(product)});f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(validateAutomaticListingTask(task)),task.id);
+ const owner=new AutomaticListingService(f.directory,f.deps),port={existingPlans:()=>owner.readSalesPlans(product.id,target.id)},ledger=()=>JSON.stringify(['sku_naming_groups','sku_naming_identities','sku_naming_sequences'].map(table=>f.db.prepare('SELECT * FROM '+table).all()));
+ return{...f,product,plan,task,owner,naming,target,port,ledger};
+}
+test('planning rejects exact source overlap with an unresolved original mixed-kit task before any SKU allocation',async t=>{
+ const f=await oldMixedTaskPlanning(t);try{
+  const before=f.ledger(),original=f.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(f.task.id)!.record_json;
+  assert.equal(f.port.existingPlans().length,1);assert.equal(f.port.existingPlans()[0].plan.recipe.totalCostCny,1.64);
+  assert.throws(()=>planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,f.port),/原.*单位|计量|套装/);
+  assert.equal(f.ledger(),before);assert.equal(f.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(f.task.id)!.record_json,original);assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
+});
+test('unresolved mixed-kit history does not block completely disjoint ordinary variants or another owner scope',async t=>{
+ const f=await oldMixedTaskPlanning(t);try{
+  const ordinary={...f.product,title:'Ordinary Clip',variants:[{...f.product.variants[0],id:randomUUID(),sku:'SOURCE-DISJOINT-NEW',originalSpec:'蓝色 20 pc',normalizedSpec:'Blue 20pc'}]};
+  assert.ok(planSalesListings(ordinary,null,f.target,readListingRules(f.db),f.naming,f.port).length>0);
+  for(const field of ['productId','targetId','sellerId','marketplaceId','mode'] as const){const prior=f.port.existingPlans()[0],outside={...prior,[field]:field==='mode'?'live':randomUUID()};assert.ok(planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,{existingPlans:()=>[outside]}).length>0,field+' owner must not block another scope');}
+  assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
+});
+test('ordinary proven homogeneous old mixed recipe remains eligible when its new recipes share sources',async t=>{
+ const f=await oldMixedTaskPlanning(t,true);try{
+  const rows=planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,f.port);assert.ok(rows.length>0);assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
 });

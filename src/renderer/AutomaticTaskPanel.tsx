@@ -32,11 +32,12 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
   const [readError, setReadError] = useState('');
   const [pending, setPending] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const [sourceCounts, setSourceCounts] = useState<{taskId:string;counts:Record<string,number>} | null>(null);
   const [sourceProducts, setSourceProducts] = useState<ProductDetail[]>([]);
   const [sourceErrors, setSourceErrors] = useState<Record<string, string>>({});
   const [loadingSources, setLoadingSources] = useState(false);
   const [checkRequest, setCheckRequest] = useState<{id:string;revision:number;refresh:number;serial:number}|null>(null);
-  const groups = useMemo(() => buildAutomaticProductGroups(task?.items ?? [], sourceProducts, products), [task, sourceProducts, products]);
+  const groups = useMemo(() => buildAutomaticProductGroups(task?.items ?? [], sourceProducts, products).map(group => ({...group, sourceCountSnapshot: group.sourceVariantCount === null && sourceCounts?.taskId === task?.id && sourceCounts?.counts[group.productId] !== undefined, sourceVariantCount: group.sourceVariantCount ?? (sourceCounts?.taskId === task?.id ? sourceCounts?.counts[group.productId] : null) ?? null})), [task, sourceProducts, products, sourceCounts]);
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -90,6 +91,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
     void api.previewAutomaticListingAdaptation(task.id).then(checked => {
       if (!active || request !== version.current || actionPending.current) return;
       setAdaptation(checked); setSourceProducts(checked.sources);
+      setSourceCounts({taskId:task.id,counts:Object.fromEntries(checked.sources.map(source=>[source.id,source.variants.length]))});
     }).catch(cause => {
       if (!active || request !== version.current) return;
       const message = errorText(cause);
@@ -135,7 +137,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
       <div className="workflow-actions automatic-task-heading"><Badge tone={tone(task.status)}>{statusLabels[task.status]}</Badge><strong>{task.targetName} · {task.mode === 'demo' ? '本地演示' : '真实 Haul'} · {task.productType}</strong><span className="small-copy">规则版本 {task.ruleRevision}</span></div>
       {batchError&&<p role="alert" className="workflow-notice">Batch 状态读取失败：{batchError}；请刷新任务。</p>}
       {batchSummary&&<AutomaticBatchStatus summary={batchSummary} status={task.status} disabled={busy||!!pending} onMode={mode=>{void changeMode(mode);}}/>}
-      <div className="automatic-task-scope" aria-label="当前任务范围"><span>来源商品链接<strong>{groups.length}</strong></span><span>来源规格<strong>{groups.every(group => group.sourceVariantCount !== null) ? groups.reduce((sum, group) => sum + (group.sourceVariantCount ?? 0), 0) : loadingSources ? '读取中' : '未完整读取'}</strong></span><span>本次销售 SKU<strong>{task.items.length}</strong></span></div>
+      <div className="automatic-task-scope" aria-label="当前任务范围"><span>来源商品链接<strong>{groups.length}</strong></span><span>来源规格<strong>{groups.every(group => group.sourceVariantCount !== null) ? groups.reduce((sum, group) => sum + (group.sourceVariantCount ?? 0), 0) : loadingSources ? '读取中' : Object.keys(sourceErrors).length ? '读取失败' : '尚未读取'}{groups.some(group=>group.sourceCountSnapshot) ? '（含已读快照）' : ''}</strong></span><span>本次销售 SKU<strong>{task.items.length}</strong></span></div>
       <progress className="automatic-task-progress" aria-label="流程已完成 SKU" value={outcomes.completed} max={Math.max(task.items.length,1)} />
       <p className="small-copy automatic-task-counts" role="status"><OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="success" label="流程完成" value={outcomes.completed} suffix={` / ${task.items.length} 个销售 SKU`} /> · <OutcomeCount tone="info" label="准备标签" value={outcomes.labels} /> · <OutcomeCount tone="info" label="处理中" value={outcomes.running} /> · <OutcomeCount tone="info" label="等待服务" value={outcomes.waiting} /> · <OutcomeCount tone="neutral" label="待执行" value={outcomes.pending} /></p>
       <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="neutral" label="历史未分类" value={outcomes.unclassified} />；原始原因保留在各 SKU 中。</p>
@@ -145,7 +147,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}
       </div>
       {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
-      {['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<AutomaticResumePanel key={task.id} task={task} disabled={busy||Boolean(pending)} onUpdated={value=>{setTask(value);setTasks(values=>values.map(row=>row.id===value.id?value:row));setRefresh(value=>value+1);}}/>}
+      {['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<AutomaticResumePanel key={`resume:${task.id}`} task={task} disabled={busy||Boolean(pending)} onUpdated={value=>{setTask(value);setTasks(values=>values.map(row=>row.id===value.id?value:row));setRefresh(value=>value+1);}}/>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
       <details className="workflow-notice" aria-label="旧任务适配检查"><summary>当前规则与资料检查（展开明细）</summary>
         <p>检查仅在点击后执行，并读取全部来源规格。任务进度或资料刷新后，请重新检查再适配。</p>
@@ -157,7 +159,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p></>}
       </details>
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
-      <AutomaticProductGroups key={task.id} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
+      <AutomaticProductGroups key={`groups:${task.id}`} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}
   </section>;
 }

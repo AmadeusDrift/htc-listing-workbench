@@ -15,7 +15,10 @@ test('local replay adopts a retained reference-rejected field without changing o
  const result=await (listing as any).recoverRetainedFieldCandidates(f.reference);
  assert.deepEqual(result.draft.attributes.item_shape,[{value:'Round'}]);assert.equal(result.recoveredFields[0],'item_shape');assert.equal(f.requests.length,1);assert.equal(JSON.stringify(f.ai.getResult(original.id)),before);assert.equal(JSON.stringify(f.ai.listCalls()),calls);
  const derived=f.ai.listResults(f.product.id).find(r=>r.fieldCandidateRecovery)!;assert.ok(derived);assert.equal(derived.sourceResultIds[0],original.id);assert.equal(derived.createdAt,original.createdAt);assert.equal(derived.listingContext!.draftRevision,draftBefore.revision);
+ const adoptionEvents=()=>((f.ai as any).db.prepare("SELECT detail_json FROM audit_events WHERE action='run.evidence' AND json_extract(detail_json,'$.event')='RESULT_ADOPTED'").all() as {detail_json:string}[]).map(row=>JSON.parse(row.detail_json));
+ assert.equal(adoptionEvents().length,1);assert.equal(adoptionEvents()[0].callId,original.callId);assert.equal(adoptionEvents()[0].draftId,result.draft.id);
  const again=await (listing as any).recoverRetainedFieldCandidates({draftId:result.draft.id,draftRevision:result.draft.revision});assert.equal(again.recoveredFields.length,0);assert.equal(f.requests.length,1);
+ assert.equal(adoptionEvents().length,1,'repeated local recovery must not invent another adoption');
  const altered=structuredClone(derived);(altered.output as any).candidates[0].nativeValue=[{value:'Square'}];assert.throws(()=>validateStoredAiResult(altered));
  await assert.doesNotReject(()=>listing.snapshotCurrentForImages({draftId:result.draft.id,draftRevision:result.draft.revision}));
 });
@@ -40,6 +43,7 @@ test('adoption failure rolls draft and owner back while retaining the replayable
  const old=f.amazon.getDraft(f.draft.id),owner=JSON.stringify(f.ai.completionJournal.get(op.id)),adopt=f.amazon.adoptFields.bind(f.amazon);
  f.amazon.adoptFields=(input,attrs,receipt,fresh,preserve,checkpoint)=>adopt(input,attrs,receipt,fresh,preserve,(d,db)=>{checkpoint?.(d,db);throw Error('fixture save failure');});
  assert.throws(()=>f.listing.recoverRetainedFieldCandidates(f.reference),/fixture save failure/);
+ assert.equal((f.ai as any).db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='run.evidence' AND json_extract(detail_json,'$.event')='RESULT_ADOPTED'").get().n,0,'adoption evidence rolls back with the draft and owner');
  assert.deepEqual(f.amazon.getDraft(old.id),old);assert.equal(JSON.stringify(f.ai.completionJournal.get(op.id)),owner);assert.equal(f.requests.length,2);
  f.amazon.adoptFields=adopt;assert.deepEqual(f.listing.recoverRetainedFieldCandidates(f.reference).recoveredFields,['item_shape']);assert.equal(f.requests.length,2);
 });

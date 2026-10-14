@@ -1,6 +1,10 @@
 import { addWorkBatchProducts, currentWorkBatch } from './automatic-listing/work-batches.ts';
 import { readFactScope, saveFactScopes, readProductFactModel, writeProductFactModel } from './products/public.ts';
 import { appendAuditEvent } from './storage/audit.ts';
+import { RunReportReader } from './diagnostics/run-report.ts';
+import { readErrorEvidence } from './error-evidence.ts';
+import { validateRunEvidence } from './diagnostics/run-evidence.ts';
+import type { RunReportContext } from '../shared/run-report-contracts.ts';
 import { readNativeImageReceipt } from './source-images.ts';
 import { transaction } from './application/transaction.ts';
 import { freezeSourceForProduct } from './products/public.ts';
@@ -31,8 +35,11 @@ const now = () => new Date().toISOString();
 
 export class WorkspaceStore {
   private db: DatabaseSync;
+  private runReport: RunReportReader;
   private directory:string;
-  constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);try{assertSourceImageHistory(this.db,directory);assertConsistencyHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
+  constructor(directory: string) { this.directory=directory;this.db = openDatabase(directory);this.runReport=new RunReportReader(this.db);try{assertSourceImageHistory(this.db,directory);assertConsistencyHistory(this.db,directory);}catch(error){this.db.close();throw error;} }
+  getRunDiagnostics(input: unknown, context?: RunReportContext) { return this.runReport.query(input, context); }
+  exportRunDiagnostics(input: unknown, context?: RunReportContext) { return this.runReport.export(input, context); }
   close(): void { this.db.close(); }
   freezeSourceVersion(productId:string,revision:number):void{
     this.transaction(()=>{this.assertRevision({productId,revision});freezeSourceForProduct(this.db,productId);});
@@ -174,7 +181,13 @@ export class WorkspaceStore {
     const rows = productId
       ? this.db.prepare('SELECT * FROM audit_events WHERE product_id=? ORDER BY rowid DESC LIMIT 200').all(identifier(productId))
       : this.db.prepare('SELECT * FROM audit_events ORDER BY rowid DESC LIMIT 200').all();
-    return rows.map(e => ({ id: String(e.id), productId: e.product_id === null ? null : String(e.product_id), action: String(e.action), summary: String(e.summary), createdAt: String(e.created_at) }));
+    return rows.map(e => {
+      let evidence: AuditEvent['evidence'];
+      if (['run.evidence','operation.failed'].includes(String(e.action)) && typeof e.detail_json === 'string' && e.detail_json.length <= 8192) {
+        try { const raw = JSON.parse(e.detail_json); evidence = e.action === 'run.evidence' ? validateRunEvidence(raw) : readErrorEvidence(raw) ?? undefined; } catch { /* Unsafe historical detail is never displayed. */ }
+      }
+      return { id: String(e.id), productId: e.product_id === null ? null : String(e.product_id), action: String(e.action), summary: e.action === 'operation.failed' ? '步骤失败（脱敏诊断）' : e.action === 'run.evidence' ? '运行阶段证据' : String(e.summary), createdAt: String(e.created_at), ...(evidence ? { evidence } : {}) };
+    });
   }
   addAssets(raw: ProductMutation, assets: NewAsset[]): ProductDetail {
     const input = parseMutation(raw);

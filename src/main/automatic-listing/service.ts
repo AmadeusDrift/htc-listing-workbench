@@ -3,6 +3,7 @@ import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureR
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
 import { listWorkBatches, currentWorkBatch, archiveWorkBatch, addWorkBatchProducts, bindWorkBatchTask } from './work-batches.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
+import { appendRunEvidence, evidenceSku } from '../diagnostics/run-evidence.ts';
 import { taskAiContext,BatchWaitingError } from '../ai/batch/task-context.ts';
 import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
 import type { TaskBatchPlan } from '../../shared/ai-batch-contracts.ts';
@@ -156,15 +157,27 @@ export class AutomaticListingService {
   }
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
-  private save(task: AutomaticListingTask, db:DatabaseSync=this.db): void {
+  private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = []): void {
     transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
+    const priorStages = new Map(db.prepare("SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.status') status FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?").all(task.id).map(row => [String(row.key), { stage: String(row.stage), status: String(row.status) }]));
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
     for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
     task.revision++; task.updatedAt = new Date().toISOString();
     validateAutomaticListingTask(task);
     assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
+    for (const row of task.items) {
+      const prior = priorStages.get(row.key), context = { version: 1 as const, at: task.updatedAt, taskId: task.id, itemKey: row.key, ...(evidenceSku(row.sku) ? { sku: row.sku } : {}), ...(row.draftId ? { draftId: row.draftId } : {}) };
+      try {
+        // Checkpoint movement can also mean reuse, rewind or unresolved submission.
+        // Completion comes only from the service boundary that checked its result.
+        for (const result of completed.filter(result => result.key === row.key)) appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: result.stage });
+        if ((!prior || prior.stage !== row.stage || prior.status !== 'RUNNING' && row.status === 'RUNNING') && row.status === 'RUNNING') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_STARTED', stage: row.stage });
+        if (row.status === 'FAILED' && prior?.status !== 'FAILED') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_BLOCKED', stage: row.stage, ...(row.outcome?.kind === 'UNKNOWN' ? { certainty: 'SENT_UNKNOWN' as const } : {}) });
+        if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
+      } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
+    }
     });
   }
   listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
@@ -758,7 +771,7 @@ export class AutomaticListingService {
             catch (error) {
               if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.save(task);continue;}
               if(row.batchWait&&this.deps.batch?.find(row.batchWait.operationId)?.adoption)delete row.batchWait;
-              recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+              recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
               if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
@@ -882,7 +895,7 @@ export class AutomaticListingService {
       // A new exact visual decision needs no source redelivery or sibling revision rebase.
       try {
         assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);
-        row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task);
+        row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task,this.db,[{key:row.key,stage:'SOURCES'}]);
       } catch(error) {
         if(!(error instanceof SourceConsistencyError))throw error;
         // A retained format failure already has its exact source scope. Recover it
@@ -892,7 +905,7 @@ export class AutomaticListingService {
           const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
           await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
           this.checkpoint(task,row);assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds);
-          row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task);
+          row.sourcesPrepared=true;row.stage='DRAFT';row.error=null;delete row.outcome;this.save(task,this.db,[{key:row.key,stage:'SOURCES'}]);
         }
       }
     }
@@ -940,7 +953,7 @@ export class AutomaticListingService {
       if (siblings.some(sibling => sibling.sourcesPrepared)) {
         for (const sibling of siblings) if (!sibling.sourcesPrepared) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));
       }
-      this.save(task); this.checkpoint(task, row);
+      this.save(task,this.db,siblings.filter(sibling=>sibling.sourcesPrepared).map(sibling=>({key:sibling.key,stage:'SOURCES'}))); this.checkpoint(task, row);
       if (!row.sourcesPrepared) throw new UserFacingError(row.error!);
     }
     row.status = 'RUNNING';
@@ -950,7 +963,7 @@ export class AutomaticListingService {
       const classification = await this.deps.classify({ productId:row.productId,productRevision:row.productRevision,targetId:task.targetId }, this.controller!.signal);
       this.checkpoint(task,row);
       for (const sibling of task.items.filter(item=>item.productId===row.productId)) sibling.classification = structuredClone(classification);
-      this.save(task);
+      this.save(task,this.db,[{key:row.key,stage:'CLASSIFY'}]);
     }
     const productType = row.classification?.productType ?? task.productType;
     if(row.salesPlan&&!row.salesPlan.familyResolved){
@@ -986,7 +999,7 @@ export class AutomaticListingService {
     if(row.familyTransition)draft=await this.finishFamilyTransition(task,row);
     if (!row.executionTaskIds.length||this.deps.execution.get(row.executionTaskIds.at(-1)!).status==='CANCELLED') {
       const prior = this.deps.images.getProgress(draft.id);
-      row.stage = 'IMAGES'; this.save(task);
+      row.stage = 'IMAGES'; this.save(task,this.db,[{key:row.key,stage:'DRAFT'}]);
       if (!this.imageReady(prior)) {
         const changedRiskPolicy=canResumeRiskAdaptation(this.db,task,row,draft,prior,this.deps.store.getProduct(row.productId))||!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
         if (row.imageStarted && !canResumeImageWorkflow(prior) && !this.deps.images.hasHistoricalRetryAllowance?.(draft.id) && !changedRiskPolicy && !(unknown==='IMAGE_RESULT_UNKNOWN')) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
@@ -1020,13 +1033,13 @@ export class AutomaticListingService {
     if (!row.executionTaskIds.length||this.deps.execution.get(row.executionTaskIds.at(-1)!).status==='CANCELLED') {
       if(row.salesPlan?.parentage==='CHILD'){
         if(!this.deps.ensureParent)throw new UserFacingError('父体建档服务尚未初始化');
-        row.stage='PARENT';this.save(task);
+        row.stage='PARENT';this.save(task,this.db,[{key:row.key,stage:'IMAGES'}]);
         const parent=await this.deps.ensureParent(this.deps.amazon.getDraft(draft.id),task.profileId,this.controller!.signal);
         row.parentDraftId=parent.draftId;this.checkpoint(task,row);
         if(!parent.ready){row.status='WAITING';this.save(task);return;}
       }
       const child = this.childFor(task, draft);
-      row.executionTaskIds.push(child.id); row.stage = 'EXECUTION'; this.save(task);
+      row.executionTaskIds.push(child.id); row.stage = 'EXECUTION'; this.save(task,this.db,[{key:row.key,stage:row.salesPlan?.parentage==='CHILD'?'PARENT':'IMAGES'}]);
     }
     for (;;) {
       this.checkpoint(task, row);
@@ -1041,7 +1054,7 @@ export class AutomaticListingService {
       const current = this.deps.amazon.getDraft(draft.id);
       if (submitted(current)) {
         row.stage = 'READBACK'; row.status = 'WAITING'; row.error = null;
-        this.deps.followup.schedule(current.id); this.save(task); return;
+        this.deps.followup.schedule(current.id); this.save(task,this.db,child.status==='COMPLETED'&&current.submittedAt?[{key:row.key,stage:'EXECUTION'}]:[]); return;
       }
       this.checkpoint(task, row);
       if (child.status === 'COMPLETED') throw new UserFacingError('执行结束但没有可核对的提交记录');
@@ -1340,7 +1353,7 @@ export class AutomaticListingService {
             const legacyOutcome=!row.observationFailureStamp&&savedFailureStamp&&savedFailureTime!==undefined&&row.outcome
               &&savedFailureTime<=Date.parse(row.outcome.classifiedAt)?structuredClone(row.outcome):undefined;
             if(savedFailureStamp)row.observationFailureStamp=savedFailureStamp;else delete row.observationFailureStamp;
-            recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+            recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
             row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
             const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
             if(!canObserve()||task.revision!==revision){interrupted=true;break;}

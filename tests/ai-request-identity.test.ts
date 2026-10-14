@@ -116,8 +116,8 @@ test('SHUTDOWN drains late receipt and usage before closing SQLite, with zero au
   try{const calls=reopened.listCalls();assert.equal(calls.length,1);assert.equal(calls[0].errorCode,'CANCELLED');assert.equal(calls[0].usage.promptTokens,23);assert.ok(await reopened.readProviderReceipt(calls[0].id));assert.equal(reopened.listResults(f.product.id).length,0);assert.equal(f.requests.length,1);}finally{await reopened.close();}
 });
 
-for(const [body,expected] of [[{},true],['Unauthorized',true],['',false]] as const)test(`complete 401 ${JSON.stringify(body)} has evidence-based certainty without declaring zero fees`,async t=>{
-  const f=await fixture(t,{fetch:async()=>body===''?new Response('',{status:401}):Response.json(body,{status:401})});f.enable('deepseek');await assert.rejects(f.service.suggest(f.textInput));const call=f.service.listCalls()[0],db=openDatabase(f.directory);
+for(const status of [401,402,403,429])for(const [body,expected] of [[{},true],['Unauthorized',true],['',false]] as const)test(`complete ${status} ${JSON.stringify(body)} has evidence-based certainty without declaring zero fees`,async t=>{
+  const f=await fixture(t,{fetch:async()=>body===''?new Response('',{status}):Response.json(body,{status})});f.enable('deepseek');await assert.rejects(f.service.suggest(f.textInput));const call=f.service.listCalls()[0],db=openDatabase(f.directory);
   try{assert.equal(localAiRequestResolved(db,f.directory,call.id,call),expected);}finally{db.close();}
   assert.equal(f.requests.length,1);assert.equal(f.service.getUsageSummary('deepseek').unknownCalls,1);
 });

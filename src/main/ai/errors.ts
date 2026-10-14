@@ -69,3 +69,9 @@ export function httpError(status: number, providerCode?: unknown): AiError {
   if (status === 429 || /^(Throttling|RateLimit)/i.test(code)) return new AiError('RATE_LIMITED');
   return new AiError('PROVIDER_ERROR');
 }
+/** Requires independently verified complete receipt bytes at the caller. A
+ * rejection does not establish zero cost or permission for another request. */
+export function receivedDeepSeekRejection(status:number,body:unknown,errorCode:string):boolean {
+  if(![401,402,403,429].includes(status)||body===undefined||body==='[omitted: credential echo]'||typeof body==='string'&&!body.trim())return false;
+  return httpError(status,(body as any)?.error?.code).code===errorCode;
+}

@@ -4,7 +4,7 @@ import {resultHasOwner} from './result-owner.ts';
 import {readCallReceiptSync} from './receipts.ts';
 import {openRouterFailure} from './adapters/openrouter-http.ts';
 import {assertReceiptRecovery} from './receipt-recovery.ts';
-import {httpError} from './errors.ts';
+import {httpError,receivedDeepSeekRejection} from './errors.ts';
 
 /** Result certainty is independent of reported usage and current adoption permission.
  * This query does not settle costs, repair records or grant another provider request. */
@@ -21,7 +21,7 @@ export function localAiRequestResolved(db:DatabaseSync,directory:string,id:strin
     if(record.status>=200&&record.status<300)return call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&body!=='[omitted: credential echo]'&&!openRouterFailure(record.status,body);
     if(call.status!=='FAILED'||body===undefined||typeof body==='string'&&!body.trim()||body==='[omitted: credential echo]')return false;
     const error=record.gateway==='openrouter'?openRouterFailure(record.status,body):httpError(record.status,body?.error?.code);
-    const definitive=record.gateway==='openrouter'?!!error&&'definitive' in error&&error.definitive===true:[401,402,403,429].includes(record.status);
+    const definitive=record.gateway==='openrouter'?!!error&&'definitive' in error&&error.definitive===true:receivedDeepSeekRejection(record.status,body,call.errorCode!);
     // Earlier OpenRouter readers encoded a complete matching 403 as AUTH_FAILED.
     // Recognize that terminal receipt; retry permission remains with the existing
     // explicit once-only claim, not this read-only certainty projection.

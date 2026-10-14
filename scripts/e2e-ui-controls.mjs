@@ -12,14 +12,14 @@ let app; const checks=[];
 try {
  app=await electron.launch({executablePath:require('electron'),args:['.'],cwd:resolve('.'),env});
  const page=await app.firstWindow(); page.setDefaultTimeout(15000); await expect(page.getByRole('button',{name:'同步妙手采集箱',exact:true})).toBeVisible();
- const ids=await page.evaluate(async()=>{const ids=[];for(let i=0;i<65;i++){const p=await window.red.createProduct();await window.red.saveProduct({id:p.id,revision:p.revision,sourceUrl:p.sourceUrl,description:p.description,status:p.status,facts:p.facts,title:`合成分页商品 ${String(i).padStart(3,'0')}`,variants:p.variants.map(({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})=>({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory}))});ids.push(p.id);}await window.red.moveWorkspaceProducts({productIds:ids.slice(0,63),destination:'inbox'});await window.red.moveWorkspaceProducts({productIds:ids.slice(63),destination:'ignored'});return ids;});
+ const ids=await page.evaluate(async()=>{const ids=[];for(let i=0;i<65;i++){const p=await window.red.createProduct();await window.red.saveProduct({id:p.id,revision:p.revision,sourceUrl:p.sourceUrl,description:p.description,status:p.status,facts:[{id:crypto.randomUUID(),name:'尺寸',value:'15×8×3 cm',source:'manual',sourceRef:'',state:'human_confirmed'}],title:`合成分页商品 ${String(i).padStart(3,'0')}`,variants:p.variants.map(({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})=>({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory}))});ids.push(p.id);}await window.red.moveWorkspaceProducts({productIds:ids.slice(0,63),destination:'inbox'});await window.red.moveWorkspaceProducts({productIds:ids.slice(63),destination:'ignored'});return ids;});
  await page.reload(); await expect(page.locator('.collection-row')).toHaveCount(20);
  const select=page.getByLabel('采集箱每页数量'), scope=page.getByLabel('采集箱批量操作');
  await page.getByLabel('搜索采集箱').fill('000');await expect(page.locator('.collection-row')).toHaveCount(1);
  await page.getByRole('button',{name:/选中全部待整理商品/}).click();await expect(scope).toContainText('已选择 63 件');
  await page.getByLabel('搜索采集箱').fill(''); await page.getByRole('button',{name:'采集箱下一页',exact:true}).click();await expect(scope).toContainText('已选择 63 件');
  await select.selectOption('50');await expect(scope).toContainText('已选择 63 件');await expect(page.locator('.collection-row')).toHaveCount(13);
- await select.selectOption('100');await expect(page.locator('.collection-row')).toHaveCount(63);await expect(page.getByLabel('采集箱分页')).toContainText('第 1 / 1 页');
+ await select.selectOption('100');await expect(page.locator('.collection-row')).toHaveCount(63);await expect(page.getByLabel('采集箱商品滚动区域')).toHaveAttribute('aria-busy','false');await expect(page.locator('.inbox-inline-error')).toHaveCount(0);await expect(page.locator('.collection-row').filter({hasText:'15×8×3 cm'})).toHaveCount(63);await expect(page.getByLabel('采集箱分页')).toContainText('第 1 / 1 页');
  await select.selectOption('20');await page.getByRole('button',{name:/仅选中当前页商品/}).click();await expect(scope).toContainText('已选择 20 件');
  await page.getByRole('button',{name:'清空',exact:true}).click();await expect(scope).toContainText('选择商品后');
  checks.push('搜索后跨页全选63件排除2件ignored；分页20/50/100保持选择并钳制页码；仅当前页20件；清空');

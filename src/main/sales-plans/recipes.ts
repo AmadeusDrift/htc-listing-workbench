@@ -95,7 +95,15 @@ export function procurementComponents(lines: {recipe:SalesRecipe;sets:number}[])
   for (const {recipe,sets} of lines) for (const c of salesPurchaseComponents(recipe,sets)) {
     const key=JSON.stringify([c.variantId,c.sourceKey]), current=totals.get(key);
     if(!current){totals.set(key,c);continue;}
-    current.pieces+=c.pieces;current.quoteUnits+=c.quoteUnits;
+    current.pieces+=c.pieces;current.quoteUnits+=c.quoteUnits;current.originalPacks+=c.originalPacks;
+    if(c.contents){
+      current.contents??=[];
+      for(const item of c.contents){
+        const prior=current.contents.find(p=>p.name===item.name&&p.role===item.role);
+        if(prior)prior.quantity=prior.quantity===null||item.quantity===null?null:prior.quantity+item.quantity;
+        else current.contents.push({...item});
+      }
+    }
     current.costCny=current.costCny===null||c.costCny===null?null:money(current.costCny+c.costCny);
     current.needsSplit ||= c.needsSplit;
   }

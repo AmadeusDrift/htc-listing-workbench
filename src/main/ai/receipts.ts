@@ -46,6 +46,25 @@ export async function readProviderReceipt(db:DatabaseSync,directory:string,callI
   if(record.callId!==callId)throw new UserFacingError('AI原始收据归属不一致');const path=resolve(directory,record.relativePath),stat=await lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==record.byteSize)throw new UserFacingError('AI原始收据文件身份无效');const bytes=await readFile(path);
   if(bytes.length!==record.byteSize||hash(bytes)!==record.sha256)throw new UserFacingError('AI原始收据文件缺失或损坏');return JSON.parse(bytes.toString('utf8'));
 }
+/** Read-only synchronous evidence at a local command boundary; never repairs the index. */
+export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import('../../shared/ai-contracts.ts').AiCall):{record:ProviderReceipt;capture:ProviderReceiptCapture}|null {
+  if(!call.providerReceiptId)return null;
+  try{
+    const row=db.prepare('SELECT id,record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return null;
+    const record=parse(JSON.parse(String(row.record_json)));
+    const gateway=call.providerId.startsWith('openrouter')?'openrouter':call.providerId.startsWith('deepseek')?'deepseek':null;
+    const endpoint=gateway==='deepseek'?'/chat/completions':call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions';
+    if(record.id!==row.id||record.id!==call.providerReceiptId||record.callId!==call.id||record.model!==call.model||record.gateway!==gateway||record.endpoint!==endpoint||record.id!==hash(call.id+':'+record.sha256))return null;
+    const folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
+    const path=join(directory,record.relativePath),before=lstatSync(path);
+    if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size!==record.byteSize)return null;
+    const bytes=readFileSync(path),after=lstatSync(path);
+    if(bytes.length!==record.byteSize||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||hash(bytes)!==record.sha256)return null;
+    const capture=JSON.parse(bytes.toString('utf8'));
+    if(capture.version!==1||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    return {record,capture};
+  }catch{return null;}
+}
 export function providerReceiptFiles(db:DatabaseSync,directory?:string):ProviderReceipt[]{
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<25)return[];
   assertRecordTable(db,'ai_provider_receipts');assertRecordTable(db,'ai_image_requests');

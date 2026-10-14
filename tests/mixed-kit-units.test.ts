@@ -46,6 +46,11 @@ test('kit procurement expands complete kits and preserves accessory composition,
  assert.equal(line.quoteUnits,5);assert.equal(line.originalPacks,5);assert.equal(line.costCny,41);assert.equal(line.needsSplit,false);
  assert.equal(line.unit,'kit');assert.ok(line.contents?.some(c=>c.name==='过滤网'&&c.quantity===250));
 });
+test('merged kit procurement accumulates quote units, original packs and accessory contents',()=>{
+ const r=buildSalesRecipes(kitProduct(),null,defaultListingRules())[0],line=procurementComponents([{recipe:r,sets:5},{recipe:r,sets:7}])[0];
+ assert.equal(line.pieces,12);assert.equal(line.quoteUnits,12);assert.equal(line.originalPacks,12);assert.equal(line.costCny,98.4);
+ assert.equal(line.contents?.find(c=>c.name==='过滤网')?.quantity,600);assert.equal(line.contents?.find(c=>c.name==='贴片')?.quantity,null);
+});
 test('explicitly unknown quote units cannot establish a cost from a numeric package count',()=>{
  const p=kitProduct();p.variants=p.variants.slice(0,1);p.variants[0].originalSpec='50只过滤网，报价单位不明';
  const r=buildSalesRecipes(p,null,defaultListingRules())[0];

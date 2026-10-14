@@ -60,6 +60,7 @@ import { salesUnitReviewNeeded } from '../sales-plans/unit-adoption.ts';
 import { salesPlatformPieces,salesUnitIssue } from '../../shared/source-quantity.ts';
 import { salesPurchaseDescription } from '../../shared/sales-purchase.ts';
 import type { SalesUnitAdoptionPreview } from '../../shared/amazon-contracts.ts';
+import {localAiRequestResolved} from '../ai/request-certainty.ts';
 
 const PREVIEW_TTL = 15 * 60_000;
 const FINAL_STATES = new Set(['SUBMITTING', 'SUBMITTED', 'PROCESSING', 'BUYABLE', 'DISCOVERABLE', 'UNKNOWN']);
@@ -125,6 +126,7 @@ function readbackTargetScope(target: AmazonTarget): string {
 }
 
 export class AmazonService {
+  private readonly directory: string;
   private persistence: AmazonPersistence;
   private corrections: ListingCorrections;
   private vault: CredentialVault;
@@ -134,6 +136,7 @@ export class AmazonService {
   private busy = new Set<string>();
   private closed = false;
   constructor(directory: string, getProduct: (id: string) => ProductDetail, secretStorage: SecretStorage, dependencies: AmazonDependencies = {}) {
+    this.directory=directory;
     this.persistence = new AmazonPersistence(directory); this.vault = new CredentialVault(directory, secretStorage); this.getProduct = getProduct; this.now = dependencies.now ?? Date.now;
     this.transport = new AmazonTransport({ active: id => this.active(id), generation: id => this.persistence.generation(id), credentials: id => this.vault.read(id, this.persistence.generation(id)),
       pause: (id, message) => this.pauseForError(id, message), audit: event => this.persistence.addCall(event), redact: value => this.vault.redact(value), remember: value => this.vault.remember(value) }, dependencies);
@@ -340,7 +343,7 @@ export class AmazonService {
     if(new CompletionJournal(db).list(d.id).some(op=>!['DONE','RETIRED'].includes(op.state)))blockers.push('原字段操作尚未结束，先核对原请求结果');
     if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND (json_extract(i.value,'$.submitStarted')=1 OR json_extract(t.record_json,'$.status') IN ('RUNNING','QUEUED'))").get(d.id))blockers.push('存在提交意图或执行任务，请先核对，不能改变单位');
     if(db.prepare("SELECT 1 FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND (json_extract(record_json,'$.status') IN ('RUNNING','WAITING_BATCH') OR EXISTS(SELECT 1 FROM json_each(record_json,'$.slots') s WHERE json_extract(s.value,'$.status') IN ('RUNNING','UNKNOWN'))) ").get(d.id))blockers.push('原图片工作流仍在进行或结果未知，不能改变单位');
-    if(db.prepare("SELECT 1 FROM ai_calls WHERE json_extract(record_json,'$.productId')=? AND (json_extract(record_json,'$.status')='RUNNING' OR json_extract(record_json,'$.status')='FAILED' AND coalesce(json_extract(record_json,'$.responseReceived'),0)=0 AND json_extract(record_json,'$.errorCode') IN ('NETWORK_ERROR','TIMEOUT','CANCELLED','RESULT_UNKNOWN'))").get(d.productId))blockers.push('来源相关请求仍在进行或结果未知，先按原身份核对');
+    if(db.prepare("SELECT id,record_json FROM ai_calls WHERE json_extract(record_json,'$.productId')=?").all(d.productId).some(row=>!localAiRequestResolved(db,this.directory,String(row.id),JSON.parse(String(row.record_json)))))blockers.push('来源相关请求仍在进行或结果未知，先按原身份核对');
     if(this.persistence.records(d.productId).some(other=>other.draft.id!==d.id&&listingHash(other.draft,other.draft.sku)===listingHash(d,d.sku)&&(other.unresolvedWrite||other.draft.submittedAt||FINAL_STATES.has(other.draft.state))))blockers.push('同 SKU 已有其他提交/未知草稿，不能采用');
     if(this.persistence.listAcceptedSkus(d.targetId).some(row=>row.sku===d.sku&&row.sellerId===d.sellerId&&row.marketplaceId===d.marketplaceId&&row.mode===d.mode))blockers.push('原 SKU 已被平台接收，需走原 SKU 修正流程');
     return [...new Set(blockers)];

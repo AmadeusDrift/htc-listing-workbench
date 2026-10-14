@@ -38,6 +38,7 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
+  categoryContext?:{version:1;phase:'keywords'|'select'|'judge';requestSha256:string};
   purposeAssignments?:import('./ai-purpose-contracts.ts').FieldPurposeAssignment[];
   providerReceiptId?:string;
   purposeSnapshot?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;

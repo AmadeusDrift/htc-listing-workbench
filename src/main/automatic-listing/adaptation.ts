@@ -45,9 +45,10 @@ export function* adaptationSteps(task:AutomaticListingTask,deps:AutomaticListing
   for(const row of task.items){
     yield;
     const draft=row.draftId?drafts.get(row.draftId):undefined,p=sources.find(p=>p.id===row.productId)!;
-    if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读');continue;}
     const units=row.salesPlan?salesUnitReviewNeeded(row.salesPlan.recipe,p):null;
-    if(units){unitReviewProducts.add(p.id);add(row,'BLOCKED',units,['计量对照与明确采用'],['number_of_items','unit_count','purchasable_offer']);continue;}
+    if(units)unitReviewProducts.add(p.id);
+    if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读'+(units?'；计量变化不分配新的替代 SKU':''));continue;}
+    if(units){add(row,'BLOCKED',units,['计量对照与明确采用'],['number_of_items','unit_count','purchasable_offer']);continue;}
     if(recipeErrors.has(p.id)){add(row,'BLOCKED',recipeErrors.get(p.id)!,['销售选样']);continue;}
     const selected=deps.planSales?recipes.get(p.id)!.some(r=>matchesRecipe(row,r)):p.variants.some(v=>v.id===row.variantId);
     if(!selected&&row.outcome?.kind==='RULE_FILTERED'&&row.outcome.pricingReport){add(row,'PRESERVED','原利润淘汰继续排除；本次也未选中，保留独立定价证据供后续重新入选时核对');continue;}

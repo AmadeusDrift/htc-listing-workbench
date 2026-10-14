@@ -98,8 +98,34 @@ test('stored paid guard catches kit composition from the current adopted revisio
   const before=JSON.stringify(db.prepare('SELECT record_json FROM listing_drafts').all());
   assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/套装|整套|计量/);
   assert.equal(JSON.stringify(db.prepare('SELECT record_json FROM listing_drafts').all()),before);
-  db.prepare('UPDATE products SET revision=2').run();assert.doesNotThrow(()=>assertStoredPricingForPaid(db,'draft'),'unadopted newer source title cannot rewrite frozen quote semantics');
+  db.prepare("UPDATE products SET description='仅补备注',revision=2").run();assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/原.*依据|计量|套装/,'unrelated revision cannot release an erroneous quote without original unit evidence');
  }finally{db.close();}
+});
+test('stored guard uses exact original source revision from owner history instead of an unadopted new title',()=>{
+ const p=kitProduct();p.variants=p.variants.slice(0,1);const v=p.variants[0];v.originalSpec='黄色';p.title='家庭牙签50支盒装';v.purchasePrice='2.4';
+ const rules=defaultListingRules(),recipe=buildSalesRecipes(p,null,rules)[0];delete recipe.quantityVersion;delete recipe.platformPieces;
+ const schema=realAmazonSchema(),target={id:'target',name:'U2',mode:'demo',marketplaceId:'ATVPDKIKX0DER'} as AmazonTarget;
+ const result=applyBusinessRules({product:p,variant:v,target,schema,attributes:{},measurements:{},costCny:2.4,saleUnit:recipe,packageMatchesSaleUnit:true,now:new Date()},rules);
+ const draft={id:'draft',productId:p.id,productRevision:1,variantId:v.id,listingProgram:'haul',marketplaceId:target.marketplaceId,schema,attributes:result.attributes,businessRules:result.report,salesPlan:{recipe}};
+ const db=new DatabaseSync(':memory:');try{
+  db.exec('CREATE TABLE listing_drafts(id TEXT,record_json TEXT); CREATE TABLE products(id TEXT,title TEXT,description TEXT,revision INTEGER); CREATE TABLE variants(id TEXT,product_id TEXT,original_spec TEXT,normalized_spec TEXT); CREATE TABLE amazon_settings(key TEXT,value_json TEXT); CREATE TABLE audit_events(product_id TEXT,action TEXT,detail_json TEXT)');
+  db.prepare('INSERT INTO listing_drafts VALUES(?,?)').run('draft',JSON.stringify({draft}));db.prepare('INSERT INTO products VALUES(?,?,?,?)').run(p.id,'未采用的新支架+贴片+50只过滤网标题','',2);db.prepare('INSERT INTO variants VALUES(?,?,?,?)').run(v.id,p.id,'黄色','');
+  db.prepare('INSERT INTO audit_events VALUES(?,?,?)').run(p.id,'product.updated',JSON.stringify({before:p,after:{...p,revision:1,title:'未采用的新支架+贴片+50只过滤网标题'}}));
+  const before=JSON.stringify(db.prepare('SELECT record_json FROM listing_drafts').all());assert.doesNotThrow(()=>assertStoredPricingForPaid(db,'draft'));assert.equal(JSON.stringify(db.prepare('SELECT record_json FROM listing_drafts').all()),before);
+  const kitBefore={...p,title:'支架+贴片+50只过滤网'};db.prepare('UPDATE audit_events SET detail_json=?').run(JSON.stringify({before:kitBefore,after:{...kitBefore,revision:1,description:'仅新增备注'}}));
+  assert.throws(()=>assertStoredPricingForPaid(db,'draft'),/套装|计量/);assert.equal(result.report.pricingDecision?.status,'quoted','historical quoted result remains history');
+ }finally{db.close();}
+});
+test('UNKNOWN and submitted/readback rows preserve old identity and suppress replacement NEW recipes',()=>{
+ for(const [state,stage] of [['UNKNOWN','READBACK'],['SUBMITTED','IMAGES'],['SUBMITTING','IMAGES'],['DRAFT','READBACK'],['DRAFT','LABELS'],['DRAFT','COMPLETE']]){
+  const p=kitProduct(),rules=defaultListingRules(),recipe=buildSalesRecipes(p,null,rules)[0],c={...recipe.components[0],quantity:50,piecesPerQuote:50,sourcePackPieces:50};delete c.unitSemantics;
+  const old={...recipe,components:[c],key:createHash('sha256').update(JSON.stringify([[c.sourceKey,50]])).digest('hex'),totalPieces:50};delete old.quantityVersion;delete old.platformPieces;
+  const task={id:randomUUID(),revision:1,status:'PAUSED',targetId:'target',profileId:'profile',targetStamp:fingerprint({}),profileStamp:fingerprint({}),rulesStamp:fingerprint(rules),items:[{key:'original',productId:p.id,variantId:c.variantId,productRevision:p.revision,sourceStamp:sourceStamp(p),sku:'KEEP-SKU',salesPlan:{recipe:old},stage,status:'FAILED',draftId:'draft'}]};
+  const deps={store:{getProductSnapshot:()=>p},rules:()=>rules,planSales:()=>[],amazon:{executionTargetScope:()=>({}),getDraft:()=>({id:'draft',state,submittedAt:null})},hosting:{getProfile:()=>({})},images:{getProgress:()=>null},execution:{list:()=>[]}};
+  const before=JSON.stringify(task),result=adaptationState(task as any,deps as any,false);
+  assert.ok(result.preview.changes.some(c=>c.key==='original'&&c.kind==='PRESERVED'),state+'/'+stage);
+  assert.ok(!result.preview.changes.some(c=>c.kind==='NEW'),state+'/'+stage+' must not create another SKU for the original kit');assert.equal(JSON.stringify(task),before);
+ }
 });
 test('explicit homogeneous SKU wording wins over generic kit prose, while original kit wording survives normalization',()=>{
  const p=kitProduct();p.title='支架+50只过滤网';p.description='支架+贴片+50只过滤网';p.variants=p.variants.slice(0,1);p.variants[0].originalSpec='50只过滤网';p.variants[0].normalizedSpec='黄色 50pc';

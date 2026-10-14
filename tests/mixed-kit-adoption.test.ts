@@ -28,6 +28,7 @@ async function oldKit(t:any){
 }
 test('unit preview is read-only and explicit adoption preserves original naming identity, history and quantity authority',async t=>{
  const f=await oldKit(t),before=JSON.stringify(f.persistence.record(f.ref.id));
+ const financialHistory=JSON.stringify({calls:f.db.prepare('SELECT * FROM ai_calls').all(),usage:f.db.prepare('SELECT * FROM ai_usage_ledger').all()});
  assert.equal(typeof (f.amazon as any).previewSalesUnitAdoption,'function');
  const initial=f.amazon.previewSalesUnitAdoption(f.ref);
  assert.equal(initial.proposed?.totalCostCny,8.2);assert.equal(initial.proposed?.platformPieces,null);assert.equal(initial.canApply,false);
@@ -43,6 +44,7 @@ test('unit preview is read-only and explicit adoption preserves original naming 
  const context=buildListingContext(next,f.p,0);assert.ok(context.evidence.some(e=>e.name==='销售件数'&&e.value==='1'));
  assert.ok(context.evidence.some(e=>e.name==='销售计量说明'&&e.value.includes('过滤网×50')));
  assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='listing.sales-units.adopted'").get()?.n,1);
+ assert.equal(JSON.stringify({calls:f.db.prepare('SELECT * FROM ai_calls').all(),usage:f.db.prepare('SELECT * FROM ai_usage_ledger').all()}),financialHistory);
  assert.throws(()=>f.amazon.adoptSalesUnit({...f.ref,token:preview.token,platformPieces:1,basis:preview.basis,confirmed:true}),/版本|更新/);
 });
 test('unit adoption refuses absent authorization, stale source, unknown or submitted state without touching historical recipe',async t=>{

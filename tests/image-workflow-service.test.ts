@@ -1342,3 +1342,11 @@ test('P05 selected image slot reuses its pending request and leaves other slots 
  assert.deepEqual(result.workflow.slots!.slice(1),before);
  assert.equal(result.workflow.slots![0].attempts[0].requestId,first.workflow.slots![0].attempts[0].requestId);
 });
+
+test('P05 selected slot cannot expand authorization to whole-set copy policy recheck',async t=>{
+ const f=await fixture(t);f.service.saveCopyReviewSettings({enabled:false});const first=await f.run();assert.equal(first.workflow.status,'COMPLETED');
+ f.service.saveCopyReviewSettings({enabled:true});const before=structuredClone(f.service.getProgress(f.draft.id)),calls=[...f.calls];
+ assert.throws(()=>f.service.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[2]}),/当前需要整套审核策略重新核验，请按SKU预览并确认范围/);
+ assert.deepEqual(f.calls,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
+ const next=await f.run();assert.equal(next.workflow.status,'COMPLETED');assert.equal(next.workflow.recheckedFromRunId,first.workflow.id);assert.equal(f.calls.slice(calls.length).includes('generate'),false);assert.equal(f.calls.slice(calls.length).includes('content-review'),true);
+});

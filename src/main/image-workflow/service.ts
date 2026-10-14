@@ -425,11 +425,17 @@ export class ImageWorkflowService {
     if(prior&&prior.productRevision!==draft.productRevision)prior=this.derivePartialSource(prior,draft);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior?.imageContext)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));
-    if(hasSevenApprovedImages(prior)&&draft.listingProgram==='haul'&&prior!.draftSha256!==imageWorkflowDraftStamp(draft)&&this.currentContextMatches(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
-    if(hasSevenApprovedImages(prior)&&this.canRecheckImageContent(prior!,draft))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
+    // Whole-set evidence is indivisible: a slot grant cannot approve paid reviews
+    // for the remaining six slots or promote a global policy snapshot.
+    const recheckWholeSet=()=>{
+      if(options.selectedSlots)throw new UserFacingError('当前需要整套审核策略重新核验，请按SKU预览并确认范围');
+      return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
+    };
+    if(hasSevenApprovedImages(prior)&&draft.listingProgram==='haul'&&prior!.draftSha256!==imageWorkflowDraftStamp(draft)&&this.currentContextMatches(prior!,draft))return recheckWholeSet();
+    if(hasSevenApprovedImages(prior)&&this.canRecheckImageContent(prior!,draft))return recheckWholeSet();
     if(hasSevenApprovedImages(prior)&&this.listing.prepareSourceColors
-      &&(nonDeferredImageIssues(draft).some(issue=>issue.attributeNames.includes('color'))||!this.currentContextMatches(prior!,draft)))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
-    if(hasSevenApprovedImages(prior)&&(!this.isRiskPolicyCompatible(prior)||!this.isCopyReviewPolicyCompatible(prior)))return this.recheck({draftId,draftRevision:revision,sourceWorkflowId:prior!.id});
+      &&(nonDeferredImageIssues(draft).some(issue=>issue.attributeNames.includes('color'))||!this.currentContextMatches(prior!,draft)))return recheckWholeSet();
+    if(hasSevenApprovedImages(prior)&&(!this.isRiskPolicyCompatible(prior)||!this.isCopyReviewPolicyCompatible(prior)))return recheckWholeSet();
     if(prior?.imageContext?.copyReviewBypass&&prior.status!=='COMPLETED'&&this.getCopyReviewSettings().enabled)throw new UserFacingError('这套未完成图片已跳过文案复核。请先关闭文案复核完成该套图片，再开启并复核已有图片；历史记录和图片均已保留');
     if(prior?.riskInterceptionEnabled===false&&prior.status!=='COMPLETED'&&this.getRiskSettings().enabled)throw new UserFacingError('这套未完成图片是在关闭风险拦截时开始的。请先关闭开关并完成该套图片，再开启并复核已有图片；历史记录和图片均已保留');
     if (hasSevenApprovedImages(prior)) {

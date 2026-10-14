@@ -29,6 +29,7 @@ import { installArtifactIpc } from './artifact-ipc.ts';
 import type { ImageVersionService } from './image-versions/service.ts';
 import type { ReviewedContentService } from './content/service.ts';
 import { installDiagnosticsIpc } from './diagnostics-ipc.ts';
+import { readRunReportBuildContext } from './diagnostics/service.ts';
 import { installMiaoshouIpc } from './miaoshou-ipc.ts';
 import type { MiaoshouService } from './miaoshou/service.ts';
 import type { MiaoshouImageService } from './miaoshou/images.ts';
@@ -202,7 +203,9 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
       await writeFileAtomically(result.filePath, content); return { cancelled: false };
     },
   });
+  const runReportContext = readRunReportBuildContext(app.getVersion(), app.getAppPath());
   installDiagnosticsIpc(dataRoot, handle, {
+    runReport: { query: input => store.getRunDiagnostics(input, runReportContext), export: input => store.exportRunDiagnostics(input, runReportContext) },
     context: () => ({ appVersion: app.getVersion(), runtime: { nodeMajor: Number(process.versions.node.split('.')[0]), electronMajor: Number(process.versions.electron.split('.')[0]) },
       services: { aiBusy: ai.busy, imageWritesBusy: images.busy, executionBusy: execution.busy } }),
     selectDestination: () => dialog.showSaveDialog(window, { title: '导出本地诊断报告', defaultPath: 'HTC-本地诊断.json', filters: [{ name: 'JSON', extensions: ['json'] }] }),

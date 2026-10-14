@@ -25,7 +25,7 @@ export class OpenRouterImageAdapter{
     throwIfAborted(signal);if(!response.ok)throw new AiError('SERVICE_PERMISSION_REQUIRED');
     const raw=await readBounded(response,1024*1024,signal) as any;if(!raw||!(Array.isArray(raw.endpoints)||Array.isArray(raw.data?.endpoints)))throw new AiError('OUTPUT_INVALID');
   }
-  async generate(input:OpenRouterImageRequest,signal:AbortSignal,hooks:Pick<AdapterContext,'onProviderReceipt'|'beforeSend'>={}){
+  async generate(input:OpenRouterImageRequest,signal:AbortSignal,hooks:Pick<AdapterContext,'onProviderReceipt'|'beforeSend'|'onRunEvidence'|'responseDeadlineAt'|'responseTimeoutMs'|'responseBodyTimeoutMs'>={}){
     try{
       throwIfAborted(signal);
       if(!input||typeof input!=='object'||!OPENROUTER_IMAGE_MODELS.includes(input.model as any)||typeof input.apiKey!=='string'||!/^[\x21-\x7e]{8,4096}$/.test(input.apiKey)||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>32000||!['auto','1024x1024','1536x1024','1024x1536'].includes(input.size)||!['auto','low','medium','high'].includes(input.quality)||!['auto','transparent','opaque'].includes(input.background)||!Array.isArray(input.references)||input.references.length>16)throw new AiError('INVALID_INPUT');

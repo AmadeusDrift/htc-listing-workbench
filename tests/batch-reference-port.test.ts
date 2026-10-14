@@ -21,7 +21,7 @@ async function fixture(t:test.TestContext){
  const port=createBatchReferencePort({directory,store,generation:{readCandidate:async()=>{throw new Error('No candidate fixture');}},hosting:{getProfile:()=>profile as any,listUploads:()=>[],uploadReferenceVersion:async(_id,_gen,version)=>{uploads++;return `https://images.example.test/references/${version.sha256}.png`; }},task:()=>task as any,probe:async()=>{probes++;}});
  t.after(async()=>{await port.close();store.close();rmSync(directory,{recursive:true,force:true});});
  const owner={taskId,operationId:randomUUID(),productId:product.id,productRevision:product.revision},bytes=readFileSync(join(directory,store.getAssetRecord(product.assets[0].id)!.originalPath)),body={messages:[{role:'user',content:[{type:'text',text:'Observe this source'},{type:'image_url',image_url:{url:`data:image/png;base64,${bytes.toString('base64')}`}}]}],reasoning:{effort:'medium'},max_tokens:4096};
- const scope={taskId,rowKey:product.variants[0].id,phase:'source',mode:'deferred_batch' as const,authorize:()=>allowed};
+ const scope={taskId,rowKey:product.id+':'+product.variants[0].id,phase:'source',mode:'deferred_batch' as const,authorize:()=>allowed};
  return{directory,store,product,port,owner,body,scope,profile,task,counts:()=>({uploads,probes}),revoke:()=>{allowed=false;}};
 }
 test('main reference port uses the selected hosting profile and reuses one immutable pin',async t=>{

@@ -10,6 +10,10 @@ import type { AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { assertRecordTable } from '../storage/record-table.ts';
 import { openRouterMetadata } from './adapters/openrouter-http.ts';
+import {assertOpaqueResponse} from './opaque-response.ts';
+import {validateRequestScope} from './request-identity.ts';
+import type {AiRequestScope} from '../../shared/ai-request-identity-contracts.ts';
+import {listingFingerprint} from '../json-fingerprint.ts';
 
 export const PROVIDER_RECEIPT_TABLES={ai_provider_receipts:['id','record_json'],ai_image_requests:['id','record_json']};
 export interface ProviderReceipt {executionIdentity?:{actualModel:string|null;actualProvider:string|null};version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
@@ -23,6 +27,7 @@ function parse(raw:unknown):ProviderReceipt{
     ||r.reportedTokens!==null&&(!Number.isSafeInteger(r.reportedTokens)||r.reportedTokens<0||r.reportedTokens>2_000_000_000))throw new UserFacingError('AI原始收据记录无效');return r;
 }
 export async function saveProviderReceipt(db:DatabaseSync,directory:string,callId:string,capture:ProviderReceiptCapture,purpose:AiPurposeSnapshot|undefined):Promise<ProviderReceipt>{
+  assertOpaqueResponse(capture.body);
   if(!/^[a-f0-9-]{36}$/.test(callId))throw new UserFacingError('AI收据调用身份无效');
   const bytes=Buffer.from(JSON.stringify({version:1,callId,purpose:purpose??null,...capture})),sha256=hash(bytes),id=hash(callId+':'+sha256),relativePath=`ai-receipts/${id}.json`;
   const metadata=openRouterMetadata(capture.body);
@@ -44,8 +49,44 @@ export async function readProviderReceipt(db:DatabaseSync,directory:string,callI
   if(row)record=parse(JSON.parse(String(row.record_json)));
   else{try{const pointer=join(directory,'ai-receipts',callId+'.receipt.json'),stat=await lstat(pointer);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size<1||stat.size>8192)throw new UserFacingError('AI收据指针文件无效');record=parse(JSON.parse(await readFile(pointer,'utf8')));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}}
   if(record.callId!==callId)throw new UserFacingError('AI原始收据归属不一致');const path=resolve(directory,record.relativePath),stat=await lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==record.byteSize)throw new UserFacingError('AI原始收据文件身份无效');const bytes=await readFile(path);
-  if(bytes.length!==record.byteSize||hash(bytes)!==record.sha256)throw new UserFacingError('AI原始收据文件缺失或损坏');return JSON.parse(bytes.toString('utf8'));
+  if(bytes.length!==record.byteSize||hash(bytes)!==record.sha256)throw new UserFacingError('AI原始收据文件缺失或损坏');const capture=JSON.parse(bytes.toString('utf8'));assertOpaqueResponse(capture.body);return capture;
 }
+/** Read-only synchronous evidence at a local command boundary; never repairs the index. */
+export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import('../../shared/ai-contracts.ts').AiCall):{record:ProviderReceipt;capture:ProviderReceiptCapture}|null {
+  if(!call.providerReceiptId)return null;
+  try{
+    const row=db.prepare('SELECT id,record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return null;
+    const record=parse(JSON.parse(String(row.record_json)));
+    const gateway=call.providerId.startsWith('openrouter')?'openrouter':call.providerId.startsWith('deepseek')?'deepseek':null;
+    const endpoint=gateway==='deepseek'?'/chat/completions':call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions';
+    if(record.id!==row.id||record.id!==call.providerReceiptId||record.callId!==call.id||record.model!==call.model||record.gateway!==gateway||record.endpoint!==endpoint||record.id!==hash(call.id+':'+record.sha256))return null;
+    const folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
+    const path=join(directory,record.relativePath),before=lstatSync(path);
+    if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size!==record.byteSize)return null;
+    const bytes=readFileSync(path),after=lstatSync(path);
+    if(bytes.length!==record.byteSize||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||hash(bytes)!==record.sha256)return null;
+    const capture=JSON.parse(bytes.toString('utf8'));
+    assertOpaqueResponse(capture.body);
+    if(!Object.hasOwn(capture,'body')||capture.version!==1||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    return {record,capture};
+  }catch{return null;}
+}
+
+/** Complete owned image receipt, used inside the synchronous intent guard. */
+export function readImageReceiptSync(db:DatabaseSync,directory:string,intent:ImageRequestIntent):{record:ProviderReceipt;capture:ProviderReceiptCapture}|null{
+  try{
+    const row=db.prepare("SELECT id,record_json FROM ai_provider_receipts WHERE json_extract(record_json,'$.callId')=? ORDER BY rowid DESC LIMIT 1").get(intent.id);let record:ProviderReceipt;
+    if(row){record=parse(JSON.parse(String(row.record_json)));if(record.id!==row.id)return null;}else{const path=join(directory,'ai-receipts',intent.id+'.receipt.json'),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size<1||stat.size>8192)return null;record=parse(JSON.parse(readFileSync(path,'utf8')));}
+    if(record.callId!==intent.id||record.gateway!=='openrouter'||record.endpoint!=='/api/v1/images'||record.model!==intent.model||record.id!==hash(intent.id+':'+record.sha256))return null;
+    const folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
+    const path=join(directory,record.relativePath),before=lstatSync(path);if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size!==record.byteSize)return null;
+    const bytes=readFileSync(path),after=lstatSync(path);if(bytes.length!==record.byteSize||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||hash(bytes)!==record.sha256)return null;
+    const capture=JSON.parse(bytes.toString('utf8'));assertOpaqueResponse(capture.body);
+    if(!Object.hasOwn(capture,'body')||capture.version!==1||capture.callId!==intent.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    return {record,capture};
+  }catch{return null;}
+}
+
 export function providerReceiptFiles(db:DatabaseSync,directory?:string):ProviderReceipt[]{
   if(Number(db.prepare('PRAGMA user_version').get()!.user_version)<25)return[];
   assertRecordTable(db,'ai_provider_receipts');assertRecordTable(db,'ai_image_requests');
@@ -71,13 +112,17 @@ export function indexProviderReceiptPointers(db:DatabaseSync,directory:string):v
     db.prepare('INSERT OR IGNORE INTO ai_provider_receipts VALUES(?,?)').run(record.id,JSON.stringify(record));
   }
 }
-export interface ImageRequestIntent{version:1;id:string;provider:'openrouter';model:string;productId:string;productRevision:number;createdAt:string;mode:'generate'|'edit';sourceAssets:{id:string;sha256:string}[];editSource?:{id:string;sha256:string}}
+interface ImageRequestBase{id:string;provider:'openrouter';model:string;productId:string;productRevision:number;createdAt:string;mode:'generate'|'edit';sourceAssets:{id:string;sha256:string}[];editSource?:{id:string;sha256:string}}
+export type ImageRequestIntent=ImageRequestBase&({version:1}|{version:2;requestScope:AiRequestScope;requestFingerprint:string;requestInput:{version:1;promptSha256:string;size:string;quality:string;background:string}});
+export function imageRequestFingerprint(input:ImageRequestBase,requestInput:{version:1;promptSha256:string;size:string;quality:string;background:string}):string{return listingFingerprint({provider:input.provider,model:input.model,productId:input.productId,productRevision:input.productRevision,mode:input.mode,sourceAssets:input.sourceAssets,editSource:input.editSource??null,requestInput});}
 function parseImageRequest(raw:unknown):ImageRequestIntent{
   const r=raw as ImageRequestIntent,uuid=(s:unknown)=>typeof s==='string'&&/^[a-f0-9-]{36}$/.test(s);
-  if(!r||r.version!==1||r.provider!=='openrouter'||!uuid(r.id)||!uuid(r.productId)||typeof r.model!=='string'||r.model.length>200||!Number.isSafeInteger(r.productRevision)||r.productRevision<1||!Number.isFinite(Date.parse(r.createdAt))||!['generate','edit'].includes(r.mode)||!Array.isArray(r.sourceAssets)||r.sourceAssets.length>16||r.sourceAssets.some(a=>!uuid(a.id)||!/^[a-f0-9]{64}$/.test(a.sha256)))throw new UserFacingError('生图请求意图无效');
-  if(Object.keys(r).some(k=>!['version','id','provider','model','productId','productRevision','createdAt','mode','sourceAssets','editSource'].includes(k)))throw new UserFacingError('生图意图包含未知字段');
+  if(!r||![1,2].includes(r.version)||r.provider!=='openrouter'||!uuid(r.id)||!uuid(r.productId)||typeof r.model!=='string'||r.model.length>200||!Number.isSafeInteger(r.productRevision)||r.productRevision<1||!Number.isFinite(Date.parse(r.createdAt))||!['generate','edit'].includes(r.mode)||!Array.isArray(r.sourceAssets)||r.sourceAssets.length>16||r.sourceAssets.some(a=>!uuid(a.id)||!/^[a-f0-9]{64}$/.test(a.sha256)))throw new UserFacingError('生图请求意图无效');
+  if(Object.keys(r).some(k=>!['version','id','provider','model','productId','productRevision','createdAt','mode','sourceAssets','editSource',...(r.version===2?['requestScope','requestFingerprint','requestInput']:[])].includes(k)))throw new UserFacingError('生图意图包含未知字段');
   const asset=(a:unknown)=>{const v=a as {id:string;sha256:string};return !!v&&Object.keys(v).sort().join()==='id,sha256'&&uuid(v.id)&&/^[a-f0-9]{64}$/.test(v.sha256);};
-  if(!r.sourceAssets.every(asset)||(r.editSource!==undefined&&(r.mode!=='edit'||!asset(r.editSource))))throw new UserFacingError('生图请求来源无效');return r;
+  if(!r.sourceAssets.every(asset)||(r.editSource!==undefined&&(r.mode!=='edit'||!asset(r.editSource))))throw new UserFacingError('生图请求来源无效');
+  if(r.version===2){const scope=validateRequestScope(r.requestScope),input=r.requestInput;if(scope.productId!==r.productId||scope.operation!=='image-generation'||!input||Object.keys(input).sort().join()!=='background,promptSha256,quality,size,version'||input.version!==1||!/^[a-f0-9]{64}$/.test(input.promptSha256)||!['auto','1024x1024','1536x1024','1024x1536'].includes(input.size)||!['auto','low','medium','high'].includes(input.quality)||!['auto','opaque','transparent'].includes(input.background)||r.requestFingerprint!==imageRequestFingerprint(r,input))throw new UserFacingError('生图请求冻结身份无效');}
+  return r;
 }
 export function saveImageRequestIntent(db:DatabaseSync,intent:ImageRequestIntent):void{
   const value=parseImageRequest(intent);db.prepare('INSERT INTO ai_image_requests(id,record_json) VALUES(?,?)').run(value.id,JSON.stringify(value));

@@ -36,6 +36,8 @@ export interface GenerateImageCandidateInput {
   size: ImageGenerationSize; quality: ImageGenerationQuality;
   background: 'auto' | 'opaque' | 'transparent';
 }
+/** Internal workflow producer only; absent manual SKU identity remains broad. */
+export interface ImageGenerationOwner {draftId:string;sku:string;targetId:string;marketplaceId:string;variantIds:string[];slot:number}
 export interface GeneratedImageCandidate {
   id: string; provider: ImageGenerationProvider; model: ImageGenerationModel; mode: 'generate' | 'edit';
   productId: string; productRevision: number; createdAt: string; requestId: string | null;

@@ -9,11 +9,13 @@ import { pricingQuantityInputs, pricingRuleInputs, pricingSaleUnit } from './dep
 import { convertMeasurement } from '../amazon/field-mapping.ts';
 import { semanticJson } from '../amazon/preparation.ts';
 import { pricingAttributeInputs } from '../amazon/pricing-inputs.ts';
+import { salesPlatformPieces, salesUnitIssue } from '../../shared/source-quantity.ts';
 
 export function pricingExempt(draft: AmazonDraft): boolean {
   return draft.listingProgram !== 'haul' || draft.schema?.parentageLevel === 'PARENT';
 }
 export function pricingEvidenceCurrent(draft: AmazonDraft, rules: ListingRules): boolean {
+  if(draft.salesPlan?.recipe&&salesUnitIssue(draft.salesPlan.recipe))return false;
   const report=draft.businessRules,decision=report?.pricingDecision;
   if (!report || !decision) return false;
   try { assertPricingDecision(report,draft); } catch { return false; }
@@ -22,7 +24,7 @@ export function pricingEvidenceCurrent(draft: AmazonDraft, rules: ListingRules):
       || semanticJson(decision.dependencies.saleUnit) !== semanticJson(pricingSaleUnit(draft.salesPlan?.recipe))
       || semanticJson(decision.dependencies.quantityInputs) !== semanticJson(pricingQuantityInputs(draft.attributes))) return false;
   } else if (report.revision !== rules.revision) return false;
-  if (decision.status === 'quoted' && (decision.evidence.saleUnit !== 'confirmed' || draft.salesPlan && report.bundleQuantity !== draft.salesPlan.recipe.totalPieces)) return false;
+  if (decision.status === 'quoted' && (decision.evidence.saleUnit !== 'confirmed' || draft.salesPlan && report.bundleQuantity !== salesPlatformPieces(draft.salesPlan.recipe))) return false;
   const entry=(field:string):any=>Array.isArray(draft.attributes[field])&&draft.attributes[field].length===1?draft.attributes[field][0]:null;
   const converted=(value:any,kind:'length'|'weight')=>{if(!value)return null;const result=convertMeasurement(value.value,value.unit,kind);return result.status==='mapped'?result.value:null;};
   if (decision.version !== 1) {
@@ -40,13 +42,15 @@ export interface PricingQualificationIssue { code: string; message: string }
 /** Runtime qualification is separate from the frozen historical suggestion report. */
 export function pricingQualificationIssue(draft: AmazonDraft, rules: ListingRules, now = Date.now()): PricingQualificationIssue | null {
   if (pricingExempt(draft)) return null;
+  const unitIssue=draft.salesPlan?.recipe?salesUnitIssue(draft.salesPlan.recipe):null;
+  if(unitIssue)return {code:'SALE_UNIT_UNCONFIRMED',message:unitIssue};
   if (!pricingEvidenceCurrent(draft,rules)) return {code:'PRICING_EVIDENCE_STALE',message:'定价依据缺失或相关输入已变化，请重新应用商品规则后核对实际报价'};
   const report=draft.businessRules!,decision=report.pricingDecision!;
   const historicalIssue = {code:decision.code,message:report.notices.join('；')||'尚无合格的定价依据，请核对成本、包装与销售数量'};
   // A failed automatic suggestion is not proof that a supplied manual offer fails.
   // Unknown input/system failures still cannot establish usable cost and quantity.
   if (!['quoted','business_blocked'].includes(decision.status)) return historicalIssue;
-  if (decision.evidence.saleUnit!=='confirmed' || draft.salesPlan && report.bundleQuantity!==draft.salesPlan.recipe.totalPieces)
+  if (decision.evidence.saleUnit!=='confirmed' || draft.salesPlan && report.bundleQuantity!==salesPlatformPieces(draft.salesPlan.recipe))
     return {code:'PRICING_EVIDENCE_STALE',message:'实际报价的销售数量或成本口径尚未确认'};
   const {costCny,dimensionsInches,weightPounds}=decision.inputs;
   if (costCny===null || dimensionsInches===null || weightPounds===null) return {code:'PRICING_EVIDENCE_STALE',message:'实际报价缺少完整成本或包装输入'};

@@ -1,0 +1,40 @@
+{
+  "scope": "User-authorized database copy only; no credentials copied. Candidate read methods measured without source-image file validation/startup; full UI is separately synthetic.",
+  "beforeMs": [
+    10141.313999999998,
+    11053.0706,
+    10394.698900000003
+  ],
+  "afterMs": [
+    581.8576000000003,
+    538.7740999999996,
+    533.3144000000002
+  ],
+  "afterEventLoop": [
+    {
+      "maxTimerIntervalMs": 76.71129999999994,
+      "ticks": 52
+    },
+    {
+      "maxTimerIntervalMs": 66.00460000000021,
+      "ticks": 52
+    },
+    {
+      "maxTimerIntervalMs": 68.41600000000017,
+      "ticks": 49
+    }
+  ],
+  "beforeReads": {
+    "getProduct": 303,
+    "getProductSnapshot": 303
+  },
+  "afterReads": {
+    "getProduct": 0,
+    "getProductSnapshot": 39
+  },
+  "candidateCount": 101,
+  "eligibleCount": 5,
+  "outputHashesEqual": true,
+  "nineProtectedTablesUnchanged": true,
+  "networkRequests": 0
+}

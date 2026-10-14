@@ -31,10 +31,56 @@ function fixture() {
     state: 'PROCESSING', schema: { parentageLevel: 'NONE' }, submittedAt: '2026-10-07T00:00:00.000Z', checkedAt: '2026-10-07T00:30:00.000Z', statuses: [], listingIssues: [], updatedAt: '2026-10-07T00:30:00.000Z' } as unknown as AmazonDraft;
   const target = { id: 'u2', mode: 'live', sellerId: 'seller', marketplaceId: 'ATVPDKIKX0DER' } as AmazonTarget;
   const observation = { draftId: draft.id, targetId: 'u2', sellerId: 'seller', marketplaceId: 'ATVPDKIKX0DER', sku: 'HTC-ONE', checkedAt: draft.checkedAt!, requestId: null, asin: 'B012345678', fnsku: null, statuses: [], issues: [] };
-  const store = { listProducts: () => [{ id }], getProduct: () => product };
+  const store = { listProducts: () => [{ id }], getProduct: () => product, getProductSnapshot: () => product };
   const amazon = { listDrafts: () => [draft], getDraft: () => draft, getTarget: () => target, getListingObservation: () => observation };
   return { dir, product, draft, target, observation, store, amazon };
 }
+
+test('procurement candidate reads never repair product source bindings', () => {
+  const f=fixture(),baseline=new ProcurementService(f.dir,f.store,f.amazon);
+  const expected=baseline.candidates();baseline.close();
+  let snapshotReads=0;
+  const store={...f.store,getProduct:()=>{throw Error('candidate query must not repair image history');},getProductSnapshot:()=>{snapshotReads++;return f.product;}};
+  const service=new ProcurementService(f.dir,store,f.amazon);
+  try {assert.deepEqual(service.candidates(),expected);assert.equal(snapshotReads,1);}
+  finally {service.close();}
+});
+
+test('candidate sweep shares a product snapshot across SKUs but refreshes it for the next sweep', () => {
+  const f=fixture(),secondVariant={...f.product.variants[0],id:randomUUID(),sku:'HTC-TWO'};
+  f.product.variants.push(secondVariant);
+  const drafts=[f.draft,{...f.draft,id:randomUUID(),variantId:secondVariant.id,sku:secondVariant.sku,state:'UNKNOWN' as const}];
+  const amazon={...f.amazon,listDrafts:()=>drafts,getListingObservation:(id:string)=>({...f.observation,draftId:id,sku:drafts.find(draft=>draft.id===id)!.sku})};
+  const baseline=new ProcurementService(f.dir,f.store,amazon),expected=baseline.candidates();baseline.close();
+  let reads=0;
+  const read=()=>{reads++;return structuredClone(f.product);};
+  const store={...f.store,getProduct:read,getProductSnapshot:read},service=new ProcurementService(f.dir,store,amazon);
+  try {
+    assert.deepEqual(service.candidates(),expected);assert.equal(reads,1,'one snapshot per product, not per draft');
+    f.product.revision++;f.product.variants[0].purchasePrice='3.75';
+    const refreshed=service.candidates();assert.equal(reads,2,'cache must end with each sweep');
+    assert.equal(refreshed[0].sourcePurchasePrice,'3.75');assert.equal(refreshed[0].basis?.productRevision,2);
+    assert.equal(refreshed[1].eligible,false);assert.equal(refreshed[1].requiresAttention,true);
+  } finally {service.close();}
+});
+
+test('background candidate projection yields between reads and matches the complete synchronous view', async () => {
+  const f=fixture(),service=new ProcurementService(f.dir,f.store,f.amazon);let reading=true;
+  try {
+    const expected=service.candidates();let heartbeats=0;
+    const beat=()=>{heartbeats++;if(reading)setImmediate(beat);};setImmediate(beat);
+    const actual=await service.candidatesForObservation();reading=false;
+    assert.deepEqual(actual,expected);assert.ok(heartbeats>=2,'input runs between product and candidate reads');
+  } finally {reading=false;service.close();}
+});
+
+test('cancelled background candidate projection returns no partial view and performs no later reads', async () => {
+  const f=fixture();let allowed=true,sourceReads=0;
+  const service=new ProcurementService(f.dir,{...f.store,getProductSnapshot:()=>{sourceReads++;return f.product;}},
+    {...f.amazon,listDrafts:()=>{allowed=false;return [f.draft];}});
+  try {assert.equal(await service.candidatesForObservation(()=>allowed),null);assert.equal(sourceReads,0);}
+  finally {service.close();}
+});
 
 test('manual price changes invalidate confirmation and retain the previous procurement revision', () => {
   const f=fixture(),service=new ProcurementService(f.dir,f.store,f.amazon);

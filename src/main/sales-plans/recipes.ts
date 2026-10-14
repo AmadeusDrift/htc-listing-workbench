@@ -58,8 +58,9 @@ export function sourceQuotedCost(variant: Variant, receipt: MiaoshouReceipt | nu
 function recipe(groupKey: string, components: SalesComponent[], color: string, specification: string): SalesRecipe {
   const sorted=[...components].sort((a,b)=>a.sourceKey.localeCompare(b.sourceKey));
   const totalPieces=sorted.reduce((sum,c)=>sum+c.quantity,0);
-  return {key:hash(sorted.map(c=>[c.sourceKey,c.quantity])),groupKey,color,specification,components:sorted,totalPieces,
-    totalCostCny:sorted.every(c=>c.quotedCostCny!==null)?money(sorted.reduce((sum,c)=>sum+c.quotedCostCny!*c.quantity/c.piecesPerQuote,0)):null};
+  return {key:hash(sorted.map(c=>[c.sourceKey,c.quantity])),groupKey,color,specification,components:sorted,totalPieces,quantityVersion:2,
+    platformPieces:sorted.some(c=>c.unitSemantics)?null:totalPieces,
+    totalCostCny:sorted.every(c=>c.quotedCostCny!==null&&c.unitSemantics?.quoteUnit!=='unknown')?money(sorted.reduce((sum,c)=>sum+c.quotedCostCny!*c.quantity/c.piecesPerQuote,0)):null};
 }
 /** Linear number of sales SKUs: each selected source color plus at most one mixed recipe per same-spec group. */
 export function buildSalesRecipes(product: ProductDetail, receipt: MiaoshouReceipt | null, rules: ListingRules, costAllowed:(variant:Variant)=>boolean=()=>true): SalesRecipe[] {
@@ -68,12 +69,12 @@ export function buildSalesRecipes(product: ProductDetail, receipt: MiaoshouRecei
     const units=productSourceQuantity(product,variant,receipt?.snapshot.detailText), quotedCostCny=costAllowed(variant)?sourceQuotedCost(variant,receipt):null;
     if (units.conflict) throw new UserFacingError(`规格「${spec}」中的件数或计价口径冲突`);
     const unitCost=quotedCostCny===null?null:quotedCostCny/units.piecesPerQuote;
-    const eligible=rules.pricing.bundleEnabled && unitCost!==null && unitCost/rules.pricing.fx<rules.pricing.bundleThresholdUsd;
+    const eligible=!units.unitSemantics && rules.pricing.bundleEnabled && unitCost!==null && unitCost/rules.pricing.fx<rules.pricing.bundleThresholdUsd;
     const quantity=units.source==='explicit' ? units.piecesPerPack : eligible ? rules.pricing.bundleSizes.find(size=>unitCost!*size/rules.pricing.fx<=rules.pricing.bundleCapUsd+1e-10) ?? 1 : 1;
-    const component: SalesComponent={variantId:variant.id,sourceKey,sourceSku:variant.sku,specification:spec,color,quantity,quotedCostCny,piecesPerQuote:units.piecesPerQuote,sourcePackPieces:units.piecesPerPack};
+    const component: SalesComponent={variantId:variant.id,sourceKey,sourceSku:variant.sku,specification:spec,color,quantity,quotedCostCny,piecesPerQuote:units.piecesPerQuote,sourcePackPieces:units.piecesPerPack,...(units.unitSemantics?{unitSemantics:units.unitSemantics}:{})};
     return {groupKey,component,eligible};
   });
-  const result=entries.map(entry=>recipe(entry.groupKey,[entry.component],entry.component.color,`${entry.component.specification} · ${entry.component.quantity} pc`));
+  const result=entries.map(entry=>recipe(entry.groupKey,[entry.component],entry.component.color,`${entry.component.specification} · ${entry.component.quantity} ${entry.component.unitSemantics?'套（平台件数待确认）':'pc'}`));
   const groups=new Map<string,typeof entries>();
   for (const entry of entries) {const group=groups.get(entry.groupKey)??[];group.push(entry);groups.set(entry.groupKey,group);}
   for (const [groupKey, group] of groups) {

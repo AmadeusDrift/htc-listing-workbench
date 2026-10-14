@@ -64,6 +64,17 @@ export function listConsistencyAttempts(db:DatabaseSync,context:SourceConsistenc
   return rows(db,'source_consistency_attempts',validateConsistencyAttempt).filter(a=>consistencyScopeKey(a.context)===consistencyScopeKey(context)).sort((a,b)=>(a.attemptNumber??1)-(b.attemptNumber??1));
 }
 export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyAttempt|undefined {return listConsistencyAttempts(db,context).at(-1);}
+/** OUTPUT_INVALID is also used for empty/interrupted HTTP bodies: the code alone proves nothing. */
+export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAttempt):boolean {
+ const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
+ if(!call||call.id!==attempt.callId||call.productId!==attempt.context.productId||call.productRevision!==attempt.context.productRevision||call.startedAt!==attempt.sentAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(attempt.context))return true;
+ if(call.status==='SUCCEEDED'||confirmedAuthenticationRejection(db,call))return false;
+ if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return true;
+ if(call.responseReceived===true)return false;
+ // Legacy diagnostics may predate responseReceived. Only a validated local recovery
+ // establishes usable original content; missing/null metadata never clears the guard.
+ return !rows(db,'source_consistency_assessments',validateConsistencyAssessment).some(a=>a.callId===call.id&&a.recovery&&listingFingerprint(a.context)===listingFingerprint(call.sourceConsistencyContext));
+}
 /** Model changes alone do not authorize a new request. Credentials must have been explicitly saved. */
 export function canRetryConsistencyAuthentication(db:DatabaseSync,prior:AiCall,current:{providerId:string;generation:number}):boolean {
  const scope=taskAiContext.getStore();
@@ -78,6 +89,7 @@ export function canRetryConsistencyAuthentication(db:DatabaseSync,prior:AiCall,c
 /** Called only in AiUsageLedger.reserve's transaction, before the transport sends bytes. */
 export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string;providerId?:string;generation?:number}):void {
   const attempts=listConsistencyAttempts(db,context),latest=attempts.at(-1),n=(latest?.attemptNumber??(latest?1:0))+1;
+  if(attempts.some(attempt=>consistencyAttemptUnknown(db,attempt)))invalid();
   if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||!isGenerationProvider(prior.providerId)||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!(prior.errorCode==='OUTPUT_INVALID'||call.providerId!==undefined&&call.generation!==undefined&&canRetryConsistencyAuthentication(db,prior,{providerId:call.providerId,generation:call.generation}))||n>MAX_SOURCE_ATTEMPTS)invalid();}
   const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyAttemptId(context,n),context,callId:call.id,sentAt:call.startedAt,...(n>1?{attemptNumber:n}:{})});
   db.prepare('INSERT INTO source_consistency_attempts VALUES(?,?)').run(record.id,JSON.stringify(record));

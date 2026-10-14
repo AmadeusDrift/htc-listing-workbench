@@ -34,7 +34,7 @@ import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
 import { resolveConsistencyContext } from "../source-image-consistency/scope.ts";
 import { validateConsistencyContext, consistencyScopeKey } from "../source-image-consistency/contracts.ts";
-import { canRetryConsistencyAuthentication,reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
+import { consistencyAttemptUnknown,listConsistencyAttempts,canRetryConsistencyAuthentication,reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
 import { assertConsistencyView,readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
@@ -688,6 +688,7 @@ export class AiService {
             }catch{this.db.exec('ROLLBACK');}
           }
         }
+        if(listConsistencyAttempts(this.db,context).some(previous=>consistencyAttemptUnknown(this.db,previous)))throw new AiError('INTERRUPTED');
         const current=this.activePurpose('source_understanding',true),authRetry=canRetryConsistencyAuthentication(this.db,call,{providerId:current.id,generation:current.generation});
         if(authRetry){const receipt=await readProviderReceipt(this.db,this.directory,call.id) as {status?:number}|null;if(!receipt||![401,403].includes(receipt.status??0))throw new AiError('AUTH_FAILED');}
         if(!call||call.status!=='FAILED'||!(call.errorCode==='OUTPUT_INVALID'||authRetry)||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':confirmedAuthenticationRejection(this.db,call)?'AUTH_FAILED':'INTERRUPTED');

@@ -18,7 +18,7 @@ import { AiService } from '../src/main/ai/service.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { chat,mockStorage,saveInput } from './fixtures/listing-ai.ts';
 import { consistencyScopeKey } from '../src/main/source-image-consistency/scope.ts';
-import { assertConsistencyHistory } from '../src/main/source-image-consistency/history.ts';
+import { reserveConsistencyAttempt,assertConsistencyHistory } from '../src/main/source-image-consistency/history.ts';
 import { readConsistencyView,assertProductConsistency } from '../src/main/source-image-consistency/proof.ts';
 import { randomUUID } from 'node:crypto';
 import { recordInvalidAiOutput } from '../src/main/ai/output-diagnostics.ts';
@@ -335,4 +335,34 @@ test('legacy saved-connection audit supports denied source recovery without alte
  f.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'ai.connection.saved','Synthetic legacy credential save',JSON.stringify({vendorId:'deepseek',profiles:[{id:profile.id,generation:profile.generation}]}),new Date().toISOString());
  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))}));
  await explicitlyContinue(()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
+});
+
+for(const kind of ['empty','missing','broken-stream'] as const)test(`source HTTP 200 ${kind} body stays UNKNOWN and never resends`,async t=>{
+ const f=await fixture(t);f.respond(()=>kind==='empty'?new Response('',{status:200}):kind==='missing'?new Response(null,{status:200}):new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"choices":'));controller.error(new Error('synthetic interrupted body'));}}),{status:200}));
+ await assert.rejects(f.observe());const call=f.ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');assert.equal(call.responseReceived,undefined);
+ assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);assert.equal(readConsistencyView(f.db,f.context()).status,'UNKNOWN');
+ f.ai.saveConnection({id:'deepseek',apiKey:'body-new-synthetic'});assert.throws(()=>explicitlyContinue(()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ assert.deepEqual(f.ai.listCalls()[0],call);
+});
+
+test('older unknown source attempt cannot be hidden by a later explicit auth denial',async t=>{
+ const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic denial'}},{status:401}));await assert.rejects(f.observe());
+ const old=f.ai.listCalls()[0];f.ai.saveConnection({id:'deepseek',apiKey:'second-old-synthetic'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ // The old version allowed this second send. Preserve that historical shape without issuing it again.
+ const unknown={...old,errorCode:'NETWORK_ERROR'};delete unknown.providerReceiptId;
+ f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(unknown),old.id);
+ const attempts=f.db.prepare('SELECT id,record_json FROM source_consistency_attempts ORDER BY id').all();
+ assertConsistencyHistory(f.db,f.directory);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ f.ai.saveConnection({id:'deepseek',apiKey:'third-blocked-synthetic'});assert.throws(()=>explicitlyContinue(()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ assert.deepEqual(f.db.prepare('SELECT id,record_json FROM source_consistency_attempts ORDER BY id').all(),attempts);
+});
+
+test('legacy valid retained source content recovers locally without responseReceived or another send',async t=>{
+ const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());const call=f.ai.listCalls()[0];delete call.responseReceived;
+ f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
+ assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ const raw={kind:'source-image-consistency',assets:f.context().referenceAssets.map(a=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))};
+ recordInvalidAiOutput(f.directory,{call,operation:'source-image-consistency',createdAt:new Date(Date.parse(call.finishedAt!)+1).toISOString(),rejectionStage:'operation-output-validation',output:raw});
+ const result=await f.observe();assert.equal(result.output.kind,'source-image-consistency');assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),false);
+ assert.deepEqual(f.ai.listCalls()[0],call);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');
 });

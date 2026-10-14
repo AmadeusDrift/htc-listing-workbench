@@ -12,7 +12,7 @@ import { keys, uuid, integer, sha256, boundedText } from "../ai/primitives.ts";
 import { validateAiCall, validateStoredAiResult } from "../ai/validation.ts";
 import { resolveConsistencyContext } from "./scope.ts";
 import { consistencyScopeKey, consistencyDecisionKey } from "./contracts.ts";
-import { assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt,latestConsistencyAttempt } from './history.ts';
+import { consistencyAttemptUnknown,assertConsistencyHistory,validateConsistencyAssessment,validateConsistencyDecision,validateConsistencyAttempt,latestConsistencyAttempt } from './history.ts';
 
 import { SourceConsistencyError } from './errors.ts';
 import { normalizeSourceObservations,reduceSourceConsistency } from './comparison.ts';
@@ -20,9 +20,8 @@ export { SourceConsistencyError } from './errors.ts';
 const NON_VISUAL_AUTHORITY=new Set(['RANDOM_OR_AMBIGUOUS_FULFILLMENT','RAW_NORMALIZED_CONFLICT','NEGATED_CLAIM']);
 export function sourceConsistencyUnknown(db:DatabaseSync,productId:string,variantIds:string[]):boolean {
   for(const row of db.prepare("SELECT record_json FROM source_consistency_attempts WHERE json_extract(record_json,'$.context.productId')=?").all(productId)){
-    const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId)||latestConsistencyAttempt(db,attempt.context)?.id!==attempt.id)continue;
-    const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=callRow?validateAiCall(JSON.parse(String(callRow.record_json))):null;
-    if(!call||call.status!=='SUCCEEDED'&&call.errorCode!=='OUTPUT_INVALID'&&!confirmedAuthenticationRejection(db,call))return true;
+    const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId))continue;
+    if(consistencyAttemptUnknown(db,attempt))return true;
   }
   return false;
 }

@@ -5,6 +5,7 @@ import {mkdtemp,mkdir,readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {createHash} from 'node:crypto';
 
 const require=createRequire(import.meta.url),run=promisify(execFile),guard=resolve('tests/fixtures/stabilization/pipeline-network-guard.cjs');
 const {createFakeProvider}=require(resolve('tests/fixtures/stabilization/fake-http-provider.mjs'));
@@ -28,6 +29,29 @@ test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP
   const rows=server.ledger().filter((row:any)=>row.event==='request');assert.equal(rows.length,2);
   assert.ok(rows.every((row:any)=>row.protocolVerified===true&&row.bodyBytes>0&&/^[a-f0-9]{64}$/.test(row.bodySha256)));
   const raw=await readFile(server.ledgerPath,'utf8');assert.ok(!/s10-acs-secret|s10-miaoshou-secret|authorization|x-sign/.test(raw));
+});
+
+test('actual Ali risk adapter performs token, exact candidate OSS4 upload and moderation as three owned verified effects',async t=>{
+  const {materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),root=await directory();
+  const fixtures=await materializeFixtures(join(root,'fixtures')),bytes=await readFile(fixtures[0].absolutePath),sha256=createHash('sha256').update(bytes).digest('hex');
+  const candidateId='01234567-89ab-4cde-8fab-0123456789ab',objectName='s10/'+candidateId+'.png',green='https://green-cip.cn-shanghai.aliyuncs.com/';
+  const acs=(action:string)=>({kind:'acs3',accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret',action,version:'2022-03-02',now,nonce,contentType:'application/x-www-form-urlencoded'});
+  const moderationBody=new URLSearchParams({Service:'aigcViolationDetection',ServiceParameters:JSON.stringify({ossBucketName:'s10-risk-bucket',ossObjectName:objectName,ossRegionId:'cn-shanghai',dataId:candidateId})}).toString();
+  const routes=[{id:'risk-token',method:'POST',path:'/protocol/risk-token',publicUrl:green,protocol:{...acs('DescribeUploadToken'),bodySha256:createHash('sha256').update('').digest('hex')},response:{issueTokenFor:'risk-upload'}},
+    {id:'risk-upload',method:'PUT',path:'/protocol/risk-upload',publicUrl:'https://s10-risk-bucket.oss-cn-shanghai.aliyuncs.com/'+objectName,protocol:{kind:'oss4',bucket:'s10-risk-bucket',objectName,region:'cn-shanghai',candidateId,bodySha256:sha256,contentType:'image/png',accessKeyId:'s10-temporary-id',accessKeySecret:'s10-temporary-secret',securityToken:'s10-temporary-token',now},response:{bytes:Buffer.alloc(0)}},
+    {id:'risk-moderation',method:'POST',path:'/protocol/risk-moderation',publicUrl:green,protocol:{...acs('ImageModeration'),bodySha256:createHash('sha256').update(moderationBody).digest('hex')},response:{json:{Code:200,RequestId:'s10-risk-1',Data:{DataId:candidateId,RiskLevel:'none',Result:[{Label:'nonLabel',Description:'Synthetic none'}]}}}}];
+  const server=await createFakeProvider({directory:join(root,'server'),routes});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {createHash} from 'node:crypto';import {signOss4Put} from './src/main/ai/oss4.ts';import {reviewImageWithAliyun} from './src/main/ai/aliyun-image-risk.ts';
+    const bytes=await readFile(${JSON.stringify(fixtures[0].absolutePath)}),meta=[],receipts=[];
+    const output=await reviewImageWithAliyun(bytes,{id:'${candidateId}',sha256:'${sha256}',width:256,height:256},'11234567-89ab-4cde-8fab-0123456789ab',{accessKeyId:'s10-acs-id',accessKeySecret:'s10-acs-secret'},new AbortController().signal,{fetch,now:()=>new Date('${now}'),nonce:()=>'${nonce}',maxResponseBytes:1048576,onMetadata:value=>meta.push(value),onProviderReceipt:value=>receipts.push(value)});
+    assert.equal(output.output.verdict,'PASS');for(const value of [output,meta,receipts])assert.ok(!JSON.stringify(value).includes('s10-temporary'));
+    const url='https://s10-risk-bucket.oss-cn-shanghai.aliyuncs.com/${objectName}',headers=signOss4Put({bucket:'s10-risk-bucket',objectName:'${objectName}',region:'cn-shanghai',now:new Date('${now}'),accessKeyId:'s10-temporary-id',accessKeySecret:'s10-temporary-secret',headers:{'content-type':'image/png','content-md5':createHash('md5').update(bytes).digest('base64'),'x-oss-security-token':'s10-temporary-token'}});
+    const bad=[...['authorization','x-oss-security-token','x-oss-date','x-oss-content-sha256','content-md5','content-type'].map(name=>[url,{headers:{...headers,[name]:'s10-wrong'}}]),[url.replace('${candidateId}','21234567-89ab-4cde-8fab-0123456789ab'),{}],[url.replace('s10-risk-bucket','s10-other-bucket'),{}],[url.replace('cn-shanghai','cn-hangzhou'),{}],[url+'?x=1',{}],[url.replace('/s10/','/s10%2F'),{}],[url,{body:Buffer.from('wrong')}],[url,{method:'POST'}],[url,{headers:{...headers,'x-oss-extra':'s10-extra'}}]];
+    for(const [target,override]of bad)await assert.rejects(async()=>{const response=await fetch(target,{method:'PUT',headers,body:bytes,redirect:'error',...override});await response.text();});
+    console.log(JSON.stringify({requestId:output.requestId,ossRejected:bad.length,guard:globalThis.__s10Guard}));`;
+  const output=await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});assert.equal(JSON.parse(output.stdout).requestId,'s10-risk-1');assert.equal(JSON.parse(output.stdout).ossRejected,14);
+  const rows=server.ledger(),requests=rows.filter((row:any)=>row.event==='request');assert.deepEqual(requests.map((row:any)=>row.routeId),['risk-token','risk-upload','risk-moderation']);assert.ok(requests.every((row:any)=>row.protocolVerified));assert.equal(requests[1].bodySha256,sha256);assert.equal(rows.filter((row:any)=>row.event==='arrival').length,3);
+  assert.ok(!/s10-temporary|AccessKeySecret|SecurityToken|authorization/.test(await readFile(server.ledgerPath,'utf8')));
 });
 
 test('signed protocol mutations are denied before server arrival; getter/body snapshot is exactly what reaches server',async t=>{

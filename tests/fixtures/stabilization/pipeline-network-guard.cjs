@@ -14,6 +14,7 @@ for(const route of policy.routes){if(!/^[a-z0-9-]+$/.test(route.id)||!/^\/[a-zA-
   if(route.credential&&!/^Bearer s10-[a-z0-9-]+$/.test(route.credential.value))throw Error('S10_POLICY_INVALID');
   if(route.protocol)validateProtocolRoute(route);
 }
+function freezePolicy(value){if(value&&typeof value==='object'){for(const part of Object.values(value))freezePolicy(part);Object.freeze(value);}}freezePolicy(policy);
 for(const key of Object.keys(process.env))if(/^(OPENAI|OPENROUTER|DEEPSEEK|ALIYUN|AMAZON|AWS|FTP|MIAOSHOU|RED_|FIRMNESS_SOURCE|SOURCE_)/i.test(key)||/(?:PROXY|API_KEY|ACCESS_KEY|TOKEN|PASSWORD|SECRET)$/i.test(key))delete process.env[key];
 process.env.RED_DATA_DIR=policy.dataRoot;process.env.RED_E2E='1';
 const state={installedBeforeMain:true,blocked:[],allowed:0,dataRoot:policy.dataRoot};Object.defineProperty(state,'require',{value:require});Object.defineProperty(globalThis,'__s10Guard',{value:state});
@@ -23,9 +24,9 @@ function mapped(input,init={},transport='fetch'){
   const raw=typeof input==='string'||input instanceof URL?String(input):input?.url; if(typeof raw!=='string')return deny(transport);rawPathSafe(raw);
   const url=new URL(raw),method=String(init.method??input?.method??'GET').toUpperCase();
   if(url.username||url.password||url.hash)return deny(transport);
-  const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path));if(!route)return deny(transport);
-  if(url.search&&!route.protocol)return deny(transport);
   const headers=new Headers(init.headers??input?.headers);
+  const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
+  if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
     if(transport!=='fetch'||raw!==route.publicUrl||init.redirect!==undefined&&init.redirect!=='error')return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');

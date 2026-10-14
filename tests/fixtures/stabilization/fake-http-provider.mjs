@@ -46,7 +46,11 @@ export async function createFakeProvider({directory,routes,ftp=false,maxRequestB
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
       const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
       const row=ledger.append({event:'request',routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true}:{})});
-      const output=route.response??{},bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(output.json??{}));
+      const output=route.response??{};let json=output.json??{};
+      if(output.issueTokenFor){const target=known.find(row=>row.id===output.issueTokenFor);assert.equal(target?.protocol?.kind,'oss4');assert.equal(route.protocol?.action,'DescribeUploadToken');const p=target.protocol;
+        json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};
+      }
+      const bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(json));
       response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':String(row.sequence),'content-length':String(bytes.length)});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestSequence:row.sequence,status:output.status??200});
       const finish=()=>{if(!response.destroyed){response.end(bytes);ledger.append({event:'body',routeId:route.id,requestSequence:row.sequence,bodySha256:digest(bytes),bodyBytes:bytes.length});}};
       if(output.holdBody){const pending=held.get(route.id)??[];pending.push(finish);held.set(route.id,pending);}else finish();
@@ -78,7 +82,7 @@ export async function createFakeProvider({directory,routes,ftp=false,maxRequestB
       }});
     });ftpPort=await listen(controlServer);
   }
-  return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>route),directory,ledgerPath:ledger.path,
+  return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>structuredClone(route)),directory,ledgerPath:ledger.path,
     ftp:ftp?{host:'127.0.0.1',port:ftpPort,dataPort,user:'s10-user',password:'s10-password'}:null,
     ledger:()=>structuredClone(ledger.rows),release(id){const releases=held.get(id)??[];held.delete(id);releases.forEach(fn=>fn());},readFtp:path=>readFile(ftpPath(path)),
     async close(){if(closed)return;closed=true;held.clear();for(const socket of [...sockets,...ftpSockets])socket.destroy();await Promise.all([server,controlServer,dataServer].filter(Boolean).map(value=>new Promise(done=>value.close(done))));}

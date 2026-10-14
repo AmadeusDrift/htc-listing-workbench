@@ -1,0 +1,106 @@
+{
+  "sourceCommit": "9cec2289f14d80d6a4e88000c46d014db7076a81",
+  "unitTests": {
+    "total": 3107,
+    "passed": 3104,
+    "failed": 0,
+    "skipped": 3,
+    "durationMs": 720184.6145,
+    "logSha256": "b417c45968904abc42cb5b617f2a300101c1b4f2c8b63898a0445409213fa905"
+  },
+  "candidate": {
+    "checks": [
+      "candidate execPath/appPath/version, hidden sandbox, exact public IPC API",
+      "actual Electron safeStorage, SQLite write, nativeImage PNG",
+      "real preload/IPC sample persistence and managed image rendering",
+      "compatibility IPC retains independent thinking/key and rejects invalid input; real purpose UI independently saves model/effort without mutating other purposes, legacy settings or calling providers",
+      "restarted actual EXE displays exact persisted purpose models/efforts/revisions and retains compatibility thinking without re-entering the shared synthetic key",
+      "same candidate restart preserves SQLite, encrypted synthetic secret and product IDs; no outbound"
+    ],
+    "sessions": 2,
+    "errors": [],
+    "guardProbesBlocked": 8,
+    "manifestSha256": "1e6bd79785fd1540506964afa36fb6e59f416a52ba46736b4746011d86b171cc",
+    "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e"
+  },
+  "packagedImages": {
+    "checks": 22,
+    "sessions": 3,
+    "errors": [],
+    "build": {
+      "packaged": true,
+      "version": "2.5.0",
+      "mainSha256": "48840febfac68ca26353d9f5ee23493540de506d1524b06ce79383c52bc558a9",
+      "preloadSha256": "8fb000af8d0b60bf4c5eeeca2c977aabcfbd291078d630a65b46073e574c2b96"
+    },
+    "reportSha256": "d92afd47c78976351d0e25e3b33c34ff6feb0d353d982d1de15db8011cd11e8f"
+  },
+  "settings": {
+    "passed": true,
+    "root": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\RED-独立上架中台\\artifacts\\worktrees\\htc-250-update-integration\\.test-data\\settings-controls-TLmonN",
+    "checks": [
+      "Native dropdown opening/dismissal and unsaved synthetic key input stay interactive",
+      "Repeated settings/automatic navigation completes with real main/preload/renderer",
+      "Zero AI calls or outbound attempts; no saved key or real workspace use"
+    ],
+    "timings": [
+      {
+        "operation": "native select open/dismiss then focus",
+        "ms": 71.8134
+      },
+      {
+        "operation": "native select open/dismiss then focus",
+        "ms": 68.34519999999998
+      },
+      {
+        "operation": "native select open/dismiss then focus",
+        "ms": 62.823900000000094
+      },
+      {
+        "operation": "native select open/dismiss then focus",
+        "ms": 61.63580000000002
+      },
+      {
+        "operation": "automatic/settings roundtrip",
+        "ms": 174.3737000000001
+      },
+      {
+        "operation": "automatic/settings roundtrip",
+        "ms": 135.0673999999999
+      },
+      {
+        "operation": "automatic/settings roundtrip",
+        "ms": 125.99450000000002
+      }
+    ],
+    "errors": [],
+    "mainTimerMaxMs": 38.116399999999885,
+    "mainTimerSamples": 37,
+    "networkAttempts": [],
+    "scope": "Visible inactive isolated window; synthetic empty workspace. Historical database query equivalence/latency is tested separately, not represented by this run."
+  },
+  "migration": {
+    "from": 30,
+    "to": 32,
+    "unchangedTables": 63,
+    "sourceSha256": "972949421149321275cd7ed133cd3144c163b00d22222dcb5f05dff7b74743ff",
+    "scope": "Database-only additive migration of an explicitly authorized snapshot copy; no app services, key files, asset verification, task execution or online checks."
+  },
+  "delivery": {
+    "passed": true,
+    "delivery": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-界面与任务更新版-20261014",
+    "exe": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-界面与任务更新版-20261014\\HTC.exe",
+    "archive": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-界面与任务更新版-20261014.zip",
+    "archiveBytes": 163540359,
+    "archiveSha256": "5f4ba84b2df1071660b5974aba881251bf8ceb29b22b4954eccc597cce60509c",
+    "files": 89,
+    "sourceCommit": "9cec2289f14d80d6a4e88000c46d014db7076a81",
+    "manifestSha256": "1e6bd79785fd1540506964afa36fb6e59f416a52ba46736b4746011d86b171cc",
+    "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e",
+    "allFolderAndArchiveFileHashesVerified": true,
+    "activated": false
+  },
+  "nativeTitlebarDragVerified": false,
+  "realOnlineVerified": false,
+  "activated": false
+}

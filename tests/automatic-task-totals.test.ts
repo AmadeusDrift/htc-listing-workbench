@@ -27,3 +27,9 @@ test('readback preserves the explicit 24-hour expiry detail from saved followup'
  const reason=automaticItemReason(row({status:'FAILED',stage:'READBACK',error:'原提交已满 24 小时，仍未确认处理完成；可继续查询，禁止重复提交',outcome:{kind:'SYSTEM_REPAIR',code:'READBACK_FAILED'} as any}));
  assert.match(reason,/24 小时/);assert.match(reason,/禁止重复提交/);
 });
+
+test('typed rule evidence wins over arbitrary raw failure text, while ordinary failures retain sanitized detail',()=>{
+ for(const status of ['SCREENED','FAILED'] as const){const reason=automaticItemReason(row({status,error:'secret raw service response',outcome:{kind:'RULE_FILTERED',code:'SKU_SELECTION_FILTERED',message:'untrusted secret fallback'} as any}));assert.match(reason,/SKU 选择规则淘汰/);assert.doesNotMatch(reason,/secret/);}
+ const reason=automaticItemReason(row({status:'FAILED',stage:'IMAGES',error:'图位 2 下载超时 https://private.invalid?key=SECRET api_key=PRIVATE',outcome:{kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'} as any}));
+ assert.match(reason,/图位 2 下载超时/);assert.doesNotMatch(reason,/private.invalid|SECRET|PRIVATE/);
+});

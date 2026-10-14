@@ -361,12 +361,28 @@ async function importRemoteProduct() {
 async function selectProduct(product, targetId) {
   await page.reload(); await expect(button('新建商品')).toBeEnabled();
   await click(page.locator('nav').getByRole('button', { name: '自动上架', exact: true }));
-  const selection=panel().getByTestId(`automatic-select-${product.id}`);
-  // The twelve-product restore fixture spans two current eight-row pages.
-  // Select through the real pagination UI instead of assuming the oldest row
-  // remains on page one after reload/restore.
-  if(await selection.count()===0)await click(panel().getByRole('button',{name:'下一页',exact:true}));
-  await selection.check({ force: true });
+  // Batch membership arrives asynchronously after navigation. Wait for its real
+  // product list before deciding whether the target is on another page. The UI
+  // owns its remembered 20/50/100 page size; this fixture assumes no row count.
+  const batchChoice=page.getByRole('combobox',{name:'选择工作批次',exact:true});
+  await expect(batchChoice).toHaveValue(/.+/);
+  const batchId=await batchChoice.inputValue();
+  const available=await page.evaluate(async batchId=>{
+    const [batches,products]=await Promise.all([window.red.listAutomaticWorkBatches(),window.red.listProducts()]);
+    const batch=batches.find(value=>value.id===batchId);
+    return batch?products.filter(value=>batch.productIds.includes(value.id)).map(value=>value.id):[];
+  },batchId);
+  assert.ok(available.includes(product.id),'The target must belong to the selected, available batch');
+  const queue=panel().getByRole('region',{name:'商品选择与处理结果',exact:true});
+  const pageLabel=queue.locator('.automatic-queue-footer > span');
+  await expect(pageLabel).toContainText(`匹配 ${available.length} / ${available.length} 件`);
+  const selection=queue.getByTestId(`automatic-select-${product.id}`);
+  const previous=queue.getByRole('button',{name:'上一页',exact:true}),next=queue.getByRole('button',{name:'下一页',exact:true});
+  const changePage=async control=>{const before=await pageLabel.innerText();await click(control);await expect(pageLabel).not.toHaveText(before);};
+  while(await selection.count()===0&&await previous.isEnabled())await changePage(previous);
+  while(await selection.count()===0&&await next.isEnabled())await changePage(next);
+  await expect(selection).toHaveCount(1);await expect(selection).toBeVisible();await expect(selection).toBeEnabled();
+  await selection.check({ force: true });await expect(selection).toBeChecked();
   await panel().getByRole('combobox', { name: /目标店铺与站点/ }).selectOption(targetId);
   assert.equal(await panel().locator('textarea').count(), 0);
   assert.equal(await panel().getByRole('textbox', { name: /提示词|参考图/ }).count(), 0);

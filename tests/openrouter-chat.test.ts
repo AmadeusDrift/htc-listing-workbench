@@ -38,3 +38,12 @@ test('OpenRouter region refusals are distinct from invalid credentials and never
   assert.equal(posts,1);assert.equal(receipts[0].body.error.message,message);
  }
 });
+
+test('known no-provider refusals explain routing without broad 404 or secret-echo classification',async()=>{
+ const {requestOpenRouterJson}=await adapter();
+ for(const [status,message,code] of [[404,'No allowed providers are available for the selected model.','ROUTING_FORBIDDEN'],[404,'No endpoints found that support the requested parameters.','ROUTING_FORBIDDEN'],[503,'No available providers found for the selected model.','ROUTING_FORBIDDEN'],[404,'Resource not found','PROVIDER_ERROR'],[503,'Upstream unavailable','PROVIDER_ERROR'],[404,'No endpoints found that support or-fixture-key','PROVIDER_ERROR']] as const){
+  let posts=0;
+  await assert.rejects(requestOpenRouterJson({},'JSON','openai/gpt-6-luna',{apiKey:'or-fixture-key'},new AbortController().signal,{fetch:async()=>{posts++;return Response.json({error:{message,code:status}},{status});},now:()=>new Date(),nonce:()=>'',maxResponseBytes:10000,effectiveEffort:'none'}),(e:any)=>e.code===code&&!e.message.includes('or-fixture-key')&&(code!=='ROUTING_FORBIDDEN'||e.message.includes('可用提供商')));
+  assert.equal(posts,1);
+ }
+});

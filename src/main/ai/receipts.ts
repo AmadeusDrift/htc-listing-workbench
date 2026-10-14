@@ -106,7 +106,7 @@ function readConfirmedForbidden(db:DatabaseSync,call:import('../../shared/ai-con
  if(call.status!=='FAILED'||!['AUTH_FAILED','MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN','SERVICE_PERMISSION_REQUIRED'].includes(call.errorCode??'')||!call.providerId.startsWith('openrouter')||!call.providerReceiptId)return null;
  try{
   const row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return null;
-  const r=parse(JSON.parse(String(row.record_json)));if(r.id!==call.providerReceiptId||r.callId!==call.id||r.model!==call.model||r.gateway!=='openrouter'||r.status!==403||r.endpoint!=='/api/v1/chat/completions'||r.byteSize>65536)return null;
+  const r=parse(JSON.parse(String(row.record_json)));if(r.id!==call.providerReceiptId||r.callId!==call.id||r.model!==call.model||r.gateway!=='openrouter'||r.status!==403||r.endpoint!==(call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions')||r.byteSize>65536)return null;
   const file=db.prepare('PRAGMA database_list').all().find(row=>row.name==='main')?.file;if(typeof file!=='string'||!file)return null;
   const directory=dirname(file),folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
   const path=join(directory,r.relativePath),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==r.byteSize)return null;

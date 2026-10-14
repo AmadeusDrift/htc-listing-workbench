@@ -1,3 +1,4 @@
+import { canRetryConfirmedForbidden } from '../src/main/ai/confirmed-forbidden-retry.ts';
 import {inheritLegacyPurposeSettings} from '../src/main/ai/purpose-routing.ts';
 import { AmazonService } from '../src/main/amazon/service.ts';
 import { ListingRuleStore } from '../src/main/listing-rules.ts';
@@ -384,6 +385,7 @@ test('legacy forbidden uses matching403 proof while missing receipts never unloc
   const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
   f.respond(()=>Response.json({error:{message:missing?'This model is not available in your region.':'Forbidden',code:403}},{status:403}));await assert.rejects(f.observe());
   const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED',...(missing?{providerReceiptId:undefined}:{})}),prior.id);
+  assert.equal(readConsistencyView(f.db,f.context()).status,missing?'UNKNOWN':'SYSTEM_REPAIR');
   f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),missing?1:2);
  }
 });
@@ -428,4 +430,29 @@ test('confirmed403 retry claim survives restoring older encrypted backup and can
  const snapshot=await prepareWorkspaceRestore(f.directory,file,pass);await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
  const store=new WorkspaceStore(f.directory),db=openDatabase(f.directory),hosting=new HostingService(f.directory,store,mockStorage),ai=new AiService(f.directory,store,hosting,mockStorage,f.dependencies);
  try{assert.equal(db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.detail_json,claim.detail_json);ai.saveConnection({id:'openrouter',apiKey:'restored-synthetic-key'});await assert.rejects(explicitlyContinue(()=>ai.observeSourceConsistency(ai.sourceConsistencyContext({productId:f.p.id,productRevision:store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}),()=>{})));assert.equal(f.count(),2);}finally{await ai.close();await hosting.close();db.close();store.close();}
+});
+
+test('confirmed403 reservation failure rolls back claim, call and usage together before any send',async t=>{
+ const f=await routerForbiddenFixture(t),before=f.ai.getUsageSummary('openrouter');
+ f.db.exec("CREATE TRIGGER synthetic_retry_reservation_failure BEFORE INSERT ON source_consistency_attempts BEGIN SELECT RAISE(ABORT,'synthetic transaction failure'); END");
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(f.ai.listCalls().length,1);assert.deepEqual(f.ai.getUsageSummary('openrouter'),before);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ f.db.exec('DROP TRIGGER synthetic_retry_reservation_failure');await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+});
+test('confirmed403 claimed retry with lost response stays UNKNOWN and cannot send after another continue',async t=>{
+ const f=await routerForbiddenFixture(t);f.respond(()=>{throw new TypeError('synthetic connection lost after reservation');});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);
+});
+test('confirmed403 after original source limit is exhausted clearly blocks without a new allowance',async t=>{
+ const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+ f.respond(()=>Response.json({error:{message:'Unauthorized',code:401}},{status:401}));await assert.rejects(f.observe());
+ for(const key of ['second-synthetic','third-synthetic']){f.ai.saveConnection({id:'openrouter',apiKey:key});if(key==='third-synthetic')f.respond(()=>Response.json({error:{message:'Forbidden',code:403}},{status:403}));await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));}
+ assert.equal(f.count(),3);await assert.rejects(explicitlyContinue(()=>f.observe()),/原重试次数已耗尽/);assert.equal(f.count(),3);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+});
+test('confirmed403 repeated manual click reports consumed opportunity without inserting a new failure',async t=>{
+ const f=await routerForbiddenFixture(t);await assert.rejects(explicitlyContinue(()=>f.observe()));const calls=f.ai.listCalls();await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()),/已使用一次手动403重试.*本次未发送新请求/);assert.deepEqual(f.ai.listCalls(),calls);assert.equal(f.count(),2);
+});
+
+test('confirmed403 old failure cannot acquire another claim through a different scope',async t=>{
+ const f=await routerForbiddenFixture(t),old=f.ai.listCalls()[0];await assert.rejects(explicitlyContinue(()=>f.observe()));
+ assert.equal(explicitlyContinue(()=>canRetryConfirmedForbidden(f.db,old,'alternative-scope:'+randomUUID())),false);assert.equal(f.count(),2);
 });

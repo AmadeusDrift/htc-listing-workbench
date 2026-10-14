@@ -21,6 +21,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
   const api = window.red;
   const [batchSummary,setBatchSummary]=useState<TaskBatchSummary|null>(null),[batchError,setBatchError]=useState('');
   const [tasks, setTasks] = useState<AutomaticListingTask[]>([]);
+  const [taskRevisionSignature,setTaskRevisionSignature]=useState('');
   const [selectedId, setSelectedId] = usePageState('automatic:task', '');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,7 +58,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         let batch:TaskBatchSummary|null=null,batchFailure='';
         if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
-        if (active && request === version.current && !actionPending.current) { setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
+        if (active && request === version.current && !actionPending.current) { setTaskRevisionSignature(JSON.stringify([...allValues].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])));setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
       finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, pollDelay); } }
     };
@@ -114,7 +115,6 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
-  const taskRevisionSignature=useMemo(()=>JSON.stringify([...tasks].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])),[tasks]);
   const taskOptions=useMemo(()=>tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {formatAutomaticTaskDate(value.createdAt)}</option>),[tasks]);
   useEffect(()=>{window.dispatchEvent(new Event('automatic-listing-changed'));},[taskRevisionSignature]);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);

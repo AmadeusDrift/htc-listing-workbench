@@ -34,6 +34,7 @@ const label = { id:'label-1',batchId:'batch-1',lineId:'line-1',draftId:'draft-1'
 const state = window.fixture = { calls:[], tasks:[], products:[product], labels:[label,{...label,id:'label-old',version:1,current:false,status:'STALE',quantity:3,files:[{index:0,relativePath:'old.pdf'}]}], profiles, format:label.format, consent:true, documents:[], polls:0 };
 const record = (name,input) => { state.calls.push({name,input:copy(input)}); };
 window.red = {
+ listAutomaticWorkBatches:async()=>[{id:'work-batch-fixture',name:'2026-10-14 · 第1批',date:'2026-10-14',sequence:1,createdAt:'2026-10-14T00:00:00Z',archivedAt:null,productIds:state.products.map(p=>p.id),taskIds:state.tasks.map(t=>t.id)}],
  getActualQuoteDetails:async id=>({draftId:id,sku:'FIXTURE',draftRevision:1,sourceRevision:1,ruleRevision:7,bundleQuantity:null,exempt:true,qualified:false,issue:null,offers:[]}),
  getAutomaticBatchPlan:async()=>({version:1,credentialScope:'component-only',purposes:[],coverage:[]}),
  getAutomaticBatchSummary:async()=>({mode:'immediate',plan:null,batches:[],details:[]}),
@@ -138,7 +139,7 @@ try {
  await page.evaluate(()=>window.fixture.consent=true);await start.click();
  await expect(page.getByTestId('automatic-task-task-1')).toBeVisible();
  const submitted=await page.evaluate(()=>window.fixture.calls.filter(call=>call.name==='start').at(-1).input);
- assert.deepEqual(submitted,{productIds:['product-1'],targetId:'target-1',profileId:'alpha',executionMode:'immediate'});
+ assert.deepEqual(submitted,{workBatchId:'work-batch-fixture',productIds:['product-1'],targetId:'target-1',profileId:'alpha',executionMode:'immediate'});
  await expect(page.getByTestId('automatic-product-group-product-1')).toBeVisible();
  await expect(page.getByTestId('automatic-product-group-product-1')).toContainText('来源规格 3');
  await expect(page.getByTestId('automatic-product-group-product-1')).toContainText('本次销售 SKU 2');

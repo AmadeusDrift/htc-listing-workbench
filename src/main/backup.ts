@@ -562,11 +562,11 @@ async function prepareStreamingRestore(directory: string, sourceFile: string, pa
     }
     if (found.size !== info.assetPaths.size) throw new UserFacingError('备份缺少商品图片，无法完整恢复');
     guard.assertTree();
-    disconnectSnapshot(snapshot);
+    const migratedWorkBatches=disconnectSnapshot(snapshot);
     const retention = snapshotRetention(snapshot);
     if (JSON.stringify(value.retention) !== JSON.stringify(retention)) throw new UserFacingError('备份保留信息与数据快照不匹配');
     guard.assertTree();
-    retainSafetyHistory(join(root, 'red.sqlite'), snapshot);
+    retainSafetyHistory(join(root, 'red.sqlite'), snapshot,migratedWorkBatches);
     await retainCandidateFiles(root,staging);
     guard.assertTree();
     return { stagingDirectory: staging, createdAt: value.createdAt, productCount: info.productCount, assetCount: info.assetCount, expiresAt: retention.expiresAt, artifacts: [...value.files.slice(1).map(({ path, sha256, byteSize }) => ({ path, sha256, byteSize })),...await candidateBackupFiles(staging)] };

@@ -110,7 +110,7 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
     startPending.current = true; setStarting(true); setError(''); setNotice('');
     try {
       const task = await api.startAutomaticListing({workBatchId, productIds: selected.map(value => value.id), targetId, profileId, executionMode });
-      if (mounted.current) { if (task) setStartedTask(task); else setNotice('已取消启动，未创建自动上架任务。'); }
+      if (mounted.current) { if (task) {setStartedTask(task);onRefreshQueue();} else setNotice('已取消启动，未创建自动上架任务。'); }
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { startPending.current = false; if (mounted.current) { setStarting(false); } }
   }

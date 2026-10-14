@@ -100,6 +100,11 @@ export class WorkspaceStore {
       origin: p.origin as ProductOrigin, variantCount: Number(p.variant_count), assetCount: Number(p.asset_count),
       coverUrl: p.cover_id ? `red-asset://image/${p.cover_id}` : null, updatedAt: String(p.updated_at) }));
   }
+  /** Batch membership needs only existence, never source repair or full product hydration. */
+  hasProducts(productIds:readonly string[]):boolean {
+    const ids=[...new Set(productIds.map(identifier))];
+    return Number(this.db.prepare('SELECT count(*) AS n FROM products WHERE id IN (SELECT value FROM json_each(?))').get(JSON.stringify(ids))!.n)===ids.length;
+  }
   listWorkspacePlacements(): WorkspacePlacement[] { return readWorkspacePlacements(this.db); }
   moveWorkspaceProducts(raw: unknown): WorkspacePlacement[] {
     const input = parseMoveWorkspaceProducts(raw);

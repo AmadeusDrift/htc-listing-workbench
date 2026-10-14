@@ -80,3 +80,25 @@ test('concurrent category variants cannot both reserve separate requests for one
  const running=Promise.allSettled([f.service.decideCategory(input),f.service.decideCategory({...input,keywords:['another']})]);
  setTimeout(release,100);await running;assert.equal(f.requests.length,1);
 });
+
+import {saveProviderReceipt} from '../src/main/ai/receipts.ts';
+for(const historical of ['two400','mixedUnknown','two403'] as const)test(`multiple historical category calls ${historical} coalesce only proven parameter denials`,async t=>{
+ const status=historical==='two403'?403:400,body=historical==='two403'?{error:{code:403,message:'Forbidden'}}:denied;
+ const f=await fixture(t,{fetch:async()=>json(body,status)});f.service.saveConnection({id:'openrouter',apiKey:'fixture-only'});f.service.setEnabled({id:'openrouter',enabled:true});
+ const input={productId:f.product.id,productRevision:f.product.revision,phase:'select' as const,candidates:[{name:'CLEANING_CLOTH',displayName:'Cleaning cloth'}]};await assert.rejects(f.service.decideCategory(input));
+ const db=(f.service as any).db,first=f.service.listCalls()[0];delete first.categoryContext;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(first),first.id);
+ const second={...structuredClone(first),id:crypto.randomUUID(),...(historical==='mixedUnknown'?{errorCode:'NETWORK_ERROR' as const}: {})};delete second.providerReceiptId;
+ if(historical!=='mixedUnknown'){const r=await saveProviderReceipt(db,f.directory,second.id,{gateway:'openrouter',endpoint:'/api/alpha/decisions',model:second.model,status,requestId:null,receivedAt:second.finishedAt!,body,costUsd:null},second.purposeSnapshot);second.providerReceiptId=r.id;}
+ db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(second.id,JSON.stringify(second));
+ const originals=f.service.listCalls().map(c=>JSON.stringify(c));
+ const scope={taskId:crypto.randomUUID(),rowKey:'test',phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:new Date(Date.parse(first.finishedAt!)+1000).toISOString(),authorize:()=>true};
+ f.respond(async()=>json({answers:{category:{type:'choice',choice:'CLEANING_CLOTH'},review:{type:'choice',choice:'clear'}},usage:{input_tokens:1,output_tokens:0}}));
+ if(historical==='two400'){
+  const result=await taskAiContext.run(scope,()=>f.service.decideCategory(input));assert.equal(f.requests.length,2);
+  assert.equal((await taskAiContext.run(scope,()=>f.service.decideCategory(input))).id,result.id);assert.equal(f.requests.length,2);
+  const claim=JSON.parse(String(db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.category.detail-repair'").get().detail_json));assert.deepEqual(claim.priorCallIds,[first.id,second.id].sort());
+  const restored=await fixture(t);retainCategoryRepairs(db,(restored.service as any).db);retainCategoryRepairs(db,(restored.service as any).db);
+  assert.equal((restored.service as any).db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action='ai.category.detail-repair'").get().n,1);
+ }else{await assert.rejects(taskAiContext.run(scope,()=>f.service.decideCategory(input)));assert.equal(f.requests.length,1);}
+ for(const original of originals){const call=JSON.parse(original);assert.equal(JSON.stringify(f.service.getCall(call.id)),original);}
+});

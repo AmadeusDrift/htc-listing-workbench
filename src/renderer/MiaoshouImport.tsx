@@ -1,3 +1,4 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useEffect, useState } from 'react';
 import { ArrowDownToLine, ChevronLeft, ChevronRight, RefreshCw, X } from 'lucide-react';
 import type { MiaoshouDimensionId, MiaoshouList, MiaoshouMapping, MiaoshouPreview, MiaoshouStatus } from '../shared/miaoshou-contracts';
@@ -12,6 +13,7 @@ function initialMapping(preview: MiaoshouPreview): MiaoshouMapping {
     dimensions: Object.fromEntries(resolveMiaoshouSpecifications(preview.product, sku.key).map(row => [row.dimension.id, row.value.id])) })) };
 }
 export function MiaoshouImport({ onClose, onChanged }: { onClose: () => void; onChanged: () => Promise<unknown> }) {
+  const [pageSize, setPageSize] = useListPageSize('miaoshou-import');
   const [status, setStatus] = useState<MiaoshouStatus | null>(null), [list, setList] = useState<MiaoshouList | null>(null);
   const [selected, setSelected] = useState<string[]>([]), [prepared, setPrepared] = useState<Prepared[]>([]), [focus, setFocus] = useState(0);
   const [working, setWorking] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -20,9 +22,9 @@ export function MiaoshouImport({ onClose, onChanged }: { onClose: () => void; on
     if (working) return; setWorking(true); setError(''); setNotice('');
     try { await operation(); } catch (cause) { setError(errorText(cause)); } finally { setWorking(false); }
   }
-  async function load(pageNo = 1) {
-    const result = await window.red.listMiaoshouProducts({ pageNo, pageSize: 20 });
-    setList(result); setSelected([]); setPrepared([]); setFocus(0);
+  async function load(pageNo = 1, size = pageSize) {
+    const result = await window.red.listMiaoshouProducts({ pageNo, pageSize: size });
+    setList(result);
   }
   async function switchMode(mode: 'demo' | 'live') {
     setStatus(await window.red.setMiaoshouMode(mode));
@@ -72,10 +74,10 @@ export function MiaoshouImport({ onClose, onChanged }: { onClose: () => void; on
     {status && status.mode !== 'unconfigured' && <MiaoshouSync key={`${status.mode}:${status.appKeyHint}`} disabled={working} onPreview={preview => { setPrepared([{ preview, mapping: initialMapping(preview) }]); setFocus(0); setNotice('已从暂存区打开预览，请在下方核对规格和采购价。'); }} />}
     {working && <p role="status">正在处理妙手商品…</p>}{error && <p className="miaoshou-error" role="alert">{error}</p>}{notice && <p className="workflow-notice" role="status">{notice}</p>}
     {list && <>
-      <div className="miaoshou-list-heading"><label className="check-label"><input type="checkbox" aria-label="选择本页妙手商品" disabled={working || !list.items.length} checked={list.items.length > 0 && selected.length === list.items.length} onChange={event => setSelected(event.target.checked ? list.items.map(item => item.id) : [])} />本页商品</label><span>共 {list.total} 件 · 第 {list.pageNo} 页</span></div>
-      <div className="miaoshou-product-list">{list.items.map(item => <label className="miaoshou-product-row" key={item.id}><input type="checkbox" aria-label={`选择妙手商品 ${item.title}`} disabled={working} checked={selected.includes(item.id)} onChange={event => setSelected(ids => event.target.checked ? [...ids, item.id] : ids.filter(id => id !== item.id))} /><span><strong>{item.title || '未命名商品'}</strong><small>{item.sourceName || '来源待核对'} · 编号 {item.id}</small></span><span className="miaoshou-price">来源价 {item.minPrice ?? '—'}{item.maxPrice && item.maxPrice !== item.minPrice ? ` – ${item.maxPrice}` : ''}<small>币种与口径待确认</small></span></label>)}</div>
+      <div className="miaoshou-list-heading"><label className="check-label"><input type="checkbox" aria-label="选择本页妙手商品" disabled={working || !list.items.length} checked={list.items.length > 0 && list.items.every(item => selected.includes(item.id))} onChange={event => setSelected(ids => event.target.checked ? [...new Set([...ids, ...list.items.map(item => item.id)])] : ids.filter(id => !list.items.some(item => item.id === id)))} />本页商品</label><span>共 {list.total} 件 · 第 {list.pageNo} 页</span></div>
+      <div className="miaoshou-product-list">{list.items.map(item => <label className="miaoshou-product-row" key={item.id}><input type="checkbox" aria-label={`选择妙手商品 ${item.title}`} disabled={working} checked={selected.includes(item.id)} onChange={event => setSelected(ids => event.target.checked ? [...new Set([...ids, item.id])] : ids.filter(id => id !== item.id))} /><span><strong>{item.title || '未命名商品'}</strong><small>{item.sourceName || '来源待核对'} · 编号 {item.id}</small></span><span className="miaoshou-price">来源价 {item.minPrice ?? '—'}{item.maxPrice && item.maxPrice !== item.minPrice ? ` – ${item.maxPrice}` : ''}<small>币种与口径待确认</small></span></label>)}</div>
       {!list.items.length && <p>采集箱中还没有可读取的商品。先用妙手现有工具采集，再刷新列表。</p>}
-      <div className="workflow-actions"><button className="button secondary" disabled={working || list.pageNo <= 1} onClick={() => void task(() => load(list.pageNo - 1))}><ChevronLeft size={15} />上一页</button><button className="button secondary" disabled={working || list.pageNo * list.pageSize >= list.total} onClick={() => void task(() => load(list.pageNo + 1))}>下一页<ChevronRight size={15} /></button><button className="button primary" disabled={working || !selected.length} onClick={() => void task(previewSelection)}>预览所选商品（{selected.length}）</button></div>
+      <div className="workflow-actions"><PageSizeSelect label="妙手商品每页数量" disabled={working} value={pageSize} onChange={value => { setPageSize(value); void task(() => load(1, value)); }}/><button className="button secondary" disabled={working || list.pageNo <= 1} onClick={() => void task(() => load(list.pageNo - 1))}><ChevronLeft size={15} />上一页</button><button className="button secondary" disabled={working || list.pageNo * list.pageSize >= list.total} onClick={() => void task(() => load(list.pageNo + 1))}>下一页<ChevronRight size={15} /></button><button className="button primary" disabled={working || !selected.length} onClick={() => void task(previewSelection)}>预览所选商品（{selected.length}）</button></div>
     </>}
     {active && product && <section className="miaoshou-preview" aria-label="妙手字段映射">
       <div className="workflow-actions">{prepared.map((row, index) => <button className={`button ${index === focus ? 'primary' : 'secondary'}`} key={row.preview.previewId} disabled={working} onClick={() => setFocus(index)}>{index + 1}. {row.preview.product.title.slice(0, 24)}{row.result ? row.failed ? ' · 失败' : ' · 已处理' : ''}</button>)}</div>

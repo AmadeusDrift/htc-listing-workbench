@@ -1,3 +1,4 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { usePageState } from './navigation-context';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Download, RefreshCw, Search, Square } from 'lucide-react';
@@ -43,6 +44,7 @@ function Metric({ name, rows, read, source }: {
 }
 const count = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString();
 export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettings }: Props) {
+  const [pageSize, setPageSize] = useListPageSize('product-data');
   const live = targets.filter(target => target.mode === 'live');
   const [selection, setSelection] = usePageState('data:selection', '');
   const target = live.find(item => item.id === selection) ?? live.find(item => item.configured) ?? live[0];
@@ -100,7 +102,8 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
     || [row.listing, row.inventory, row.sales].some(value => value.status === 'error'));
   const rows = all.filter(row => (!filter || (filter === 'buyable' ? rowStatus(row).label === '可以销售' : attention(row)))
     && (row.title + ' ' + row.sku + ' ' + (row.listing.value?.asin ?? '')).toLowerCase().includes(query.trim().toLowerCase()));
-  const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / 100) - 1));
+  const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
+  useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
   return <section className="operations-page product-data-page">
     <div className="ops-toolbar">
       <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => { setSelection(event.target.value); setPage(0); }}>
@@ -142,7 +145,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
       {!rows.length ? <div className="ops-empty"><strong>{loading ? '正在读取本机记录…' : query || filter ? '没有符合筛选条件的商品' : '等待第一件正式上传的商品'}</strong>
         <p>通过本软件正式提交后自动加入跟踪清单，再点“从 Amazon 同步数据”读取平台结果。</p></div>
         : <><div data-scroll-key="product-data-table" className="ops-table-wrap"><table><thead><tr><th>商品 / SKU</th><th>上架情况</th><th>近 7 / 30 天销量</th><th>可售 / 待入库库存</th><th>补货参考</th><th>操作</th></tr></thead>
-          <tbody>{rows.slice(safePage * 100, (safePage + 1) * 100).map(row => {
+          <tbody>{rows.slice(safePage * pageSize, (safePage + 1) * pageSize).map(row => {
             const state = rowStatus(row);
             return <tr key={row.sku}><td><div className="ops-product">{row.coverUrl && <img src={row.coverUrl} alt="商品图" />}<div><strong>{row.title}</strong><small>{row.sku}</small><small>{row.listing.value?.asin ?? 'ASIN 待确认'}</small><small>开始跟踪 {formatDate(row.salesSince, true)}</small></div></div></td>
               <td><Badge tone={state.tone}>{state.label}</Badge><small>{row.trackingIssue ?? observationNote(row.listing)}</small>
@@ -155,7 +158,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
               <td>暂未启用<small>待确定补货周期与规则</small></td>
               <td><button type="button" className="button secondary" disabled={busy} onClick={() => onOpen(row.productId)}>查看商品</button><button type="button" className="button secondary" disabled={busy} onClick={() => onProcurement({ targetId, sku: row.sku })}>采购此 SKU</button></td></tr>;
           })}</tbody></table></div>
-          {rows.length > 100 && <div className="ops-pagination"><button type="button" className="button secondary" disabled={!safePage || busy} onClick={() => setPage(safePage - 1)}>上一页</button><span>{safePage + 1} / {Math.ceil(rows.length / 100)} 页</span><button type="button" className="button secondary" disabled={(safePage + 1) * 100 >= rows.length || busy} onClick={() => setPage(safePage + 1)}>下一页</button></div>}</>}
+          {rows.length > 0 && <div className="ops-pagination"><PageSizeSelect label="商品数据每页数量" value={pageSize} onChange={setPageSize}/><button type="button" className="button secondary" disabled={!safePage || busy} onClick={() => setPage(safePage - 1)}>上一页</button><span>{safePage + 1} / {Math.ceil(rows.length / pageSize)} 页</span><button type="button" className="button secondary" disabled={(safePage + 1) * pageSize >= rows.length || busy} onClick={() => setPage(safePage + 1)}>下一页</button></div>}</>}
     </div>
   </section>;
 }

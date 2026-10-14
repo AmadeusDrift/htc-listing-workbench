@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { PageSizeSelect, useListPageSize } from './ListPagination';
+import { useEffect, useState } from 'react';
 import { ArrowRight, ChevronDown, Search } from 'lucide-react';
 import type { ProductSummary } from '../shared/contracts';
 import type { AutomaticListingQueue } from '../shared/automatic-listing-contracts';
@@ -17,10 +18,12 @@ interface Props {
   onSelection(ids: string[]): void; onManual(id: string): void; onInbox(): void; onExamples(): void;
 }
 export function AutomaticQueueProducts({ products, queue, selectedIds, selectableIds, disabled, loading, onSelection, onManual, onInbox, onExamples }: Props) {
+  const [pageSize, setPageSize] = useListPageSize('automatic-selection');
   const [tab, setTab] = useState<QueueTab>('all'), [search, setSearch] = useState(''), [page, setPage] = useState(1);
   const projection = new Map(queue?.products.map(product => [product.productId, product]));
   const visible = products.filter(product => queueInTab(projection.get(product.id), tab) && matchesQueueSearch(product.title, projection.get(product.id), search, tab));
-  const pages = Math.max(1, Math.ceil(visible.length / 8)), current = Math.min(page, pages), rows = visible.slice((current - 1) * 8, current * 8);
+  const pages = Math.max(1, Math.ceil(visible.length / pageSize)), current = Math.min(page, pages), rows = visible.slice((current - 1) * pageSize, current * pageSize);
+  useEffect(() => { if (page !== current) setPage(current); }, [page, current]);
   const visibleIds = visible.filter(product => selectableIds.includes(product.id)).map(product => product.id);
   const selectedCount = visibleIds.filter(id => selectedIds.includes(id)).length;
   const query = search.trim().toLocaleLowerCase();
@@ -47,6 +50,6 @@ export function AutomaticQueueProducts({ products, queue, selectedIds, selectabl
         </details>
       </div>;
     })}
-    <div className="automatic-queue-footer"><span>匹配 {visible.length} / {products.length} 件 · 当前第 {current} / {pages} 页</span><div className="workflow-actions"><button type="button" className="text-button" disabled={disabled || !selectedIds.length} onClick={() => onSelection([])}>清空选择</button><button type="button" className="button secondary small-button" disabled={current <= 1} onClick={() => setPage(current - 1)}>上一页</button><button type="button" className="button secondary small-button" disabled={current >= pages} onClick={() => setPage(current + 1)}>下一页</button></div></div>
+    <div className="automatic-queue-footer"><PageSizeSelect label="自动商品选择每页数量" value={pageSize} onChange={setPageSize}/><span>匹配 {visible.length} / {products.length} 件 · 当前第 {current} / {pages} 页</span><div className="workflow-actions"><button type="button" className="text-button" disabled={disabled || !selectedIds.length} onClick={() => onSelection([])}>清空选择</button><button type="button" className="button secondary small-button" disabled={current <= 1} onClick={() => setPage(current - 1)}>上一页</button><button type="button" className="button secondary small-button" disabled={current >= pages} onClick={() => setPage(current + 1)}>下一页</button></div></div>
   </section>;
 }

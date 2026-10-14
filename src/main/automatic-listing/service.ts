@@ -297,9 +297,11 @@ export class AutomaticListingService {
     const rows = row ? [row] : task.items.filter(value => (!selection||selected.some(item=>item.key===value.key||item.productId===value.productId||item.salesPlan?.sourceGroupKey&&item.salesPlan.sourceGroupKey===value.salesPlan?.sourceGroupKey))&&!task.adaptation?.blockedKeys.includes(value.key)&&value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
     if (!rows.length) return;
     this.assertConnections(task);
+    const sources=new Map<string,{source:ProductDetail;stamp:string}>();
     for (const item of rows) {
-      const source=this.deps.store.getProduct(item.productId),product=projectSalesProduct(source,item.salesPlan,item.variantId), variant = product.variants.find(value => value.id === item.variantId);
-      if (!variant || variant.sku !== item.sku || sourceStamp(source) !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
+      if(!sources.has(item.productId)){const source=this.deps.store.getProduct(item.productId);sources.set(item.productId,{source,stamp:sourceStamp(source)});}
+      const {source,stamp}=sources.get(item.productId)!,product=projectSalesProduct(source,item.salesPlan,item.variantId), variant = product.variants.find(value => value.id === item.variantId);
+      if (!variant || variant.sku !== item.sku || stamp !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
     }
   }
   private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
@@ -458,7 +460,13 @@ export class AutomaticListingService {
     if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile))throw new UserFacingError('创建期间范围已变化，请刷新');
     this.deps.preflight?.();
     const regroupedSkus=new Set<string>();
-    const items: AutomaticListingItem[] = ids.flatMap(id => {
+    const saleChecks:{productId:string;plan:SalesListingPlan;stamp:string}[]=[];
+    const sourceVersions=new Map(ids.map(id=>[id,fingerprint({product:this.deps.store.getProduct(id),receipt:this.deps.sourceReceipt?.(id)??null})]));
+    const selectedSourceIds=new Set(ids);
+    const relevantTaskVersions=()=>fingerprint([...this.tasks.values()].filter(task=>task.mode===target.target.mode&&task.sellerId===target.target.sellerId&&task.marketplaceId===target.target.marketplaceId&&task.items.some(row=>selectedSourceIds.has(row.productId))).map(task=>[task.id,task.revision]));
+    const taskVersions=relevantTaskVersions();
+    const items: AutomaticListingItem[] = [];
+    const planSource=(id:string):AutomaticListingItem[] => {
       const projection=queue.products.find(p=>p.productId===id);
       if(!projection?.eligibleCount&&!projection?.inputIssue)return [];
       const product = this.deps.store.getProduct(id);
@@ -471,6 +479,7 @@ export class AutomaticListingService {
       const selected=plans?plans.map(salesPlan=>({variant:product.variants.find(v=>v.id===salesPlan.recipe.components[0].variantId)!,salesPlan})):this.selectedVariants(product).map(variant=>({variant,salesPlan:undefined}));
       return selected.filter(({variant,salesPlan})=>eligible.has(product.id+':'+(salesPlan?.recipe.key??variant.id))).map(({variant,salesPlan}) => {
         const existing=salesPlan?this.deps.existingSale?.(product.id,salesPlan,targetId):undefined;
+        if(salesPlan)saleChecks.push({productId:product.id,plan:salesPlan,stamp:fingerprint(existing??null)});
         const frozen=existing&&submitted(existing)?existing:undefined;
         const regrouped=!frozen&&existing?.salesPlan&&salesPlan&&existing.salesPlan.recipe.key===salesPlan.recipe.key
           &&existing.salesPlan.sourceGroupKey!==salesPlan.sourceGroupKey?existing:undefined;
@@ -478,6 +487,7 @@ export class AutomaticListingService {
         const canonical=frozen??regrouped;
         const legacy=existing&&!existing.salesPlan&&existing.productId===product.id&&existing.variantId===variant.id&&existing.sku===variant.sku?existing:undefined;
         const source=canonical?this.deps.store.getProduct(canonical.productId):product;
+        if(!sourceVersions.has(source.id))sourceVersions.set(source.id,fingerprint({product:source,receipt:this.deps.sourceReceipt?.(source.id)??null}));
         let plan=canonical?canonical.salesPlan:legacy?undefined:salesPlan;
         // Keep allocated identity, but recompute unsent costs/components from the current source.
         // A duplicate import may have new local variant IDs even for the same supplier recipe.
@@ -491,7 +501,15 @@ export class AutomaticListingService {
         variantId, sku: canonical?.sku??legacy?.sku??plan?.sku??variant.sku, ...(plan?{salesPlan:plan}:{}), stockSets: rules.product.stockSets, sourcesPrepared: false,
         status: 'PENDING', stage: 'SOURCES', draftId: null, executionTaskIds: [], imageStarted: false, imageAttempts: 0, repairAttempts: 0, repairPolicyVersion: FIELD_REPAIR_POLICY_VERSION, categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION, repair: null, batchId: null, error: null,
       } as AutomaticListingItem;});
-    });
+    };
+    for(const id of ids){items.push(...planSource(id));await yieldToEventLoop();}
+    this.ensureOpen();
+    if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile)
+      ||relevantTaskVersions()!==taskVersions
+      ||[...sourceVersions].some(([id,stamp])=>fingerprint({product:this.deps.store.getProduct(id),receipt:this.deps.sourceReceipt?.(id)??null})!==stamp)
+      ||saleChecks.some(check=>fingerprint(this.deps.existingSale?.(check.productId,check.plan,targetId)??null)!==check.stamp))throw new UserFacingError('创建期间范围已变化，请刷新');
+    this.deps.preflight?.();
+    if(fingerprint(this.deps.batchPlan?.()??null)!==fingerprint(batchPlan??null))throw new UserFacingError('创建期间范围已变化，请刷新');
     // Repeated collection of the same source recipe uses the canonical saved listing once.
     for(let index=items.length-1;index>=0;index--)if(items[index].stage!=='PLAN'&&items.findIndex(row=>row.stage!=='PLAN'&&row.sku===items[index].sku)!==index)items.splice(index,1);
     if (!items.length || items.length > 5000) throw new UserFacingError('本次请选择 1–5000 个 SKU');

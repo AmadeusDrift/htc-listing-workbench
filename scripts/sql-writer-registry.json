@@ -978,6 +978,12 @@
       "review": "Controlled BEGIN/savepoint/commit/rollback only; monotonically generated savepoint names."
     },
     {
+      "file": "main/storage/migrations.ts",
+      "command": "apply",
+      "expression": "index.sql",
+      "review": "Schema 33 executes only the two exact SALES_IDENTITY_INDEXES declarations; no caller-provided SQL."
+    },
+    {
       "file": "main/database.ts",
       "command": "openDatabase",
       "expression": "index.sql",

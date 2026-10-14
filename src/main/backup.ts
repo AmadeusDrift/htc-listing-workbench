@@ -32,7 +32,7 @@ import { promisify } from 'node:util';
 import { UserFacingError } from '../shared/errors.ts';
 import { parseListingRules } from '../shared/listing-rules.ts';
 import { openDatabase, SCHEMA_VERSION } from './database.ts';
-import { RECORD_INDEXES } from './record-indexes.ts';
+import { RECORD_INDEXES, SALES_IDENTITY_INDEXES } from './record-indexes.ts';
 import { assertUnambiguousRecordJson } from './record-json.ts';
 import { managedAssetPath } from './security.ts';
 import { writeFileAtomically } from './files.ts';
@@ -187,6 +187,10 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 20) Object.assign(approved, CONSISTENCY_TABLES);
     if (version >= 21) {Object.assign(approved,CORRECTION_TABLES);approved.amazon_write_locks=[...versionTwoTables.amazon_write_locks,'owner_kind','owner_id'];assertCorrectionHistory(database);}
     if(version>=22){Object.assign(approved,MIGRATION_TABLES);assertMigrationJournal(database);}
+    if(version>=33){
+      assertUnambiguousRecordJson(database,'listing_drafts');
+      for(const index of SALES_IDENTITY_INDEXES){const actual=database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?").get(index.name,index.table);if(actual?.sql!==index.sql)throw new UserFacingError('备份销售身份索引不正确');}
+    }
     if(version>=32){Object.assign(approved,WORK_BATCH_TABLES);assertWorkBatches(database);}
     if(version>=30){Object.assign(approved,PRODUCT_FACT_MODEL_TABLES);assertProductFactModels(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}

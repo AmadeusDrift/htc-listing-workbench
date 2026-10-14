@@ -39,7 +39,7 @@ import { SkuNamingService } from './sku-naming/service.ts';
 import { planSalesListings } from './sales-plans/planning.ts';
 import { ensureFamilyParent, resolveSalesFamily } from './automatic-listing/families.ts';
 import { ShipmentDocumentService } from './procurement/shipment-documents.ts';
-import { ListingRuleStore } from './listing-rules.ts';
+import { ListingRuleStore, readListingRules } from './listing-rules.ts';
 import { ListingAiService } from './listing-ai/service.ts';
 import { imageWorkflowDraftStamp } from "./image-workflow/approval-reuse.ts";
 
@@ -72,6 +72,7 @@ let automatic: AutomaticListingService | undefined;
 let labels: ItemLabelService | undefined;
 let labelSettings: ItemLabelSettings | undefined;
 let skuNaming: SkuNamingService | undefined;
+let automaticRules: ListingRuleStore | undefined;
 let shipmentDocuments: ShipmentDocumentService | undefined;
 let content: ReviewedContentService | undefined;
 let collection: CollectionHistory | undefined;
@@ -125,16 +126,17 @@ async function start() {
   labels = new ItemLabelService(dataRoot, amazon, procurement);
   labelSettings = new ItemLabelSettings(dataRoot);
   skuNaming = new SkuNamingService(dataRoot);
+  automaticRules = new ListingRuleStore(dataRoot);
   shipmentDocuments = new ShipmentDocumentService(dataRoot, procurement);
-  const workflowService = imageWorkflow, listingService = new ListingAiService(db, amazon, ai,()=>workflowService.getCopyReviewSettings().enabled), amazonService = amazon, aiService = ai, formatSettings = labelSettings, catalogService = catalog, namingService=skuNaming, executionService=execution;
+  const workflowService = imageWorkflow, listingService = new ListingAiService(db, amazon, ai,()=>workflowService.getCopyReviewSettings().enabled), amazonService = amazon, aiService = ai, formatSettings = labelSettings, catalogService = catalog, namingService=skuNaming, executionService=execution, ruleStore=automaticRules;
   automatic = new AutomaticListingService(dataRoot, {
     store: db, amazon, hosting, images: imageWorkflow, execution, followup, procurement, labels,
     batch:aiService.batchTasks,batchPlan:()=>aiService.taskBatchPlan(),
-    rules: () => { const rules = new ListingRuleStore(dataRoot); try { return rules.get(); } finally { rules.close(); } },
+    rules: () => ruleStore.get(),
     labelFormat: () => formatSettings.get(),
     sourceReceipt: productId => miaoshouService.getReceipt(productId),
-    planSalesForAdaptation: (source,targetId,transactionDb) => {const naming=new SkuNamingService(dataRoot,transactionDb),rules=new ListingRuleStore(dataRoot);try{return planSalesListings(source,miaoshouService.getReceipt(source.id),amazonService.getTarget(targetId),rules.get(),naming);}finally{rules.close();}},
-    planSales: (productId,targetId) => {const rules=new ListingRuleStore(dataRoot);try{return planSalesListings(db.getProduct(productId),miaoshouService.getReceipt(productId),amazonService.getTarget(targetId),rules.get(),namingService);}finally{rules.close();}},
+    planSalesForAdaptation: (source,targetId,transactionDb) => {const naming=new SkuNamingService(dataRoot,transactionDb);return planSalesListings(source,miaoshouService.getReceipt(source.id),amazonService.getTarget(targetId),readListingRules(transactionDb),naming);},
+    planSales: (productId,targetId) => {return planSalesListings(db.getProduct(productId),miaoshouService.getReceipt(productId),amazonService.getTarget(targetId),ruleStore.get(),namingService);},
     existingSale:(productId,plan,targetId)=>amazonService.findSalesDraft(productId,plan,targetId),
     resolveFamily: (input,signal) => resolveSalesFamily(amazonService,input,signal),
     rebindFamily: (input,signal) => amazonService.rebindUnsubmittedFamily(input,signal),
@@ -246,7 +248,7 @@ async function start() {
   });
   installIpc(mainWindow, db, dataRoot, expectedUrl, amazon, hosting, execution, ai, images, content, async prepared => {
     await automatic?.close(); automatic = undefined;
-    skuNaming?.close(); skuNaming = undefined;
+    skuNaming?.close(); skuNaming = undefined; automaticRules?.close(); automaticRules = undefined;
     await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
     await imageWorkflow?.close(); imageWorkflow = undefined;
     productData?.close(); productData = undefined;
@@ -307,7 +309,7 @@ else {
     productData?.close(); productData = undefined;
     void (async () => {
       await automatic?.close(); automatic = undefined;
-      skuNaming?.close(); skuNaming = undefined;
+      skuNaming?.close(); skuNaming = undefined; automaticRules?.close(); automaticRules = undefined;
       await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
       try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
       finally {

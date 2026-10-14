@@ -17,15 +17,14 @@ import { projectSalesProduct } from '../sales-plans/records.ts';
 import { validateItemLabelRecord } from '../item-labels/records.ts';
 
 type ProcurementAmazon = Pick<AmazonService, 'listDrafts' | 'getDraft' | 'getTarget' | 'getListingObservation'>;
-interface Products { listProducts(): { id: string }[]; getProduct(id: string): ProductDetail }
+interface Products { listProducts(): { id: string }[]; getProductSnapshot(id: string): ProductDetail }
 export class ProcurementService {
   private db: DatabaseSync;
   private store: Products;
   private amazon: ProcurementAmazon;
   constructor(directory: string, store: Products, amazon: ProcurementAmazon) { this.db = openDatabase(directory); this.store = store; this.amazon = amazon; }
   close(): void { this.db.close(); }
-  private candidate(draft: AmazonDraft): ProcurementCandidate {
-    const product = this.store.getProduct(draft.productId), receipt = getReceipt(this.db, product.id);
+  private candidate(draft: AmazonDraft, product: ProductDetail, receipt: ReturnType<typeof getReceipt>): ProcurementCandidate {
     let projectionValid=true,variant=product.variants.find(item=>item.id===draft.variantId);
     try{variant=projectSalesProduct(product,draft.salesPlan,draft.variantId).variants.find(item=>item.id===draft.variantId);}catch{projectionValid=false;}
     const mapping = receipt?.skuMappings.find(item => item.localVariantId === draft.variantId), sourceSku = receipt?.snapshot.skus.find(item => item.key === mapping?.sourceKey);
@@ -69,7 +68,18 @@ export class ProcurementService {
       const attempted = (item: AmazonDraft) => Boolean(item.submittedAt || ['UNKNOWN','SUBMITTING'].includes(item.state));
       if (!prior || attempted(draft) && !attempted(prior) || attempted(draft) === attempted(prior) && (draft.submittedAt ?? draft.updatedAt) > (prior.submittedAt ?? prior.updatedAt)) newest.set(key, draft);
     }
-    return [...newest.values()].map(draft => this.candidate(draft));
+    // A read-only view must not run getProduct's image-history attribution repair.
+    // Share source reads within this synchronous sweep only; later polls see edits.
+    const sources = new Map<string, { product: ProductDetail; receipt: ReturnType<typeof getReceipt> }>();
+    return [...newest.values()].map(draft => {
+      let source = sources.get(draft.productId);
+      if (!source) {
+        const product = this.store.getProductSnapshot(draft.productId);
+        source = { product, receipt: getReceipt(this.db, product.id) };
+        sources.set(draft.productId, source);
+      }
+      return this.candidate(draft, source.product, source.receipt);
+    });
   }
   list(): ProcurementBatchSummary[] {
     return this.db.prepare('SELECT id,record_json FROM procurement_batches ORDER BY rowid DESC').all().map(row => {

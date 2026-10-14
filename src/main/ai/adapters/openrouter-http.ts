@@ -4,8 +4,11 @@ import type { ProviderMetadata } from '../transport.ts';
 import { emptyUsage } from '../transport.ts';
 
 export type OpenRouterEndpoint='/api/v1/chat/completions'|'/api/alpha/decisions'|'/api/v1/images'|'/api/v1/batches';
-export function openRouterHttpError(status:number):AiError&{httpStatus:number;definitive:boolean}{
-  return Object.assign(httpError(status),{httpStatus:status,definitive:[400,401,402,403,404,405,413,415,422,429].includes(status)});
+export function openRouterHttpError(status:number,raw?:unknown):AiError&{httpStatus:number;definitive:boolean}{
+  const message=(raw as any)?.error?.message;
+  const region=typeof message==='string'&&/^This model is not available in your region\.?$/i.test(message.trim());
+  const error=status===403?new AiError(region?'MODEL_REGION_RESTRICTED':'ROUTING_FORBIDDEN'):httpError(status);
+  return Object.assign(error,{httpStatus:status,definitive:[400,401,402,403,404,405,413,415,422,429].includes(status)});
 }
 export function openRouterMetadata(raw:any):ProviderMetadata{
   const usage=emptyUsage(),prompt=raw?.usage?.prompt_tokens??raw?.usage?.input_tokens,completion=raw?.usage?.completion_tokens??raw?.usage?.output_tokens;
@@ -28,7 +31,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   if(context.deferOpenRouter){const deferred=await context.deferOpenRouter(endpoint,body);if(deferred){context.onMetadata?.(openRouterMetadata(deferred.body));return deferred.body;}}
   const serialized=JSON.stringify(body);context.beforeSend?.(serialized);
   let response:Response;
-  try{response=await context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal});}
+  try{response=await context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',...(endpoint==='/api/v1/chat/completions'?{'X-OpenRouter-Metadata':'enabled'}:{}),authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal});}
   catch{throwIfAborted(signal);throw new AiError('NETWORK_ERROR');}
   const length=response.headers.get('content-length');if(length!==null&&(!/^\d+$/.test(length)||!Number.isSafeInteger(Number(length))||Number(length)>context.maxResponseBytes)){void response.body?.cancel().catch(()=>{});throw new AiError('OUTPUT_INVALID');}
   const reader=response.body?.getReader();if(!reader)throw new AiError('OUTPUT_INVALID');
@@ -42,7 +45,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   const cost=typeof raw?.usage?.cost==='number'&&Number.isFinite(raw.usage.cost)&&raw.usage.cost>=0?raw.usage.cost:null;
   const metadata=openRouterMetadata(raw);metadata.requestId=id;context.onMetadata?.(metadata);
   await context.onProviderReceipt?.({gateway:'openrouter',endpoint,model:String(body.model??''),status:response.status,requestId:id,receivedAt:context.now().toISOString(),body:safe?raw:'[omitted: credential echo]',costUsd:cost});
-  throwIfAborted(signal);if(!response.ok)throw openRouterHttpError(response.status);
+  throwIfAborted(signal);if(!response.ok)throw openRouterHttpError(response.status,safe?raw:undefined);
   if(!safe)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:'RESPONSE_SECRET_ECHO',responseDiagnostic:{status:response.status,byteCount:size}});
   if(!valid)throw new AiError('OUTPUT_INVALID');return raw;
 }

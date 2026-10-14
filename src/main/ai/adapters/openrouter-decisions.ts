@@ -8,7 +8,7 @@ export type DecisionQuestion={type:'choice';criteria:Record<string,string|null>;
 export type DecisionAnswer={type:'choice';choice:string;confidence?:number;probabilities?:Record<string,number>}|{type:'noul';noul:number}|{type:'score';score:number;confidence?:number;probabilities?:Record<string,number>};
 export async function requestOpenRouterDecisions(model:string,state:unknown,questions:Record<string,DecisionQuestion>,credentials:{apiKey:string},signal:AbortSignal,context:AdapterContext):Promise<ProviderMetadata&{answers:Record<string,DecisionAnswer>}>{
   if(textModelCapability('openrouter',model).endpoint!=='decisions'||!Object.keys(questions).length||Object.keys(questions).length>200||Object.entries(questions).some(([id,q])=>!id||id.length>100||!q.instructions?.trim()||q.type==='choice'&&!Object.keys(q.criteria).length))throw new AiError('INVALID_INPUT');
-  const raw=await postOpenRouter('/api/alpha/decisions',{model,state,questions,provider:{allow_fallbacks:false}},credentials,signal,context);
+  const raw=await postOpenRouter('/api/alpha/decisions',{model,state,questions,provider:{allow_fallbacks:true,require_parameters:true}},credentials,signal,context);
   const usage=emptyUsage();let usageKnown=false;
   if(raw?.usage&&['input_tokens','output_tokens'].every(key=>Number.isSafeInteger(raw.usage[key])&&raw.usage[key]>=0&&raw.usage[key]<=1_000_000_000)){usage.promptTokens=raw.usage.input_tokens;usage.completionTokens=raw.usage.output_tokens;usageKnown=true;}
   const metadata={requestId:typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)?raw.id:null,usage,usageKnown};context.onMetadata?.(metadata);

@@ -366,3 +366,24 @@ test('legacy valid retained source content recovers locally without responseRece
  const result=await f.observe();assert.equal(result.output.kind,'source-image-consistency');assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),false);
  assert.deepEqual(f.ai.listCalls()[0],call);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');
 });
+
+
+test('legacy OpenRouter region refusal resumes once only after explicit continue without rotating Key',async t=>{
+ const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+ f.respond(()=>Response.json({error:{message:'This model is not available in your region.',code:403}},{status:403}));await assert.rejects(f.observe());
+ const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED'}),prior.id);
+ await assert.rejects(f.observe());assert.equal(f.count(),1);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ assert.equal(f.ai.listCalls().find(c=>c.id===prior.id)?.errorCode,'AUTH_FAILED');
+});
+
+
+test('legacy forbidden without exact region proof and missing receipts never unlock source sends',async t=>{
+ for(const missing of [false,true]){
+  const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
+  f.respond(()=>Response.json({error:{message:missing?'This model is not available in your region.':'Forbidden',code:403}},{status:403}));await assert.rejects(f.observe());
+  const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED',...(missing?{providerReceiptId:undefined}:{})}),prior.id);
+  f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ }
+});

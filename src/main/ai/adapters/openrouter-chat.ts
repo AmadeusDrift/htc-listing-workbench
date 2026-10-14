@@ -9,7 +9,7 @@ import { postOpenRouter } from './openrouter-http.ts';
 export async function requestOpenRouterJson(payload:unknown,system:string,model:string,credentials:{apiKey:string},signal:AbortSignal,context:AdapterContext,maxTokens=4096,images:readonly DeepSeekReferenceImage[]=[]):Promise<ProviderMetadata&{content:unknown}>{
   const effort=context.effectiveEffort??'medium',capability=checkReasoning('openrouter',model,effort);
   if(context.gateway==='deepseek'||capability.endpoint==='decisions'||images.length&&!capability.vision)throw new AiError('INVALID_CONFIG');
-  const body={model,messages:[{role:'system',content:system+'\nReturn only a valid JSON object.'},{role:'user',content:images.length?visionContent(payload,images):JSON.stringify(payload)}],reasoning:{effort},response_format:{type:'json_object'},stream:false,max_tokens:effort==='none'?maxTokens:Math.max(maxTokens,32768),provider:{only:['openai'],allow_fallbacks:false,require_parameters:true}};
+  const body={model,messages:[{role:'system',content:system+'\nReturn only a valid JSON object.'},{role:'user',content:images.length?visionContent(payload,images):JSON.stringify(payload)}],reasoning:{effort},response_format:{type:'json_object'},stream:false,max_tokens:effort==='none'?maxTokens:Math.max(maxTokens,32768),provider:{allow_fallbacks:true,require_parameters:true}};
   if(Buffer.byteLength(JSON.stringify(body))>MAX_VISION_REQUEST_BYTES)throw new AiError('IMAGE_INVALID');
   const raw=await postOpenRouter('/api/v1/chat/completions',body,credentials,signal,context);
   const usage=emptyUsage();let usageKnown=false;

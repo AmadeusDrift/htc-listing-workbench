@@ -10,7 +10,8 @@ test('OpenRouter chat sends the exact model and effective effort with no native 
     now:()=>new Date('2026-10-13T00:00:00.000Z'),nonce:()=>'',maxResponseBytes:10000,effectiveEffort:'max',onProviderReceipt:(r:any)=>receipts.push(r),
   });
   assert.equal(requests[0].url,'https://openrouter.ai/api/v1/chat/completions');
-  const body=JSON.parse(requests[0].init.body);assert.equal(body.model,'openai/gpt-6-astra');assert.deepEqual(body.reasoning,{effort:'max'});assert.equal(body.thinking,undefined);
+  const body=JSON.parse(requests[0].init.body);assert.equal(body.model,'openai/gpt-6-astra');assert.deepEqual(body.reasoning,{effort:'max'});assert.equal(body.thinking,undefined);assert.deepEqual(body.provider,{allow_fallbacks:true,require_parameters:true});assert.equal(body.models,undefined);
+  assert.equal(new Headers(requests[0].init.headers).get('X-OpenRouter-Metadata'),'enabled');
   assert.equal(new Headers(requests[0].init.headers).get('authorization'),'Bearer or-fixture-key');
   assert.deepEqual(result.content,{title:'test'});assert.equal(receipts.length,1);assert.equal(result.usageKnown,true);
 });
@@ -27,4 +28,13 @@ test('cancelled callers can retain a late provider result but cannot receive it 
     fetch:async()=>{controller.abort();return new Response(JSON.stringify({id:'gen_late',choices:[{finish_reason:'stop',message:{content:'{}'}}]}));},now:()=>new Date(),nonce:()=>'',maxResponseBytes:10000,effectiveEffort:'low',onProviderReceipt:(r:any)=>receipts.push(r),
   }));
   assert.equal(receipts[0].requestId,'gen_late');
+});
+
+test('OpenRouter region refusals are distinct from invalid credentials and never trigger a second POST',async()=>{
+ const {requestOpenRouterJson}=await adapter();
+ for(const [status,message,code] of [[403,'This model is not available in your region.','MODEL_REGION_RESTRICTED'],[403,'Forbidden','ROUTING_FORBIDDEN'],[401,'Unauthorized','AUTH_FAILED'],[402,'Insufficient credits','QUOTA_EXCEEDED']] as const){
+  let posts=0;const receipts:any[]=[];
+  await assert.rejects(requestOpenRouterJson({},'JSON','openai/gpt-6-luna',{apiKey:'or-fixture-key'},new AbortController().signal,{fetch:async()=>{posts++;return Response.json({error:{message,code:status}},{status});},now:()=>new Date(),nonce:()=>'',maxResponseBytes:10000,effectiveEffort:'none',onProviderReceipt:(r:any)=>{receipts.push(r);}}),(e:any)=>e.code===code&&e.httpStatus===status&&e.definitive===true&&!e.message.includes('Forbidden'));
+  assert.equal(posts,1);assert.equal(receipts[0].body.error.message,message);
+ }
 });

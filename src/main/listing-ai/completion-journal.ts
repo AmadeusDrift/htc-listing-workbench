@@ -1,3 +1,4 @@
+import { AiError } from '../ai/errors.ts';
 import { readCopyReview,copyReviewResult } from '../ai/copy-review-upgrade.ts';
 import { isDefinitiveFieldRejection } from './request-outcome.ts';
 import { legacyCompletionAssets } from './legacy-generated-scope.ts';
@@ -203,6 +204,7 @@ export class CompletionJournal {
     const owner=call.presentationContext;
     if(!owner||owner.kind!=='listing'||owner.draftId!==round.context.draftId||owner.variantId!==round.context.variantId||owner.sourceSha256!==round.contextHash)invalid();
     if(call.status==='SUCCEEDED'||call.status==='RUNNING')invalid();
+    if(call.errorCode==='MODEL_REGION_RESTRICTED'||call.errorCode==='ROUTING_FORBIDDEN')throw new AiError(call.errorCode);
     if(!isDefinitiveFieldRejection(call)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if(this.received(entry,round)&&!(kind==='review'&&this.reviewCoverageOmission(id)))unknownCompletion();
     if((entry.previous?.length??0)+legacyStepDebt(op,round,kind)>=2)throw new UserFacingError('字段请求已用完三次尝试，原请求与费用记录保留');

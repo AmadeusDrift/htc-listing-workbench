@@ -1,5 +1,5 @@
 import { taskAiContext } from '../ai/batch/task-context.ts';
-import { confirmedAuthenticationRejection } from '../ai/receipts.ts';
+import { confirmedAuthenticationRejection,confirmedLegacyRegionRejection } from '../ai/receipts.ts';
 import { isGenerationProvider } from "../ai/primitives.ts";
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiResult,AiCall } from '../../shared/ai-contracts.ts';
@@ -68,7 +68,7 @@ export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsisten
 export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAttempt):boolean {
  const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
  if(!call||call.id!==attempt.callId||call.productId!==attempt.context.productId||call.productRevision!==attempt.context.productRevision||call.startedAt!==attempt.sentAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(attempt.context))return true;
- if(call.status==='SUCCEEDED'||confirmedAuthenticationRejection(db,call))return false;
+ if(call.status==='SUCCEEDED'||confirmedAuthenticationRejection(db,call)||confirmedLegacyRegionRejection(db,call)||call.status==='FAILED'&&['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'].includes(call.errorCode??''))return false;
  if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return true;
  if(call.responseReceived===true)return false;
  // Legacy diagnostics may predate responseReceived. Only a validated local recovery
@@ -78,6 +78,7 @@ export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAtt
 /** Model changes alone do not authorize a new request. Credentials must have been explicitly saved. */
 export function canRetryConsistencyAuthentication(db:DatabaseSync,prior:AiCall,current:{providerId:string;generation:number}):boolean {
  const scope=taskAiContext.getStore();
+ if(scope?.explicitContinueAt&&scope.authorize()&&current.providerId===prior.providerId&&Date.parse(scope.explicitContinueAt)>Date.parse(prior.finishedAt??prior.startedAt)&&confirmedLegacyRegionRejection(db,prior))return true;
  if(!scope?.explicitContinueAt||!Number.isFinite(Date.parse(scope.explicitContinueAt))||!scope.authorize()||!confirmedAuthenticationRejection(db,prior)||current.providerId!==prior.providerId||current.generation<=prior.generation)return false;
  const events=db.prepare("SELECT action,detail_json,created_at FROM audit_events WHERE action IN ('ai.credentials.updated','ai.connection.saved','ai.connection.imported')").all();
  return events.some(row=>{

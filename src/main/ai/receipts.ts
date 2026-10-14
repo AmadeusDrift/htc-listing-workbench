@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdir,readFile,lstat } from 'node:fs/promises';
 import { existsSync,lstatSync,readdirSync,readFileSync } from 'node:fs';
-import { resolve,join } from 'node:path';
+import { resolve,join,dirname } from 'node:path';
 import { writeFileAtomically } from '../files.ts';
 import type { ProviderReceiptCapture } from './transport.ts';
 import type { AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
@@ -87,5 +87,21 @@ export function readImageRequestIntent(db:DatabaseSync,id:string):ImageRequestIn
 export function confirmedAuthenticationRejection(db:DatabaseSync,call:import('../../shared/ai-contracts.ts').AiCall):boolean {
  if(call.status!=='FAILED'||call.errorCode!=='AUTH_FAILED'||!call.providerReceiptId)return false;
  const row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return false;
- try {const r=parse(JSON.parse(String(row.record_json)));return r.id===call.providerReceiptId&&r.callId===call.id&&r.model===call.model&&r.gateway===(call.providerId.startsWith('openrouter')?'openrouter':'deepseek')&&[401,403].includes(r.status);}catch{return false;}
+ try {const r=parse(JSON.parse(String(row.record_json)));return r.id===call.providerReceiptId&&r.callId===call.id&&r.model===call.model&&r.gateway===(call.providerId.startsWith('openrouter')?'openrouter':'deepseek')&&(r.gateway==='openrouter'?r.status===401:[401,403].includes(r.status));}catch{return false;}
+}
+
+/** A legacy, definitively rejected region request may use the corrected provider policy once.
+ * Read only the bounded error receipt and verify identity/hash; no raw text crosses IPC.
+ */
+export function confirmedLegacyRegionRejection(db:DatabaseSync,call:import('../../shared/ai-contracts.ts').AiCall):boolean {
+ if(call.status!=='FAILED'||call.errorCode!=='AUTH_FAILED'||!call.providerId.startsWith('openrouter')||!call.providerReceiptId)return false;
+ try{
+  const row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return false;
+  const r=parse(JSON.parse(String(row.record_json)));if(r.id!==call.providerReceiptId||r.callId!==call.id||r.model!==call.model||r.gateway!=='openrouter'||r.status!==403||r.byteSize>65536)return false;
+  const file=db.prepare('PRAGMA database_list').all().find(row=>row.name==='main')?.file;if(typeof file!=='string'||!file)return false;
+  const directory=dirname(file),folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return false;
+  const path=join(directory,r.relativePath),stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size!==r.byteSize)return false;
+  const bytes=readFileSync(path);if(hash(bytes)!==r.sha256)return false;
+  const receipt=JSON.parse(bytes.toString('utf8'));return receipt.callId===call.id&&receipt.model===call.model&&receipt.gateway==='openrouter'&&receipt.status===403&&receipt.body?.error?.message==='This model is not available in your region.';
+ }catch{return false;}
 }

@@ -86,3 +86,15 @@ for(const folder of ['.test-data','artifacts']) test(`S00 launcher rejects synth
     assert.deepEqual(await readdir(target),[]);
   } finally { await unlink(link);await rm(root,{recursive:true,force:true}); }
 });
+
+for(const api of ['callback','promise']) for(const options of [6,{family:6}]) test(`S00 ${api} localhost lookup preserves IPv6 option ${JSON.stringify(options)}`,async()=>{
+  const result=await run(process.execPath,['--require',guard,'-e',`
+    const dns=require('node:dns');
+    (async()=>{
+      const options=${JSON.stringify(options)};
+      const result=${JSON.stringify(api)}==='promise'?await dns.promises.lookup('localhost',options):await new Promise((done,reject)=>dns.lookup('localhost',options,(error,address,family)=>error?reject(error):done({address,family})));
+      console.log(JSON.stringify(result));
+    })().catch(error=>{console.error(error);process.exitCode=1;});
+  `],{windowsHide:true,env:{...process.env,HTC_STABILIZATION_DATA_DIR:resolve('.test-data/stabilization')}});
+  assert.deepEqual(JSON.parse(result.stdout),{address:'::1',family:6});
+});

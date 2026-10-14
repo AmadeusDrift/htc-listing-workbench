@@ -71,7 +71,8 @@ for (const target of [dns, dns.promises]) for (const name of Object.keys(target)
     if(name!=='lookup')return deny('dns.'+name);
     // Never ask a configured DNS server to resolve localhost. Preserve the
     // requested IPv6 family, otherwise choose the IPv4 loopback explicitly.
-    const numeric=String(host).toLowerCase()==='localhost'?(args[0]?.family===6?'::1':'127.0.0.1'):host;
+    const family=typeof args[0]==='number'?args[0]:args[0]?.family;
+    const numeric=String(host).toLowerCase()==='localhost'?(family===6?'::1':'127.0.0.1'):host;
     if(target===dns)return protectLookup(original,'dns.lookup-result').call(this,numeric,...args);
     return original.call(this,numeric,...args);
   };

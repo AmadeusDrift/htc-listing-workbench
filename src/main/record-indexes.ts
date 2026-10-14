@@ -1,4 +1,8 @@
 /** Exact declarations shared by migration and the backup schema allowlist. Never infer trust from a name alone. */
+export const SALES_IDENTITY_INDEXES = [
+  { table: 'listing_drafts', name: 'record_drafts_sku', expressions: 1, sql: "CREATE INDEX record_drafts_sku ON listing_drafts(json_extract(record_json,'$.draft.sku'))" },
+  { table: 'listing_drafts', name: 'record_drafts_recipe', expressions: 1, sql: "CREATE INDEX record_drafts_recipe ON listing_drafts(json_extract(record_json,'$.draft.salesPlan.recipe.key'))" },
+] as const;
 export const RECORD_INDEXES = [
   { table: 'ai_results', name: 'record_ai_results_product', expressions: 1, sql: "CREATE INDEX record_ai_results_product ON ai_results(json_extract(record_json,'$.productId'))" },
   { table: 'ai_calls', name: 'record_ai_calls_product', expressions: 1, sql: "CREATE INDEX record_ai_calls_product ON ai_calls(json_extract(record_json,'$.productId'))" },

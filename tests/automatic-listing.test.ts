@@ -2032,3 +2032,66 @@ test('integrated scoped resume revoked by archive cannot publish a late image or
  await assert.rejects(f.service.confirmResume({taskId:task.id,taskRevision:preview.taskRevision,token:preview.token,scope},async()=>true),/变化/);
  assert.equal(f.calls.submissions,0);
 });
+
+test('create yields between source plans and rejects a source change without saving a partial task',async t=>{
+ const f=fixture(t);let interleaved=false;
+ // Keep admission real; a selected recipe must survive through the planning boundary.
+ const recipes=buildSalesRecipes(f.product,null,f.rules);
+ f.dependencies.planSales=()=>{setImmediate(()=>{interleaved=true;f.product.revision++;});return recipes.map(recipe=>({namingGroupId:randomUUID(),sourceGroupKey:'source',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE',baseSku:'SALE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));};
+ await assert.rejects(()=>f.create(),/创建期间范围已变化/);
+ assert.equal(interleaved,true);assert.equal(f.service.list().length,0);
+});
+
+test('100 sources / 330 sales create keeps stable SKUs and yields once per source',async t=>{
+ const f=fixture(t),products=new Map<string,ProductDetail>();
+ for(let i=0;i<100;i++){
+  const product=structuredClone(f.product);product.id=randomUUID();
+  product.variants=['红色','蓝色','绿色','黑色'].slice(0,i<30?4:3).map((color,j)=>({...product.variants[0],id:randomUUID(),sku:`SOURCE-${i}-${j}`,sourceSpec:`颜色: ${color} / 尺寸: 小号`,originalSpec:`颜色: ${color} / 尺寸: 小号`,normalizedSpec:''}));
+  products.set(product.id,product);
+ }
+ f.dependencies.store.getProduct=id=>structuredClone(products.get(id)!);f.dependencies.store.hasProducts=ids=>ids.every(id=>products.has(id));
+ f.dependencies.previewSales=id=>buildSalesRecipes(products.get(id)!,null,f.rules);
+ f.dependencies.planSales=id=>f.dependencies.previewSales!(id).map((recipe,j)=>({namingGroupId:id,sourceGroupKey:id,collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:`SALE-${id.slice(0,20)}-${j}`,baseSku:`BASE-${id.slice(0,20)}`,recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));
+ const {DatabaseSync}=await import('node:sqlite'),{AmazonPersistence}=await import('../src/main/amazon/persistence.ts'),{AmazonService}=await import('../src/main/amazon/service.ts'),{SALES_IDENTITY_INDEXES}=await import('../src/main/record-indexes.ts');
+ const history=new DatabaseSync(join(f.directory,'synthetic-history.sqlite'));f.cleanups.push(async()=>history.close());
+ history.exec('CREATE TABLE listing_drafts(id TEXT PRIMARY KEY, product_id TEXT, record_json TEXT, created_at TEXT);CREATE INDEX amazon_drafts_product ON listing_drafts(product_id,created_at)');
+ history.exec('BEGIN');const put=history.prepare('INSERT INTO listing_drafts VALUES(?,?,?,?)');
+ for(let i=0;i<3000;i++)put.run('history-'+i,'history-product-'+i,JSON.stringify({draft:{id:'history-'+i,sku:'history-sku-'+i,salesPlan:{recipe:{key:'history-recipe-'+i}},schema:{padding:'x'.repeat(8000)}}}),'');
+ history.exec('COMMIT');for(const index of SALES_IDENTITY_INDEXES)history.exec(index.sql);
+ const persistence=Object.create(AmazonPersistence.prototype) as InstanceType<typeof AmazonPersistence>;persistence.db=history;
+ f.dependencies.existingSale=(productId,plan,targetId)=>AmazonService.prototype.findSalesDraft.call({getTarget:()=>f.target,persistence} as never,productId,plan,targetId);
+ let ticks=0,maxGap=0,last=performance.now(),running=true;
+ const beat=()=>{const now=performance.now();maxGap=Math.max(maxGap,now-last);last=now;ticks++;if(running)setImmediate(beat).unref();};setImmediate(beat).unref();
+ const start=performance.now();const task=await f.service.create({productIds:[...products.keys()],targetId:f.target.id,profileId:'alpha'});running=false;
+ assert.equal(task.items.length,330);assert.equal(new Set(task.items.map(row=>row.sku)).size,330);assert.ok(ticks>=100,`heartbeats=${ticks}`);
+ t.diagnostic(`synthetic 100 sources / 330 SKU create: ${(performance.now()-start).toFixed(1)} ms; max immediate heartbeat gap ${maxGap.toFixed(1)} ms; heartbeats ${ticks}`);
+ let reads=0;const get=f.dependencies.store.getProduct;f.dependencies.store.getProduct=id=>{reads++;return get(id);};
+ f.service.prepareStart(task.id);assert.equal(reads,100,'scope assertion reads each source once');
+});
+
+test('create rejects a canonical prior source changing during the planning yield',async t=>{
+ const f=fixture(t),canonical=structuredClone(f.product);canonical.id=randomUUID();
+ const recipe=buildSalesRecipes(f.product,null,f.rules)[0],plan:SalesListingPlan={namingGroupId:randomUUID(),sourceGroupKey:'source',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE',baseSku:'SALE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null};
+ f.dependencies.planSales=()=>[plan];f.dependencies.store.getProduct=id=>structuredClone(id===canonical.id?canonical:f.product);
+ const draft=(await f.dependencies.amazon.prepareDrafts({items:[{variantId:f.product.variants[0].id}]})).items[0].draft!;Object.assign(draft,{productId:canonical.id,salesPlan:plan,sku:plan.sku,state:'SUBMITTED',submittedAt:new Date().toISOString()});
+ let reads=0;f.dependencies.existingSale=()=>{if(reads++===0)setImmediate(()=>canonical.revision++);return structuredClone(draft);};
+ await assert.rejects(()=>f.create(),/创建期间范围已变化/);assert.equal(f.service.list().length,0);
+});
+
+for(const change of ['rules','target','profile','preflight','submission'] as const)test(`create rejects ${change} changing at a planning yield without a partial task`,async t=>{
+ const f=fixture(t),recipe=buildSalesRecipes(f.product,null,f.rules)[0];
+ const plan:SalesListingPlan={namingGroupId:randomUUID(),sourceGroupKey:'source',collectedAt:f.product.createdAt,collectionBasis:'first_import',sku:'SALE',baseSku:'SALE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null};
+ let enabled=true;f.dependencies.preflight=()=>{if(!enabled)throw new UserFacingError('用途连接已停用');};
+ const draft=(await f.dependencies.amazon.prepareDrafts({items:[{variantId:f.product.variants[0].id}]})).items[0].draft!;Object.assign(draft,{salesPlan:plan,sku:plan.sku});f.dependencies.existingSale=()=>structuredClone(draft);
+ f.dependencies.planSales=()=>{setImmediate(()=>{if(change==='rules')f.rules.revision++;if(change==='target')f.target.paused=true;if(change==='profile')f.profile.generation++;if(change==='preflight')enabled=false;if(change==='submission')draft.state='UNKNOWN';});return [plan];};
+ await assert.rejects(()=>f.create(),/创建期间范围已变化|用途连接已停用/);assert.equal(f.service.list().length,0);assert.equal(f.calls.submissions,0);
+});
+
+test('unrelated task progress during creation does not invalidate the selected sources',async t=>{
+ const f=fixture(t),prior=await f.create(),old=(f.service as any).tasks.get(prior.id);
+ const next=structuredClone(f.product);next.id=randomUUID();next.variants[0].id=randomUUID();next.variants[0].sku='NEXT-SOURCE';
+ f.dependencies.store.getProduct=id=>structuredClone(id===next.id?next:f.product);f.dependencies.store.hasProducts=()=>true;
+ f.dependencies.previewSales=id=>buildSalesRecipes(id===next.id?next:f.product,null,f.rules);
+ f.dependencies.planSales=id=>{setImmediate(()=>old.revision++);return f.dependencies.previewSales!(id).map(recipe=>({namingGroupId:randomUUID(),sourceGroupKey:'next-source',collectedAt:next.createdAt,collectionBasis:'first_import',sku:'NEXT-SALE',baseSku:'NEXT-SALE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));};
+ const task=await f.service.create({productIds:[next.id],targetId:f.target.id,profileId:'alpha'});assert.equal(task.items[0].sku,'NEXT-SALE');assert.equal(f.service.list().length,2);
+});

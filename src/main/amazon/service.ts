@@ -364,7 +364,7 @@ export class AmazonService {
     const sourceIdentity=(key:string)=>key.match(/^(.*):[a-f0-9]{64}$/u)?.[1]??null;
     const sameRecipe=(d:AmazonDraft)=>!!d.salesPlan&&d.salesPlan.recipe.key===plan.recipe.key
       &&(d.salesPlan.sourceGroupKey===plan.sourceGroupKey||!!sourceIdentity(plan.sourceGroupKey)&&sourceIdentity(d.salesPlan.sourceGroupKey)===sourceIdentity(plan.sourceGroupKey));
-    const candidates=this.persistence.records().map(r=>r.draft).filter(d=>d.targetId===target.id&&d.sellerId===target.sellerId&&d.marketplaceId===target.marketplaceId&&d.mode===target.mode&&d.schema.parentageLevel!=='PARENT'
+    const candidates=this.persistence.salesCandidates(productId,plan.sku,plan.recipe.key).map(r=>r.draft).filter(d=>d.targetId===target.id&&d.sellerId===target.sellerId&&d.marketplaceId===target.marketplaceId&&d.mode===target.mode&&d.schema.parentageLevel!=='PARENT'
       &&(d.sku===plan.sku||sameRecipe(d)
         ||!d.salesPlan&&d.productId===productId&&plan.recipe.components.length===1&&d.variantId===plan.recipe.components[0].variantId&&(d.businessRules?.bundleQuantity??1)===plan.recipe.totalPieces));
     const sent=(d:AmazonDraft)=>!!d.submittedAt||['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(d.state);

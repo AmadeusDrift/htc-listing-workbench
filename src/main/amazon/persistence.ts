@@ -49,6 +49,15 @@ export class AmazonPersistence {
       : this.db.prepare('SELECT record_json FROM listing_drafts WHERE record_json IS NOT NULL').all();
     return rows.map(row => parseRecord(row.record_json));
   }
+  /** Indexed superset; service still checks seller, source, recipe and submission state. */
+  salesCandidates(productId:string,sku:string,recipeKey:string):DraftRecord[] {
+    const rows=this.db.prepare(`SELECT record_json FROM listing_drafts WHERE rowid IN (
+      SELECT rowid FROM listing_drafts WHERE json_extract(record_json,'$.draft.sku')=?
+      UNION SELECT rowid FROM listing_drafts WHERE json_extract(record_json,'$.draft.salesPlan.recipe.key')=?
+      UNION SELECT rowid FROM listing_drafts WHERE product_id=?
+    ) AND record_json IS NOT NULL ORDER BY rowid`).all(sku,recipeKey,productId);
+    return rows.map(row=>parseRecord(row.record_json));
+  }
   record(id: string): DraftRecord {
     const row = this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(id);
     if (!row?.record_json) throw new UserFacingError('上架草稿不存在或已按保留期限清理');

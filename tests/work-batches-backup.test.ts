@@ -11,10 +11,10 @@ import { archiveWorkBatch,currentWorkBatch,listWorkBatches } from '../src/main/a
 import { createInertBatchTask } from './fixtures/work-batches.ts';
 const passphrase='synthetic batch backup passphrase';
 async function fixture(t:test.TestContext){await mkdir(resolve('.test-data'),{recursive:true});const root=await mkdtemp(resolve('.test-data/work-batch-backup-'));t.after(()=>rm(root,{recursive:true,force:true}));const directory=join(root,'workspace'),store=new WorkspaceStore(directory),product=store.createProduct();store.moveWorkspaceProducts({productIds:[product.id],destination:'automatic'});store.close();return {root,directory,product,file:join(root,'snapshot.htcbackup')};}
-for(const version of [30,31,32])test(`schema${version} backup restore keeps later empty batch identity and restart numbering`,async t=>{
+for(const version of [30,31,32,33])test(`schema${version} backup restore keeps later empty batch identity and restart numbering`,async t=>{
  const f=await fixture(t);
- if(version<32){const db=new DatabaseSync(join(f.directory,'red.sqlite'));db.exec(`DROP TABLE automatic_work_batches; DELETE FROM module_migration_journal WHERE version=32; PRAGMA user_version=${version}`);if(version===30)db.exec('DROP TABLE image_retry_allowances; DELETE FROM module_migration_journal WHERE version=31');db.close();}
- if(version<32)await writeStreamingBackup(f.file,passphrase,{format:'htc-workspace-backup',version:2,source:{application:'HTC',kind:'local-workspace',databaseVersion:version},createdAt:new Date().toISOString(),retention:{amazonDays:180,logDays:365,dataOldestAt:null,expiresAt:null},files:[{path:'red.sqlite',...await hashBackupFile(join(f.directory,'red.sqlite')),role:'workspace-database'}]},()=>join(f.directory,'red.sqlite'),async()=>{});else await createWorkspaceBackup(f.directory,f.file,passphrase);
+ if(version<33){const db=new DatabaseSync(join(f.directory,'red.sqlite'));db.exec(`DROP INDEX record_drafts_sku; DROP INDEX record_drafts_recipe; DELETE FROM module_migration_journal WHERE version=33; PRAGMA user_version=${version}`);if(version<32)db.exec('DROP TABLE automatic_work_batches; DELETE FROM module_migration_journal WHERE version=32');if(version===30)db.exec('DROP TABLE image_retry_allowances; DELETE FROM module_migration_journal WHERE version=31');db.close();}
+ if(version<33)await writeStreamingBackup(f.file,passphrase,{format:'htc-workspace-backup',version:2,source:{application:'HTC',kind:'local-workspace',databaseVersion:version},createdAt:new Date().toISOString(),retention:{amazonDays:180,logDays:365,dataOldestAt:null,expiresAt:null},files:[{path:'red.sqlite',...await hashBackupFile(join(f.directory,'red.sqlite')),role:'workspace-database'}]},()=>join(f.directory,'red.sqlite'),async()=>{});else await createWorkspaceBackup(f.directory,f.file,passphrase);
  const db=openDatabase(f.directory),old=currentWorkBatch(db),next=archiveWorkBatch(db,old.id);const before=listWorkBatches(db);db.close();
  const prepared=await prepareWorkspaceRestore(f.directory,f.file,passphrase);await commitWorkspaceRestore(f.directory,prepared);
  const restored=openDatabase(f.directory);assert.deepEqual(listWorkBatches(restored),before);assert.equal(currentWorkBatch(restored).id,next.id);assert.deepEqual(currentWorkBatch(restored).productIds,[]);assert.equal(archiveWorkBatch(restored,next.id).sequence,next.sequence+1);restored.close();
@@ -57,4 +57,9 @@ for(const change of ['member','task','archive'] as const)test(`restore rechecks 
  await assert.rejects(()=>commitWorkspaceRestore(target,prepared),/序号重复|原任务身份/);
  assert.deepEqual(await readFile(join(target,'red.sqlite')),before,'rejected install must preserve live SQLite bytes');
  const check=openDatabase(target);assert.deepEqual(listWorkBatches(check),batches);check.close();store=new WorkspaceStore(target);assert.deepEqual(store.listProducts().map(p=>p.id),[product.id]);store.close();
+});
+
+test('schema33 backup rejects a sales lookup index with a forged definition',async t=>{
+ const f=await fixture(t),db=openDatabase(f.directory);db.exec("DROP INDEX record_drafts_sku; CREATE INDEX record_drafts_sku ON listing_drafts(json_extract(record_json,'$.draft.productId'))");db.close();
+ await assert.rejects(()=>createWorkspaceBackup(f.directory,f.file,passphrase),/销售身份索引/);
 });

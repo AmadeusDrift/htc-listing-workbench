@@ -178,3 +178,21 @@
 /* Short desktop windows keep a usable editor; the containing page can scroll. */
 @media (min-width: 1081px) and (max-height: 850px) { .manual-workspace .workbench-layout { min-height: 640px; flex: 0 0 auto; } }
 :root[data-theme='dark'] .sidebar { background: var(--panel-soft); }
+
+/* UI-OPT-001/004/005: the workspace owns its surface; list footers never shrink. */
+.main-shell, :root[data-theme='dark'] .main-shell, .main-content { background: var(--panel); }
+#root :is(.inbox-panel, .automatic-queue, .automation-setup, .results-panel, .ops-panel, .product-editor, .utility-panel) { border: 0; border-radius: 0; box-shadow: none; }
+.main-content > :not(.page-heading) { flex-shrink: 0; }
+.main-content[data-workspace='inbox'] { overflow: auto; }
+.main-content > .inbox-browser { flex: 1 0 auto; min-height: 440px; }
+.inbox-browser .inbox-panel { display: flex; flex-direction: column; flex: 1; min-height: 320px; overflow: visible; }
+.inbox-browser .inbox-table-viewport { flex: 1 1 0; min-height: 180px; max-height: none; }
+.inbox-browser :is(.collection-toolbar, .collection-selection, .inbox-pagination, .inbox-selection-scope, .inbox-sync-bar) { flex-shrink: 0; }
+.inbox-browser :is(.collection-toolbar, .collection-selection, .inbox-pagination), .inbox-sync-bar { padding-left: 0; padding-right: 0; }
+.inbox-sync-bar { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.inbox-selection-scope { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; padding: 8px 0 14px; font-size: 12px; color: var(--muted); }
+.inbox-pagination, .automatic-queue-footer, .ops-pagination { flex-wrap: wrap; }
+.list-page-size { display: inline-flex !important; flex-direction: row !important; align-items: center; gap: 6px; white-space: nowrap; }
+.list-page-size select { width: auto !important; min-width: 64px; min-height: 30px; padding: 4px 8px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+.workflow-notice > summary { cursor: pointer; font-weight: 600; }
+@media (max-height: 700px) { .main-content > .inbox-browser { flex: 0 0 auto; } .inbox-browser .inbox-table-viewport { flex: none; height: 280px; } }

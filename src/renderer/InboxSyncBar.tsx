@@ -1,3 +1,4 @@
+import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, FileInput, LoaderCircle, MoreHorizontal, PackageOpen, Pause, Play, RefreshCw, Settings2, X } from 'lucide-react';
 import type { MiaoshouStatus } from '../shared/miaoshou-contracts';
@@ -88,18 +89,19 @@ export function InboxSyncBar({ busy, onChanged, onOpenSettings, onImport, onExam
 }
 
 function InboxSyncDetails({ status, error, working, onClose, onAction }: { status: MiaoshouSyncStatus | null; error: string; working: boolean; onClose: () => void; onAction: (operation: () => Promise<MiaoshouSyncStatus | null>) => Promise<void> }) {
+  const [pageSize, setPageSize] = useListPageSize('inbox-sync-records');
   const [page, setPage] = useState(1), [filter, setFilter] = useState<MiaoshouSyncPageInput['filter']>('all');
   const [items, setItems] = useState<MiaoshouSyncPage | null>(null), [readError, setReadError] = useState(''), [refresh, setRefresh] = useState(0);
   useEffect(() => {
     let active = true;
     setReadError('');
-    void window.red.listMiaoshouSyncItems({ page, pageSize: 20, filter }).then(value => {
+    void window.red.listMiaoshouSyncItems({ page, pageSize, filter }).then(value => {
       if (!active) return;
       setItems(value);
       if (page > 1 && value.total <= (page - 1) * value.pageSize) setPage(Math.max(1, Math.ceil(value.total / value.pageSize)));
     }, cause => { if (active) setReadError(errorText(cause)); });
     return () => { active = false; };
-  }, [page, filter, status?.updatedAt, refresh]);
+  }, [page, pageSize, filter, status?.updatedAt, refresh]);
   const running = status?.status === 'running';
   return <InboxDialog label="同步详情" className="inbox-sync-dialog" onClose={onClose}>
     <header className="inbox-dialog-header"><div><span className="section-kicker">妙手采集箱</span><h2>同步详情</h2></div><button type="button" className="icon-button" aria-label="关闭同步详情" onClick={onClose}><X size={20} /></button></header>
@@ -112,7 +114,7 @@ function InboxSyncDetails({ status, error, working, onClose, onAction }: { statu
       {readError && <p className="inbox-inline-error" role="alert">{readError}<button type="button" className="text-button" onClick={() => setRefresh(value => value + 1)}>重试读取</button></p>}
       <div className="inbox-sync-records">{items?.items.map(item => <article key={item.remoteId}><div><strong>{item.title || '未命名商品'}</strong><small>{item.skuCount} SKU · 编号 {item.remoteId}</small>{item.error && <p className="inbox-record-error">{item.error}</p>}</div><span className={`inbox-record-state ${item.status === 'failed' ? 'failed' : ''}`}>{item.importResult === 'added' ? '已加入采集箱' : item.importResult === 'existing' ? '本地已有' : itemLabels[item.status]}</span></article>)}</div>
       {!items && !readError && <p className="inbox-muted" role="status">正在读取同步记录…</p>}{items?.total === 0 && <p className="inbox-muted">{filter === 'all' ? '暂无同步记录。' : '当前筛选下没有商品。'}</p>}
-      {!!items?.total && <nav className="inbox-pagination" aria-label="同步记录分页"><span>每页 20 件</span><div><button type="button" className="icon-button" aria-label="同步记录上一页" disabled={page <= 1} onClick={() => { setItems(null); setPage(value => value - 1); }}><ChevronLeft size={17} /></button><span>第 {page} / {Math.max(1, Math.ceil(items.total / 20))} 页</span><button type="button" className="icon-button" aria-label="同步记录下一页" disabled={page * 20 >= items.total} onClick={() => { setItems(null); setPage(value => value + 1); }}><ChevronRight size={17} /></button></div></nav>}
+      {!!items?.total && <nav className="inbox-pagination" aria-label="同步记录分页"><PageSizeSelect label="同步记录每页数量" value={pageSize} onChange={value => { setItems(null); setPageSize(value); }}/><div><button type="button" className="icon-button" aria-label="同步记录上一页" disabled={page <= 1} onClick={() => { setItems(null); setPage(value => value - 1); }}><ChevronLeft size={17} /></button><span>第 {page} / {Math.max(1, Math.ceil(items.total / pageSize))} 页</span><button type="button" className="icon-button" aria-label="同步记录下一页" disabled={page * pageSize >= items.total} onClick={() => { setItems(null); setPage(value => value + 1); }}><ChevronRight size={17} /></button></div></nav>}
     </div>
     <footer className="inbox-dialog-footer"><span className="inbox-muted">暂停后可从当前进度继续</span><div>{running ? <button type="button" className="button secondary" disabled={working} onClick={() => void onAction(() => window.red.pauseMiaoshouSync())}><Pause size={16} />暂停同步</button> : status?.status === 'paused' ? <button type="button" className="button primary" disabled={working} onClick={() => void onAction(() => window.red.syncMiaoshouInbox({ trigger: 'resume' }))}><Play size={16} />继续同步</button> : null}<button type="button" className="button secondary" disabled={working || running || !status?.failed} onClick={() => void onAction(() => window.red.syncMiaoshouInbox({ trigger: 'retry' }))}><RefreshCw size={15} />重试失败项（{status?.failed ?? 0}）</button></div></footer>
   </InboxDialog>;

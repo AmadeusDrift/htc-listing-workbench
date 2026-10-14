@@ -1,0 +1,16 @@
+import { electron } from './e2e-core-runtime.mjs';
+import { expect } from '@playwright/test';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+await mkdir('.test-data',{recursive:true});const root=await mkdtemp(resolve('.test-data/list-components-'));
+// A renderer-only component fixture, explicitly separate from the real-app test.
+const renderer=`import React from 'react';import {createRoot} from 'react-dom/client';import {AutomaticProductGroups} from '../../src/renderer/AutomaticProductGroups';
+const groups=Array.from({length:63},(_,i)=>({productId:'p'+i,title:'合成任务商品 '+i,sourceUrl:'',coverUrl:null,sourceVariantCount:0,excludedCount:0,sourceVariants:[],items:[],families:[],parentSkus:[],statusCounts:{PENDING:0,RUNNING:0,WAITING:0,DONE:0,FAILED:0,SCREENED:0},outcomeCounts:{pending:0,running:0,waiting:0,completed:0,systemRepair:0,unknown:0,unclassified:0,ruleFiltered:0,notSelected:0,profitFiltered:0,needsInput:0,submittedAwaitingReadback:0,labels:0}}));
+createRoot(document.getElementById('root')).render(<AutomaticProductGroups groups={groups} busy={false} pending={false} revision="1" onManual={()=>{throw Error('unexpected mutation')}} sourceErrors={{}} loadingSources={false}/>);`;
+await writeFile(join(root,'fixture.tsx'),renderer);await build({entryPoints:[join(root,'fixture.tsx')],bundle:true,outfile:join(root,'fixture.js'),platform:'browser',format:'iife',jsx:'automatic',logLevel:'silent'});
+await writeFile(join(root,'index.html'),'<!doctype html><meta charset="utf-8"><div id="root"></div><script src="fixture.js"></script>');
+await writeFile(join(root,'main.cjs'),`const {app,BrowserWindow,session}=require('electron');app.setPath('userData',${JSON.stringify(join(root,'profile'))});app.whenReady().then(()=>{session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_,done)=>done({cancel:true}));new BrowserWindow({show:false,webPreferences:{backgroundThrottling:false}}).loadFile(${JSON.stringify(join(root,'index.html'))})});app.on('window-all-closed',()=>app.quit());`);
+const require=createRequire(import.meta.url),env={...process.env,RED_DATA_DIR:join(root,'data'),RED_E2E:'1'};delete env.ELECTRON_RUN_AS_NODE;let app;
+try{app=await electron.launch({executablePath:require('electron'),args:[join(root,'main.cjs')],cwd:resolve('.'),env});const p=await app.firstWindow();p.setDefaultTimeout(15000);const rows=p.locator('.automatic-source-group'),size=p.getByLabel('任务商品每页数量');await expect(rows).toHaveCount(20);await p.getByRole('button',{name:'下一页',exact:true}).click();await size.selectOption('50');await expect(rows).toHaveCount(13);await size.selectOption('100');await expect(rows).toHaveCount(63);await expect(p.getByLabel('任务商品分页')).toContainText('第 1 / 1 页');await p.getByLabel('搜索任务商品或 SKU').fill('商品 62');await expect(rows).toHaveCount(1);await p.getByLabel('搜索任务商品或 SKU').fill('');await expect(rows).toHaveCount(63);await p.reload();await expect(size).toHaveValue('100');await expect(rows).toHaveCount(63);console.log('PASS renderer-only任务商品分页20/50/100、边界、搜索、独立偏好持久化');}finally{if(app)await app.close();}

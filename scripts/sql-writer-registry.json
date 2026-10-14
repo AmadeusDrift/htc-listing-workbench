@@ -1090,6 +1090,12 @@
       "command": "sourceProductUrl",
       "expression": "url.pathname",
       "review": "Non-SQL prepare or RegExp.exec, reviewed receiver; no DatabaseSync write."
+    },
+    {
+      "file": "main/ai-network.ts",
+      "command": "sanitizeProxyRoute",
+      "expression": "entry",
+      "review": "Reviewed RegExp.exec on a proxy-rule token; literal regexp receiver, no database access or SQL execution."
     }
   ],
   "tableSets": [

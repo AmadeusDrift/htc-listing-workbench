@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
+import type { RunReportContext } from '../../shared/run-report-contracts.ts';
 import type { Stats } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -13,6 +15,20 @@ export interface DiagnosticContext {
   appVersion: string;
   runtime: { nodeMajor: number; electronMajor: number };
   services: DiagnosticServices;
+}
+/** Packaged provenance is a reported build identity, not an on-demand binary verification. */
+export function readRunReportBuildContext(appVersion: string, appPath: string): RunReportContext {
+  const context: RunReportContext = { appVersion };
+  try {
+    const path = resolve(appPath, '..', '..', '版本与摘要.json'), stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 4*1024*1024) return context;
+    const manifest = JSON.parse(readFileSync(path, 'utf8'));
+    if (manifest.schema !== 'htc-package/v1') return context;
+    if (/^[a-f0-9]{40}$/.test(manifest.source?.commit ?? '')) context.sourceCommit = manifest.source.commit;
+    if (/^[a-f0-9]{64}$/.test(manifest.source?.sourceDigest ?? '')) context.sourceDigest = manifest.source.sourceDigest;
+    if (manifest.build?.schema === 'htc-build/v1' && manifest.build.sourceCommit === context.sourceCommit) context.buildDigest = createHash('sha256').update(JSON.stringify(manifest.build)).digest('hex');
+  } catch { /* Dev/legacy packages explicitly report missing build source. */ }
+  return context;
 }
 const tables = { products: 'products', assets: 'assets', aiCalls: 'ai_calls', aiResults: 'ai_results', imageVersions: 'image_versions', imageSelections: 'image_selections', contentVersions: 'content_versions', imageWriteOperations: 'image_write_operations', usageLedger: 'ai_usage_ledger' } as const;
 const uuid = (raw: unknown): string | null => typeof raw === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw) ? raw : null;

@@ -38,6 +38,10 @@ test('transport evidence rejects accessor properties without invoking them', () 
   Object.defineProperty(event, 'at', { enumerable: true, get() { reads++; return at; } });
   assert.throws(() => implementation!.validateTransportRunEvidence(event)); assert.equal(reads, 0);
 });
+test('evidence accepts the existing automatic-task custom SKU length contract', () => {
+  const sku = '自定义 '.repeat(30);
+  assert.equal(implementation!.validateRunEvidence({ version: 1, at, event: 'STAGE_STARTED', stage: 'fields', sku }).sku, sku);
+});
 test('real AiService reservation, receipt and parsed result retain exact task scope without claiming adoption', async t => {
   const f = await fixture(t), taskId = randomUUID(), rowKey = f.product.id+':'+f.product.variants[0].id;
   const result = await taskAiContext.run({ taskId, rowKey, phase: 'fields', mode: 'immediate', authorize: () => true }, () => f.listing.suggest(f.reference));
@@ -73,4 +77,14 @@ test('post-dispatch failed audit preserves original safe error, call identity an
   // Existing adapter maps a rejected fetch to NETWORK_ERROR. Audit must not replace it.
   const call = f.ai.listCalls().at(-1)!; assert.equal(caught.code, 'NETWORK_ERROR'); assert.equal(caught.callId, call.id);
   assert.equal(call.errorCode, 'NETWORK_ERROR'); assert.equal(f.ai.getUsageSummary(call.providerId).unknownCalls, 1); assert.equal(f.requests.length, 1);
+});
+test('actual field adoption records adopted separately on the draft transaction connection', async t => {
+  const f = await fixture(t), taskId = randomUUID(), itemKey = f.product.id+':'+f.product.variants[0].id;
+  const scope = { taskId, rowKey: itemKey, phase: 'fields', mode: 'immediate' as const, authorize: () => true };
+  const suggestion = await taskAiContext.run(scope, () => f.listing.suggest(f.reference));
+  const review = await taskAiContext.run(scope, () => f.listing.review({ ...f.reference, suggestionResultId: suggestion.id }));
+  const draft = await taskAiContext.run(scope, () => f.listing.adopt({ ...f.reference, suggestionResultId: suggestion.id, reviewResultId: review.id, fields: suggestion.output.kind === 'amazon-fields' ? suggestion.output.candidates.map(c => c.field) : [] }));
+  const events = (f.ai as any).db.prepare("SELECT detail_json FROM audit_events WHERE action='run.evidence'").all().map((r: any) => JSON.parse(r.detail_json));
+  assert.ok(events.some((e: any) => e.event === 'RESULT_ADOPTED' && e.callId === suggestion.callId && e.taskId === taskId && e.itemKey === itemKey && e.draftId === draft.id));
+  assert.equal(draft.fieldAdoptions?.length, 1); assert.equal(f.requests.length, 2);
 });

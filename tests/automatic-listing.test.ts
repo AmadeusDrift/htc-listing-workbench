@@ -1656,6 +1656,26 @@ test('global procurement scan failure aborts observation once without reclassify
  await assert.rejects(()=>f.service.refreshWaiting(),/global candidate failure/);assert.equal(scans,1);assert.deepEqual(f.service.get(task.id),before);
 });
 
+for(const stop of ['pause','suspend','close'] as const)test(`background procurement scan stops safely on ${stop} and stays single-flight`,async t=>{
+ const f=fixture(t,'live'),task=await f.create(),saved=(f.service as any).tasks.get(task.id);saved.status='WAITING';
+ saved.items[0].draftId=randomUUID();saved.items[0].stage='READBACK';saved.items[0].status='WAITING';
+ let scans=0,stopped:ReturnType<typeof f.service.get>|undefined,closing:Promise<void>|undefined;
+ f.dependencies.procurement.candidates=()=>{throw Error('background observer must use cooperative projection');};
+ f.dependencies.procurement.candidatesForObservation=async canContinue=>{
+   scans++;assert.equal(canContinue!(),true);
+   await new Promise<void>(resolve=>setImmediate(()=>{
+     if(stop==='pause')stopped=f.service.pause(task.id);
+     else if(stop==='suspend')f.service.suspendScheduling();
+     else closing=f.service.close();
+     resolve();
+   }));
+   assert.equal(canContinue!(),false);return null;
+ };
+ const pending=f.service.refreshWaiting();assert.equal(f.service.refreshWaiting(),pending);
+ await pending;await closing;assert.equal(scans,1);assert.equal(f.calls.batches,0);assert.equal(f.calls.labels,0);
+ if(stopped)assert.deepEqual(f.service.get(task.id),stopped);
+});
+
 
 test('UI adaptation yields to pending input and keeps the exact synchronous proof',async t=>{
  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);

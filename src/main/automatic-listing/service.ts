@@ -75,7 +75,7 @@ export interface AutomaticListingDependencies {
   };
   execution: Pick<ExecutionService, 'create' | 'prepareStart' | 'startAuthorized' | 'get' | 'list' | 'pause' | 'cancel' | 'waitForIdle'>;
   followup: Pick<FollowupService, 'get' | 'schedule'>;
-  procurement: Pick<ProcurementService, 'candidates' | 'ensureAutomaticBatch'>;
+  procurement: Pick<ProcurementService, 'candidates' | 'ensureAutomaticBatch'> & Partial<Pick<ProcurementService, 'candidatesForObservation'>>;
   labels: Pick<ItemLabelService, 'syncBatch' | 'list'> & Partial<Pick<ItemLabelService, 'pauseJob' | 'resumeJob' | 'cancelJob'>>;
   labelFormat?(): ItemLabelFormat;
   /** Main-only final field repair + re-review of the existing image; never generates another image. */
@@ -1092,7 +1092,16 @@ export class AutomaticListingService {
       const needsCandidates = [...this.tasks.values()].some(task => !this.confirming.has(task.id)
         && ['WAITING', 'NEEDS_ATTENTION'].includes(task.status)
         && task.items.some(row => row.draftId && row.status !== 'DONE' && ['READBACK', 'LABELS'].includes(row.stage)));
-      const candidates = new Map((needsCandidates ? this.deps.procurement.candidates() : []).map(value => [value.draftId, value]));
+      const versions = [...this.tasks.values()].map(task => ({ id: task.id, revision: task.revision, status: task.status, confirming: this.confirming.has(task.id) }));
+      const scanCurrent = () => !this.closed && !this.closing && !this.schedulingSuspended
+        && versions.length === this.tasks.size && versions.every(before => {
+          const task = this.tasks.get(before.id);
+          return task?.revision === before.revision && task.status === before.status && this.confirming.has(before.id) === before.confirming;
+        });
+      const candidateRows = !needsCandidates ? [] : this.deps.procurement.candidatesForObservation
+        ? await this.deps.procurement.candidatesForObservation(scanCurrent) : this.deps.procurement.candidates();
+      if (candidateRows === null || !scanCurrent()) return;
+      const candidates = new Map(candidateRows.map(value => [value.draftId, value]));
       for (const task of this.tasks.values()) {
         const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
         if (!canObserve()) continue;

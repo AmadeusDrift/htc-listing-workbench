@@ -1,5 +1,6 @@
 import { appendAuditEvent } from '../storage/audit.ts';
 import { createHash, randomUUID } from 'node:crypto';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AmazonService } from '../amazon/service.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
@@ -61,25 +62,46 @@ export class ProcurementService {
       currency: draft.salesPlan?.recipe.totalCostCny!==undefined && draft.salesPlan.recipe.totalCostCny!==null ? 'CNY' : receipt?.mapping.currency ?? 'unknown', asin: observation?.asin ?? null, fnsku: observation?.fnsku ?? null, checkedAt: observation?.checkedAt ?? null,
       eligible: !reason, requiresAttention, reason: reason || (draft.mode === 'demo' ? '本地演示建档结果' : '平台建档已确认；入库资格需在发／补货时确认') };
   }
-  candidates(): ProcurementCandidate[] {
+  private *candidateSteps(): Generator<void, ProcurementCandidate[]> {
     const newest = new Map<string, AmazonDraft>();
-    for (const product of this.store.listProducts()) for (const draft of this.amazon.listDrafts(product.id)) {
-      const key = JSON.stringify([draft.mode,draft.targetId,draft.sellerId,draft.marketplaceId,draft.sku]), prior = newest.get(key);
-      const attempted = (item: AmazonDraft) => Boolean(item.submittedAt || ['UNKNOWN','SUBMITTING'].includes(item.state));
-      if (!prior || attempted(draft) && !attempted(prior) || attempted(draft) === attempted(prior) && (draft.submittedAt ?? draft.updatedAt) > (prior.submittedAt ?? prior.updatedAt)) newest.set(key, draft);
+    for (const product of this.store.listProducts()) {
+      yield;
+      for (const draft of this.amazon.listDrafts(product.id)) {
+        const key = JSON.stringify([draft.mode,draft.targetId,draft.sellerId,draft.marketplaceId,draft.sku]), prior = newest.get(key);
+        const attempted = (item: AmazonDraft) => Boolean(item.submittedAt || ['UNKNOWN','SUBMITTING'].includes(item.state));
+        if (!prior || attempted(draft) && !attempted(prior) || attempted(draft) === attempted(prior) && (draft.submittedAt ?? draft.updatedAt) > (prior.submittedAt ?? prior.updatedAt)) newest.set(key, draft);
+      }
     }
     // A read-only view must not run getProduct's image-history attribution repair.
-    // Share source reads within this synchronous sweep only; later polls see edits.
+    // Share source reads within this sweep only; later polls see edits.
     const sources = new Map<string, { product: ProductDetail; receipt: ReturnType<typeof getReceipt> }>();
-    return [...newest.values()].map(draft => {
+    const candidates: ProcurementCandidate[] = [];
+    for (const draft of newest.values()) {
+      yield;
       let source = sources.get(draft.productId);
       if (!source) {
         const product = this.store.getProductSnapshot(draft.productId);
         source = { product, receipt: getReceipt(this.db, product.id) };
         sources.set(draft.productId, source);
       }
-      return this.candidate(draft, source.product, source.receipt);
-    });
+      candidates.push(this.candidate(draft, source.product, source.receipt));
+    }
+    return candidates;
+  }
+  candidates(): ProcurementCandidate[] {
+    const steps = this.candidateSteps(); let next = steps.next();
+    while (!next.done) next = steps.next();
+    return next.value;
+  }
+  /** Background observation only. Commands still recalculate candidates synchronously. */
+  async candidatesForObservation(shouldContinue: () => boolean = () => true): Promise<ProcurementCandidate[] | null> {
+    const steps = this.candidateSteps();
+    for (;;) {
+      await yieldToEventLoop();
+      if (!shouldContinue()) return null;
+      const next = steps.next();
+      if (next.done) return next.value;
+    }
   }
   list(): ProcurementBatchSummary[] {
     return this.db.prepare('SELECT id,record_json FROM procurement_batches ORDER BY rowid DESC').all().map(row => {

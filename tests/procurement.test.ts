@@ -64,6 +64,24 @@ test('candidate sweep shares a product snapshot across SKUs but refreshes it for
   } finally {service.close();}
 });
 
+test('background candidate projection yields between reads and matches the complete synchronous view', async () => {
+  const f=fixture(),service=new ProcurementService(f.dir,f.store,f.amazon);let reading=true;
+  try {
+    const expected=service.candidates();let heartbeats=0;
+    const beat=()=>{heartbeats++;if(reading)setImmediate(beat);};setImmediate(beat);
+    const actual=await service.candidatesForObservation();reading=false;
+    assert.deepEqual(actual,expected);assert.ok(heartbeats>=2,'input runs between product and candidate reads');
+  } finally {reading=false;service.close();}
+});
+
+test('cancelled background candidate projection returns no partial view and performs no later reads', async () => {
+  const f=fixture();let allowed=true,sourceReads=0;
+  const service=new ProcurementService(f.dir,{...f.store,getProductSnapshot:()=>{sourceReads++;return f.product;}},
+    {...f.amazon,listDrafts:()=>{allowed=false;return [f.draft];}});
+  try {assert.equal(await service.candidatesForObservation(()=>allowed),null);assert.equal(sourceReads,0);}
+  finally {service.close();}
+});
+
 test('manual price changes invalidate confirmation and retain the previous procurement revision', () => {
   const f=fixture(),service=new ProcurementService(f.dir,f.store,f.amazon);
   try {

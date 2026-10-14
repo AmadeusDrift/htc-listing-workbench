@@ -955,7 +955,7 @@ export class AiService {
           deferOpenRouter:async(endpoint,body)=>{
             if(!taskScope||endpoint!=='/api/v1/chat/completions'||profile.routing?.gateway!=='openrouter')return null;
             const {model,provider,stream,...ordinaryBody}=body;let requestBody=ordinaryBody,references:BatchReference[]=[];
-            if(stream!==false||JSON.stringify(provider)!==JSON.stringify({allow_fallbacks:true,require_parameters:true}))return null;
+            if(stream!==false||JSON.stringify(provider)!==JSON.stringify({allow_fallbacks:true,require_parameters:true}))throw new AiError('INVALID_CONFIG');
             if(model!==profile.model)throw new AiError('CONFIG_CHANGED');
             const existingBatch=this.batchTasks.find(batchOperationId)??this.batchTasks.pendingOperation(batchOperationId);
             if(existingBatch){requestBody=existingBatch.body;references=existingBatch.references;}

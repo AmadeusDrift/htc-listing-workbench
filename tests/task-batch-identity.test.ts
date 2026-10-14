@@ -47,12 +47,54 @@ for(const changed of ['task','row','phase','waiting','model','key','input','rese
  assert.deepEqual(f.counts(),{posts:1,gets:1});assert.equal(f.history(),before);assert.equal(f.ai.listResults(f.product.id).length,0);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);
 });
 
-for(const foreign of ['task','row','grant'] as const)test(`concurrent foreign ${foreign} cannot join original Batch result adoption`,async t=>{
+for(const foreign of ['task','row','grant','credential'] as const)test(`concurrent foreign ${foreign} cannot join original Batch result adoption`,async t=>{
  const f=await batchFixture(t);await f.stage();await f.ai.batchTasks.reconcile(f.scope.taskId);
  const own=f.ai.batchTasks.run(f.scope,()=>f.listing.suggest(f.reference));
- const scope={...f.scope,...(foreign==='task'?{taskId:randomUUID()}:foreign==='row'?{rowKey:f.product.id+':'+randomUUID()}:{authorize:()=>false})};
- const rejected=assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),(error:any)=>foreign==='grant'?error.name==='BatchWaitingError':error.code==='INTERRUPTED');
+ const scope={...f.scope,...(foreign==='task'?{taskId:randomUUID()}:foreign==='row'?{rowKey:f.product.id+':'+randomUUID()}:foreign==='credential'?{credentialScope:'f'.repeat(64)}:{authorize:()=>false})};
+ const rejected=assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),(error:any)=>foreign==='grant'?error.name==='BatchWaitingError':error.code===(foreign==='credential'?'CONFIG_CHANGED':'INTERRUPTED'));
  const result=await own;await rejected;assert.equal(result.callId,f.scope.waitingOperationId);assert.deepEqual(f.counts(),{posts:1,gets:1});assert.equal(f.ai.listResults(f.product.id).length,1);
+});
+
+for(const changed of ['mode','explicit-grant'] as const)test(`concurrent valid ${changed} contexts recover one original Batch result and one fee`,async t=>{
+ const f=await batchFixture(t);await f.stage();await f.ai.batchTasks.reconcile(f.scope.taskId);
+ const changedScope={...f.scope,...(changed==='mode'?{mode:'immediate' as const}:{explicitContinueAt:'2099-01-01T00:00:00.000Z'})};
+ const results=await Promise.all([f.ai.batchTasks.run(f.scope,()=>f.listing.suggest(f.reference)),f.ai.batchTasks.run(changedScope,()=>f.listing.suggest(f.reference))]);
+ assert.equal(results[0].id,results[1].id);assert.equal(results[0].callId,f.scope.waitingOperationId);assert.equal(f.ai.listResults(f.product.id).length,1);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);assert.deepEqual(f.counts(),{posts:1,gets:1});assertBatchHistory((f.ai as any).db);
+});
+
+test('a deferred scope cannot borrow an in-flight immediate result',async t=>{
+ const f=await fixture(t),context=(f.ai as any).context,original=context.fetch;let release!:()=>void,started!:()=>void;const sent=new Promise<void>(r=>{started=r;}),held=new Promise<void>(r=>{release=r;});let posts=0;
+ context.fetch=async(...args:any[])=>{posts++;started();await held;return original(...args);};
+ const scope={taskId:randomUUID(),rowKey:f.product.id+':'+f.draft.variantId,phase:'fields',mode:'immediate' as 'immediate'|'deferred_batch',authorize:()=>true};
+ const own=f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));await sent;const originalCall=f.ai.listCalls()[0];
+ const other=assert.rejects(f.ai.batchTasks.run({...scope,mode:'deferred_batch'},()=>f.listing.suggest(f.reference)),(error:any)=>error.code==='INTERRUPTED'&&error.callId===originalCall.id);
+ release();const result=await own;await other;assert.equal(result.callId,originalCall.id);assert.equal(posts,1);assert.equal(f.ai.listCalls().length,1);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);
+});
+
+for(const completed of [false,true])test(`revoked immediate scope cannot send ${completed?'after an earlier success':'a new paid request'}`,async t=>{
+ const f=await fixture(t);let authorized=true;
+ const scope={taskId:randomUUID(),rowKey:f.product.id+':'+f.draft.variantId,phase:'fields',mode:'immediate' as const,authorize:()=>authorized};
+ if(completed)await f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));
+ const calls=JSON.stringify(f.ai.listCalls()),results=JSON.stringify(f.ai.listResults(f.product.id)),usage=JSON.stringify(f.ai.getUsageSummary('deepseek'));authorized=false;
+ await assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),(error:any)=>error.code==='CANCELLED'&&error.certainty==='NOT_SENT');
+ assert.equal(f.requests.length,completed?1:0);assert.equal(JSON.stringify(f.ai.listCalls()),calls);assert.equal(JSON.stringify(f.ai.listResults(f.product.id)),results);assert.equal(JSON.stringify(f.ai.getUsageSummary('deepseek')),usage);
+});
+
+test('revocation during preparation is rechecked before the ordinary reservation',async t=>{
+ const f=await fixture(t);let authorized=true;const context=f.listing.currentContext(f.draft,f.product,f.amazon.executionTargetScope(f.draft.targetId).generation);
+ const scope={taskId:randomUUID(),rowKey:f.product.id+':'+f.draft.variantId,phase:'fields',mode:'immediate' as const,authorize:()=>authorized};
+ await assert.rejects(f.ai.batchTasks.run(scope,()=>f.ai.listingFields(context,async()=>{authorized=false;})),(error:any)=>error.code==='CANCELLED'&&error.certainty==='NOT_SENT');
+ assert.equal(f.requests.length,0);assert.equal(f.ai.listCalls().length,0);assert.equal(f.ai.getUsageSummary('deepseek').attempts,0);
+});
+
+test('revoked after send retains the original receipt and fee without adopting a result',async t=>{
+ const f=await fixture(t),context=(f.ai as any).context,original=context.fetch;let authorized=true,release!:()=>void,started!:()=>void;const sent=new Promise<void>(r=>{started=r;}),held=new Promise<void>(r=>{release=r;});let posts=0;
+ context.fetch=async(...args:any[])=>{posts++;started();await held;return original(...args);};
+ const scope={taskId:randomUUID(),rowKey:f.product.id+':'+f.draft.variantId,phase:'fields',mode:'immediate' as const,authorize:()=>authorized};
+ const pending=f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),rejected=assert.rejects(pending,{code:'CANCELLED'});await sent;authorized=false;release();await rejected;
+ const call=f.ai.listCalls()[0],raw=JSON.stringify(call),receipt=JSON.stringify(await f.ai.readProviderReceipt(call.id)),usage=JSON.stringify(f.ai.getUsageSummary('deepseek'));assert.notEqual(receipt,'null');assert.equal(f.ai.listResults(f.product.id).length,0);
+ await assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),{code:'CANCELLED'});authorized=true;
+ const recovered=await f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));assert.equal(recovered.callId,call.id);assert.ok(recovered.providerReceiptRecovery);assert.equal(posts,1);assert.equal(JSON.stringify(f.ai.getCall(call.id)),raw);assert.equal(JSON.stringify(await f.ai.readProviderReceipt(call.id)),receipt);assert.equal(JSON.stringify(f.ai.getUsageSummary('deepseek')),usage);
 });
 
 test('revoked adoption retains original Batch and later explicit immediate recovery adopts once',async t=>{

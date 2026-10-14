@@ -14,6 +14,7 @@ import {deterministicFieldCorrections} from './correction-rules.ts';
 import {resolveSchemaNode} from './field-catalog.ts';
 
 export const correctionHash=(v:unknown)=>createHash('sha256').update(semanticJson(v as JsonValue)).digest('hex');
+const matchingField=(left:JsonObject,right:JsonObject,field:string)=>Object.hasOwn(left,field)===Object.hasOwn(right,field)&&(!Object.hasOwn(left,field)||correctionHash(left[field])===correctionHash(right[field]));
 function fail(message:string):never {throw new UserFacingError(message);}
 const readableIssues=(value:unknown)=>Array.isArray(value)&&value.every(i=>isObject(i)&&typeof i.code==='string'&&!!i.code.trim()&&typeof i.message==='string'&&!!i.message.trim()&&['ERROR','WARNING','INFO'].includes(String(i.severity)));
 const stamp=(r:DraftRecord)=>correctionHash({id:r.draft.id,revision:r.draft.revision,productId:r.draft.productId,variantId:r.draft.variantId,sku:r.draft.sku,sellerId:r.draft.sellerId,marketplaceId:r.draft.marketplaceId,targetId:r.draft.targetId,attributes:r.draft.attributes,schema:r.draft.schema,submittedAt:r.draft.submittedAt,submissionId:r.draft.submissionId,submitResponse:r.submitResponse,request:r.request});
@@ -82,18 +83,20 @@ export class ListingCorrections {
    const accepted=r.exchanges?.findLast(e=>e.operation==='submit'&&e.response?.status==='ACCEPTED'&&e.response?.submissionId===d.submissionId&&e.response?.sku===d.sku),submitted=accepted?.request??r.request;
    if(submitted.productType!==c.productType||!isObject(submitted.attributes)||correctionHash(submitted.attributes)!==correctionHash(d.attributes))fail('原可信提交请求或原草稿不一致');
    const trustedFacts=structuredClone(submitted.attributes);
-   for(const old of [...prior].reverse())if(old.response?.status==='ACCEPTED'&&isObject(old.readback?.attributes)&&old.draftStamp===c.draftStamp){
-    for(const field of old.scope??[])if(correctionHash(old.readback!.attributes[field])===correctionHash(old.after[field])&&correctionHash(before[field])===correctionHash(old.after[field]))trustedFacts[field]=old.after[field];
+   for(const old of [...prior].reverse())if(old.state==='VERIFIED'&&old.response?.status==='ACCEPTED'&&old.response.sku===c.sku&&old.listingHash===c.listingHash&&isObject(old.readback?.attributes)&&old.draftStamp===c.draftStamp){
+    for(const field of old.scope??['package_contains_sku'])if(matchingField(old.readback!.attributes as JsonObject,old.after,field)&&matchingField(before,old.after,field)){
+     if(Object.hasOwn(old.after,field))trustedFacts[field]=structuredClone(old.after[field]);else delete trustedFacts[field];
+    }
    }
    let after:JsonObject,originalAfter:JsonObject,patches:JsonObject[];
    const edges=before.package_contains_sku,selfEdge=Array.isArray(edges)&&edges.some(e=>isObject(e)&&e.sku===c.sku);
    if(selfEdge){
-    if(correctionHash(submitted.attributes.package_contains_sku)!==correctionHash(before.package_contains_sku))fail('远端目标关系与原可信提交不一致');
-    const change=selfPackageDeletion(before,c.sku,c.marketplaceId,schema);after=change.after;patches=[change.patch];originalAfter=selfPackageDeletion(submitted.attributes,c.sku,c.marketplaceId,schema).after;
+    if(!matchingField(submitted.attributes,before,'package_contains_sku'))fail('远端目标关系与原可信提交不一致');
+    const change=selfPackageDeletion(before,c.sku,c.marketplaceId,schema);after=change.after;patches=[change.patch];originalAfter=selfPackageDeletion(trustedFacts,c.sku,c.marketplaceId,schema).after;
     c.scope=['package_contains_sku'];c.evidence=['已核实独立 SKU + 原可信提交与远端一致的包装自引用'];
    }else{
     let change:ReturnType<typeof deterministicFieldCorrections>;try{change=deterministicFieldCorrections(before,trustedFacts,schema,remote.issues??[]);}catch(error){fail((error instanceof Error?error.message:'需人工核对')+'；平台回读：'+JSON.stringify(remote.issues??[]).slice(0,1800));}after=change.after;patches=change.patches;c.scope=change.fields;c.evidence=change.evidence;
-    originalAfter=structuredClone(submitted.attributes);for(const field of change.fields)originalAfter[field]=after[field];
+    originalAfter=structuredClone(trustedFacts);for(const field of change.fields)originalAfter[field]=after[field];
    }
    c.correctionVersion=2;c.problemKey=correctionHash([...c.scope].sort());
    const issues=validateAttributes(schema.schema,originalAfter,schema.metaSchema);
@@ -116,7 +119,7 @@ export class ListingCorrections {
    if(c.state!=='READY')return c;
    c=await this.send({id:c.id,revision:c.revision,patchHash:c.patchHash},true);
    if(['ACCEPTED','UNKNOWN'].includes(c.state))c=await this.readback({id:c.id,revision:c.revision,patchHash:c.patchHash});
-   if(c.state!=='REJECTED'||!c.response||(c.round??1)>=2)return c;
+   if(c.state!=='REJECTED'||c.response?.status!=='INVALID'||c.response.sku!==c.sku||!readableIssues(c.response.issues)||!Array.isArray(c.response.issues)||!c.response.issues.some(i=>isObject(i)&&i.severity==='ERROR')||(c.round??1)>=2)return c;
    let next:ListingCorrection;
    try{next=await this.prepare({id:c.draftId,revision:c.draftRevision});}
    catch(error){return this.state(c,c.state,c.message+'；停止自动接续：'+(error instanceof Error?error.message:'无法准备可靠修正'));}
@@ -158,9 +161,9 @@ export class ListingCorrections {
    if(['VERIFIED','REJECTED'].includes(state))this.p.db.prepare("DELETE FROM amazon_write_locks WHERE listing_hash=? AND owner_kind='correction' AND owner_id=?").run(c.listingHash,c.id);else this.p.db.prepare("UPDATE amazon_write_locks SET state=? WHERE listing_hash=? AND owner_kind='correction' AND owner_id=?").run(state,c.listingHash,c.id);return structuredClone(c);});}
  async readback(raw:unknown){const c=this.reference(raw);if(!['ACCEPTED','UNKNOWN'].includes(c.state))fail('此案尚未发送或不需要继续核对');if(this.busy.has(c.listingHash))fail('修正正在处理中');this.busy.add(c.listingHash);try{const remote=await this.remote(c,true);this.reference(raw);c.readback=remote;c.remainingIssues=Array.isArray(remote.issues)?remote.issues:[];
    const relevantError=c.remainingIssues.some(i=>isObject(i)&&i.severity==='ERROR'&&Array.isArray(i.attributeNames)&&i.attributeNames.some(field=>(c.scope??['package_contains_sku']).includes(String(field))));
-   if(c.state==='ACCEPTED'&&relevantError)return this.finish(c,'REJECTED','平台回读仍明确拒绝本次范围；本轮结果已保留。最多两轮，有实质变化才可准备下一轮；不能自动处理请人工核对具体错误');
+   if(c.state==='ACCEPTED'&&relevantError)return this.finish(c,'ACCEPTED','仍在等待本轮修正处理结果；回读问题可能来自原提交，未证实本轮失败。保留 ACCEPTED 写锁继续核对，不发送第二轮');
    if(c.scope&&c.scope.some(field=>field!=='package_contains_sku')){
-    const attributes=remote.attributes as JsonObject,matched=c.scope.every(field=>correctionHash(attributes[field])===correctionHash(c.after[field]));
+    const attributes=remote.attributes as JsonObject,matched=c.scope.every(field=>matchingField(attributes,c.after,field));
     if(c.state==='UNKNOWN')return this.finish(c,'UNKNOWN',matched?'目标字段已匹配，但发送结果仍未知；保留写锁，禁止重发':'字段仍未匹配；发送结果未知，保留写锁');
     return this.finish(c,matched?'VERIFIED':'ACCEPTED',matched?'已核实范围内字段匹配；其他平台问题保留，不代表可售':'目标字段尚未匹配，保留写锁，请稍后核对');
    }

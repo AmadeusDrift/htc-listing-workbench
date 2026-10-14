@@ -810,7 +810,7 @@ export class AiService {
     if (repair && !prior) throw new AiError('SOURCE_CHANGED');
     {
       const requestHash=listingFingerprint({context,repair:repair??null});
-      const calls=this.listCalls().filter(call=>call.presentationContext?.sourceSha256===listingFingerprint(context)&&call.presentationContext?.workflowId===workflowId&&(call.purposeSnapshot?['image_plan','image_plan_repair'].includes(call.purposeSnapshot.purposeId):isGenerationProvider(call.providerId)&&call.model==='deepseek-flash')).sort((a,b)=>b.startedAt.localeCompare(a.startedAt));
+      const calls=this.listCalls().filter(call=>call.presentationContext?.sourceSha256===listingFingerprint(context)&&call.presentationContext?.workflowId===workflowId&&isGenerationProvider(call.providerId)&&(call.presentationContext?.imagePlanRequestSha256!==undefined||(call.purposeSnapshot?['image_plan','image_plan_repair'].includes(call.purposeSnapshot.purposeId):call.model==='deepseek-flash'))).sort((a,b)=>b.startedAt.localeCompare(a.startedAt));
       const call=calls.find(call=>call.presentationContext?.imagePlanRequestSha256===requestHash||!repair&&call.presentationContext?.imagePlanRequestSha256===undefined);
       if(call?.status==='SUCCEEDED'){
         const refusal=this.listResults(call.productId).find(result=>result.callId===call.id&&result.output.kind==='image-plan'&&(result.output.productUnderstanding?.sufficient===false||!!workflowId&&call.presentationContext?.imagePlanRequestSha256===requestHash)&&result.sourceSha256===listingFingerprint(context));

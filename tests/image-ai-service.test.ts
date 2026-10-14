@@ -1826,3 +1826,30 @@ test('unknown image planning Batch keeps the exact waiting identity and adopts i
  await assert.rejects(plan,{name:'BatchWaitingError'});assert.equal(posts,1);await runtime.reconcile(taskId);
  const result=await plan();assert.equal(result.output.kind,'image-plan');assert.equal(result.callId,scope.waitingOperationId);assert.equal(posts,1);
 });
+
+for(const provider of ['deepseek','openrouter'] as const)test(`legacy non-flash ${provider} planning hash protects an unknown request without purpose snapshot`,async t=>{
+ const f=await fixture(t),workflowId=randomUUID();
+ if(provider==='openrouter'){
+  f.ai.saveConnection({id:'openrouter',apiKey:'offline-legacy-plan-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+  const p=f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_plan')!;f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ }
+ const saved=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),call={...f.ai.getCall(saved.callId)!,status:'FAILED' as const,errorCode:'NETWORK_ERROR' as const};
+ delete call.purposeSnapshot;delete call.purposeAssignments;if(provider==='deepseek')call.model='deepseek-v4-pro';assert.ok(call.presentationContext?.imagePlanRequestSha256);
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');assert.equal(f.requests.length,before);
+});
+
+test('empty retained planning diagnostic is not confirmed failure evidence',async t=>{
+ const f=await fixture(t),workflowId=randomUUID(),saved=await f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),call={...f.ai.getCall(saved.callId)!,status:'FAILED' as const,errorCode:'OUTPUT_INVALID' as const};delete call.responseReceived;
+ const db=openDatabase(f.directory);try{db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);db.prepare('DELETE FROM ai_results WHERE id=?').run(saved.id);}finally{db.close();}
+ const {recordInvalidAiOutput}=await import('../src/main/ai/output-diagnostics.ts');recordInvalidAiOutput(f.directory,{call,operation:'image-plan',createdAt:call.finishedAt!,rejectionStage:'provider-response-validation',rejectionReason:'RESPONSE_JSON_INVALID',output:''});
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');assert.equal(f.requests.length,before);
+});
+
+for(const body of ['missing','empty','interrupted'] as const)test(`planning ${body} response body never authorizes another POST`,async t=>{
+ const f=await fixture(t),workflowId=randomUUID();
+ f.respond(operation=>operation!=='image-plan'?undefined:body==='missing'?new Response(null):body==='empty'?new Response(''):new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"choices":['));},pull(controller){controller.error(new Error('Synthetic stream interruption'));}})));
+ const before=f.requests.length;await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');
+ assert.equal(f.requests.length,before+1);const call=f.ai.listCalls().find(c=>c.errorCode==='OUTPUT_INVALID')!;assert.equal(call.responseReceived,undefined);
+ await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),(error:any)=>error.callId===call.id&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN');assert.equal(f.requests.length,before+1);
+});

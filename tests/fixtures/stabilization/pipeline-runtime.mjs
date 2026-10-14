@@ -84,7 +84,7 @@ export async function launchElectron({policy,guardFile,entry}){
     // Playwright 1.63 uses cmd.exe as the process handle on Windows. The actual
     // Electron identity above is read from its guarded main, not that wrapper PID.
     const processHandle=app.process();
-    let stopped=false;return {report,async probeRejection(){const rejected=await app.evaluate(async({net,session,BrowserWindow},origin)=>{
+    let stopped=false;return {report,async probeProtocol(){assert.equal(report.protocolOnly,true,'S10_PROTOCOL_ONLY_ENTRY_REQUIRED');return app.evaluate(()=>globalThis.__s10RunNativeProtocol());},async probeRejection(){const rejected=await app.evaluate(async({net,session,BrowserWindow},origin)=>{
       let nativeRejected=0;const attempts=[()=>net.fetch('https://outside.invalid/'),()=>net.fetch('http://127.0.0.1:1/foundation'),()=>net.request(origin+'/foundation'),()=>session.defaultSession.fetch('https://outside.invalid/'),()=>globalThis.__s10Guard.require('node:net').connect(Number(new URL(origin).port),'127.0.0.1')];
       for(const attempt of attempts){try{await attempt();throw Error('S10_GUARD_ESCAPED');}catch(error){if(!String(error).includes('S10_NETWORK_BLOCKED'))throw error;nativeRejected++;}}
       const before=globalThis.__s10Guard.blocked.length;

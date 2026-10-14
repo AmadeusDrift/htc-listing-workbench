@@ -1,3 +1,4 @@
+import { assertConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { imagePlanFailureConfirmed } from './image-plan-retry.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
@@ -19,7 +20,7 @@ import { parseFullGeneration,retainValidNativeCandidates } from '../listing-ai/f
 import { transaction } from '../application/transaction.ts';
 import { readAiUsageReport } from './usage-report.ts';
 import { TEXT_MODEL_CAPABILITIES } from './model-capabilities.ts';
-import { saveProviderReceipt,readProviderReceipt,confirmedAuthenticationRejection,confirmedLegacyRegionRejection } from './receipts.ts';
+import { saveProviderReceipt,readProviderReceipt,confirmedAuthenticationRejection,confirmedLegacyRegionRejection,confirmedForbiddenRejection } from './receipts.ts';
 import type { AiPurposeId,SaveAiPurposeInput,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { freezeSourceForProduct } from '../products/public.ts';
 import { isSchemaTransientError } from '../amazon/schema-retry.ts';
@@ -689,6 +690,10 @@ export class AiService {
           }
         }
         if(listConsistencyAttempts(this.db,context).some(previous=>consistencyAttemptUnknown(this.db,previous)))throw new AiError('INTERRUPTED');
+        if(confirmedForbiddenRejection(this.db,call)){
+          if((attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS){const exhausted=new AiError('QUOTA_EXCEEDED');exhausted.message='来源观察原重试次数已耗尽；历史次数和费用保留，本次未发送新请求';throw exhausted;}
+          assertConfirmedForbiddenRetry(this.db,call,'source:'+consistencyScopeKey(context));
+        }
         const current=this.activePurpose('source_understanding',true),authRetry=canRetryConsistencyAuthentication(this.db,call,{providerId:current.id,generation:current.generation});
         if(authRetry){const receipt=await readProviderReceipt(this.db,this.directory,call.id) as {status?:number}|null;if(!receipt||![401,403].includes(receipt.status??0))throw new AiError('AUTH_FAILED');}
         if(!call||call.status!=='FAILED'||!(call.errorCode==='OUTPUT_INVALID'||authRetry)||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':confirmedLegacyRegionRejection(this.db,call)?'MODEL_REGION_RESTRICTED':call?.errorCode==='MODEL_REGION_RESTRICTED'||call?.errorCode==='ROUTING_FORBIDDEN'?call.errorCode:confirmedAuthenticationRejection(this.db,call)?'AUTH_FAILED':'INTERRUPTED');

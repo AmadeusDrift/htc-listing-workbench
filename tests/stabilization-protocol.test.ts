@@ -31,6 +31,36 @@ test('actual Miaoshou/OCR adapters cross the installed guard and real owned HTTP
   const raw=await readFile(server.ledgerPath,'utf8');assert.ok(!/s10-acs-secret|s10-miaoshou-secret|authorization|x-sign/.test(raw));
 });
 
+test('real source downloader accepts only the registered CDN image and exact synthetic resolver mapping',async t=>{
+  const root=await directory(),{materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),fixtures=await materializeFixtures(join(root,'fixtures')),bytes=await readFile(fixtures[0].absolutePath);
+  const server=await createFakeProvider({directory:join(root,'server'),routes:[{id:'source-image',method:'GET',path:'/protocol/source-image',publicUrl:'https://cbu01.alicdn.com/s10/blue-coaster.png',protocol:{kind:'public-source'},response:{bytes,contentType:'image/png'}}]});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {createHash} from 'node:crypto';import {createSourceImageDownloader} from './src/main/miaoshou/images.ts';
+    const download=createSourceImageDownloader({lookup:async host=>{assert.equal(host,'cbu01.alicdn.com');return [{address:'198.18.0.1',family:4}];},nativeFetch:fetch});const url='https://cbu01.alicdn.com/s10/blue-coaster.png';
+    const bytes=await download(url,new AbortController().signal);assert.equal(createHash('sha256').update(bytes).digest('hex'),'${createHash('sha256').update(bytes).digest('hex')}');
+    for(const target of [url+'?x=1',url.replace('/s10/','/other/'),url.replace('cbu01.alicdn.com','cbu01.alicdn.com.evil.invalid')])await assert.rejects(download(target,new AbortController().signal));console.log('source-byte-verified');`;
+  await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});assert.equal(server.ledger().filter((row:any)=>row.event==='arrival').length,1);
+});
+
+test('real DeepSeek/OpenRouter chat, decisions and image adapters use endpoint-bound fake keys and retain provider receipts',async t=>{
+  const root=await directory(),{materializeFixtures}=require(resolve('tests/fixtures/stabilization/pipeline-runtime.mjs')),fixtures=await materializeFixtures(join(root,'fixtures')),bytes=await readFile(fixtures[0].absolutePath);
+  const chat=(id:string)=>({id,choices:[{finish_reason:'stop',message:{content:JSON.stringify({answer:'s10-protocol'})}}],usage:{prompt_tokens:10,completion_tokens:4,total_tokens:14,cost:0.001}});
+  const routes=[{id:'deepseek',method:'POST',path:'/protocol/deepseek',publicUrl:'https://api.deepseek.com/chat/completions',credential:{header:'authorization',value:'Bearer s10-deepseek-key'},response:{json:chat('s10-ds-1')}},
+    {id:'chat',method:'POST',path:'/protocol/chat',publicUrl:'https://openrouter.ai/api/v1/chat/completions',credential:{header:'authorization',value:'Bearer s10-openrouter-key'},response:{json:chat('s10-chat-1')}},
+    {id:'decisions',method:'POST',path:'/protocol/decisions',publicUrl:'https://openrouter.ai/api/alpha/decisions',credential:{header:'authorization',value:'Bearer s10-openrouter-key'},response:{json:{id:'s10-decisions-1',answers:{category:{type:'choice',choice:'DRINK_COASTER'}},usage:{input_tokens:10,output_tokens:4,cost:0.001}}}},
+    {id:'images',method:'POST',path:'/protocol/images',publicUrl:'https://openrouter.ai/api/v1/images',credential:{header:'authorization',value:'Bearer s10-openrouter-key'},response:{json:{id:'s10-image-1',created:1792022400,data:[{b64_json:bytes.toString('base64')}],usage:{cost:0.013}}}}];
+  const server=await createFakeProvider({directory:join(root,'server'),routes});t.after(()=>server.close());const policy=await writePolicy({directory:join(root,'worker'),provider:server,guardFile:guard});
+  const code=`import assert from 'node:assert/strict';import {requestDeepSeekJson} from './src/main/ai/adapters.ts';import {requestOpenRouterJson} from './src/main/ai/adapters/openrouter-chat.ts';import {requestOpenRouterDecisions} from './src/main/ai/adapters/openrouter-decisions.ts';import {OpenRouterImageAdapter} from './src/main/ai/adapters/openrouter-images.ts';
+    const signal=new AbortController().signal,receipts=[],context={fetch,now:()=>new Date('${now}'),nonce:()=>'${nonce}',maxResponseBytes:1048576,onProviderReceipt:value=>receipts.push(value)};
+    assert.equal((await requestDeepSeekJson({operation:'s10-protocol'},'Return the synthetic answer','deepseek-flash',{apiKey:'s10-deepseek-key'},signal,{...context,gateway:'deepseek'})).content.answer,'s10-protocol');
+    assert.equal((await requestOpenRouterJson({operation:'s10-protocol'},'Return the synthetic answer','openai/gpt-6-luna',{apiKey:'s10-openrouter-key'},signal,context)).content.answer,'s10-protocol');
+    const decision=await requestOpenRouterDecisions('openai/gpt-6-luna-decisions',{operation:'s10-protocol'},{category:{type:'choice',criteria:{DRINK_COASTER:'Drink coaster'},instructions:'Select the supplied synthetic category'}},{apiKey:'s10-openrouter-key'},signal,context);assert.equal(decision.answers.category.choice,'DRINK_COASTER');
+    const image=await new OpenRouterImageAdapter({fetch}).generate({apiKey:'s10-openrouter-key',model:'openai/gpt-image-2.5-sunburst',prompt:'Synthetic protocol fixture',size:'auto',quality:'auto',background:'opaque',references:[]},signal,{onProviderReceipt:context.onProviderReceipt});assert.equal(image.requestId,'s10-image-1');assert.equal(image.width,256);
+    for(const [url,key]of [['https://openrouter.ai/api/v1/images','s10-deepseek-key'],['https://api.deepseek.com/chat/completions','s10-openrouter-key'],['https://openrouter.ai/api/v1/images?x=1','s10-openrouter-key']])await assert.rejects(async()=>fetch(url,{method:'POST',headers:{authorization:'Bearer '+key},body:'{}'}));
+    assert.equal(receipts.length,4);assert.equal(receipts.find(row=>row.endpoint==='/api/v1/images').costUsd,0.013);console.log(JSON.stringify({receiptIds:receipts.map(row=>row.requestId),guard:globalThis.__s10Guard}));`;
+  const output=await run(process.execPath,['--require',guard,'--input-type=module','-e',code],{cwd:resolve('.'),env:{...process.env,NODE_OPTIONS:'',S10_POLICY_FILE:policy.path},windowsHide:true});assert.equal(JSON.parse(output.stdout).receiptIds.length,4);
+  const rows=server.ledger();assert.equal(rows.filter((row:any)=>row.event==='request').length,4);assert.equal(rows.filter((row:any)=>row.event==='rejected').length,0);assert.equal(new Set(rows.filter((row:any)=>row.event==='request').map((row:any)=>row.requestId)).size,4);
+});
+
 test('FTP passive replies cannot redirect a guarded worker to another loopback port or public host',async t=>{
   const root=await directory(),bait=await createFakeProvider({directory:join(root,'bait'),observeConnections:true,routes:[{id:'bait',method:'GET',path:'/bait'}]});t.after(()=>bait.close());
   for(const kind of ['epsv-port','pasv-host']){

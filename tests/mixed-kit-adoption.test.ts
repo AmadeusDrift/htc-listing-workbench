@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { saveInput,chat } from './fixtures/listing-ai.ts';
 import { saveProviderReceipt } from '../src/main/ai/receipts.ts';
 import { writeFileSync,readFileSync } from 'node:fs';
@@ -13,7 +13,7 @@ import { buildListingContext } from '../src/main/listing-ai/context.ts';
 import { AmazonPersistence } from '../src/main/amazon/persistence.ts';
 import { DatabaseSync } from 'node:sqlite';
 import {AutomaticListingService} from '../src/main/automatic-listing/service.ts';
-import {validateAutomaticListingTask} from '../src/main/automatic-listing/records.ts';
+import {validateAutomaticListingTask,sourceStamp} from '../src/main/automatic-listing/records.ts';
 import {readListingRules} from '../src/main/listing-rules.ts';
 import {assertTaskAdaptationHistory} from '../src/main/automatic-listing/adaptation.ts';
 import {planSalesListings} from '../src/main/sales-plans/planning.ts';
@@ -187,4 +187,36 @@ test('planning reuses adopted original SKU and confirmed count, while an unrelat
   const product={...f.p,variants:[...f.p.variants,{...f.p.variants[0],id:randomUUID(),sku:'SOURCE-ORDINARY-NEW',originalSpec:'蓝色 20 pc',normalizedSpec:'Blue 20pc'}]};
   const withNew=planSalesListings(product,null,target,readListingRules(f.db),naming,port);assert.ok(withNew.some(row=>row.sku===plan.sku&&row.recipe.platformPieces===52));assert.ok(withNew.some(row=>row.recipe.components.some(c=>c.sourceSku==='SOURCE-ORDINARY-NEW')&&row.sku!==plan.sku));assert.equal(f.requests.length,0);
  }finally{naming.close();}
+});
+
+async function oldMixedTaskPlanning(t:test.TestContext,ordinary=false){
+ const f=await taskKit(t);await f.owner.close();
+ const original=saveInput(f.p),product=f.store.saveProduct({...original,title:ordinary?'Ordinary Clips':f.p.title,variants:[...original.variants.map(v=>({...v,originalSpec:ordinary?'黄色 50pc':v.originalSpec})),{...original.variants[0],id:randomUUID(),sku:'SOURCE-SECOND-KIT',originalSpec:ordinary?'蓝色 50pc':'米色 / 支架+贴片+50只过滤网',normalizedSpec:''}]});
+ const components=product.variants.map(v=>({...f.plan.recipe.components[0],variantId:v.id,sourceKey:v.id,sourceSku:v.sku,specification:v.originalSpec,quantity:5})),key=createHash('sha256').update(JSON.stringify([...components].sort((a,b)=>a.sourceKey.localeCompare(b.sourceKey)).map(c=>[c.sourceKey,c.quantity]))).digest('hex');
+ const naming=new SkuNamingService(f.directory),target=f.amazon.getTarget(f.task.targetId),group=naming.allocate({storeScope:JSON.stringify([target.mode,target.sellerId]),storeCode:'U2',sourceGroupKey:f.plan.sourceGroupKey,collectedAt:f.plan.collectedAt,childKeys:[key]});
+ const plan=validateSalesPlan({...f.plan,sku:group.children.find(child=>child.key===key)!.sku,namingChildKey:key,recipe:{...f.plan.recipe,key,specification:'历史错误混色10pc',color:'Mixed colors',components,totalPieces:10,totalCostCny:1.64}});
+ const task=structuredClone(f.task);Object.assign(task.items[0],{key:product.id+':'+key,sku:plan.sku,salesPlan:plan,draftId:null,productRevision:product.revision,sourceStamp:sourceStamp(product)});f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(validateAutomaticListingTask(task)),task.id);
+ const owner=new AutomaticListingService(f.directory,f.deps),port={existingPlans:()=>owner.readSalesPlans(product.id,target.id)},ledger=()=>JSON.stringify(['sku_naming_groups','sku_naming_identities','sku_naming_sequences'].map(table=>f.db.prepare('SELECT * FROM '+table).all()));
+ return{...f,product,plan,task,owner,naming,target,port,ledger};
+}
+test('planning rejects exact source overlap with an unresolved original mixed-kit task before any SKU allocation',async t=>{
+ const f=await oldMixedTaskPlanning(t);try{
+  const before=f.ledger(),original=f.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(f.task.id)!.record_json;
+  assert.equal(f.port.existingPlans().length,1);assert.equal(f.port.existingPlans()[0].plan.recipe.totalCostCny,1.64);
+  assert.throws(()=>planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,f.port),/原.*单位|计量|套装/);
+  assert.equal(f.ledger(),before);assert.equal(f.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(f.task.id)!.record_json,original);assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
+});
+test('unresolved mixed-kit history does not block completely disjoint ordinary variants or another owner scope',async t=>{
+ const f=await oldMixedTaskPlanning(t);try{
+  const ordinary={...f.product,title:'Ordinary Clip',variants:[{...f.product.variants[0],id:randomUUID(),sku:'SOURCE-DISJOINT-NEW',originalSpec:'蓝色 20 pc',normalizedSpec:'Blue 20pc'}]};
+  assert.ok(planSalesListings(ordinary,null,f.target,readListingRules(f.db),f.naming,f.port).length>0);
+  for(const field of ['productId','targetId','sellerId','marketplaceId','mode'] as const){const prior=f.port.existingPlans()[0],outside={...prior,[field]:field==='mode'?'live':randomUUID()};assert.ok(planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,{existingPlans:()=>[outside]}).length>0,field+' owner must not block another scope');}
+  assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
+});
+test('ordinary proven homogeneous old mixed recipe remains eligible when its new recipes share sources',async t=>{
+ const f=await oldMixedTaskPlanning(t,true);try{
+  const rows=planSalesListings(f.product,null,f.target,readListingRules(f.db),f.naming,f.port);assert.ok(rows.length>0);assert.equal(f.requests.length,0);
+ }finally{f.naming.close();await f.owner.close();}
 });

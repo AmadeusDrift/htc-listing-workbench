@@ -34,11 +34,12 @@ export function planSalesListings(product:ProductDetail,receipt:MiaoshouReceipt|
   const priors=(history?.existingPlans()??[]).filter(p=>p.productId===product.id&&p.targetId===target.id&&p.mode===target.mode&&p.sellerId===target.sellerId&&p.marketplaceId===target.marketplaceId).map(p=>validateSalesPlan(p.plan));
   const adopted=new Map<string,SalesListingPlan>();
   for(const recipe of recipes)for(const prior of priors){
+    const sourceOverlap=recipe.components.some(c=>prior.recipe.components.some(p=>p.variantId===c.variantId&&p.sourceKey===c.sourceKey&&p.sourceSku===c.sourceSku));
+    if(sourceOverlap&&salesUnitReviewNeeded(prior.recipe,product))throw new UserFacingError('原销售单位存在套装计量差异；请从原任务或原草稿明确采用，未分配替代 SKU');
     const sameComponents=recipe.components.length===prior.recipe.components.length&&recipe.components.every(c=>prior.recipe.components.some(p=>p.variantId===c.variantId&&p.sourceKey===c.sourceKey&&p.sourceSku===c.sourceSku));
     if(!sameComponents)continue;
     const group=naming.lookup(salesStoreScope(target),prior.sourceGroupKey),child=group?.children.find(c=>c.key===prior.namingChildKey);
     if(group?.id!==prior.namingGroupId||group.baseSku!==prior.baseSku||group.collectedAt!==prior.collectedAt||(prior.namingChildKey===null?prior.sku!==group.baseSku:child?.sku!==prior.sku))throw new UserFacingError('原销售单位与持久 SKU 命名身份不一致，未分配新 SKU');
-    if(salesUnitReviewNeeded(prior.recipe,product))throw new UserFacingError('原销售单位存在套装计量差异；请从原任务或原草稿明确采用，未分配替代 SKU');
     if(prior.unitAdoption){
       if(prior.recipe.key!==recipe.key||recipe.components.some(c=>prior.recipe.components.find(p=>p.sourceKey===c.sourceKey)?.quotedCostCny!==c.quotedCostCny))throw new UserFacingError('原采用套装范围或报价已变化，请核对原 SKU；未分配替代 SKU');
       const other=adopted.get(recipe.key);if(other&&other.sku!==prior.sku)throw new UserFacingError('原套装销售身份冲突，未分配新 SKU');adopted.set(recipe.key,prior);

@@ -16,7 +16,7 @@ test('W08+A19 real Batch runtime recovers both review stages once under original
    for(const request of body.requests){const p=JSON.parse(request.body.messages[1].content),output:any=p.candidate?reviewFor(p):candidateFor(p);if(p.candidate&&body.model==='openai/gpt-6-luna'){output.verdict='BLOCKED';output.checks[0].verdict='CONTRADICTED';output.checks[0].claims[0].verdict='CONTRADICTED';output.issues=[{field:output.checks[0].field,message:'Requires independent evidence review'}];}results.push({custom_id:request.custom_id,response:{status_code:200,body:await chat(output).json()}});}
    return Response.json({id,model:body.model,endpoint:'/v1/chat/completions',status:'completed',results});
  };
- const runtime=f.ai.batchTasks,scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as const,authorize:()=>true};
+ const runtime=f.ai.batchTasks,scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:'deferred_batch' as const,authorize:()=>true};
  await assert.rejects(runtime.run(scope,()=>f.listing.suggest(f.reference)),{name:'BatchWaitingError'});await runtime.flush(scope.taskId);await runtime.reconcile(scope.taskId);
  const suggestion=await runtime.run(scope,()=>f.listing.suggest(f.reference)),input={...f.reference,suggestionResultId:suggestion.id};
  await assert.rejects(runtime.run(scope,()=>f.listing.review(input)),{name:'BatchWaitingError'});await runtime.flush(scope.taskId);await runtime.reconcile(scope.taskId);
@@ -48,7 +48,7 @@ test('W14 current-copy Batch replay retains the completed pair and never stages 
    for(const request of body.requests){const p=JSON.parse(request.body.messages[1].content),output:any={kind:'amazon-fields-review',verdict:'PASS',checks:p.candidate.candidates.flatMap((c:any)=>c.items.map((_:any,index:number)=>({field:c.field,index,verdict:'SUPPORTED',evidenceIds:[],reason:'Reviewed complete wording',claims:[]}))),issues:[]};if(p.candidate&&body.model==='openai/gpt-6-luna'){output.verdict='BLOCKED';output.checks[0].verdict='CONTRADICTED';output.issues=[{field:output.checks[0].field,message:'Requires independent evidence review'}];}results.push({custom_id:request.custom_id,response:{status_code:200,body:await chat(output).json()}});}
    return Response.json({id,model:body.model,endpoint:'/v1/chat/completions',status:'completed',results});
  };
- const runtime=f.ai.batchTasks,scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'copy',mode:'deferred_batch' as const,authorize:()=>true};
+ const runtime=f.ai.batchTasks,scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'copy',mode:'deferred_batch' as const,authorize:()=>true};
  const listingContext=f.listing.currentContext(f.draft,f.product,f.amazon.executionTargetScope(f.draft.targetId).generation),copy=[{field:'item_name',values:['Blue Silicone Coaster']}];
  const review=()=>f.ai.reviewCurrentListing(listingContext,copy,async()=>{});
  await assert.rejects(runtime.run(scope,review),{name:'BatchWaitingError'});await runtime.flush(scope.taskId);await runtime.reconcile(scope.taskId);

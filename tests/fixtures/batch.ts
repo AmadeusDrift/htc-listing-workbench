@@ -14,5 +14,9 @@ export function fixture(t:test.TestContext,fetcher:typeof fetch){
   const service=new BatchService(db,directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:credentialScope})});
   t.after(()=>{close();rmSync(directory,{recursive:true,force:true});});
   const operation=():BatchOperation=>({taskId,operationId:randomUUID(),attempt:1,phase:'copy',inputFingerprint:'b'.repeat(64),schemaFingerprint:'c'.repeat(64),credentialScope,owner:{productId:randomUUID(),productRevision:1,providerId:'openrouter' as const,generation:1},purpose:resolvePurpose(db,'listing_title'),body:{messages:[{role:'user',content:'Return JSON title'}],reasoning:{effort:'medium'},max_tokens:4096,response_format:{type:'json_object'}},references:[]});
-  return{service,db,directory,operation,close};
+  // Low-level Batch fixtures have synthetic owners rather than source rows.
+  // Give each product one stable synthetic variant, matching the production task key contract.
+  const variants=new Map<string,string>();
+  const rowKey=(op:BatchOperation)=>{const variantId=variants.get(op.owner.productId)??randomUUID();variants.set(op.owner.productId,variantId);return op.owner.productId+':'+variantId;};
+  return{service,db,directory,operation,close,rowKey};
 }

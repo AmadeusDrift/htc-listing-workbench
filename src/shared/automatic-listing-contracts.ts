@@ -47,6 +47,7 @@ export interface AutomaticSchemaRetry {
   reason: 'SCHEMA_TRANSIENT';
 }
 export interface AutomaticListingItem {
+  unitRecheck?:{sourceWorkflowId:string;draftRevision:number;draftStamp:string};
   lastContinuedAt?:string;
   failureHistory?:import('./automatic-resume.ts').AutomaticFailureEvent[];
   batchWait?:{operationId:string};
@@ -84,7 +85,7 @@ export interface AutomaticListingTask {
   resumeScope?:import('./automatic-resume.ts').AutomaticResumeSelection;
   executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode;
   batchPlan?:import('./ai-batch-contracts.ts').TaskBatchPlan;
-  adaptation?:{version:1;token:string;at:string;blockedKeys:string[];previousRules:{stamp:string;revision:number}[]};
+  adaptation?:{version:1;token:string;at:string;blockedKeys:string[];unitResolvedKeys?:string[];previousRules:{stamp:string;revision:number}[]};
   id: string; revision: number; status: AutomaticListingStatus;
   targetId: string; targetName: string; sellerId: string; marketplaceId: string; mode: 'demo' | 'live';
   targetStamp: string; profileId: string; profileStamp: string; rulesStamp: string; ruleRevision: number;
@@ -93,6 +94,8 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { workBatchId?:string; executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticListingApi {
+  previewAutomaticSalesUnitAdoption(input:AutomaticSalesUnitInput):Promise<AutomaticSalesUnitPreview>;
+  adoptAutomaticSalesUnit(input:AutomaticSalesUnitInput&{token:string;confirmed:true}):Promise<AutomaticListingTask>;
   previewAutomaticResume(input:{taskId:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<{taskRevision:number;token:string;lines:string[]}>;
   resumeAutomaticSelection(input:{taskId:string;taskRevision:number;token:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<AutomaticListingTask|null>;
   listAutomaticWorkBatches():Promise<import('./automatic-work-batches.ts').AutomaticWorkBatch[]>;
@@ -111,6 +114,8 @@ export interface AutomaticListingApi {
   pauseAutomaticListingTask(id: string): Promise<AutomaticListingTask>;
   cancelAutomaticListingTask(id: string): Promise<AutomaticListingTask>;
 }
+export interface AutomaticSalesUnitInput {taskId:string;taskRevision:number;itemKey:string;platformPieces?:number;basis?:string}
+export interface AutomaticSalesUnitPreview {taskId:string;taskRevision:number;itemKey:string;unitPreview:import('./amazon-contracts.ts').SalesUnitAdoptionPreview;token:string}
 
 export interface AutomaticAdaptationChange { key:string; productId:string; sku:string|null; kind:'SOURCE'|'RULES'|'SELECTED'|'NOT_SELECTED'|'NEW'|'DRAFT'|'RISK_RECHECK'|'PRESERVED'|'BLOCKED'; steps:string[]; fields:string[]; message:string }
 export interface AutomaticAdaptationPreview { taskId:string; taskRevision:number; token:string; canApply:boolean; blockers:string[]; changes:AutomaticAdaptationChange[]; sources:import('./contracts.ts').ProductDetail[] }

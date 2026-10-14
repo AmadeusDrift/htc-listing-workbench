@@ -9,7 +9,8 @@ import { resolveSchemaNode } from './field-catalog.ts';
 import { convertMeasurement, DIMENSION_FIELDS, mapMeasurementFields, validateFieldValues, wrapCandidateValues } from './field-mapping.ts';
 import type { ConfirmedMeasurements, MeasurementSet } from './field-mapping.ts';
 import { effectiveSourceMeasurements, sourceFactValue, sourceFieldName } from './demo.ts';
-import { productSourceQuantity, sourceQuantity } from '../../shared/source-quantity.ts';
+import { productSourceQuantity, sourceQuantity, salesPlatformPieces, salesUnitIssue } from '../../shared/source-quantity.ts';
+import type { SalesRecipe } from '../../shared/sales-plan-contracts.ts';
 import { pricingAttributeInputs } from './pricing-inputs.ts';
 import { currentFactAuthority } from './fact-authority.ts';
 import { declarationRisks } from './declaration-safety.ts';
@@ -24,7 +25,7 @@ export interface BusinessRuleInput {
   previousBusinessReport?: BusinessRuleReport;
   /** Unprojected scope metadata for rejecting unbound packaging prose. */
   sourceQuantityProduct?: ProductDetail;
-  saleUnit?: { totalPieces:number; totalCostCny:number|null };
+  saleUnit?: Pick<SalesRecipe,'totalPieces'|'totalCostCny'> & Partial<Pick<SalesRecipe,'components'|'quantityVersion'|'platformPieces'>>;
   /** Supplied by the sales recipe boundary; component packages do not prove a mixed/bundled package. */
   packageMatchesSaleUnit?: boolean;
   baseSku?: string;
@@ -187,7 +188,9 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   const itemCount = first('number_of_items')?.value;
   const existingCount = typeof itemCount === 'number' && Number.isSafeInteger(itemCount) && itemCount > 0 ? itemCount : null;
   const hasCount = Object.hasOwn(attributes, 'unit_count') || Object.hasOwn(attributes, 'number_of_items') || blocked.unitCount !== undefined || explicitFields.has('number_of_items');
-  const sourceUnits = input.saleUnit ? sourceQuantity(`${input.saleUnit.totalPieces} pc`) : productSourceQuantity(quantityProduct,variant);
+  const platformPieces=input.saleUnit?salesPlatformPieces(input.saleUnit):null;
+  const sourceUnits = input.saleUnit ? sourceQuantity(`${platformPieces??input.saleUnit.totalPieces} pc`) : productSourceQuantity(quantityProduct,variant);
+  const unitIssue=input.saleUnit?.components?salesUnitIssue({...input.saleUnit,components:input.saleUnit.components}):sourceUnits.unitSemantics?'来源整套计量或报价单位尚未确认；平台件数待确认':null;
   const quantityFacts = product.facts.filter(fact => (product.variants.length===1||fact.scope==='common'||fact.scope==='variant') && sourceFieldName(fact.name, 'haul') === 'number_of_items'
     && ['source_confirmed','human_confirmed','conflicting'].includes(fact.state));
   const quantityFactValues = quantityFacts.map(fact => Object.hasOwn(properties, 'number_of_items')
@@ -198,7 +201,7 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     || Object.hasOwn(attributes, 'number_of_items') && (existingCount === null || !Array.isArray(attributes.number_of_items) || attributes.number_of_items.length !== 1)
     || quantityFacts.some(fact => fact.state === 'conflicting') || new Set(quantityFactValues.map(value => JSON.stringify(value))).size > 1
     || quantityFactValues.some(value => typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)
-    || input.saleUnit !== undefined && existingCount !== null && existingCount !== input.saleUnit.totalPieces;
+    || input.saleUnit !== undefined && existingCount !== null && existingCount !== platformPieces || unitIssue!==null;
   const hasPackClaim = sourceUnits.source === 'explicit' || /随机|咨询|补差/iu.test(variant.originalSpec);
   report.bundleQuantity = existingCount ?? (sourceUnits.conflict ? 1 : sourceUnits.piecesPerPack);
   const previousReport = input.previousBusinessReport, previousBasis = previousReport?.pricingBasis;
@@ -257,7 +260,8 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
   report.pricingDecision = decision;
   decision.dependencies.rules = pricingRuleInputs(rules,decision.evidence);
   const needInput = (code: PricingDecisionCode, message: string) => { decision.code = code; decision.status = 'needs_input'; note(message); };
-  if (costCny === null) needInput('COST_CNY_UNCONFIRMED', '采购成本或人民币币种尚未确认，未计算销售报价');
+  if(unitIssue)needInput('SALE_QUANTITY_CHANGED',unitIssue);
+  else if (costCny === null) needInput('COST_CNY_UNCONFIRMED', '采购成本或人民币币种尚未确认，未计算销售报价');
   else if (target.marketplaceId !== 'ATVPDKIKX0DER') needInput('MARKETPLACE_UNSUPPORTED', '定价规则以美元计价，仅用于已确认的美国站');
   else {
     const axes = currentPackage.dimensionsInches, pounds = currentPackage.weightPounds;
@@ -326,9 +330,9 @@ export function applyBusinessRules(input: BusinessRuleInput, rules: ListingRules
     }
   }
   const count = report.bundleQuantity;
-  if (!sourceUnits.conflict && !blocked.unitCount && !attributes.unit_count) add('number_of_items', count, sourceUnits.source === 'explicit' ? `当前来源规格件数：${sourceUnits.evidence}` : count > 1 ? '按已确认组套规则计算的每套件数' : '未注明数量，默认 1 件 / 1 pc');
+  if (!unitIssue && !sourceUnits.conflict && !blocked.unitCount && !attributes.unit_count) add('number_of_items', count, sourceUnits.source === 'explicit' ? `当前来源规格件数：${sourceUnits.evidence}` : count > 1 ? '按已确认组套规则计算的每套件数' : '未注明数量，默认 1 件 / 1 pc');
   const unitCount = mapMeasurementFields(schema, target.marketplaceId, { unitCount: count }).attributes.unit_count;
-  const canFillUnitCount = !sourceUnits.conflict && !blocked.unitCount && (!explicitFields.has('number_of_items') || existingCount !== null);
+  const canFillUnitCount = !unitIssue && !sourceUnits.conflict && !blocked.unitCount && (!explicitFields.has('number_of_items') || existingCount !== null);
   if (unitCount && !attributes.unit_count && canFillUnitCount) { attributes.unit_count = unitCount; report.fields.unit_count = { value: structuredClone(unitCount), reason: '售卖单位数量规则；不等于备货套数' }; }
   decision.dependencies.costCny = decision.inputs.costCny;
   decision.dependencies.bundleQuantity = report.bundleQuantity;

@@ -34,6 +34,8 @@ export interface LocalDiagnosticReport {
 }
 /** All values are projected by the main process. No paths or arbitrary stored strings cross this boundary. */
 export interface DiagnosticApi {
+  getRunDiagnostics(input: import('./run-report-contracts.ts').RunReportQuery): Promise<import('./run-report-contracts.ts').RunDiagnosticReport>;
+  exportRunDiagnostics(input: { taskId: string; sku?: string }): Promise<{ cancelled: boolean }>;
   getLocalDiagnostics(): Promise<LocalDiagnosticReport>;
   exportLocalDiagnostics(): Promise<{ cancelled: boolean }>;
 }

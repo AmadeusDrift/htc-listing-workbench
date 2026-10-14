@@ -5,7 +5,7 @@ import { AiError } from '../ai/errors.ts';
 export function imageRequestNotSent(error:unknown):AiError&{notSent:true}{
   if(isSchemaTransientError(error))return Object.assign(error,{notSent:true as const});
   const safe=new AiError(error instanceof AiError?error.code:'PROVIDER_ERROR');
-  if(error instanceof AiError)safe.message=error.message;
+  if(error instanceof AiError){safe.message=error.message;safe.callId=error.callId;safe.requestId=error.requestId;safe.certainty=error.certainty;safe.abortSource=error.abortSource;}
   return Object.assign(safe,{notSent:true as const});
 }
 

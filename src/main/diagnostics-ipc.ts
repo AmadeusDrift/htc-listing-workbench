@@ -5,8 +5,10 @@ import { UserFacingError } from '../shared/errors.ts';
 import { writeFileAtomically } from './files.ts';
 import { createLocalDiagnosticReport } from './diagnostics/service.ts';
 import type { DiagnosticContext } from './diagnostics/service.ts';
+import type { RunDiagnosticReport } from '../shared/run-report-contracts.ts';
 
 interface DiagnosticHooks {
+  runReport?: { query(input: unknown): RunDiagnosticReport; export(input: unknown): RunDiagnosticReport };
   context(): DiagnosticContext;
   /** Implemented only by the main process's native save dialog. Never accepts a renderer path. */
   selectDestination(): Promise<{ canceled: boolean; filePath?: string }>;
@@ -32,6 +34,23 @@ async function exportDestination(directory: string, selected: string): Promise<s
   return join(actualParent, basename(destination));
 }
 export function installDiagnosticsIpc(directory: string, handle: IpcHandler, hooks: DiagnosticHooks): void {
+  if (hooks.runReport) {
+    handle('red:diagnostics:run-query', 1, input => hooks.runReport!.query(input));
+    handle('red:diagnostics:run-export', 1, async input => {
+      try {
+        const selected = await hooks.selectDestination();
+        if (selected.canceled || !selected.filePath) return { cancelled: true };
+        await exportDestination(directory, selected.filePath);
+        const report = hooks.runReport!.export(input);
+        const destination = await exportDestination(directory, selected.filePath);
+        await writeFileAtomically(destination, JSON.stringify(report, null, 2)+'\n');
+        return { cancelled: false };
+      } catch (error) {
+        if (error instanceof DiagnosticOperationError || error instanceof UserFacingError) throw error;
+        throw new DiagnosticOperationError((error as { code?: unknown } | null)?.code === 'ENOSPC' ? 'DIAGNOSTIC_EXPORT_NO_SPACE' : 'DIAGNOSTIC_EXPORT_FAILED');
+      }
+    });
+  }
   handle('red:diagnostics:get', 0, async () => {
     try { return await createLocalDiagnosticReport(directory, hooks.context()); }
     catch { throw new DiagnosticOperationError('DIAGNOSTIC_FAILED'); }

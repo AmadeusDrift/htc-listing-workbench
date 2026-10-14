@@ -87,7 +87,7 @@ async function start() {
   store = new WorkspaceStore(dataRoot);
   const db = store;
   if (recovered) db.recordWorkspaceEvent('workspace.restore.recovered', recovered === 'rolled-back' ? '启动时已回滚中断的备份恢复，保留原始工作区' : '启动时已完成中断的备份恢复清理');
-  amazon = new AmazonService(dataRoot, id => db.getProduct(id), safeStorage, {
+  amazon = new AmazonService(dataRoot, id => db.getProductSnapshot(id), safeStorage, {
     schemaFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
     dataFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
   });
@@ -138,8 +138,8 @@ async function start() {
     rules: () => ruleStore.get(),
     labelFormat: () => formatSettings.get(),
     sourceReceipt: productId => miaoshouService.getReceipt(productId),
-    planSalesForAdaptation: (source,targetId,transactionDb) => {const naming=new SkuNamingService(dataRoot,transactionDb);return planSalesListings(source,miaoshouService.getReceipt(source.id),amazonService.getTarget(targetId),readListingRules(transactionDb),naming);},
-    planSales: (productId,targetId) => {return planSalesListings(db.getProduct(productId),miaoshouService.getReceipt(productId),amazonService.getTarget(targetId),ruleStore.get(),namingService);},
+    planSalesForAdaptation: (source,targetId,transactionDb) => {const naming=new SkuNamingService(dataRoot,transactionDb);return planSalesListings(source,miaoshouService.getReceipt(source.id),amazonService.getTarget(targetId),readListingRules(transactionDb),naming,{existingPlans:()=>[...amazonService.readSalesPlans(source.id,targetId),...(automatic?.readSalesPlans(source.id,targetId)??[])]});},
+    planSales: (productId,targetId) => {return planSalesListings(db.getProductSnapshot(productId),miaoshouService.getReceipt(productId),amazonService.getTarget(targetId),ruleStore.get(),namingService,{existingPlans:()=>[...amazonService.readSalesPlans(productId,targetId),...(automatic?.readSalesPlans(productId,targetId)??[])]});},
     existingSale:(productId,plan,targetId)=>amazonService.findSalesDraft(productId,plan,targetId),
     resolveFamily: (input,signal) => resolveSalesFamily(amazonService,input,signal),
     rebindFamily: (input,signal) => amazonService.rebindUnsubmittedFamily(input,signal),

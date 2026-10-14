@@ -136,6 +136,42 @@ function legacyV2Pricing(f:ReturnType<typeof fixture>,draft:AmazonDraft) {
   draft.businessRules={revision:f.rules.revision,fields:{},notices:[],quote,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:2.4,quantity:1,saleUnitCostCny:2.4},pricingDecision:{version:2,status:'quoted',code:'QUOTE_VALID',quoteError:null,inputs,attributeInputs,evidence:{cost:'confirmed_cny',dimensions:'business_default',weight:'business_default',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:null,weightPounds:null}}}};
   assert.equal(pricingQualificationIssue(draft,f.rules),null,'v2 fixture must qualify before the test mutates its evidence');
 }
+test('automatic stage evidence follows actual transitions while repeated reads stay read-only', async t => {
+  const f = fixture(t), task = await f.create();
+  f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();
+  const db = openDatabase(f.directory);
+  try {
+    const events = db.prepare("SELECT detail_json FROM audit_events WHERE action='run.evidence'").all().map(row => JSON.parse(String(row.detail_json)));
+    assert.ok(events.some(e => e.taskId === task.id && e.event === 'STAGE_STARTED' && e.stage === 'IMAGES'));
+    assert.ok(events.some(e => e.taskId === task.id && e.event === 'STAGE_COMPLETED'));
+    const before = db.prepare('SELECT COUNT(*) n FROM audit_events').get()!.n, revision = f.service.get(task.id).revision;
+    for (let i = 0; i < 100; i++) { f.service.list(); f.service.get(task.id); }
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM audit_events').get()!.n, before); assert.equal(f.service.get(task.id).revision, revision);
+  } finally { db.close(); }
+});
+
+test('changing a pending or failed stage does not claim the former stage completed', async t => {
+  const f = fixture(t), task = await f.create();
+  materializeSourceSnapshot(f.directory, f.product, f.product.variants.map(v => v.id));
+  const pending = f.service.get(task.id);
+  pending.items[0].stage = pending.items[0].stage === 'DRAFT' ? 'CLASSIFY' : 'DRAFT';
+  (f.service as any).save(pending);
+  pending.items[0].status = 'FAILED';
+  (f.service as any).save(pending);
+  pending.items[0].stage = 'IMAGES';
+  (f.service as any).save(pending);
+  pending.items[0].status = 'RUNNING';
+  (f.service as any).save(pending);
+  pending.items[0].draftId = randomUUID(); pending.items[0].executionTaskIds = [randomUUID()];
+  pending.items[0].stage = 'READBACK'; pending.items[0].status = 'WAITING';
+  (f.service as any).save(pending);
+  const db = openDatabase(f.directory);
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='run.evidence' AND json_extract(detail_json,'$.event')='STAGE_BLOCKED'").get()!.n, 1);
+    const completed = db.prepare("SELECT detail_json FROM audit_events WHERE action='run.evidence' AND json_extract(detail_json,'$.event')='STAGE_COMPLETED'").all();
+    assert.equal(completed.length, 0, 'a changed checkpoint alone is not successful execution');
+  } finally { db.close(); }
+});
 
 async function reachedStage(event:Promise<void>, operation:Promise<void>, describe:()=>unknown) {
   let timer:ReturnType<typeof setTimeout>|undefined;

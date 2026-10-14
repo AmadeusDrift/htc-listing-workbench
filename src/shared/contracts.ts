@@ -107,6 +107,7 @@ export interface AssetUpdateInput extends ProductMutation {
   variantIds: string[];
 }
 export interface AuditEvent {
+  evidence?: import('./run-evidence-contracts.ts').RunEvidence | import('./error-evidence-contracts.ts').ErrorStageEvidence;
   id: string;
   productId: string | null;
   action: string;

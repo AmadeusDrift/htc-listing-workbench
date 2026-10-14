@@ -249,7 +249,7 @@ test('source malformed HTTP 200 envelope retains safe text and never becomes a m
   for(const raw of ['{"choices":[', '{"note":"\\u0063onsistency-synthetic-key"']){
     const f=await fixture(t);f.respond(()=>new Response(raw));await assert.rejects(f.observe());
     const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
-    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,'RESPONSE_ENVELOPE_JSON_INVALID');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
+    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,raw==='{"choices":['?'RESPONSE_ENVELOPE_JSON_INVALID':'RESPONSE_SECRET_ECHO');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
     if(raw==='{"choices":[')assert.equal(saved[0].output,raw);
     await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
   }
@@ -270,49 +270,49 @@ test('unknown source call with corrupt ownership stops without another paid rese
 
 import { taskAiContext } from '../src/main/ai/batch/task-context.ts';
 import { sourceConsistencyUnknown } from '../src/main/source-image-consistency/proof.ts';
-function explicitlyContinue<T>(action:()=>T):T{return taskAiContext.run({taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate',explicitContinueAt:new Date().toISOString(),authorize:()=>true},action);}
+function explicitlyContinue<T>(f:{p:{id:string;variants:{id:string}[]}},action:()=>T):T{return taskAiContext.run({taskId:randomUUID(),rowKey:f.p.id+':'+f.p.variants[0].id,phase:'sources',mode:'immediate',explicitContinueAt:new Date().toISOString(),authorize:()=>true},action);}
 test('confirmed auth rejection requires refreshed credentials and explicit continue; keeps original budget',async t=>{
  const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic rejected'}},{status:401}));
  await assert.rejects(f.observe());const original=f.ai.listCalls()[0];
  assert.equal(original.errorCode,'AUTH_FAILED');assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),false);
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:true});
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  f.ai.saveConnection({id:'deepseek',apiKey:'new-synthetic-key'});
  await assert.rejects(f.observe());assert.equal(f.count(),1);
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
- f.ai.saveConnection({id:'deepseek',apiKey:'third-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),3);
- f.ai.saveConnection({id:'deepseek',apiKey:'fourth-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),3);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
+ f.ai.saveConnection({id:'deepseek',apiKey:'third-synthetic-key'});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),3);
+ f.ai.saveConnection({id:'deepseek',apiKey:'fourth-synthetic-key'});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),3);
  assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
 });
 test('unknown source transport never resends after changed credentials and explicit continuation',async t=>{
  const f=await fixture(t);f.respond(()=>{throw new TypeError('synthetic unknown');});await assert.rejects(f.observe());
  f.ai.saveConnection({id:'deepseek',apiKey:'rotated-unknown-synthetic'});
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
 });
 
 test('403 retry survives restart and requires a continuation after the credential update',async t=>{
  const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic forbidden'}},{status:403}));await assert.rejects(f.observe());
  assert.equal(readConsistencyView(f.db,f.context()).status,'SYSTEM_REPAIR');assert.deepEqual(readConsistencyView(f.db,f.context()).reasons,['SOURCE_CONSISTENCY_AUTH_FAILED']);
- const oldScope={taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate' as const,explicitContinueAt:'2020-01-01T00:00:00Z',authorize:()=>true};
+ const oldScope={taskId:randomUUID(),rowKey:f.p.id+':'+f.p.variants[0].id,phase:'sources',mode:'immediate' as const,explicitContinueAt:'2020-01-01T00:00:00Z',authorize:()=>true};
  f.ai.saveConnection({id:'deepseek',apiKey:'restart-rotated-synthetic'});
  await assert.rejects(taskAiContext.run(oldScope,()=>f.observe()));assert.equal(f.count(),1);
  await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
- try{await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),1);await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
+ try{await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),1);await assert.rejects(explicitlyContinue(f,()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
 });
 test('saving the same credential or bare AUTH_FAILED without HTTP refusal cannot unlock source attempts',async t=>{
  const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic denied'}},{status:401}));await assert.rejects(f.observe());
- f.ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ f.ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  f.db.prepare('DELETE FROM ai_provider_receipts').run();
- f.ai.saveConnection({id:'deepseek',apiKey:'different-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ f.ai.saveConnection({id:'deepseek',apiKey:'different-synthetic-key'});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
 });
 test('timeout interrupted and cancelled source records remain unknown after restart and explicit continuation',async t=>{
  for(const code of ['TIMEOUT','INTERRUPTED','CANCELLED','PROVIDER_ERROR'] as const){
  const f=await fixture(t);f.respond(()=>{throw new TypeError('synthetic response lost');});await assert.rejects(f.observe());
  const call=f.ai.listCalls()[0];call.errorCode=code;f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
  f.ai.saveConnection({id:'deepseek',apiKey:'unknown-new-synthetic'});await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
- try{await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);}finally{await restarted.close();}
+ try{await assert.rejects(explicitlyContinue(f,()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);}finally{await restarted.close();}
  }
 });
 
@@ -323,7 +323,7 @@ test('actual OpenRouter source request with reference port resumes a stale immed
  ai.saveConnection({id:'openrouter',apiKey:'old-openrouter-synthetic'});ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
  const purpose=ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
  const plan=ai.taskBatchPlan();ai.saveConnection({id:'openrouter',apiKey:'new-openrouter-synthetic'});
- const result=await taskAiContext.run({taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate',credentialScope:plan.credentialScope,purposes:plan.purposes,explicitContinueAt:new Date().toISOString(),authorize:()=>true},()=>ai.observeSourceConsistency(f.context(),()=>{}));
+ const result=await taskAiContext.run({taskId:randomUUID(),rowKey:f.p.id+':'+f.p.variants[0].id,phase:'sources',mode:'immediate',credentialScope:plan.credentialScope,purposes:plan.purposes,explicitContinueAt:new Date().toISOString(),authorize:()=>true},()=>ai.observeSourceConsistency(f.context(),()=>{}));
  assert.equal(result.output.kind,'source-image-consistency');assert.equal(f.count(),1);assert.equal(ai.listCalls().length,1);
  }finally{await ai.close();}
 });
@@ -335,26 +335,26 @@ test('legacy saved-connection audit supports denied source recovery without alte
  f.db.prepare("DELETE FROM audit_events WHERE action='ai.credentials.updated'").run();
  f.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'ai.connection.saved','Synthetic legacy credential save',JSON.stringify({vendorId:'deepseek',profiles:[{id:profile.id,generation:profile.generation}]}),new Date().toISOString());
  f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))}));
- await explicitlyContinue(()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
+ await explicitlyContinue(f,()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
 });
 
 for(const kind of ['empty','missing','broken-stream'] as const)test(`source HTTP 200 ${kind} body stays UNKNOWN and never resends`,async t=>{
  const f=await fixture(t);f.respond(()=>kind==='empty'?new Response('',{status:200}):kind==='missing'?new Response(null,{status:200}):new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"choices":'));controller.error(new Error('synthetic interrupted body'));}}),{status:200}));
  await assert.rejects(f.observe());const call=f.ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');assert.equal(call.responseReceived,undefined);
  assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);assert.equal(readConsistencyView(f.db,f.context()).status,'UNKNOWN');
- f.ai.saveConnection({id:'deepseek',apiKey:'body-new-synthetic'});assert.throws(()=>explicitlyContinue(()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ f.ai.saveConnection({id:'deepseek',apiKey:'body-new-synthetic'});assert.throws(()=>explicitlyContinue(f,()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  assert.deepEqual(f.ai.listCalls()[0],call);
 });
 
 test('older unknown source attempt cannot be hidden by a later explicit auth denial',async t=>{
  const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic denial'}},{status:401}));await assert.rejects(f.observe());
- const old=f.ai.listCalls()[0];f.ai.saveConnection({id:'deepseek',apiKey:'second-old-synthetic'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ const old=f.ai.listCalls()[0];f.ai.saveConnection({id:'deepseek',apiKey:'second-old-synthetic'});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
  // The old version allowed this second send. Preserve that historical shape without issuing it again.
  const unknown={...old,errorCode:'NETWORK_ERROR'};delete unknown.providerReceiptId;
  f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(unknown),old.id);
  const attempts=f.db.prepare('SELECT id,record_json FROM source_consistency_attempts ORDER BY id').all();
  assertConsistencyHistory(f.db,f.directory);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
- f.ai.saveConnection({id:'deepseek',apiKey:'third-blocked-synthetic'});assert.throws(()=>explicitlyContinue(()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ f.ai.saveConnection({id:'deepseek',apiKey:'third-blocked-synthetic'});assert.throws(()=>explicitlyContinue(f,()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
  assert.deepEqual(f.db.prepare('SELECT id,record_json FROM source_consistency_attempts ORDER BY id').all(),attempts);
 });
 
@@ -374,8 +374,8 @@ test('legacy OpenRouter region refusal resumes once only after explicit continue
  f.respond(()=>Response.json({error:{message:'This model is not available in your region.',code:403}},{status:403}));await assert.rejects(f.observe());
  const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED'}),prior.id);
  await assert.rejects(f.observe());assert.equal(f.count(),1);
- await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
- await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
  assert.equal(f.ai.listCalls().find(c=>c.id===prior.id)?.errorCode,'AUTH_FAILED');
 });
 
@@ -386,7 +386,7 @@ test('legacy forbidden uses matching403 proof while missing receipts never unloc
   f.respond(()=>Response.json({error:{message:missing?'This model is not available in your region.':'Forbidden',code:403}},{status:403}));await assert.rejects(f.observe());
   const prior=f.ai.listCalls()[0];f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...prior,errorCode:'AUTH_FAILED',...(missing?{providerReceiptId:undefined}:{})}),prior.id);
   assert.equal(readConsistencyView(f.db,f.context()).status,missing?'UNKNOWN':'SYSTEM_REPAIR');
-  f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),missing?1:2);
+  f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-rotated-router-key'});await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),missing?1:2);
  }
 });
 
@@ -394,10 +394,10 @@ for(const message of ['This model is not available in your region.','Forbidden']
  const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
  f.respond(()=>Response.json({error:{message,code:403}},{status:403}));await assert.rejects(f.observe());const before=f.ai.listCalls()[0];
  await assert.rejects(f.observe());assert.equal(f.count(),1);
- await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
- await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
  await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
- try{await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
+ try{await assert.rejects(explicitlyContinue(f,()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
  assert.deepEqual(JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(before.id)!.record_json)),before);
 });
 
@@ -407,9 +407,9 @@ async function routerForbiddenFixture(t:test.TestContext){
 }
 test('confirmed403 retry respects quota, concurrent continuation reserves exactly once and historical raw remains immutable',async t=>{
  const f=await routerForbiddenFixture(t),before=f.ai.listCalls()[0];f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:1,dailyTokenLimit:null});
- await assert.rejects(explicitlyContinue(()=>f.observe()),/额度/);assert.equal(f.count(),1);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()),/额度/);assert.equal(f.count(),1);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
  f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:3,dailyTokenLimit:null});const other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
- try{await Promise.allSettled([explicitlyContinue(()=>f.observe()),explicitlyContinue(()=>other.observeSourceConsistency(f.context(),()=>{}))]);assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);}finally{await other.close();}
+ try{await Promise.allSettled([explicitlyContinue(f,()=>f.observe()),explicitlyContinue(f,()=>other.observeSourceConsistency(f.context(),()=>{}))]);assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);}finally{await other.close();}
  assert.deepEqual(f.ai.listCalls().find(c=>c.id===before.id),before);
 });
 for(const damage of ['missing','body','metadata','unknown'])test(`confirmed403 ${damage} cannot authorize a new source send`,async t=>{
@@ -418,41 +418,41 @@ for(const damage of ['missing','body','metadata','unknown'])test(`confirmed403 $
  if(damage==='body'){const r=JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId!)!.record_json));writeFileSync(join(f.directory,r.relativePath),'{}');}
  if(damage==='metadata'){const r=JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId!)!.record_json));r.model='openai/gpt-6-astra';f.db.prepare('UPDATE ai_provider_receipts SET record_json=? WHERE id=?').run(JSON.stringify(r),r.id);}
  if(damage==='unknown'){f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify({...call,errorCode:'NETWORK_ERROR'}),call.id);}
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
 });
 test('confirmed403 success resumes existing source locally without repeating result',async t=>{
  const f=await routerForbiddenFixture(t),before=f.store.getProduct(f.p.id);f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:p.claims.map((c:any)=>({claimId:c.id,value:c.axis==='color'?'Blue':'Round',visibility:'visible'}))}))}));
- const result=await explicitlyContinue(()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.equal((await f.observe()).id,result.id);assert.equal(f.count(),2);assert.deepEqual(f.store.getProduct(f.p.id),before);
+ const result=await explicitlyContinue(f,()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.equal((await f.observe()).id,result.id);assert.equal(f.count(),2);assert.deepEqual(f.store.getProduct(f.p.id),before);
 });
 test('confirmed403 retry claim survives restoring older encrypted backup and cannot grant another retry',async t=>{
  const f=await routerForbiddenFixture(t),file=join(f.directory,'before-retry.htcbackup'),pass='synthetic-forbidden-backup';await createWorkspaceBackup(f.directory,file,pass);
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);const claim=f.db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!;
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);const claim=f.db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!;
  const snapshot=await prepareWorkspaceRestore(f.directory,file,pass);await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
  const store=new WorkspaceStore(f.directory),db=openDatabase(f.directory),hosting=new HostingService(f.directory,store,mockStorage),ai=new AiService(f.directory,store,hosting,mockStorage,f.dependencies);
- try{assert.equal(db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.detail_json,claim.detail_json);ai.saveConnection({id:'openrouter',apiKey:'restored-synthetic-key'});await assert.rejects(explicitlyContinue(()=>ai.observeSourceConsistency(ai.sourceConsistencyContext({productId:f.p.id,productRevision:store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}),()=>{})));assert.equal(f.count(),2);}finally{await ai.close();await hosting.close();db.close();store.close();}
+ try{assert.equal(db.prepare("SELECT detail_json FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.detail_json,claim.detail_json);ai.saveConnection({id:'openrouter',apiKey:'restored-synthetic-key'});await assert.rejects(explicitlyContinue(f,()=>ai.observeSourceConsistency(ai.sourceConsistencyContext({productId:f.p.id,productRevision:store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}),()=>{})));assert.equal(f.count(),2);}finally{await ai.close();await hosting.close();db.close();store.close();}
 });
 
 test('confirmed403 reservation failure rolls back claim, call and usage together before any send',async t=>{
  const f=await routerForbiddenFixture(t),before=f.ai.getUsageSummary('openrouter');
  f.db.exec("CREATE TRIGGER synthetic_retry_reservation_failure BEFORE INSERT ON source_consistency_attempts BEGIN SELECT RAISE(ABORT,'synthetic transaction failure'); END");
- await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(f.ai.listCalls().length,1);assert.deepEqual(f.ai.getUsageSummary('openrouter'),before);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
- f.db.exec('DROP TRIGGER synthetic_retry_reservation_failure');await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);assert.equal(f.ai.listCalls().length,1);assert.deepEqual(f.ai.getUsageSummary('openrouter'),before);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ f.db.exec('DROP TRIGGER synthetic_retry_reservation_failure');await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);
 });
 test('confirmed403 claimed retry with lost response stays UNKNOWN and cannot send after another continue',async t=>{
- const f=await routerForbiddenFixture(t);f.respond(()=>{throw new TypeError('synthetic connection lost after reservation');});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
- await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);
+ const f=await routerForbiddenFixture(t);f.respond(()=>{throw new TypeError('synthetic connection lost after reservation');});await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+ await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),2);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);
 });
 test('confirmed403 after original source limit is exhausted clearly blocks without a new allowance',async t=>{
  const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'synthetic-router-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});const purpose=f.ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;f.ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'none'}});
  f.respond(()=>Response.json({error:{message:'Unauthorized',code:401}},{status:401}));await assert.rejects(f.observe());
- for(const key of ['second-synthetic','third-synthetic']){f.ai.saveConnection({id:'openrouter',apiKey:key});if(key==='third-synthetic')f.respond(()=>Response.json({error:{message:'Forbidden',code:403}},{status:403}));await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()));}
- assert.equal(f.count(),3);await assert.rejects(explicitlyContinue(()=>f.observe()),/原重试次数已耗尽/);assert.equal(f.count(),3);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ for(const key of ['second-synthetic','third-synthetic']){f.ai.saveConnection({id:'openrouter',apiKey:key});if(key==='third-synthetic')f.respond(()=>Response.json({error:{message:'Forbidden',code:403}},{status:403}));await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()));}
+ assert.equal(f.count(),3);await assert.rejects(explicitlyContinue(f,()=>f.observe()),/原重试次数已耗尽/);assert.equal(f.count(),3);assert.equal(f.db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
 });
 test('confirmed403 repeated manual click reports consumed opportunity without inserting a new failure',async t=>{
- const f=await routerForbiddenFixture(t);await assert.rejects(explicitlyContinue(()=>f.observe()));const calls=f.ai.listCalls();await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(()=>f.observe()),/已使用一次手动403重试.*本次未发送新请求/);assert.deepEqual(f.ai.listCalls(),calls);assert.equal(f.count(),2);
+ const f=await routerForbiddenFixture(t);await assert.rejects(explicitlyContinue(f,()=>f.observe()));const calls=f.ai.listCalls();await new Promise(resolve=>setTimeout(resolve,5));await assert.rejects(explicitlyContinue(f,()=>f.observe()),/已使用一次手动403重试.*本次未发送新请求/);assert.deepEqual(f.ai.listCalls(),calls);assert.equal(f.count(),2);
 });
 
 test('confirmed403 old failure cannot acquire another claim through a different scope',async t=>{
- const f=await routerForbiddenFixture(t),old=f.ai.listCalls()[0];await assert.rejects(explicitlyContinue(()=>f.observe()));
- assert.equal(explicitlyContinue(()=>canRetryConfirmedForbidden(f.db,old,'alternative-scope:'+randomUUID())),false);assert.equal(f.count(),2);
+ const f=await routerForbiddenFixture(t),old=f.ai.listCalls()[0];await assert.rejects(explicitlyContinue(f,()=>f.observe()));
+ assert.equal(explicitlyContinue(f,()=>canRetryConfirmedForbidden(f.db,old,'alternative-scope:'+randomUUID())),false);assert.equal(f.count(),2);
 });

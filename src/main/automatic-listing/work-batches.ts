@@ -59,6 +59,16 @@ export function retainWorkBatches(current:DatabaseSync,snapshot:DatabaseSync,mig
   if(!current.prepare("SELECT 1 FROM sqlite_master WHERE name='automatic_work_batches' AND type='table'").get())return;
   transaction(snapshot,()=>{
     const live=listWorkBatches(current),liveCurrent=currentWorkBatch(current),at=now();
+    // A newly opened manual-only workspace has an unused initial placeholder,
+    // not automatic history. Re-prove this at prepare AND installation: any member,
+    // task, automatic placement or prior archive keeps normal conflict protection.
+    const unusedInitial=live.length===1&&liveCurrent.sequence===1&&liveCurrent.createdAt!==null
+      &&!liveCurrent.productIds.length&&!liveCurrent.taskIds.length
+      &&!current.prepare('SELECT 1 FROM automatic_listing_tasks LIMIT 1').get()
+      &&!current.prepare("SELECT 1 FROM product_workspaces WHERE lane='automatic' LIMIT 1").get();
+    if(unusedInitial&&!listWorkBatches(snapshot).some(batch=>batch.id===liveCurrent.id)){
+      assertWorkBatches(snapshot);return;
+    }
     const savedTasks=new Set(snapshot.prepare('SELECT id FROM automatic_listing_tasks').all().map(row=>String(row.id)));
     if(live.some(batch=>batch.taskIds.some(id=>!savedTasks.has(id))))throw new UserFacingError('备份缺少后续批次原任务身份，无法安全恢复，请选更新备份/保留当前工作区');
     // Task IDs alone are insufficient when explicit adaptation added another SKU.

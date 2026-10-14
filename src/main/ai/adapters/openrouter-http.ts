@@ -7,8 +7,10 @@ export type OpenRouterEndpoint='/api/v1/chat/completions'|'/api/alpha/decisions'
 export function openRouterHttpError(status:number,raw?:unknown):AiError&{httpStatus:number;definitive:boolean}{
   const message=(raw as any)?.error?.message;
   const region=typeof message==='string'&&/^This model is not available in your region\.?$/i.test(message.trim());
-  const error=status===403?new AiError(region?'MODEL_REGION_RESTRICTED':'ROUTING_FORBIDDEN'):httpError(status);
-  return Object.assign(error,{httpStatus:status,definitive:[400,401,402,403,404,405,413,415,422,429].includes(status)});
+  const noProvider=[404,503].includes(status)&&typeof message==='string'&&message.length<=1000&&/^(?:No allowed providers are available for the selected model\.(?: |$)|No endpoints found that support(?: |$)|No available providers(?: found)? for the selected model\.?$)/i.test(message.trim());
+  const error=noProvider?new AiError('ROUTING_FORBIDDEN'):status===403?new AiError(region?'MODEL_REGION_RESTRICTED':'ROUTING_FORBIDDEN'):httpError(status);
+  if(noProvider){error.diagnosticReason='NO_AVAILABLE_PROVIDER';error.message='当前模型没有符合本次参数与路由条件的可用提供商；未切换模型，请核对模型能力及路由限制';}
+  return Object.assign(error,{httpStatus:status,definitive:noProvider||[400,401,402,403,404,405,413,415,422,429].includes(status)});
 }
 export function openRouterMetadata(raw:any):ProviderMetadata{
   const usage=emptyUsage(),prompt=raw?.usage?.prompt_tokens??raw?.usage?.input_tokens,completion=raw?.usage?.completion_tokens??raw?.usage?.output_tokens;

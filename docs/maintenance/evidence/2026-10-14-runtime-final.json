@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "delivery": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-运行性能修正版-20261014",
+  "exe": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-运行性能修正版-20261014\\HTC.exe",
+  "archive": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-运行性能修正版-20261014.zip",
+  "archiveBytes": 163542477,
+  "archiveSha256": "1a14ab4ee9b6b0fb740798775f26e494edc36ce856fd4441258dcaa07670bab3",
+  "files": 89,
+  "sourceCommit": "4dbd28a001e0954e0475fddad0f3646d5a9e7081",
+  "manifestSha256": "b6d06aec782a81fe523a6556051e1fa33be83abad87f7e74a1b5b23441fbcac3",
+  "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e",
+  "allFolderAndArchiveFileHashesVerified": true,
+  "activated": false,
+  "validation": {
+    "fullSuite": {
+      "total": 3135,
+      "passed": 3128,
+      "failed": 4,
+      "skipped": 3,
+      "durationMs": 711654.9529,
+      "log": "artifacts/runtime-final-tests-4dbd28a.log"
+    },
+    "resolvedFailures": 4,
+    "unresolvedFailures": 0,
+    "repairs": "Only historical schema downgrade fixtures; production source unchanged after 4dbd28a",
+    "retests": [
+      {
+        "passed": 43,
+        "failed": 0,
+        "skipped": 0,
+        "log": "artifacts/runtime-backup-final.log"
+      },
+      {
+        "passed": 42,
+        "failed": 0,
+        "skipped": 0,
+        "log": "artifacts/runtime-schema17-final.log"
+      }
+    ],
+    "actualExeCandidatePassed": true,
+    "candidateInboxRows": [
+      100,
+      51
+    ],
+    "externalRequestsByDiagnostics": 0
+  },
+  "authentication": {
+    "actualKeyVerified": false,
+    "resolved": false,
+    "observedResponses": 37,
+    "httpStatus": 401,
+    "lastReceiptUTC": "2026-10-14T07:15:49.210Z",
+    "message": "User not found.",
+    "secretsDisplayed": false
+  }
+}

@@ -177,3 +177,12 @@ test('explicit immediate resume of a stopped unsent Batch plan makes one fresh o
  f.ai.batchTasks.stop(scope.taskId);scope.mode='immediate';f.ai.batchTasks.resume(scope.taskId);
  const result=await f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));assert.equal(result.output.kind,'amazon-fields');assert.equal(posts,1);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);assert.notEqual(result.callId,scope.waitingOperationId);
 });
+
+test('P05 fresh prepared Batch operations obey the current selected SKU before POST',async t=>{
+ let body:any,posts=0;const fetcher:typeof fetch=async(_url,init)=>{posts++;body=JSON.parse(String(init?.body));return Response.json({id:'batch_selected',model:body.model,endpoint:'/v1/chat/completions',status:'in_progress'});};
+ const f=fixture(t,fetcher),one=f.operation(),two=f.operation(),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:one.credentialScope})});
+ let selected=['one','two'];
+ for(const [key,operation] of [['one',one],['two',two]] as const){const authorize=()=>selected.includes(key);await assert.rejects(runtime.run({taskId:one.taskId,rowKey:key,phase:'copy',mode:'deferred_batch',authorize},()=>runtime.request({operation,authorize,reserve:()=>{}})),{name:'BatchWaitingError'});}
+ selected=['one'];runtime.resume(one.taskId);await runtime.flush(one.taskId);
+ assert.equal(posts,1);assert.equal(body.requests.length,1);assert.ok(runtime.find(one.operationId));assert.equal(runtime.find(two.operationId),undefined);
+});

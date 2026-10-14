@@ -1,4 +1,5 @@
 import { validateRetryAllowance } from '../image-workflow/retry-allowance.ts';
+import { validateResumeSelection, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import { validatePurposeSnapshot } from '../ai/purpose-routing.ts';
 import { validateSchemaRetry } from '../catalog/schema-operations.ts';
 import { validateWorkflowRejection } from '../image-workflow/rejection.ts';
@@ -34,7 +35,7 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-const value = record(raw, '自动上架 SKU', [...itemKeys,'imageRetryAllowance','rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'imageRetryAllowance','rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp','failureHistory','lastContinuedAt']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
@@ -49,6 +50,11 @@ const value = record(raw, '自动上架 SKU', [...itemKeys,'imageRetryAllowance'
     draftId: value.draftId === null ? null : identifier(value.draftId), executionTaskIds: (value.executionTaskIds as unknown[]).map(identifier),
     imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts,21+3*(imageRetryAllowance?.allowance.grants.length??0)), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
+  if(value.lastContinuedAt!==undefined)result.lastContinuedAt=date(value.lastContinuedAt);
+  if(value.failureHistory!==undefined){
+    if(!Array.isArray(value.failureHistory))fail();
+    result.failureHistory=(value.failureHistory as unknown[]).map(raw=>{const e=record(raw,'失败事件',['version','stage','reason','occurredAt','slot','source']);if(e.slot!==undefined&&(!Number.isInteger(e.slot)||Number(e.slot)<1||Number(e.slot)>7)||e.source!==undefined&&!['request-proof','local-check'].includes(String(e.source)))fail();if(e.version!==1||!['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(e.stage)))fail();return {version:1 as const,stage:e.stage as AutomaticListingItem['stage'],reason:sanitizeFailureReason(text(e.reason,'失败原因',2000,true)),occurredAt:e.occurredAt===null?null:date(e.occurredAt),...(e.slot!==undefined?{slot:Number(e.slot)}:{}),...(e.source!==undefined?{source:e.source as 'request-proof'|'local-check'}:{})};});
+  }
   if(value.observationFailureStamp!==undefined)result.observationFailureStamp=hash(value.observationFailureStamp);
   if(value.schemaRetry!==undefined)result.schemaRetry=validateSchemaRetry(value.schemaRetry);
   if(value.pricingRefresh!==undefined){
@@ -176,8 +182,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];
 export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask {
-  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan']);
-  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
+  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan','resumeScope']);
+  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1)+(value.resumeScope===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
     || !['demo','live'].includes(String(value.mode)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 5000) fail();
   const items = (value.items as unknown[]).map(item);
   const planned=items.filter(row=>row.stage!=='PLAN');
@@ -189,6 +195,7 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
     targetStamp: hash(value.targetStamp), profileId: text(value.profileId, '图床', 30, true), profileStamp: hash(value.profileStamp), rulesStamp: hash(value.rulesStamp),
     ruleRevision: counter(value.ruleRevision), productType: text(value.productType, '商品类型', 100, true), locale: text(value.locale, '语言', 30, true), items,
     labelFormat: validateItemLabelFormat(value.labelFormat), createdAt: date(value.createdAt), updatedAt: date(value.updatedAt), error: optional(value.error, 2000) };
+  if(value.resumeScope!==undefined)result.resumeScope=validateResumeSelection(value.resumeScope,items.map(row=>row.key));
   if(value.executionMode!==undefined){if(!['immediate','deferred_batch'].includes(String(value.executionMode)))fail();result.executionMode=value.executionMode as AutomaticListingTask['executionMode'];}
   if(value.batchPlan!==undefined){
     const plan=record(value.batchPlan,'批次覆盖计划',['version','credentialScope','purposes','coverage']);if(plan.version!==1||!Array.isArray(plan.purposes)||!Array.isArray(plan.coverage)||plan.purposes.length>30||plan.coverage.length<plan.purposes.length||plan.coverage.length>plan.purposes.length+3)fail();

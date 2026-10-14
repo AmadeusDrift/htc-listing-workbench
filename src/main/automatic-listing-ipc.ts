@@ -24,6 +24,8 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
   handle('red:automatic-listing:list', 0, () => service.list());
   handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));
+  handle('red:automatic-listing:resume-preview',1,input=>service.previewResume(input));
+  handle('red:automatic-listing:resume-selection',1,input=>service.confirmResume(input,hooks.confirm));
   handle('red:automatic-listing:resume', 1, id => start(identifier(id)));
   handle('red:automatic-listing:pause', 1, id => service.pause(identifier(id)));
   handle('red:automatic-listing:cancel', 1, id => service.cancel(identifier(id)));

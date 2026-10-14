@@ -1,8 +1,10 @@
+import { sanitizeFailureReason } from '../shared/automatic-resume.ts';
 import { presentRejection } from '../shared/rejection-presentation.ts';
 import type { AutomaticQueueRow, AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
 import type { ProductDetail, ProductSummary, Variant } from '../shared/contracts.ts';
 
-export function automaticItemReason(item: AutomaticListingItem): string {
+export function automaticItemReason(item:AutomaticListingItem):string{return sanitizeFailureReason(itemReason(item));}
+function itemReason(item: AutomaticListingItem): string {
   const code = item.outcome?.kind === 'RULE_FILTERED' ? item.outcome.code : item.rejection?.detail.code ?? item.outcome?.code;
   const reasons: Record<string, string> = {
     FIELD_RESULT_UNKNOWN: '字段请求结果未知，请查看已保存的字段调用记录与恢复进度。',
@@ -12,6 +14,7 @@ export function automaticItemReason(item: AutomaticListingItem): string {
     READBACK_BRAND_REQUIRES_MANUAL: '品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理；请查看平台字段及错误代码。',
     LABELS_FAILED: '商品标签处理失败，请查看备货与标签中的具体原因；已提交商品和已保存文件保留。',
   };
+  if(item.status==='FAILED'&&(item.error||item.outcome?.message))return sanitizeFailureReason(item.error||item.outcome!.message);
   if (code && Object.hasOwn(reasons, code)) return reasons[code];
   if (item.stage === 'READBACK' && (!['DONE', 'FAILED', 'SCREENED'].includes(item.status) || code === 'READBACK_FAILED')) return item.error || item.outcome?.message || '已提交，等待 Amazon 回读确认；接受提交不等于已可售。';
   if (item.outcome?.kind === 'UNKNOWN') return '结果待核对，请查看当前步骤已保存的调用与恢复记录；正式提交结果未知时禁止自动重发。';

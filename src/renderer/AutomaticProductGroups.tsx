@@ -1,3 +1,4 @@
+import { sanitizeFailureReason } from '../shared/automatic-resume';
 import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { pageWindow } from './list-pagination';
 import { ActualQuoteDetailsPanel } from './ActualQuoteDetailsPanel';
@@ -33,13 +34,14 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping, memory
     </button>
     {(['FAILED','SCREENED','WAITING'].includes(item.status)||['READBACK','LABELS'].includes(item.stage)&&item.status!=='DONE'||item.error)&&<p className="workflow-notice" data-tone={itemTone}>{itemLabels[outcome]}：{automaticItemReason(item)}</p>}
     {expanded && <div className="automatic-sale-body">
+      {(item.failureHistory?.length||item.status==='FAILED')&&<details className="workflow-notice"><summary>历史与本次失败证据（刷新不会发起新请求）</summary><ul>{(item.failureHistory??[{stage:item.stage,reason:item.error??item.outcome?.message??'未保存具体原因',occurredAt:null,slot:undefined,source:undefined}]).map((event,index)=><li key={index}>{event.stage}{event.slot?` · 图位 ${event.slot}`:''} · {event.occurredAt?`${item.lastContinuedAt&&event.occurredAt>=item.lastContinuedAt?'本次检查失败':'历史失败'}记录时间：${new Date(event.occurredAt).toLocaleString()}${event.source==='request-proof'?'（原请求明确失败凭据）':'（本地检查记录，不是原请求时间）'}`:'原失败时间未保存'} · {sanitizeFailureReason(event.reason)}</li>)}</ul><p>当前页面读取未发送新请求；历史失败不表示本次重新执行。继续后仅按授权范围核对和接续。</p></details>}
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
       {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision}/>}
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} onLocateSlot={imageSlot => onManual(item.productId, item.draftId!, { variantId: item.variantId, imageSlot })} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
     </div>}
-    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => onManual(item.productId, item.draftId ?? undefined, { variantId: item.variantId })}>查看并处理异常<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
+    <div className="workflow-actions">{(item.status === 'FAILED' || item.error) && <button type="button" className="text-button" disabled={busy || pending} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => onManual(item.productId, item.draftId ?? undefined, { variantId: item.variantId })}>{['READBACK','LABELS','COMPLETE'].includes(item.stage)?'原 SKU 修正（保留图片，不新建上传）':'查看并处理异常'}<ArrowRight size={14} /></button>}{item.batchId && onShipping && <button type="button" className="text-button" disabled={busy} onClick={() => onShipping(item.batchId!)}>查看备货与标签<ArrowRight size={14} /></button>}</div>
   </li>;
 }
 

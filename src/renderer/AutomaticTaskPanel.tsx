@@ -1,3 +1,4 @@
+import { AutomaticResumePanel } from './AutomaticResumePanel';
 import { AutomaticBatchStatus } from './AutomaticBatchStatus';
 import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-contracts';
 import { usePageState } from './navigation-context';
@@ -109,7 +110,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
     try {
       const value = await (action === 'pause' ? api.pauseAutomaticListingTask(task.id) : action === 'resume' ? api.resumeAutomaticListingTask(task.id) : api.cancelAutomaticListingTask(task.id));
       if (mounted.current && value) { setTask(value); setTasks(values => values.map(row => row.id === value.id ? value : row)); }
-    } catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    } catch (cause) { if (mounted.current) setError((action==='resume'?'本次未启动，未发送新请求：':'')+errorText(cause)); }
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
@@ -137,6 +138,7 @@ export function AutomaticTaskPanel({ products, startedTask, busy, onManual, onSh
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}
       </div>
       {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
+      {['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<AutomaticResumePanel key={task.id} task={task} disabled={busy||Boolean(pending)} onUpdated={value=>{setTask(value);setTasks(values=>values.map(row=>row.id===value.id?value:row));setRefresh(value=>value+1);}}/>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
       {adaptation&&<details className="workflow-notice" aria-label="旧任务适配检查"><summary>当前规则与资料检查（展开明细）</summary>
         {adaptation.blockers.map(message=><p key={message}>{message}</p>)}

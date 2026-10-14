@@ -41,7 +41,7 @@ test('generation sends one OpenRouter JSON POST and returns a PNG with bounded r
   assert.equal(headers.get('authorization'), `Bearer ${BASE.apiKey}`);
   assert.equal(headers.get('content-type'), 'application/json');
   assert.deepEqual(JSON.parse(String(init.body)), {
-    model: BASE.model, prompt: BASE.prompt, n: 1, output_format: 'png', size: BASE.size, quality: BASE.quality, background: BASE.background,provider:{only:['openai'],allow_fallbacks:false},
+    model: BASE.model, prompt: BASE.prompt, n: 1, output_format: 'png', size: BASE.size, quality: BASE.quality, background: BASE.background,provider:{allow_fallbacks:true,require_parameters:true},
   });
 });
 
@@ -56,7 +56,7 @@ test('reference images use the OpenRouter input_references with typed base64 dat
     assert.equal(init?.method, 'POST'); assert.equal(init.redirect, 'error');
     assert.equal(new Headers(init.headers).get('content-type'), 'application/json');
     assert.deepEqual(JSON.parse(String(init.body)), {
-      model: input.model, prompt: input.prompt, n: 1, output_format: 'png', size: input.size, quality: input.quality, background: 'transparent',provider:{only:['openai'],allow_fallbacks:false},
+      model: input.model, prompt: input.prompt, n: 1, output_format: 'png', size: input.size, quality: input.quality, background: 'transparent',provider:{allow_fallbacks:true,require_parameters:true},
       input_references: [ { type:'image_url',image_url:{url: `data:image/png;base64,${PNG.toString('base64')}`} }, { type:'image_url',image_url:{url: `data:image/jpeg;base64,${JPEG.toString('base64')}`} } ],
     });
     return imageResponse();
@@ -158,7 +158,7 @@ test('decoded PNG output is limited to 20 MiB independently of the JSON response
 
 test('authentication, permission, quota, rate and provider errors expose fixed errors without retrying', async () => {
   const cases: [number, unknown, AiError['code']][] = [
-    [401, 'invalid_api_key', 'AUTH_FAILED'], [403, 'permission_denied', 'AUTH_FAILED'],
+    [401, 'invalid_api_key', 'AUTH_FAILED'], [403, 'permission_denied', 'ROUTING_FORBIDDEN'],
     [429, 'insufficient_quota', 'RATE_LIMITED'], [429, 'billing_hard_limit_reached', 'RATE_LIMITED'],
     [429, 'rate_limit_exceeded', 'RATE_LIMITED'], [402, undefined, 'QUOTA_EXCEEDED'], [500, 'upstream-private', 'PROVIDER_ERROR'],
     [400, 'content_policy_violation', 'PROVIDER_ERROR'], [302, undefined, 'PROVIDER_ERROR'],

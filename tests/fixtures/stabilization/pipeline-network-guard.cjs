@@ -97,7 +97,11 @@ function installElectron(electron){
   };
   electron.net.resolveHost=()=>deny('electron.net.resolveHost');
   electron.shell.openExternal=()=>deny('shell.openExternal');const installed=new WeakSet();
-  const protect=session=>{if(installed.has(session))return;installed.add(session);const original=session.fetch.bind(session);session.fetch=(input,init={})=>{const request=mapped(input,init,'session.fetch');return electronScope.run(request,()=>original(request.url,{...init,method:request.method,headers:request.headers,redirect:'error'}));};
+  const protect=session=>{if(installed.has(session))return;installed.add(session);const original=session.fetch.bind(session);session.fetch=(input,init={})=>{
+    const expected=electronScope.getStore(),headers=new Headers(init.headers??input?.headers),capability=headers.get('x-s10-native-capability'),pending=capability&&nativePending.get(capability),raw=typeof input==='string'?input:input?.url;
+    if(expected?.route.protocol&&pending&&pending.request===expected&&!pending.delegated&&raw===expected.url&&String(init.method??input?.method??'GET').toUpperCase()===expected.method){pending.delegated=true;return original(input,init);}
+    const request=mapped(input,init,'session.fetch');return electronScope.run(request,()=>original(request.url,{...init,method:request.method,headers:request.headers,redirect:'error'}));
+  };
     session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,done)=>{if(/^(file|data|red|red-asset|devtools):/.test(details.url))return done({});
       try{rawPathSafe(details.url);const url=new URL(details.url);if(url.origin!==origin.origin||url.search||url.hash||!policy.routes.some(row=>row.method===details.method&&row.path===url.pathname))throw Error();done({});}catch{state.blocked.push('Chromium');done({cancel:true});}});
     session.webRequest.onBeforeSendHeaders({urls:[origin.origin+'/*']},(details,done)=>{try{

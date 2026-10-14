@@ -129,9 +129,10 @@ export class RunReportReader {
       let certainty = latest('certainty') ?? null;
       if (certainty === 'NOT_SENT' && !retainedReceipt && ['RUNNING','FAILED'].includes(String(c.status))) certainty = 'SENT_UNKNOWN';
       if (resultIds.length) certainty = 'RECEIVED_VALID';
-      else if (c.status === 'FAILED' && c.errorCode === 'OUTPUT_INVALID' && (retainedReceipt || c.responseReceived === 1)) certainty = 'RECEIVED_INVALID';
-      else if (!certainty && retainedReceipt && [400,401,403,404,413,422,429].includes(Number(retainedReceipt.status))) certainty = 'DEFINITIVE_REJECTION';
-      else if (!certainty && !retainedReceipt) certainty = 'SENT_UNKNOWN';
+      // The read-only report projects saved metadata, not verified private body
+      // bytes. OUTPUT_INVALID/HTTP status cannot replace explicit transport
+      // certainty or prove an omitted, empty or incomplete response resolved.
+      else if (!certainty) certainty = 'SENT_UNKNOWN';
       const operation = journalCalls.get(c.id), draftId = latest('draftId') ?? id(c.draftId) ?? operation?.draftId ?? image?.draftId ?? null, item = items.find(i => latest('itemKey') === i.key) ?? items.find(i => draftId === i.draftId);
       if (c.productId && item && c.productId !== item.productId || latest('itemKey') && !keys.has(latest('itemKey')!)) return fail();
       calls.push({ callId: c.id, operationId: latest('operationId') ?? operation?.operationId ?? null, receiptId: retainedReceipt ? String(retainedReceipt.id) : null, draftId,

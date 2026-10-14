@@ -19,7 +19,7 @@ function fixture(t:test.TestContext){
 test('A17 image preview failure recovers the original base64 without another paid request',async t=>{
   const f=fixture(t),id=randomUUID();await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:id}));assert.equal(f.calls(),1);
   f.fixPreview();const recovered=await f.service.reconcileWorkflowGeneration(id);assert.equal(recovered?.id,id);assert.equal(recovered?.provider,'openrouter');assert.equal(f.calls(),1);
-  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:id}));assert.equal(f.calls(),1);
+  const repeated=await f.service.generateForWorkflow(f.input,{requestId:id});assert.equal(repeated.id,id);assert.equal(repeated.sha256,recovered?.sha256);assert.equal(f.calls(),1);
   const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT count(*) n FROM ai_provider_receipts').get()!.n,1);}finally{db.close();}
 });
 test('file receipt survives interruption before its SQLite index is stored',async t=>{

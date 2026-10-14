@@ -15,6 +15,7 @@ import { outcomeScope, pricingOutcome, qualifiedPricing } from './outcomes.ts';
 import type { SalesRecipe } from '../../shared/sales-plan-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
+import { salesUnitReviewNeeded } from '../sales-plans/unit-adoption.ts';
 
 export const adaptationSubmitted=(draft:AmazonDraft|undefined)=>!!draft&&(!!draft.submittedAt||['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state));
 const stable=(value:unknown):unknown=>Array.isArray(value)?value.map(stable):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,stable(v)])):value;
@@ -40,10 +41,14 @@ export function* adaptationSteps(task:AutomaticListingTask,deps:AutomaticListing
   const changes:AutomaticAdaptationChange[]=[];
   const add=(row:AutomaticListingItem,kind:AutomaticAdaptationChange['kind'],message:string,steps:string[]=[],fields:string[]=[])=>changes.push({key:row.key,productId:row.productId,sku:row.sku,kind,message,steps,fields});
   const projections=new Map<string,AmazonDraft>();
+  const unitReviewProducts=new Set<string>();
   for(const row of task.items){
     yield;
     const draft=row.draftId?drafts.get(row.draftId):undefined,p=sources.find(p=>p.id===row.productId)!;
-    if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读');continue;}
+    const units=row.salesPlan?salesUnitReviewNeeded(row.salesPlan.recipe,p):null;
+    if(units)unitReviewProducts.add(p.id);
+    if(adaptationSubmitted(draft)||['READBACK','LABELS','COMPLETE'].includes(row.stage)){add(row,'PRESERVED','已提交身份与历史保持不变，仅继续原平台回读'+(units?'；计量变化不分配新的替代 SKU':''));continue;}
+    if(units){add(row,'BLOCKED',units,['计量对照与明确采用'],['number_of_items','unit_count','purchasable_offer']);continue;}
     if(recipeErrors.has(p.id)){add(row,'BLOCKED',recipeErrors.get(p.id)!,['销售选样']);continue;}
     const selected=deps.planSales?recipes.get(p.id)!.some(r=>matchesRecipe(row,r)):p.variants.some(v=>v.id===row.variantId);
     if(!selected&&row.outcome?.kind==='RULE_FILTERED'&&row.outcome.pricingReport){add(row,'PRESERVED','原利润淘汰继续排除；本次也未选中，保留独立定价证据供后续重新入选时核对');continue;}
@@ -70,7 +75,7 @@ export function* adaptationSteps(task:AutomaticListingTask,deps:AutomaticListing
       }catch(error){add(row,'BLOCKED',error instanceof Error?error.message:'无法判定受影响范围，原成果保留');}
     }else if(draft&&(p.revision!==draft.productRevision||task.rulesStamp!==fingerprint(rules)))add(row,'BLOCKED','本地草稿适配接口不可用，保留原记录待修复');
   }
-  for(const p of sources)for(const recipe of recipes.get(p.id)??[])if(!task.items.some(r=>r.productId===p.id&&matchesRecipe(r,recipe)))changes.push({key:p.id+':'+recipe.key,productId:p.id,sku:null,kind:'NEW',steps:['来源','分类','草稿'],fields:[],message:'当前完整来源选样新增销售规格：'+recipe.specification});
+  for(const p of sources)if(!unitReviewProducts.has(p.id))for(const recipe of recipes.get(p.id)??[])if(!task.items.some(r=>r.productId===p.id&&matchesRecipe(r,recipe)))changes.push({key:p.id+':'+recipe.key,productId:p.id,sku:null,kind:'NEW',steps:['来源','分类','草稿'],fields:[],message:'当前完整来源选样新增销售规格：'+recipe.specification});
   const token=fingerprint(stable({version:1,task,rules,riskSettings:db?readImageRiskSettings(db):null,sources,receipts,drafts:[...drafts],runs,executions,target,profile,changes,projections:[...projections]}));
   const preview:AutomaticAdaptationPreview={taskId:task.id,taskRevision:task.revision,token,canApply:!blockers.length,blockers,changes,sources};
   return {preview,rules,sources,recipes,drafts,projections};
@@ -137,4 +142,17 @@ export function assertTaskAdaptationHistory(db:DatabaseSync,task:AutomaticListin
   const previous=[...(before.adaptation?.previousRules??[]),{stamp:before.rulesStamp,revision:before.ruleRevision}].filter((r,i,a)=>a.findIndex(v=>v.stamp===r.stamp&&v.revision===r.revision)===i);
   const blocked=proof.changes.filter((c:AutomaticAdaptationChange)=>c.kind==='BLOCKED').map((c:AutomaticAdaptationChange)=>c.key);
   if(proof.taskId!==task.id||before.id!==task.id||fingerprint(previous)!==fingerprint(task.adaptation.previousRules)||fingerprint(blocked)!==fingerprint(task.adaptation.blockedKeys))throw new UserFacingError('旧任务适配检查点与原始历史不一致');
+  for(const key of task.adaptation.unitResolvedKeys??[]){
+    if(!onlyUnitAdaptationBlock(proof.changes,key))throw new UserFacingError('原适配阻断并非仅计量，不能随单位采用解除其他阻断');
+    const row=task.items.find(r=>r.key===key),savedUnits=db.prepare("SELECT detail_json FROM audit_events WHERE action='automatic-listing.sales-units.adopted' AND json_extract(detail_json,'$.taskId')=? AND json_extract(detail_json,'$.itemKey')=? AND json_extract(detail_json,'$.before.adaptation.token')=? LIMIT 2").all(task.id,key,task.adaptation.token);
+    if(savedUnits.length!==1||!row?.salesPlan?.unitAdoption)throw new UserFacingError('原任务计量解除缺少唯一采用证明');
+    const units=JSON.parse(String(savedUnits[0].detail_json)),old=units.before?.items?.find((r:AutomaticListingItem)=>r.key===key);
+    if(units.before.id!==task.id||units.before.targetId!==task.targetId||units.before.sellerId!==task.sellerId||units.before.marketplaceId!==task.marketplaceId||units.before.mode!==task.mode||old?.sku!==row.sku||old?.draftId!==row.draftId||old?.productId!==row.productId||old?.variantId!==row.variantId||!old.salesPlan
+      ||fingerprint(old.salesPlan.recipe)!==fingerprint(row.salesPlan.unitAdoption.previousRecipe)||fingerprint(units.afterPlan)!==fingerprint(row.salesPlan)
+      ||['namingGroupId','sourceGroupKey','sku','baseSku','namingChildKey'].some(field=>old.salesPlan[field]!==units.afterPlan?.[field]))throw new UserFacingError('原任务计量解除与原 SKU、配方或命名身份不一致');
+  }
+}
+export function onlyUnitAdaptationBlock(changes:AutomaticAdaptationChange[],key:string):boolean {
+  const blocked=changes.filter(c=>c.key===key&&c.kind==='BLOCKED');
+  return blocked.length===1&&fingerprint(blocked[0].steps)===fingerprint(['计量对照与明确采用'])&&fingerprint(blocked[0].fields)===fingerprint(['number_of_items','unit_count','purchasable_offer']);
 }

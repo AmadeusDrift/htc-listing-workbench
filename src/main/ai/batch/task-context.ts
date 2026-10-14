@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { AiPurposeSnapshot } from '../../../shared/ai-purpose-contracts.ts';
 import type { ListingExecutionMode } from '../../../shared/ai-batch-contracts.ts';
 export interface TaskAiScope {
+ /** AutomaticListingItem.key: product UUID + ':' + sales recipe hash or source variant UUID. */
  taskId:string;rowKey:string;phase:string;mode:ListingExecutionMode;
  explicitContinueAt?:string;waitingOperationId?:string;credentialScope?:string;purposes?:AiPurposeSnapshot[];authorize():boolean;
 }

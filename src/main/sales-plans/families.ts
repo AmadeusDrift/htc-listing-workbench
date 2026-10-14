@@ -3,6 +3,7 @@ import type { SalesListingPlan, SalesRecipe } from '../../shared/sales-plan-cont
 import { isObject } from '../amazon/context.ts';
 import { resolveSchemaNode } from '../amazon/field-catalog.ts';
 import { wrapCandidateValues } from '../amazon/field-mapping.ts';
+import { salesPlatformPieces } from '../../shared/source-quantity.ts';
 
 /** Only concrete supported dimensions are used; unrelated axes are never invented. */
 export function chooseVariationTheme(schema:AmazonSchema, recipes:SalesRecipe[]):string|null {
@@ -13,14 +14,15 @@ export function chooseVariationTheme(schema:AmazonSchema, recipes:SalesRecipe[])
   if(!isObject(item.properties)||!isObject(item.properties.name)) return null;
   const name=resolveSchemaNode(schema.schema,item.properties.name),themes=Array.isArray(name.enum)?name.enum.filter((v):v is string=>typeof v==='string'):[];
   const deprecated=new Set([field,item,name].flatMap(n=>isObject(n.$lifecycle)&&Array.isArray(n.$lifecycle.enumDeprecated)?n.$lifecycle.enumDeprecated:[]));
-  const countVaries=new Set(recipes.map(r=>r.totalPieces)).size>1;
+  const countVaries=new Set(recipes.map(salesPlatformPieces)).size>1;
   const colorVaries=new Set(recipes.map(r=>r.color)).size>1;
   const usable=themes.filter(theme=>{
     const axes=theme.split('/'),hasColor=axes.some(axis=>['COLOR','COLOR_NAME'].includes(axis)),hasCount=axes.includes('NUMBER_OF_ITEMS');
     return !deprecated.has(theme)&&axes.length>0
       &&axes.every(axis=>['COLOR','COLOR_NAME','NUMBER_OF_ITEMS'].includes(axis))&&(!countVaries||hasCount)&&(!colorVaries||hasColor)
       &&(!hasColor||recipes.every(r=>!!r.color))
-      &&new Set(recipes.map(r=>JSON.stringify([...(hasColor?[r.color]:[]),...(hasCount?[r.totalPieces]:[])]))).size===recipes.length;
+      &&(!hasCount||recipes.every(r=>salesPlatformPieces(r)!==null))
+      &&new Set(recipes.map(r=>JSON.stringify([...(hasColor?[r.color]:[]),...(hasCount?[salesPlatformPieces(r)]:[])]))).size===recipes.length;
   });
   return usable.sort((a,b)=>a.split('/').length-b.split('/').length||a.localeCompare(b))[0]??null;
 }

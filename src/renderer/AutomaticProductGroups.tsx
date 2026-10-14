@@ -6,7 +6,7 @@ import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { useEffect } from 'react';
 import { ArrowRight, Box, ChevronDown, Search } from 'lucide-react';
-import type { AutomaticListingItem } from '../shared/automatic-listing-contracts';
+import type { AutomaticListingItem,AutomaticListingTask } from '../shared/automatic-listing-contracts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
 import { ImageSlotProgress } from './ImageSlotProgress';
 import { automaticItemOutcome, automaticItemReason, filterAutomaticProductGroups } from './automatic-product-groups';
@@ -20,9 +20,9 @@ const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行',
 export function OutcomeCount({ tone, label, value, suffix = '' }: { tone: 'success' | 'info' | 'warning' | 'danger' | 'neutral'; label: string; value: number; suffix?: string }) {
   return <span className="outcome-count" data-tone={value ? tone : undefined}>{label} {value}{suffix}</span>;
 }
-interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
+interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void;unitOwner?:{taskId:string;taskRevision:number;onUpdated(task:AutomaticListingTask):void} }
 
-function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey }: Actions & { item: AutomaticListingItem; memoryKey: string }) {
+function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey,unitOwner }: Actions & { item: AutomaticListingItem; memoryKey: string }) {
   const [expanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, item.status === 'RUNNING');
   const specification = item.salesPlan?.recipe.specification;
   const outcome = automaticItemOutcome(item);
@@ -36,7 +36,7 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping, memory
     {expanded && <div className="automatic-sale-body">
       {(item.failureHistory?.length||item.status==='FAILED')&&<details className="workflow-notice"><summary>历史与本次失败证据（刷新不会发起新请求）</summary><ul>{(item.failureHistory??[{stage:item.stage,reason:item.error??item.outcome?.message??'未保存具体原因',occurredAt:null,slot:undefined,source:undefined}]).map((event,index)=><li key={index}>{event.stage}{event.slot?` · 图位 ${event.slot}`:''} · {event.occurredAt?`${item.lastContinuedAt&&event.occurredAt>=item.lastContinuedAt?'本次检查失败':'历史失败'}记录时间：${new Date(event.occurredAt).toLocaleString()}${event.source==='request-proof'?'（原请求明确失败凭据）':'（本地检查记录，不是原请求时间）'}`:'原失败时间未保存'} · {sanitizeFailureReason(event.reason)}</li>)}</ul><p>当前页面读取未发送新请求；历史失败不表示本次重新执行。继续后仅按授权范围核对和接续。</p></details>}
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
-      {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision}/>}
+      {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision} unitScope={unitOwner?{...unitOwner,itemKey:item.key}:undefined}/>}
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} onLocateSlot={imageSlot => onManual(item.productId, item.draftId!, { variantId: item.variantId, imageSlot })} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}

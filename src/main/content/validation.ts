@@ -3,6 +3,7 @@ import { TEXT_REVIEW_POLICY_VERSION } from '../../shared/ai-contracts.ts';
 import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 import type { AdoptReviewedContentInput, ContentVersion } from '../../shared/content-contracts.ts';
 import { AiError } from '../ai/errors.ts';
+import { resultHasOwner } from '../ai/result-owner.ts';
 import { candidateFields, suggestionFingerprint } from '../ai/review.ts';
 import { date, integer, keys, modelFor, sha256, uuid } from "../ai/primitives.ts";
 import { validateTextOutput } from "../ai/basic-output-validation.ts";
@@ -27,8 +28,8 @@ export function assertContentHistory(version: ContentVersion, results: ReadonlyM
   for (const result of [generation, review]) {
     const call = calls.get(result.callId);
     if (result.productId !== version.productId || result.productRevision !== version.sourceRevision || result.variantId !== version.variantId
-      || !call || call.status !== 'SUCCEEDED' || call.providerId !== result.providerId || call.productId !== result.productId
-      || call.productRevision !== result.productRevision || call.model !== result.model || call.finishedAt !== result.createdAt) throw new AiError('INVALID_CONFIG');
+      || !call || !resultHasOwner(result,call) || call.providerId !== result.providerId || call.productId !== result.productId
+      || call.productRevision !== result.productRevision || call.model !== result.model) throw new AiError('INVALID_CONFIG');
   }
   if (generation.model !== version.generationModel || review.model !== version.reviewModel
     || generation.sourceSha256 !== version.sourceSha256 || review.output.sourceSha256 !== version.sourceSha256

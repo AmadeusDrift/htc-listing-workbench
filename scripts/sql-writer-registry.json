@@ -2,6 +2,16 @@
   "version": 1,
   "scope": "Reviewed exact command/operation/table and normalized SQL signatures, never wildcard directory/table permissions. Changed/new SQL requires review.",
   "writers": {
+    "main/image-workflow/review-journal.ts": {
+      "role": "images",
+      "review": "S05 image owner CAS only, borrowing an already active reservation transaction on the same physical workspace; no AI table writes or network wait.",
+      "commands": [
+        "reserveImageReviewRequest|UPDATE|image_workflow_runs"
+      ],
+      "statements": {
+        "reserveImageReviewRequest|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1
+      }
+    },
     "main/ai/batch/records.ts": {
       "role": "ai",
       "review": "Owner implementation; only listed table commands. retain*/restore* commands preserve history in staged restore; initialize* and schema definitions are migration-only.",
@@ -889,6 +899,38 @@
         "retainImageRetryHistory|ce7e930da7db87b4ecb934057db54a9d645400a03ea2890e1b375919f973b500": 1,
         "retainImageRetryHistory|c6849f233c3e9efd2ae31ca2b5640c4bc389b6d31df7bb3141c20994f62ad065": 1,
         "retainImageRetryHistory|79014e01448946226358f282552c876d16c903afab92f248680e878e563d22e0": 1
+      }
+    },
+    "main/ai/request-history.ts": {
+      "role": "ai",
+      "review": "M07 staged restore only: preserves complete validated original calls and owned results by immutable identity; same restore transaction; no ordinary query writes.",
+      "commands": [
+        "retainRequestCallHistory|INSERT|ai_calls",
+        "retainRequestCallHistory|INSERT|ai_results"
+      ],
+      "statements": {
+        "retainRequestCallHistory|4633a1c6198502e2494f8ab97e07b767fd848e2882d738726659358c919fa214": 1,
+        "retainRequestCallHistory|69d42ce27c3df1bcb0dfcf497a5743d4f6dc12273f218db6cb34d927cb65012b": 1
+      }
+    },
+    "main/amazon/unit-retention.ts": {
+      "role": "listing",
+      "review": "S06 approved exact staged unit-adoption restore owner command; synchronous transaction only; no providers, resume, submission or permission.",
+      "commands": [
+        "restoreSalesUnitRecord|UPDATE|listing_drafts"
+      ],
+      "statements": {
+        "restoreSalesUnitRecord|0a7e050d220366f4e3a5c3848202707ba704992bd4d98c6f2a5db835280a464b": 1
+      }
+    },
+    "main/automatic-listing/unit-retention.ts": {
+      "role": "tasks",
+      "review": "S06 approved exact staged unit-adoption restore owner command; synchronous transaction only; no providers, resume, submission or permission.",
+      "commands": [
+        "restoreSalesUnitTask|UPDATE|automatic_listing_tasks"
+      ],
+      "statements": {
+        "restoreSalesUnitTask|5662832c0de1a0c1c0cceeb6dd590d159bb58a3660cab89226af859f6981555b": 1
       }
     }
   },

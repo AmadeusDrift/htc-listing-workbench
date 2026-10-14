@@ -1,4 +1,8 @@
 import { programRelationField } from '../amazon/program-relations.ts';
+import { skuObservationImages } from '../../shared/source-observation-authority.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { taskAiContext } from '../ai/batch/task-context.ts';
+import { appendRunEvidence, evidenceSku } from '../diagnostics/run-evidence.ts';
 import { listingProblems } from './problems.ts';
 import { selectedFirmnessCorrection } from './selected-firmness.ts';
 import type { AutomaticListingItem } from '../../shared/automatic-listing-contracts.ts';
@@ -16,6 +20,15 @@ import type { ProductDetail } from '../../shared/contracts.ts';
 import type { SourceColorContext } from '../../shared/source-color-contracts.ts';
 import { hasSkuColorEvidence } from './sku-colors.ts';
 import type { AmazonDraft, JsonObject, ListingIssue } from '../../shared/amazon-contracts.ts';
+function recordFieldAdoption(db: DatabaseSync, draft: AmazonDraft, results: AiResult[], at: string): void {
+  const scope = taskAiContext.getStore();
+  for (const result of results) try {
+    appendRunEvidence(db, draft.productId, { version: 1, at, event: 'RESULT_ADOPTED', stage: 'fields.adoption', draftId: draft.id,
+      callId: result.callId, certainty: 'RECEIVED_VALID', ...(evidenceSku(draft.sku) ? { sku: draft.sku } : {}),
+      ...(scope ? { taskId: scope.taskId, itemKey: scope.rowKey } : {}),
+      ...(result.fieldGroupPart ? { operationId: result.fieldGroupPart.operationId } : result.localRecovery ? { operationId: result.localRecovery.operationId } : {}) });
+  } catch { /* The adopted draft remains authoritative if noncritical diagnostics fail. */ }
+}
 import type { AdoptAmazonFieldsInput, ListingAiContext, ListingFieldAdoption, ListingFieldsOutput, ReviewAmazonFieldsInput, SuggestAmazonFieldsInput } from '../../shared/listing-ai-contracts.ts';
 import { LISTING_CANDIDATE_FIELDS, CATEGORY_INFERENCE_POLICY_VERSION } from '../../shared/listing-ai-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
@@ -96,7 +109,10 @@ export class ListingAiService {
       context.sourceProduct!.assets=this.sourceAssets(draft,product);
       const observations=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])].map(variantId=>this.ai.sourceObservationEvidence({productId:product.id,productRevision:product.revision,variantId}));
       context.sourceProduct!.observations=observations;
-      for(const source of observations)for(const image of source.images.filter(image=>!source.productReferenceAssetIds?.includes(image.assetId)))for(const [index,observation] of (image.observations??[]).entries())context.evidence.push({id:`${source.variantId}:observation:${image.assetId}:${index}`,name:observation.name,value:observation.values.join(', '),meaning:'general',source:'image_observation'});
+      for(const source of observations)for(const image of skuObservationImages(source,source.variantId))for(const [index,observation] of (image.observations??[]).entries()){
+        if(observation.visibility!=='visible')continue;
+        context.evidence.push({id:`${source.variantId}:observation:${image.assetId}:${index}`,name:observation.name,value:observation.values.join(', '),meaning:'general',source:'image_observation'});
+      }
       return validateListingContext(context);
     }
     if(!this.ai.listResults(product.id).some(result=>result.output.kind==='source-color'&&result.productRevision===product.revision))return context;
@@ -221,6 +237,7 @@ export class ListingAiService {
       const attributes=structuredClone(draft.attributes),changes=fields.map(field=>{const c=candidate.candidates.find(c=>c.field===field)!,after=candidateNative(c,draft.schema,draft.marketplaceId);attributes[field]=after;return {field,before:null,after,evidence:context.evidence.filter(e=>c.items.some(item=>item.evidenceIds.includes(e.id)))};});
       const adoption:ListingFieldAdoption={id:listingFingerprint({draftId:draft.id,revision:draft.revision,suggestion:recovered.id,review:null,fields:[...fields].sort(),reviewDisposition:'SKIPPED_DISABLED'}),at:new Date().toISOString(),suggestionResultId:recovered.id,reviewResultId:null,contextSha256:listingFingerprint(context),fromRevision:draft.revision,toRevision:draft.revision+1,fields:[...fields].sort(),changes,reviewDisposition:'SKIPPED_DISABLED'};
       const updated=this.amazon.adoptFields({id:draft.id,revision:draft.revision},attributes,adoption,()=>{this.assertReviewSetting(false);this.assertSourceConsistency(draft);if(listingFingerprint(this.current(reference).context)!==listingFingerprint(context))throw new UserFacingError('本地恢复期间资料已变化');},true,(updated,db)=>{
+        recordFieldAdoption(db, updated, [recovered], adoption.at);
         const journal=new CompletionJournal(db),afterContext={...context,draftRevision:updated.revision,currentAttributes:updated.attributes};
         for(const op of journal.list(draft.id))if(op.state==='DONE'&&op.draftRevision===draft.revision&&op.draftStamp===completionDraftStamp(draft)){
           op.draftRevision=updated.revision;op.draftStamp=completionDraftStamp(updated);op.remaining=currentPolicyRemaining(updated,afterContext,id=>this.ai.getResult(id));journal.save(op);
@@ -288,7 +305,7 @@ export class ListingAiService {
       return { field, before, after, evidence: context.evidence.filter(e => evidenceIds.has(e.id)) };
     });
     const adoption: ListingFieldAdoption = { id: adoptionId, at: new Date().toISOString(), suggestionResultId: suggestion.id, reviewResultId: review?.id ?? null, contextSha256: listingFingerprint(context), fromRevision: draft.revision, toRevision: draft.revision + 1, fields: [...reference.fields].sort(), changes, ...disposition };
-    signal?.throwIfAborted();return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);this.assertSourceConsistency(this.amazon.getDraft(draft.id)); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); });
+    signal?.throwIfAborted();return this.amazon.adoptFields({ id: draft.id, revision: draft.revision }, attributes, adoption, () => { signal?.throwIfAborted();this.assertReviewSetting(reviewEnabled);this.assertSourceConsistency(this.amazon.getDraft(draft.id)); if (listingFingerprint(this.current(reference, context).context) !== listingFingerprint(context)) throw new UserFacingError('草稿资料已变化，未写入建议'); }, false, (updated,db) => recordFieldAdoption(db, updated, [suggestion,...(review ? [review] : [])], adoption.at));
   }
 
   /** A fresh copy snapshot for image generation when independent copy review is disabled. */

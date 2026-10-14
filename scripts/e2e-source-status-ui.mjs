@@ -16,7 +16,7 @@ const source={id:'p1',title:'测试来源',revision:1,variantCount:3,assets:[],v
 const item={key:'i1',productId:'p1',variantId:'v1',sku:'S1',stockSets:1,status:'FAILED',stage:'SOURCES',error:'旧请求未知',lastContinuedAt:'2026-10-14T02:00:00Z',failureHistory:[{stage:'SOURCES',reason:'历史鉴权失败',occurredAt:'2026-10-14T01:00:00Z',source:'request-proof'},{stage:'SOURCES',reason:'本地配置变化，本次未发送',occurredAt:'2026-10-14T03:00:00Z',source:'local-check'}],outcome:{kind:'UNKNOWN',code:'SOURCE_CONSISTENCY_SENT_UNKNOWN'}};
 const legacy={...item,key:'legacy',variantId:'v2',sku:'LEGACY',error:'AI 服务未完成请求，请核对服务状态和调用记录',failureHistory:[],outcome:{kind:'NEEDS_INPUT',code:'SOURCE_CONSISTENCY_NEEDS_INPUT',message:'AI 服务未完成请求，请核对服务状态和调用记录',classifiedAt:'2026-10-14T08:15:17Z'}};
 const queue={products:[{productId:'p1',eligibleCount:0,rows:[{key:'legacy',kind:legacy.outcome.kind,reasonCode:legacy.outcome.code,message:legacy.outcome.message,eligible:false,sku:'LEGACY',specification:'历史规格'}]}]};
-const task={id:'t1',revision:1,status:'PAUSED',targetName:'隔离测试',mode:'live',ruleRevision:1,createdAt:'2026-10-14T00:00:00Z',updatedAt:'2026-10-14T00:00:00Z',items:[item,legacy]};
+const task={id:'t1',revision:1,status:'PAUSED',targetName:'隔离测试',mode:'live',ruleRevision:1,createdAt:'2026-10-14T00:00:00Z',updatedAt:'2026-10-14T00:00:00Z',items:[item,legacy,{...item,key:'pending',variantId:'v3',sku:'PENDING',status:'PENDING',error:null,outcome:null,failureHistory:[]}]};
 const state=window.fixture={task,source,calls:[],fail:false,hold:false,summary:true,legacySnapshot:JSON.stringify(legacy)};
 const copy=x=>structuredClone(x);
 window.red={listAutomaticListingTasks:async()=>[copy(task)],getAutomaticListingTask:async()=>copy(task),getAutomaticBatchSummary:async()=>null,previewAutomaticListingAdaptation:async()=>{state.calls.push('check');if(state.hold)await new Promise(resolve=>state.release=resolve);if(state.fail)throw Error('本地来源读取测试失败');return {sources:[copy(source)],changes:[],blockers:[],canApply:false};}};
@@ -57,6 +57,10 @@ try{
  await expect(page.locator('.automatic-source-variants')).toHaveCount(0);
  await expect(page.getByTestId('automatic-result-v2')).toContainText('系统待修复');
  await expect(page.getByTestId('automatic-result-v2')).toContainText('这是历史记录，查看本提示不会重试');
+ await expect(page.getByTestId('automatic-result-v3')).toContainText('待执行');
+ await expect(page.getByTestId('automatic-result-v3')).not.toContainText('历史记录未保存');
+ await expect(page.getByTestId('automatic-result-v3').getByRole('button',{name:'查看并处理异常'})).toHaveCount(0);
+ await expect(page.getByTestId('automatic-result-v1')).toContainText('结果未知');
  assert.equal(await page.evaluate(()=>JSON.stringify(window.fixture.task.items[1])===window.fixture.legacySnapshot),true);
  await page.getByTestId('automatic-result-v1').locator('.automatic-sale-toggle').click();
  await page.getByText('历史与本次失败证据（刷新不会发起新请求）',{exact:true}).click();

@@ -33,3 +33,17 @@ test('typed rule evidence wins over arbitrary raw failure text, while ordinary f
  const reason=automaticItemReason(row({status:'FAILED',stage:'IMAGES',error:'图位 2 下载超时 https://private.invalid?key=SECRET api_key=PRIVATE',outcome:{kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'} as any}));
  assert.match(reason,/图位 2 下载超时/);assert.doesNotMatch(reason,/private.invalid|SECRET|PRIVATE/);
 });
+
+test('normal pending running and completed items never invent historical failure explanations',()=>{
+ for(const [status,expected] of [['PENDING','等待执行'],['RUNNING','正在处理'],['DONE','流程已完成']] as const){
+  const item=row({status,stage:status==='DONE'?'COMPLETE':'SOURCES'}),before=structuredClone(item);
+  assert.match(automaticItemReason(item),new RegExp(expected));
+  assert.doesNotMatch(automaticItemReason(item),/历史记录|失败|可信.*细因/);assert.deepEqual(item,before);
+ }
+});
+test('current active state labels retained errors as history without hiding unknown evidence',()=>{
+ const item=row({status:'PENDING',stage:'SOURCES',error:'AI 接口鉴权失败，请检查配置',outcome:{kind:'SYSTEM_REPAIR',code:'AUTH_FAILED',message:'AI 接口鉴权失败，请检查配置'} as any});
+ const before=structuredClone(item);assert.match(automaticItemReason(item),/等待执行.*历史记录.*鉴权失败/);assert.deepEqual(item,before);
+ assert.match(automaticItemReason(row({status:'PENDING',outcome:{kind:'UNKNOWN',code:'FIELD_RESULT_UNKNOWN'} as any})),/结果未知/);
+ assert.match(automaticItemReason(row({status:'FAILED'})),/历史记录/);
+});

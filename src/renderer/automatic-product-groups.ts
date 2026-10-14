@@ -29,6 +29,14 @@ function itemReason(item: AutomaticListingItem): string {
     READBACK_BRAND_REQUIRES_MANUAL: '品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理；请查看平台字段及错误代码。',
     LABELS_FAILED: '商品标签处理失败，请查看备货与标签中的具体原因；已提交商品和已保存文件保留。',
   };
+  // Active state is not a new failure. Keep saved rejection evidence explicitly historical;
+  // UNKNOWN evidence still uses the safety explanation below, never a normal-state fallback.
+  if (['PENDING','RUNNING','DONE'].includes(item.status) && !['READBACK','LABELS'].includes(item.stage)
+    && item.outcome?.kind !== 'UNKNOWN' && !(code && /UNKNOWN/u.test(code))) {
+    const state = item.status === 'DONE' ? '流程已完成。' : item.status === 'RUNNING' ? '正在处理当前步骤。' : '等待执行当前步骤。';
+    const history = item.error || item.outcome?.message || (code ? presentRejection(code) : '');
+    return state + (history ? `历史记录（不代表本次失败）：${history}` : '');
+  }
   // Typed rule and safety dispositions must not be replaced by provider text.
   if(item.outcome?.kind==='RULE_FILTERED')return presentRejection(code);
   if (code && Object.hasOwn(reasons, code)) return reasons[code];

@@ -8,6 +8,8 @@ export type DecisionQuestion={type:'choice';criteria:Record<string,string|null>;
 export type DecisionAnswer={type:'choice';choice:string;confidence?:number;probabilities?:Record<string,number>}|{type:'noul';noul:number}|{type:'score';score:number;confidence?:number;probabilities?:Record<string,number>};
 export async function requestOpenRouterDecisions(model:string,state:unknown,questions:Record<string,DecisionQuestion>,credentials:{apiKey:string},signal:AbortSignal,context:AdapterContext):Promise<ProviderMetadata&{answers:Record<string,DecisionAnswer>}>{
   if(textModelCapability('openrouter',model).endpoint!=='decisions'||!Object.keys(questions).length||Object.keys(questions).length>200||Object.entries(questions).some(([id,q])=>!id||id.length>100||!q.instructions?.trim()||q.type==='choice'&&!Object.keys(q.criteria).length))throw new AiError('INVALID_INPUT');
+  // Decisions only accepts auto/low/high; do not leak another provider's detail enum.
+  if(Array.isArray(state)&&state.some(part=>part?.type==='image_url'&&(!part.image_url||typeof part.image_url.url!=='string'||!/^data:image\/(png|jpeg|webp);base64,/.test(part.image_url.url)||part.image_url.detail!==undefined&&!['auto','low','high'].includes(part.image_url.detail))))throw new AiError('INVALID_INPUT');
   const raw=await postOpenRouter('/api/alpha/decisions',{model,state,questions,provider:{allow_fallbacks:true,require_parameters:true}},credentials,signal,context);
   const usage=emptyUsage();let usageKnown=false;
   if(raw?.usage&&['input_tokens','output_tokens'].every(key=>Number.isSafeInteger(raw.usage[key])&&raw.usage[key]>=0&&raw.usage[key]<=1_000_000_000)){usage.promptTokens=raw.usage.input_tokens;usage.completionTokens=raw.usage.output_tokens;usageKnown=true;}

@@ -1,3 +1,4 @@
+import {retainCategoryRepairs} from './ai/category-recovery.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
@@ -432,6 +433,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
     retainConfirmedForbiddenRetries(current,snapshot);
+    retainCategoryRepairs(current,snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainBatchHistory(current,snapshot);
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));

@@ -12,3 +12,9 @@ test('Decisions cannot introduce a candidate outside supplied criteria',async()=
   const {requestOpenRouterDecisions}=await adapter();
   await assert.rejects(requestOpenRouterDecisions('openai/gpt-6-luna-decisions','state',{category:{type:'choice',criteria:{COASTER:null},instructions:'Choose'}},{apiKey:'or-fixture-key'},new AbortController().signal,{fetch:async()=>new Response(JSON.stringify({answers:{category:{type:'choice',choice:'INVENTED'}}})),now:()=>new Date(),nonce:()=>'',maxResponseBytes:10000}));
 });
+
+for(const detail of ['original','invalid',null])test(`Decisions rejects unsupported image detail ${detail} locally without a request`,async()=>{
+  const {requestOpenRouterDecisions}=await adapter();let requests=0;
+  await assert.rejects(requestOpenRouterDecisions('openai/gpt-6-luna-decisions',[{type:'image_url',image_url:{url:'data:image/png;base64,AA==',detail}}],{category:{type:'choice',criteria:{COASTER:null},instructions:'Choose'}},{apiKey:'fixture'},new AbortController().signal,{fetch:async()=>{requests++;throw Error('must not call');},now:()=>new Date(),nonce:()=>'',maxResponseBytes:10000}),(e:any)=>e.code==='INVALID_INPUT');
+  assert.equal(requests,0);
+});

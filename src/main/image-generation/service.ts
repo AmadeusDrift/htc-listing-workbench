@@ -2,23 +2,28 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AiCapabilityInfo } from '../../shared/ai-contracts.ts';
-import type { GenerateImageCandidateInput, GeneratedImageCandidate, ImageGenerationConnection, ImageGenerationProvider } from '../../shared/image-generation-contracts.ts';
+import type { GenerateImageCandidateInput, GeneratedImageCandidate, ImageGenerationConnection, ImageGenerationProvider, ImageGenerationOwner } from '../../shared/image-generation-contracts.ts';
 import type { WorkspaceStore, StoredAsset } from '../store.ts';
 import type { SecretStorage } from '../amazon/vault.ts';
-import { AiError, abortable, throwIfAborted } from '../ai/errors.ts';
+import { AiError, abortError, abortable, throwIfAborted } from '../ai/errors.ts';
 import { readBounded } from '../ai/transport.ts';
 import { keys, uuid } from "../ai/primitives.ts";
 import { readManagedImage, sameAsset, validateImage } from '../ai/source.ts';
 import { inspectRaster } from '../image-format.ts';
 import { OpenRouterImageAdapter,decodeOpenRouterImage } from '../ai/adapters/openrouter-images.ts';
-import { openRouterHttpError } from '../ai/adapters/openrouter-http.ts';
+import { openRouterFailure,openRouterReceiptState } from '../ai/adapters/openrouter-http.ts';
 import { OPENROUTER_IMAGE_MODELS } from '../../shared/image-generation-contracts.ts';
 import { openDatabase } from '../database.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import { saveProviderReceipt,readProviderReceipt,saveImageRequestIntent,readImageRequestIntent } from '../ai/receipts.ts';
+import type {ImageRequestIntent} from '../ai/receipts.ts';
+import { saveProviderReceipt,readProviderReceipt,saveImageRequestIntent,readImageRequestIntent,readImageReceiptSync,imageRequestFingerprint } from '../ai/receipts.ts';
 import { ImageGenerationVault, imageApiKey, imageDefaults, imageModel, activeImageProvider as imageProvider, imageQuality, privateDirectory, validImageSize } from './vault.ts';
 import type { ImageGenerationConfig } from './vault.ts';
-import { readCandidateFiles } from './candidate.ts';
+import { readCandidateFiles,readCandidateFilesSync } from './candidate.ts';
+import {validateRequestScope,sameRequestBusiness} from '../ai/request-identity.ts';
+import type {AiRequestScope} from '../../shared/ai-request-identity-contracts.ts';
+import {transaction} from '../application/transaction.ts';
+import {listingFingerprint} from '../json-fingerprint.ts';
 import type { RelayDownloadDependencies } from './download.ts';
 import type { ImageModelCatalog } from '../../shared/image-generation-contracts.ts';
 import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
@@ -128,16 +133,16 @@ export class ImageGenerationService {
   private assertConfig(config: ImageGenerationConfig): void {
     const value = this.readConnection(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
   }
-  private controlled<T>(task: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
+  private controlled<T>(task: (signal: AbortSignal, deadlineAt: number) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
     this.ensureOpen(); if (this.running) return Promise.reject(new AiError('BUSY'));
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AiError('TIMEOUT')), this.timeoutMs);
-    const cancel = () => controller.abort(callerSignal?.reason instanceof AiError ? callerSignal.reason : new AiError('CANCELLED'));
+    const controller = new AbortController(), deadlineAt = Date.now()+this.timeoutMs, timer = setTimeout(() => controller.abort(Object.assign(new AiError('TIMEOUT'), { abortSource: 'TOTAL_TIMEOUT' as const })), this.timeoutMs);
+    const cancel = () => controller.abort(abortError(callerSignal?.reason));
     if (callerSignal?.aborted) cancel(); else callerSignal?.addEventListener('abort', cancel, { once: true });
     const state = { controller, promise: undefined as unknown as Promise<T> }; this.running = state;
-    state.promise = abortable(Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal); }), controller.signal)
+    state.promise = Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal,deadlineAt); })
       .catch(error => { try{beforeMap?.(error);}catch{/* Keep original failure mapping. */} throw error instanceof AiError ? error : new AiError('PROVIDER_ERROR'); })
       .finally(() => { clearTimeout(timer); callerSignal?.removeEventListener('abort', cancel); if (this.running === state) this.running = undefined; });
-    return state.promise;
+    return abortable(state.promise, controller.signal);
   }
   async checkConnection(rawProvider?: unknown): Promise<ImageGenerationConnection> {
     this.ensureOpen(); const provider = rawProvider === undefined ? this.vault.activeProvider() : imageProvider(rawProvider), config = this.config(false, provider);
@@ -161,32 +166,80 @@ export class ImageGenerationService {
     return this.generateInternal(raw,callerSignal,assertWorkflowFresh);
   }
   /** Internal workflow identity is persisted before sending. Renderer inputs cannot select candidates or paths. */
-  async generateForWorkflow(raw:unknown,attempt:{requestId:string;editCandidateId?:string},callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>):Promise<GeneratedImageCandidate>{
+  async generateForWorkflow(raw:unknown,attempt:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner},callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>):Promise<GeneratedImageCandidate>{
     let requestId:string,editCandidateId:string|undefined;
     try{requestId=uuid(attempt.requestId);editCandidateId=attempt.editCandidateId?uuid(attempt.editCandidateId):undefined;
-      if(await this.reconcileWorkflowGeneration(requestId))throw new AiError('INVALID_INPUT');
+      this.ensureOpen();if(callerSignal)throwIfAborted(callerSignal);
+      const intent=readImageRequestIntent(this.db,requestId);
+      if(intent){const input=parseInput(raw,'openrouter',intent.model);this.assertProduct(input);this.assertImageRecoveryIdentity(input,this.generationScope(input,attempt.owner),intent,editCandidateId);const outcome=this.imageOutcome(intent);if(outcome.kind==='candidate')return outcome.candidate!;if(outcome.kind==='raw'){const known=await this.reconcileWorkflowGeneration(requestId);if(callerSignal)throwIfAborted(callerSignal);if(known)return known;}throw this.imageBlocked(intent);}
+      if(existsSync(join(this.directory,'image-generation','candidates',requestId)))throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId,message:'历史候选缺少原请求输入与业务身份；保留原图，请核对原请求，未重发'});
     }catch(error){throw imageRequestNotSent(error);}
-    return this.generateInternal(raw,callerSignal,assertWorkflowFresh,{requestId,editCandidateId});
+    return this.generateInternal(raw,callerSignal,assertWorkflowFresh,{requestId,editCandidateId,...(attempt.owner?{owner:attempt.owner}:{})});
   }
   async reconcileWorkflowGeneration(rawId:string):Promise<GeneratedImageCandidate|null>{
     this.ensureOpen();const id=uuid(rawId);
     if(!existsSync(join(this.directory,'image-generation','candidates',id))){
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
-      if(receipt.status<200||receipt.status>=300)throw openRouterHttpError(receipt.status);
+      const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
+      const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
       const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
-      const candidate:GeneratedImageCandidate={...intent,requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
+      const candidate:GeneratedImageCandidate={id:intent.id,provider:intent.provider,model:intent.model,productId:intent.productId,productRevision:intent.productRevision,createdAt:intent.createdAt,mode:intent.mode,sourceAssets:intent.sourceAssets,...(intent.editSource?{editSource:intent.editSource}:{}),requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
       delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
     }
     return (await this.readCandidate(id)).candidate;
   }
-  private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string}):Promise<GeneratedImageCandidate>{
+  private generationScope(input:GenerateImageCandidateInput,rawOwner?:ImageGenerationOwner):AiRequestScope {
+    if(!rawOwner)return validateRequestScope({version:1,operation:'image-generation',productId:input.productId});
+    const owner=keys(rawOwner,['draftId','sku','targetId','marketplaceId','variantIds','slot']);
+    const scope=validateRequestScope({version:1,operation:'image-generation',productId:input.productId,...owner});
+    const row=this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(scope.draftId!),draft=row?JSON.parse(String(row.record_json)).draft:null;
+    const variants=draft?.salesPlan?.recipe?.components?.map((c:{variantId:string})=>c.variantId)??(draft?.variantId?[draft.variantId]:[]);
+    if(!draft||draft.id!==scope.draftId||draft.productId!==input.productId||draft.productRevision!==input.productRevision||draft.sku!==scope.sku||draft.targetId!==scope.targetId||draft.marketplaceId!==scope.marketplaceId||JSON.stringify([...new Set(variants)].sort())!==JSON.stringify(scope.variantIds))throw new AiError('SOURCE_CHANGED');
+    return scope;
+  }
+  private imageIntents(scope:AiRequestScope):ImageRequestIntent[] {
+    return this.db.prepare("SELECT id FROM ai_image_requests WHERE json_extract(record_json,'$.productId')=? ORDER BY rowid").all(scope.productId).map(row=>readImageRequestIntent(this.db,String(row.id))!).filter(intent=>sameRequestBusiness(scope,intent.version===2?intent.requestScope:{version:1,operation:'image-generation',productId:intent.productId}));
+  }
+  private imageOutcome(intent:ImageRequestIntent):{kind:'unknown'|'invalid'|'raw'|'candidate';candidate?:GeneratedImageCandidate} {
+    if(existsSync(join(this.directory,'image-generation','candidates',intent.id))){const candidate=readCandidateFilesSync(this.directory,intent.id,this.decodePreview).candidate;if(candidate.productId!==intent.productId||candidate.productRevision!==intent.productRevision||candidate.model!==intent.model||listingFingerprint(candidate.sourceAssets)!==listingFingerprint(intent.sourceAssets)||listingFingerprint(candidate.editSource??null)!==listingFingerprint(intent.editSource??null))throw new AiError('SOURCE_CHANGED');return {kind:'candidate',candidate};}
+    const saved=readImageReceiptSync(this.db,this.directory,intent);if(!saved)return {kind:'unknown'};
+    const state=openRouterReceiptState(saved.record.status,saved.capture.body);if(state==='unknown'||state==='invalid')return {kind:state};
+    const failure=openRouterFailure(saved.record.status,saved.capture.body);if(failure)return {kind:failure.definitive?'invalid':'unknown'};
+    if(saved.capture.body==null)return {kind:'invalid'};
+    if(saved.capture.body==='[omitted: credential echo]')return {kind:'unknown'};
+    // A returned URL or valid pixels need original materialization, not another painting.
+    if(typeof (saved.capture.body as any)?.data?.[0]?.url==='string')return {kind:'raw'};
+    try{decodeOpenRouterImage(saved.capture.body);return {kind:'raw'};}catch{return {kind:'invalid'};}
+  }
+  private imageBlocked(intent:ImageRequestIntent):AiError {
+    const error=new AiError('INTERRUPTED');error.requestId=intent.id;error.certainty='SENT_UNKNOWN';error.message=intent.version===1?'旧生图请求缺少完整业务身份；请按原请求核对，未新建生图请求':'原生图请求尚未解决；请按原请求恢复，未因提示词、Key、模型或新工作流再发送';return Object.assign(error,{notSent:true as const});
+  }
+  private imageInputSnapshot(input:GenerateImageCandidateInput){return {version:1 as const,promptSha256:digest(input.prompt),size:input.size,quality:input.quality,background:input.background};}
+  private imageFingerprint(input:GenerateImageCandidateInput,intent:ImageRequestIntent,editCandidateId?:string):string {
+    const assets=input.referenceAssetIds.map(id=>{const asset=this.store.getAssetRecord(id);if(!asset||asset.productId!==input.productId)throw new AiError('SOURCE_CHANGED');return {id:asset.id,sha256:asset.sha256};});
+    return imageRequestFingerprint({...intent,productId:input.productId,productRevision:input.productRevision,mode:assets.length||editCandidateId?'edit':'generate',sourceAssets:assets,...(editCandidateId&&intent.editSource?.id===editCandidateId?{editSource:intent.editSource}:{editSource:undefined})},this.imageInputSnapshot(input));
+  }
+  private assertImageRecoveryIdentity(input:GenerateImageCandidateInput,scope:AiRequestScope,intent:ImageRequestIntent,editCandidateId?:string):void {
+    if(intent.version!==2||listingFingerprint(scope)!==listingFingerprint(intent.requestScope)||(intent.editSource?.id??null)!==(editCandidateId??null)||this.imageFingerprint(input,intent,editCandidateId)!==intent.requestFingerprint){const error=new AiError('SOURCE_CHANGED');error.requestId=intent.id;error.message=intent.version===1?'历史生图请求缺少完整输入与业务身份；保留原图，请核对原请求，未重发':'当前输入、SKU或图片槽与原生图请求不一致；保留原回执与候选，未重发';throw error;}
+  }
+  private async recoverBeforeImageSend(input:GenerateImageCandidateInput,scope:AiRequestScope,requestId?:string,editCandidateId?:string):Promise<GeneratedImageCandidate|undefined> {
+    const intents=this.imageIntents(scope),outcomes=intents.map(intent=>({intent,outcome:this.imageOutcome(intent)})),pending=outcomes.filter(value=>['unknown','raw'].includes(value.outcome.kind));
+    const connection=this.getConnection();
+    if(pending.length){const item=pending[0];if(pending.length>1||item.outcome.kind==='unknown'||requestId&&requestId!==item.intent.id)throw this.imageBlocked(item.intent);this.assertImageRecoveryIdentity(input,scope,item.intent,editCandidateId);if(!requestId&&connection.configured&&connection.model!==item.intent.model)throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId:item.intent.id,message:'当前选用模型与原生图请求不一致；请按原请求身份恢复，未重发'});const restored=await this.reconcileWorkflowGeneration(item.intent.id);if(!restored)throw this.imageBlocked(item.intent);return restored;}
+    for(const item of outcomes)if(item.outcome.kind==='candidate'&&item.intent.version===2){if(listingFingerprint(scope)!==listingFingerprint(item.intent.requestScope)||(item.intent.editSource?.id??null)!==(editCandidateId??null))continue;const frozen={...item.intent,model:connection.configured?String(connection.model):item.intent.model};if(this.imageFingerprint(input,frozen,editCandidateId)===item.intent.requestFingerprint){if(requestId&&requestId!==item.intent.id)throw this.imageBlocked(item.intent);return item.outcome.candidate;}}
+    return undefined;
+  }
+  private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner}):Promise<GeneratedImageCandidate>{
     let enteredAdapter=false,stage='validation',recorded=false;let productId:string|undefined;
-    const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId,requestOutcome:!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
+    const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId??(error instanceof AiError?error.requestId:undefined),requestOutcome:error instanceof AiError&&error.certainty==='SENT_UNKNOWN'?'RESULT_UNKNOWN':!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
-    const config = this.config(true), input = parseInput(raw, config.provider, config.model);productId=input.productId; this.assertProduct(input);
-    return await this.controlled(async signal => {
+    if(this.running)throw new AiError('BUSY');
+    const input=parseInput(raw,'openrouter',String(this.getConnection().model));productId=input.productId;this.assertProduct(input);const ownerScope=this.generationScope(input,attempt?.owner);
+    stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(callerSignal)throwIfAborted(callerSignal);if(reused)return reused;
+    const config=this.config(true);this.assertProduct(input);
+    return await this.controlled(async (signal,responseDeadlineAt) => {
       stage='references';
       const assets = input.referenceAssetIds.map(id => {
         const asset = this.store.getAssetRecord(id); if (!asset || asset.productId !== input.productId) throw new AiError('SOURCE_CHANGED');
@@ -212,9 +265,10 @@ export class ImageGenerationService {
       stage='request';enteredAdapter=true;
       const requestId=attempt?.requestId??randomUUID();
       if(readImageRequestIntent(this.db,requestId)){const error=new AiError('INTERRUPTED');error.message='原生图请求已有发送意图；请回收原响应，未重发';throw error;}
-      saveImageRequestIntent(this.db,{version:1,id:requestId,provider:'openrouter',model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit':'generate',sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})});
-      const result=await this.adapter.generate({...request,model:config.model},signal,{onProviderReceipt:async receipt=>{
-        if(this.closed)return;const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
+      const intentBase={id:requestId,provider:'openrouter' as const,model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit' as const:'generate' as const,sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})},requestInput=this.imageInputSnapshot(input);
+      const intent:ImageRequestIntent={...intentBase,version:2,requestScope:ownerScope,requestInput,requestFingerprint:imageRequestFingerprint(intentBase,requestInput)};
+      const result=await this.adapter.generate({...request,model:config.model},signal,{responseDeadlineAt,beforeSend:()=>transaction(this.db,()=>{throwIfAborted(signal);this.assertProduct(input,assets);this.generationScope(input,attempt?.owner);const pending=this.imageIntents(ownerScope).find(prior=>['unknown','raw'].includes(this.imageOutcome(prior).kind));if(pending)throw this.imageBlocked(pending);saveImageRequestIntent(this.db,intent);}),onProviderReceipt:async receipt=>{
+        const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
       }});
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
@@ -225,7 +279,7 @@ export class ImageGenerationService {
       stage='preview';
       try { preview = this.decodePreview(result.bytes); const shape = inspectRaster(preview); if (shape.mimeType !== 'image/png' || preview.length > 4 * 1024 * 1024) throw new Error(); }
       catch(error) { record(error);throw invalidImageOutput('preview'); }
-      const candidate: GeneratedImageCandidate = { id: requestId, provider: config.provider, model: config.model, mode: assets.length ? 'edit' : 'generate',
+      const candidate: GeneratedImageCandidate = { id: requestId, provider: config.provider, model: config.model, mode: assets.length||editSource ? 'edit' : 'generate',
         productId: input.productId, productRevision: input.productRevision, createdAt: new Date().toISOString(), requestId: result.requestId,
         sourceAssets: assets.map(asset => ({ id: asset.id, sha256: asset.sha256 })), reviewState: 'unreviewed', mimeType: 'image/png',
         width: result.width, height: result.height, byteSize: result.bytes.length, sha256: digest(result.bytes), previewUrl: `data:image/png;base64,${preview.toString('base64')}`,...(editSource?{editSource}:{}) };
@@ -251,6 +305,6 @@ export class ImageGenerationService {
     } catch(error) { record(error);throw invalidImageOutput('save'); }
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
-  cancel(reason = new AiError('CANCELLED')): void { this.running?.controller.abort(reason); }
-  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
+  cancel(reason:AiError = Object.assign(new AiError('CANCELLED'),{abortSource:'USER' as const})): void { this.running?.controller.abort(reason); }
+  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(Object.assign(new AiError('SERVICE_CLOSED'), { abortSource: 'SHUTDOWN' as const })); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
 }

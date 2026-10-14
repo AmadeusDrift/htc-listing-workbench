@@ -23,11 +23,11 @@ export function readPricingRuleInputs(value: string, evidence: Pick<PricingDecis
   if (pricingRuleInputs(rules,evidence)!==value) throw new UserFacingError('定价规则依赖格式无效');
   return rules;
 }
-export function pricingSaleUnit(recipe?: Pick<SalesRecipe, 'totalPieces' | 'totalCostCny'> & Partial<Pick<SalesRecipe, 'components'>>): JsonValue {
+export function pricingSaleUnit(recipe?: Pick<SalesRecipe, 'totalPieces' | 'totalCostCny'> & Partial<Pick<SalesRecipe, 'components'|'quantityVersion'|'platformPieces'>>): JsonValue {
   if (!recipe) return null;
-  return { totalPieces: recipe.totalPieces, totalCostCny: recipe.totalCostCny,
+  return { totalPieces: recipe.totalPieces, totalCostCny: recipe.totalCostCny,...(recipe.quantityVersion===2?{quantityVersion:2,platformPieces:recipe.platformPieces??null}:{}),
     components: recipe.components?.map(c => ({ variantId: c.variantId, quantity: c.quantity,
-      quotedCostCny: c.quotedCostCny, piecesPerQuote: c.piecesPerQuote, sourcePackPieces: c.sourcePackPieces })) ?? null };
+      quotedCostCny: c.quotedCostCny, piecesPerQuote: c.piecesPerQuote, sourcePackPieces: c.sourcePackPieces,...(c.unitSemantics?{unitSemantics:c.unitSemantics as unknown as JsonValue}:{}) })) ?? null };
 }
 export function pricingQuantityInputs(attributes: JsonObject): JsonObject {
   return Object.fromEntries(['number_of_items','unit_count'].filter(key => Object.hasOwn(attributes,key)).map(key => [key,structuredClone(attributes[key])]));

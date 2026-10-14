@@ -23,7 +23,7 @@ test('real ListingAi and AiService stage requests before one Batch POST and cons
   return Response.json({id:'batch_app',endpoint:'/v1/chat/completions',model:captured.model,status:'completed',results});
  };
  const runtime=(f.ai as any).batchTasks;assert.ok(runtime,'AiService must own an actual task Batch runtime');
- const scope={taskId:randomUUID(),rowKey:'sku-1',phase:'fields',mode:'deferred_batch',authorize:()=>true};
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:'deferred_batch',authorize:()=>true};
  await assert.rejects(runtime.run(scope,()=>f.listing.suggest(f.reference)),{name:'BatchWaitingError'});
  assert.equal(requests.length,0);await runtime.flush(scope.taskId);assert.equal(requests.length,1);
  await runtime.reconcile(scope.taskId);
@@ -74,7 +74,7 @@ test('ready real requests from different SKUs share one Batch and duplicate adop
   const results=[];for(const request of [...body.requests].reverse()){const response=await original('fake',{method:'POST',body:JSON.stringify({...request.body,model:body.model})}),raw=await response.json();raw.usage.cost=.012;results.push({custom_id:request.custom_id,response:{status_code:200,body:raw}});}
   return Response.json({id:'batch_two',model:body.model,endpoint:'/v1/chat/completions',status:'completed',results});
  };
- const runtime=f.ai.batchTasks,taskId=randomUUID(),references=[f.reference,{draftId:draft.id,draftRevision:draft.revision}],scopes=references.map((_r,i)=>({taskId,rowKey:'sku-'+i,phase:'fields',mode:'deferred_batch' as const,authorize:()=>true}));
+ const runtime=f.ai.batchTasks,taskId=randomUUID(),references=[f.reference,{draftId:draft.id,draftRevision:draft.revision}],scopes=references.map(reference=>{const owner=f.amazon.getDraft(reference.draftId);return {taskId,rowKey:owner.productId+':'+owner.variantId,phase:'fields',mode:'deferred_batch' as const,authorize:()=>true};});
  for(let i=0;i<2;i++)await assert.rejects(runtime.run(scopes[i],()=>f.listing.suggest(references[i])),{name:'BatchWaitingError'});
  assert.equal(posts,0);await runtime.flush(taskId);assert.equal(posts,1);assert.equal(body.requests.length,2);
  await runtime.reconcile(taskId);
@@ -91,7 +91,7 @@ test('unknown Batch creation survives AiService restart and switching to immedia
  f.ai.saveConnection({id:'openrouter',apiKey:'unknown-batch-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
  for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
  const fetcher=async()=>{posts++;throw Error('connection lost after remote acceptance');};context.fetch=fetcher;
- const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',purposes:f.ai.taskBatchPlan().purposes,authorize:()=>true};
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',purposes:f.ai.taskBatchPlan().purposes,authorize:()=>true};
  await assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),{name:'BatchWaitingError'});
  await assert.rejects(f.ai.batchTasks.flush(scope.taskId));assert.equal(posts,1);
  await f.ai.close();const restored=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:fetcher}),listing=new ListingAiService(f.store,f.amazon,restored);const closeOriginal=f.ai.close.bind(f.ai);f.ai.close=async()=>{await restored.close();await closeOriginal();};
@@ -109,7 +109,7 @@ test('ImageWorkflow preserves its content operation while Batch is waiting',asyn
   const results=[];for(const request of body.requests){const response=await original('fake',{method:'POST',body:JSON.stringify({...request.body,model:body.model})});results.push({custom_id:request.custom_id,response:{status_code:200,body:await response.json()}});}
   return Response.json({id:'batch_image_owner',model:body.model,endpoint:'/v1/chat/completions',status:'completed',results});
  };
- const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'images',mode:'deferred_batch' as const,authorize:()=>true};
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'images',mode:'deferred_batch' as const,authorize:()=>true};
  await assert.rejects(f.ai.batchTasks.run(scope,()=>f.run()),{name:'BatchWaitingError'});
  const waiting=f.progress() as any;assert.equal(waiting.status,'WAITING_BATCH');assert.ok(waiting.contentPreparation.operationId);
  const op=waiting.contentPreparation.operationId;await f.ai.batchTasks.flush(scope.taskId);await f.ai.batchTasks.reconcile(scope.taskId);
@@ -121,7 +121,7 @@ import { TaskBatchRuntime } from '../src/main/ai/batch/task-runtime.ts';
 for(const pointerOnly of [false,true])test(`runtime recovers ${pointerOnly?'pointer-only':'saved'} create receipt without remote identity or another POST`,async t=>{
  let posts=0,gets=0;
  const fetcher:typeof fetch=async(_url,init)=>{if(init?.method==='POST')posts++;else gets++;return Response.json({id:'batch_saved_runtime',model:'openai/gpt-6-luna',endpoint:'/v1/chat/completions',status:'in_progress'});};
- const f=fixture(t,fetcher),operation=f.operation(),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:operation.credentialScope})}),scope={taskId:operation.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,authorize:()=>true};
+ const f=fixture(t,fetcher),operation=f.operation(),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:operation.credentialScope})}),scope={taskId:operation.taskId,rowKey:f.rowKey(operation),phase:'copy',mode:'deferred_batch' as const,authorize:()=>true};
  await assert.rejects(runtime.run(scope,()=>runtime.request({operation,authorize:scope.authorize,reserve:()=>{}})),{name:'BatchWaitingError'});await runtime.flush(scope.taskId);
  const batch=runtime.batches(scope.taskId)[0];
  if(pointerOnly)f.db.exec('DELETE FROM ai_provider_receipts');
@@ -136,7 +136,7 @@ for(const revoke of [false,true,'stop'] as const)test(`runtime isolates group su
   if(init?.method==='POST'){posts++;if(posts===1){if(revoke)authorized=false;if(revoke==='stop')runtime.stop(first.taskId);throw Error('first group create identity unknown');}secondBody=JSON.parse(String(init.body));return Response.json({id:'batch_runtime_second',model:secondBody.model,endpoint:'/v1/chat/completions',status:'in_progress'});}
   gets++;return Response.json({id:'batch_runtime_second',model:secondBody.model,endpoint:'/v1/chat/completions',status:'completed',results:secondBody.requests.map((r:any)=>({custom_id:r.custom_id,response:{status_code:200,body:{id:'result_second',usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2},choices:[{finish_reason:'stop',message:{content:'{}'}}]}}}))});
  };
- const f=fixture(t,fetcher),first=f.operation(),second={...f.operation(),phase:'review'},runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:first.credentialScope})}),scope={taskId:first.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,authorize:()=>authorized};
+ const f=fixture(t,fetcher),first=f.operation(),second={...f.operation(),phase:'review'},runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:first.credentialScope})}),scope={taskId:first.taskId,rowKey:f.rowKey(first),phase:'copy',mode:'deferred_batch' as const,authorize:()=>authorized};
  for(const operation of [first,second])await assert.rejects(runtime.run(scope,()=>runtime.request({operation,authorize:scope.authorize,reserve:()=>{}})),{name:'BatchWaitingError'});
  await assert.rejects(runtime.flush(first.taskId));assert.equal(runtime.find(first.operationId)!.state,'waiting');
  assert.equal(runtime.service.get(runtime.find(first.operationId)!.batchId).state,'submission_unknown');
@@ -152,7 +152,7 @@ for(const scenario of ['unscoped','immediate-openrouter','immediate-deepseek','d
  const vision=scenario==='deferred-unpinned-vision',color=f.ai.sourceColorContext({productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id}),providerId=openrouter?'openrouter':'deepseek';
  context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),openrouter?'https://openrouter.ai/api/v1/chat/completions':'https://api.deepseek.com/chat/completions');if(posts===1)throw Error('ordinary temporary connection loss');if(vision){assert.match(String(init.body),/data:image\/png;base64/);return chat({kind:'source-color',verdict:'DETERMINED',colors:['Blue'],reason:'Visible blue body',referenceAssetIds:color.referenceAssets.map(r=>r.assetId)});}return original(url,init);};
  f.ai.setUsagePolicy({providerId,dailyCallLimit:2,dailyTokenLimit:null});
- const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:scenario.startsWith('deferred')?'deferred_batch' as const:'immediate' as const,authorize:()=>true};
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:scenario.startsWith('deferred')?'deferred_batch' as const:'immediate' as const,authorize:()=>true};
  const execute=()=>vision?f.ai.observeSourceColor(color,()=>{}):f.listing.suggest(f.reference),run=()=>scenario==='unscoped'?execute():f.ai.batchTasks.run(scope,execute);
  await assert.rejects(run(),{code:'NETWORK_ERROR'});const result=await run();assert.equal(result.output.kind,vision?'source-color':'amazon-fields');
  assert.equal(posts,2);const calls=f.ai.listCalls();assert.equal(calls.length,2);assert.notEqual(calls[0].id,calls[1].id);assert.equal(f.ai.getUsageSummary(providerId).attempts,2);assert.equal(f.ai.getUsageSummary(providerId).unknownCalls,1);
@@ -163,7 +163,7 @@ test('switching immediate while a Batch operation is only staged cannot send an 
  const f=await listingFixture(t),context=(f.ai as any).context;let posts=0;
  f.ai.saveConnection({id:'openrouter',apiKey:'staged-mode-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
  context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),'https://openrouter.ai/api/v1/batches');const body=JSON.parse(String(init.body));return Response.json({id:'batch_staged_mode',model:body.model,endpoint:'/v1/chat/completions',status:'in_progress'});};
- const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',authorize:()=>true},run=()=>f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',authorize:()=>true},run=()=>f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));
  await assert.rejects(run(),{name:'BatchWaitingError'});scope.mode='immediate';await assert.rejects(run(),{name:'BatchWaitingError'});assert.equal(posts,0);
  await f.ai.batchTasks.flush(scope.taskId);assert.equal(posts,1);await assert.rejects(run(),{name:'BatchWaitingError'});assert.equal(posts,1);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);
 });
@@ -172,7 +172,7 @@ test('explicit immediate resume of a stopped unsent Batch plan makes one fresh o
  const f=await listingFixture(t),context=(f.ai as any).context,original=context.fetch;let posts=0;
  f.ai.saveConnection({id:'openrouter',apiKey:'unsent-mode-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
  context.fetch=async(url:unknown,init:RequestInit)=>{posts++;assert.equal(String(url),'https://openrouter.ai/api/v1/chat/completions');return original(url,init);};
- const scope={taskId:randomUUID(),rowKey:f.draft.sku,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',waitingOperationId:undefined as string|undefined,authorize:()=>true};
+ const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:'deferred_batch' as 'immediate'|'deferred_batch',waitingOperationId:undefined as string|undefined,authorize:()=>true};
  await assert.rejects(f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference)),(error:any)=>{scope.waitingOperationId=error.operationId;return error.name==='BatchWaitingError';});
  f.ai.batchTasks.stop(scope.taskId);scope.mode='immediate';f.ai.batchTasks.resume(scope.taskId);
  const result=await f.ai.batchTasks.run(scope,()=>f.listing.suggest(f.reference));assert.equal(result.output.kind,'amazon-fields');assert.equal(posts,1);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);assert.notEqual(result.callId,scope.waitingOperationId);
@@ -182,7 +182,7 @@ test('P05 fresh prepared Batch operations obey the current selected SKU before P
  let body:any,posts=0;const fetcher:typeof fetch=async(_url,init)=>{posts++;body=JSON.parse(String(init?.body));return Response.json({id:'batch_selected',model:body.model,endpoint:'/v1/chat/completions',status:'in_progress'});};
  const f=fixture(t,fetcher),one=f.operation(),two=f.operation(),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'batch-fixture-private-key',scope:one.credentialScope})});
  let selected=['one','two'];
- for(const [key,operation] of [['one',one],['two',two]] as const){const authorize=()=>selected.includes(key);await assert.rejects(runtime.run({taskId:one.taskId,rowKey:key,phase:'copy',mode:'deferred_batch',authorize},()=>runtime.request({operation,authorize,reserve:()=>{}})),{name:'BatchWaitingError'});}
+ for(const [key,operation] of [['one',one],['two',two]] as const){const authorize=()=>selected.includes(key);await assert.rejects(runtime.run({taskId:one.taskId,rowKey:f.rowKey(operation),phase:'copy',mode:'deferred_batch',authorize},()=>runtime.request({operation,authorize,reserve:()=>{}})),{name:'BatchWaitingError'});}
  selected=['one'];runtime.resume(one.taskId);await runtime.flush(one.taskId);
  assert.equal(posts,1);assert.equal(body.requests.length,1);assert.ok(runtime.find(one.operationId));assert.equal(runtime.find(two.operationId),undefined);
 });
@@ -191,7 +191,7 @@ test('immediate unsent request ignores stale task credential scope but staged Ba
  const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();
  let current=op.credentialScope;
  const runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
- const scope={taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'immediate' as const,credentialScope:'f'.repeat(64),authorize:()=>true};
+ const scope={taskId:op.taskId,rowKey:f.rowKey(op),phase:'copy',mode:'immediate' as const,credentialScope:'f'.repeat(64),authorize:()=>true};
  assert.equal(await runtime.run(scope,()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),null);
  await assert.rejects(runtime.run({...scope,mode:'deferred_batch',credentialScope:current},()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),{name:'BatchWaitingError'});
  current='d'.repeat(64);
@@ -201,7 +201,7 @@ test('immediate unsent request ignores stale task credential scope but staged Ba
 test('changed operation identity cannot bypass existing task Batch after credential rotation',async t=>{
  const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();
  let current=op.credentialScope;const runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
- const scope={taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,credentialScope:current,authorize:()=>true};
+ const scope={taskId:op.taskId,rowKey:f.rowKey(op),phase:'copy',mode:'deferred_batch' as const,credentialScope:current,authorize:()=>true};
  await assert.rejects(runtime.run(scope,()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),{name:'BatchWaitingError'});
  current='e'.repeat(64);
  await assert.rejects(runtime.run({...scope,mode:'immediate'},()=>runtime.request({operation:{...op,operationId:randomUUID(),credentialScope:current},authorize:()=>true,reserve:()=>{}})),/连接快照|Batch/);
@@ -210,5 +210,5 @@ test('changed operation identity cannot bypass existing task Batch after credent
 test('persisted Batch identity blocks a changed operation id even without the old task scope snapshot',async t=>{
  const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();f.service.prepare([op]);
  const current='e'.repeat(64),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
- await assert.rejects(runtime.run({taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'immediate',authorize:()=>true},()=>runtime.request({operation:{...op,operationId:randomUUID(),credentialScope:current},authorize:()=>true,reserve:()=>{}})),/连接快照|Batch/);
+ await assert.rejects(runtime.run({taskId:op.taskId,rowKey:f.rowKey(op),phase:'copy',mode:'immediate',authorize:()=>true},()=>runtime.request({operation:{...op,operationId:randomUUID(),credentialScope:current},authorize:()=>true,reserve:()=>{}})),/连接快照|Batch/);
 });

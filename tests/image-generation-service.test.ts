@@ -12,6 +12,7 @@ import { clearImageGenerationConnection } from '../src/main/image-generation/vau
 import { AiError } from '../src/main/ai/errors.ts';
 import type { SecretStorage } from '../src/main/amazon/vault.ts';
 import { DEFAULT_OPENROUTER_IMAGE_MODEL as model } from '../src/shared/image-generation-contracts.ts';
+import { readProviderReceipt } from '../src/main/ai/receipts.ts';
 
 const key = randomBytes(32), secret = 'sk-fixture-image-secret';
 const storage: SecretStorage = {
@@ -21,6 +22,14 @@ const storage: SecretStorage = {
 };
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(256, 16); png.writeUInt32BE(256, 20);
 const code = (value: string) => (error: unknown) => error instanceof AiError && error.code === value;
+
+for(const [status,message,definitive] of [[200,'Synthetic processing failure',false],[503,'Upstream unavailable',false],[503,'No available providers found for the selected model.',true]] as const)test(`image ${status}/${definitive} failure keeps original body and identical recovery classification with zero new POST`,async t=>{
+  const raw={id:'gen_s02_failed_image',error:{code:status===200?502:status,message},usage:{cost:.035}},f=await fixture(t,{fetch:async()=>Response.json(raw,{status})});f.enable();const requestId=randomUUID();
+  let first:any;await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}),(error:any)=>{first=error;return error.httpStatus===status&&error.definitive===definitive;});
+  const db=openDatabase(f.directory);try{const receipt:any=await readProviderReceipt(db,f.directory,requestId);assert.deepEqual(receipt.body,raw);assert.equal(receipt.costUsd,.035);}finally{db.close();}
+  await assert.rejects(f.service.reconcileWorkflowGeneration(requestId),(error:any)=>error.code===first.code&&error.httpStatus===status&&error.definitive===definitive);
+  assert.equal(f.calls.length,1);assert.equal((await readdir(join(f.directory,'image-generation','candidates')).catch(()=>[])).length,0);
+});
 async function fixture(t: test.TestContext, deps: Partial<ImageGenerationDependencies> = {}) {
   await mkdir(resolve('.test-data'), { recursive: true });
   const directory = await mkdtemp(resolve('.test-data/image-generation-')), store = new WorkspaceStore(directory);
@@ -116,7 +125,7 @@ test('busy, cancel and late provider completion cannot save a candidate', async 
 });
 test('config changes invalidate in-flight requests and remove access evidence', async t => {
   let start!: () => void; const started = new Promise<void>(resolve => { start = resolve; });
-  const f = await fixture(t, { fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
+  const f = await fixture(t, { timeoutMs:100,fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
   const pending = f.service.generate(f.input); await started;
   f.service.disconnect(); await assert.rejects(pending, code('CONFIG_CHANGED'));
   assert.equal(f.service.getConnection().configured, false);
@@ -172,11 +181,12 @@ test('trusted candidate reads verify metadata and local bytes rather than accept
 test('workflow cancellation interrupts generation using its caller signal with no retry or candidate commit', { timeout: 1000 }, async t => {
   let start!: () => void;
   const started = new Promise<void>(resolve => { start = resolve; });
-  const f = await fixture(t, { fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
+  const f = await fixture(t, { timeoutMs:100,fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
   const controller = new AbortController(), pending = f.service.generate(f.input, controller.signal);
   const rejected = assert.rejects(pending, code('CANCELLED'));
   await started; controller.abort(); await rejected;
-  assert.equal(f.calls.length, 1); assert.equal(f.service.busy, false);
+  assert.equal(f.calls.length, 1); assert.equal(f.service.busy, true);
+  await assert.rejects(f.service.generate(f.input),code('BUSY'));
   await assert.rejects(f.service.generate(f.input, controller.signal), code('CANCELLED')); assert.equal(f.calls.length, 1);
 });
 

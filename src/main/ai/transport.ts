@@ -1,10 +1,15 @@
 import type { AiUsage } from '../../shared/ai-contracts.ts';
 import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 import type { ReasoningEffort,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
+import { responseCollection, transportEvidence } from './response-lifecycle.ts';
 import type { TransportRunEvidence } from '../../shared/run-evidence-contracts.ts';
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
+  /** Main-only collector policy. Date.now clock, never the fixture/provider timestamp. */
+  responseDeadlineAt?: number;
+  responseTimeoutMs?: number;
+  responseBodyTimeoutMs?: number;
   onRunEvidence?: (event: TransportRunEvidence) => void;
   deferOpenRouter?:(endpoint:string,body:Record<string,unknown>)=>Promise<{body:any}|null>;
   gateway?:'openrouter'|'deepseek';
@@ -61,23 +66,34 @@ export async function readBounded(response: Response, max: number, signal: Abort
 /** One paid POST only. A redirect or ambiguous network failure is never retried automatically. */
 export async function postJson(url: string, headers: Record<string, string>, body: string | Buffer, signal: AbortSignal, context: AdapterContext, onErrorResponse?: (body: unknown) => void): Promise<unknown> {
   throwIfAborted(signal);
-  context.beforeSend?.(body);
-  let response: Response;
+  const collection=context.captureRawResponse?responseCollection(signal,context):undefined;
+  const transportSignal=collection?.signal??signal;
+  let response: Response|undefined;
+  const captureRaw=context.captureRawResponse?async(status:number,text:string)=>{transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:Buffer.byteLength(text)});await context.captureRawResponse!(status,text);}:undefined;
   try {
-    const request=context.fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal });
-    response = await (context.captureRawResponse?request:abortable(request,signal));
-  } catch { throwIfAborted(signal); throw new AiError('NETWORK_ERROR'); }
+  context.beforeSend?.(body);
+  transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});
+  try {
+    const request=context.fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal:transportSignal });
+    response = await abortable(request,transportSignal);
+  } catch { throwIfAborted(transportSignal); throw new AiError('NETWORK_ERROR'); }
+  collection?.headers();transportEvidence(context,{event:'HEADERS_RECEIVED',httpStatus:response.status,certainty:'SENT_UNKNOWN'});
   if(!context.captureRawResponse)throwIfAborted(signal);
-  const captureSignal=context.captureRawResponse?AbortSignal.timeout(30_000):signal;
+  const captureSignal=transportSignal;
   if (!response.ok) {
     let code: unknown;
     try {
-      const data = await readBounded(response, context.maxResponseBytes, captureSignal,undefined,context.captureRawResponse);
+      const data = await readBounded(response, context.maxResponseBytes, captureSignal,undefined,captureRaw);
       if (data && typeof data === 'object') code = (data as Record<string, unknown>).Code;
       onErrorResponse?.(data);
-    } catch { throwIfAborted(signal); }
+    } catch(error) { if(collection)throw error;throwIfAborted(signal); }
     throw httpError(response.status, code);
   }
-  const value=await readBounded(response, context.maxResponseBytes, captureSignal, context.onInvalidResponseText,context.captureRawResponse);
+  const value=await readBounded(response, context.maxResponseBytes, captureSignal, context.onInvalidResponseText,captureRaw);
   throwIfAborted(signal);return value;
+  } catch(error) {
+    const failure=error instanceof AiError?error:new AiError('NETWORK_ERROR');
+    transportEvidence(context,{event:'STAGE_BLOCKED',certainty:'SENT_UNKNOWN',abortSource:failure.abortSource??'NONE',errorCode:failure.code,...(response?{httpStatus:response.status}:{}),receivedBytes:failure.responseDiagnostic?.byteCount??0});
+    throw error;
+  } finally { collection?.close(); }
 }

@@ -5,13 +5,13 @@ import type { AiCapabilityInfo } from '../../shared/ai-contracts.ts';
 import type { GenerateImageCandidateInput, GeneratedImageCandidate, ImageGenerationConnection, ImageGenerationProvider } from '../../shared/image-generation-contracts.ts';
 import type { WorkspaceStore, StoredAsset } from '../store.ts';
 import type { SecretStorage } from '../amazon/vault.ts';
-import { AiError, abortable, throwIfAborted } from '../ai/errors.ts';
+import { AiError, abortError, abortable, throwIfAborted } from '../ai/errors.ts';
 import { readBounded } from '../ai/transport.ts';
 import { keys, uuid } from "../ai/primitives.ts";
 import { readManagedImage, sameAsset, validateImage } from '../ai/source.ts';
 import { inspectRaster } from '../image-format.ts';
 import { OpenRouterImageAdapter,decodeOpenRouterImage } from '../ai/adapters/openrouter-images.ts';
-import { openRouterHttpError } from '../ai/adapters/openrouter-http.ts';
+import { openRouterFailure } from '../ai/adapters/openrouter-http.ts';
 import { OPENROUTER_IMAGE_MODELS } from '../../shared/image-generation-contracts.ts';
 import { openDatabase } from '../database.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -128,16 +128,16 @@ export class ImageGenerationService {
   private assertConfig(config: ImageGenerationConfig): void {
     const value = this.readConnection(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
   }
-  private controlled<T>(task: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
+  private controlled<T>(task: (signal: AbortSignal, deadlineAt: number) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
     this.ensureOpen(); if (this.running) return Promise.reject(new AiError('BUSY'));
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AiError('TIMEOUT')), this.timeoutMs);
-    const cancel = () => controller.abort(callerSignal?.reason instanceof AiError ? callerSignal.reason : new AiError('CANCELLED'));
+    const controller = new AbortController(), deadlineAt = Date.now()+this.timeoutMs, timer = setTimeout(() => controller.abort(Object.assign(new AiError('TIMEOUT'), { abortSource: 'TOTAL_TIMEOUT' as const })), this.timeoutMs);
+    const cancel = () => controller.abort(abortError(callerSignal?.reason));
     if (callerSignal?.aborted) cancel(); else callerSignal?.addEventListener('abort', cancel, { once: true });
     const state = { controller, promise: undefined as unknown as Promise<T> }; this.running = state;
-    state.promise = abortable(Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal); }), controller.signal)
+    state.promise = Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal,deadlineAt); })
       .catch(error => { try{beforeMap?.(error);}catch{/* Keep original failure mapping. */} throw error instanceof AiError ? error : new AiError('PROVIDER_ERROR'); })
       .finally(() => { clearTimeout(timer); callerSignal?.removeEventListener('abort', cancel); if (this.running === state) this.running = undefined; });
-    return state.promise;
+    return abortable(state.promise, controller.signal);
   }
   async checkConnection(rawProvider?: unknown): Promise<ImageGenerationConnection> {
     this.ensureOpen(); const provider = rawProvider === undefined ? this.vault.activeProvider() : imageProvider(rawProvider), config = this.config(false, provider);
@@ -173,7 +173,7 @@ export class ImageGenerationService {
     if(!existsSync(join(this.directory,'image-generation','candidates',id))){
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
-      if(receipt.status<200||receipt.status>=300)throw openRouterHttpError(receipt.status);
+      const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
       const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
       const candidate:GeneratedImageCandidate={...intent,requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
       delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
@@ -186,7 +186,7 @@ export class ImageGenerationService {
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
     const config = this.config(true), input = parseInput(raw, config.provider, config.model);productId=input.productId; this.assertProduct(input);
-    return await this.controlled(async signal => {
+    return await this.controlled(async (signal,responseDeadlineAt) => {
       stage='references';
       const assets = input.referenceAssetIds.map(id => {
         const asset = this.store.getAssetRecord(id); if (!asset || asset.productId !== input.productId) throw new AiError('SOURCE_CHANGED');
@@ -213,8 +213,8 @@ export class ImageGenerationService {
       const requestId=attempt?.requestId??randomUUID();
       if(readImageRequestIntent(this.db,requestId)){const error=new AiError('INTERRUPTED');error.message='原生图请求已有发送意图；请回收原响应，未重发';throw error;}
       saveImageRequestIntent(this.db,{version:1,id:requestId,provider:'openrouter',model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit':'generate',sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})});
-      const result=await this.adapter.generate({...request,model:config.model},signal,{onProviderReceipt:async receipt=>{
-        if(this.closed)return;const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
+      const result=await this.adapter.generate({...request,model:config.model},signal,{responseDeadlineAt,onProviderReceipt:async receipt=>{
+        const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
       }});
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
@@ -251,6 +251,6 @@ export class ImageGenerationService {
     } catch(error) { record(error);throw invalidImageOutput('save'); }
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
-  cancel(reason = new AiError('CANCELLED')): void { this.running?.controller.abort(reason); }
-  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(new AiError('SERVICE_CLOSED')); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
+  cancel(reason:AiError = Object.assign(new AiError('CANCELLED'),{abortSource:'USER' as const})): void { this.running?.controller.abort(reason); }
+  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(Object.assign(new AiError('SERVICE_CLOSED'), { abortSource: 'SHUTDOWN' as const })); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
 }

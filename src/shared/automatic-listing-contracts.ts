@@ -56,6 +56,7 @@ export interface AutomaticListingItem {
   variantId: string; sku: string; stockSets: number; sourcesPrepared: boolean;
   status: 'PENDING' | 'RUNNING' | 'WAITING' | 'DONE' | 'FAILED' | 'SCREENED';
   outcome?:AutomaticListingOutcome;
+  observationFailureStamp?:string;
   stage: AutomaticListingStage; draftId: string | null; executionTaskIds: string[];
   imageStarted: boolean; imageAttempts: number; repairAttempts: number;
   repairPolicyVersion?: typeof FIELD_REPAIR_POLICY_VERSION;

@@ -1682,9 +1682,9 @@ test('UI adaptation yields to pending input and keeps the exact synchronous proo
  const baseline=f.service.previewAdaptation(task.id);let inputHandled=false;setImmediate(()=>{inputHandled=true;});
  const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(inputHandled,true);assert.deepEqual(preview,baseline);assert.equal(f.calls.submissions,0);assert.equal(f.calls.images,0);
 });
-test('UI adaptation keeps source display but blocks apply if task changes during a yield',async t=>{
+test('UI adaptation discards obsolete work and blocks apply if task changes during a yield',async t=>{
  const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
- setImmediate(()=>f.service.pause(task.id));const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(preview.canApply,false);assert.match(preview.blockers.join('；'),/任务.*变化/);assert.equal(preview.sources.length,1);assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.images,0);
+ setImmediate(()=>f.service.pause(task.id));const preview=await f.service.previewAdaptationForUi(task.id);assert.equal(preview.canApply,false);assert.match(preview.blockers.join('；'),/任务.*变化/);assert.equal(preview.sources.length,0);assert.throws(()=>f.service.applyAdaptation({taskId:task.id,token:preview.token}),/变化/);assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.images,0);
 });
 
 test('Schema retries only its GET while waiting and resumes the original row after success',async t=>{
@@ -1837,4 +1837,62 @@ test('readback observation without an execution grant cannot create a procuremen
  await f.service.refreshWaiting();assert.equal(f.calls.batches,0,'GET/readback is not a new execution grant');
  await f.service.close();const restored=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>restored.close());
  assert.equal(restored.get(task.id).status,'PAUSED');await restored.refreshWaiting();assert.equal(f.calls.batches,0);
+});
+
+test('saved READBACK failure is stable but a new response with the same error is a new event',async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ let response=1;f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'saved failure',checkedAt:`2026-10-14T00:00:0${response}.000Z`} as any);
+ await f.service.refreshWaiting();const first=f.service.get(task.id);
+ const db=openDatabase(f.directory);const logs=()=>Number(db.prepare("SELECT count(*) n FROM audit_events WHERE action='operation.failed'").get()!.n);
+ try{const count=logs();await new Promise(r=>setTimeout(r,5));await f.service.refreshWaiting();assert.deepEqual(f.service.get(task.id),first);assert.equal(logs(),count);
+ response++;await f.service.refreshWaiting();const next=f.service.get(task.id);assert.ok(next.revision>first.revision);assert.notEqual(next.items[0].outcome?.classifiedAt,first.items[0].outcome?.classifiedAt);assert.equal(logs(),count+1);
+ }finally{db.close();}
+});
+test('parallel UI previews share one readonly computation and release the flight after completion',async t=>{
+ const f=fixture(t),task=await f.create();let reads=0;f.dependencies.store.getProductSnapshot=()=>{reads++;return structuredClone(f.product);};
+ const [a,b]=await Promise.all([f.service.previewAdaptationForUi(task.id),f.service.previewAdaptationForUi(task.id)]);assert.deepEqual(a,b);assert.equal(reads,1);
+ await f.service.previewAdaptationForUi(task.id);assert.equal(reads,2);
+});
+
+test('saved READBACK observation identity survives restart and rejects malformed stamps',async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'saved failure',checkedAt:'2026-10-14T00:00:01.000Z'} as any);
+ await f.service.refreshWaiting();const first=f.service.get(task.id);assert.match(first.items[0].observationFailureStamp!,/^[a-f0-9]{64}$/);
+ const bad=structuredClone(first);bad.items[0].observationFailureStamp='invalid';assert.throws(()=>validateAutomaticListingTask(bad));
+ await f.service.close();const reopened=new AutomaticListingService(f.directory,f.dependencies);f.cleanups.push(()=>reopened.close());await reopened.refreshWaiting();assert.deepEqual(reopened.get(task.id),first);
+});
+test('same-text new dependency failures are never deduplicated as saved observations',async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ f.dependencies.followup.get=()=>{throw new Error('new I/O failure');};await f.service.refreshWaiting();const first=f.service.get(task.id);await new Promise(r=>setTimeout(r,5));await f.service.refreshWaiting();
+ const next=f.service.get(task.id);assert.ok(next.revision>first.revision);assert.notEqual(next.items[0].outcome?.classifiedAt,first.items[0].outcome?.classifiedAt);assert.equal(next.items[0].observationFailureStamp,undefined);
+});
+test('UI preview invalidates a changed rule scope and does not share its obsolete flight',async t=>{
+ const f=fixture(t),task=await f.create();f.dependencies.store.getProductSnapshot=()=>structuredClone(f.product);
+ const old=f.service.previewAdaptationForUi(task.id);f.rules.revision++;const fresh=f.service.previewAdaptationForUi(task.id);
+ const [a,b]=await Promise.all([old,fresh]);assert.equal(a.canApply,false);assert.equal(a.sources.length,0);assert.notEqual(a.token,b.token);assert.deepEqual(b,f.service.previewAdaptation(task.id));
+});
+test('UI preview detects writes from another database connection before expensive projection',async t=>{
+ const f=fixture(t),task=await f.create();let reads=0;f.dependencies.store.getProductSnapshot=()=>{reads++;return structuredClone(f.product);};
+ const pending=f.service.previewAdaptationForUi(task.id),db=openDatabase(f.directory);try{db.prepare("INSERT INTO audit_events(id,product_id,action,summary,detail_json,created_at) VALUES(?,NULL,'test.changed','changed','{}',?)").run(randomUUID(),new Date().toISOString());}finally{db.close();}
+ const preview=await pending;assert.equal(preview.canApply,false);assert.equal(reads,0);
+});
+test('background fallback uses active 10s / idle 30s and explicit refresh remains immediate',async t=>{
+ const f=fixture(t),task=await f.create();t.mock.timers.enable({apis:['setTimeout','setInterval']});let reads=0;
+ f.service.refreshWaiting=async()=>{reads++;};f.service.start();assert.equal(reads,1);t.mock.timers.tick(29_999);assert.equal(reads,1);t.mock.timers.tick(1);assert.equal(reads,2);await Promise.resolve();await Promise.resolve();
+ f.service.suspendScheduling();(f.service as any).tasks.get(task.id).status='WAITING';f.service.start();const count=reads;t.mock.timers.tick(9_999);assert.equal(reads,count);t.mock.timers.tick(1);assert.equal(reads,count+1);await Promise.resolve();await Promise.resolve();
+ await f.service.refreshWaiting();assert.equal(reads,count+2);f.service.suspendScheduling();t.mock.timers.tick(60_000);assert.equal(reads,count+2);
+});
+
+test('legacy same saved failure establishes its stamp without rewriting the old failure time',async t=>{
+ const f=fixture(t,'live'),task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ let checkedAt='2026-10-01T00:00:00.000Z';f.dependencies.followup.get=()=>({status:'NEEDS_ATTENTION',error:'same failure',checkedAt} as any);
+ await f.service.refreshWaiting();const saved=(f.service as any).tasks.get(task.id);delete saved.items[0].observationFailureStamp;const previous=f.service.get(task.id);(f.service as any).save(saved);
+ await new Promise(r=>setTimeout(r,5));await f.service.refreshWaiting();const checkpoint=f.service.get(task.id);assert.ok(checkpoint.items[0].observationFailureStamp);assert.equal(checkpoint.items[0].outcome?.classifiedAt,previous.items[0].outcome?.classifiedAt);
+ delete saved.items[0].observationFailureStamp;checkedAt=new Date(Date.now()+1_000).toISOString();(f.service as any).save(saved);await new Promise(r=>setTimeout(r,5));await f.service.refreshWaiting();assert.notEqual(f.service.get(task.id).items[0].outcome?.classifiedAt,checkpoint.items[0].outcome?.classifiedAt,'new response is not mistaken for legacy observation even without stamp');
+});
+
+test('a readonly observer can conservatively expire one preview but explicit refresh works after it settles',async t=>{
+ const f=fixture(t),task=await f.create();let reads=0;f.dependencies.store.getProductSnapshot=()=>{reads++;return structuredClone(f.product);};
+ const pending=f.service.previewAdaptationForUi(task.id);(f.service as any).observing=Promise.resolve();const stale=await pending;assert.equal(stale.canApply,false);assert.equal(reads,0);assert.equal((f.service as any).previewFlights.size,0);
+ (f.service as any).observing=null;const fresh=await f.service.previewAdaptationForUi(task.id);assert.equal(fresh.canApply,true);assert.equal(reads,1);assert.equal((f.service as any).previewFlights.size,0);
 });

@@ -123,9 +123,10 @@ export class AutomaticListingService {
   private confirming = new Set<string>();
   private worker: Promise<void> | null = null;
   private observing: Promise<void> | null = null;
+  private previewFlights = new Map<string, Promise<ReturnType<AutomaticListingService['previewAdaptation']>>>();
   private controller: AbortController | null = null;
   private activeId: string | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private schedulingSuspended = false;
   private closing: Promise<void> | null = null;
@@ -174,19 +175,31 @@ export class AutomaticListingService {
     const steps=this.adaptationStateSteps(task);let result=steps.next();
     while(!result.done)result=steps.next();return result.value;
   }
-  async previewAdaptationForUi(id:string){
-    const task=this.get(id),steps=this.adaptationStateSteps(task);
+  private previewScope(task:AutomaticListingTask):string {
+    // data_version covers writes by other service connections; total_changes covers this one.
+    return fingerprint({revision:task.revision,busy:this.busy,rules:this.deps.rules(),
+      target:this.deps.amazon.executionTargetScope(task.targetId),profile:this.deps.hosting.getProfile(task.profileId),
+      data:this.db.prepare('PRAGMA data_version').get(),local:this.db.prepare('SELECT total_changes() n').get()});
+  }
+  previewAdaptationForUi(id:string){
+    const task=this.get(id),scope=this.previewScope(task),key=id+':'+scope;
+    const existing=this.previewFlights.get(key);if(existing)return existing.then(value=>structuredClone(value));
+    const flight=this.runUiPreview(task,scope).finally(()=>{if(this.previewFlights.get(key)===flight)this.previewFlights.delete(key);});
+    this.previewFlights.set(key,flight);return flight.then(value=>structuredClone(value));
+  }
+  private async runUiPreview(task:AutomaticListingTask,scope:string){
+    const steps=this.adaptationStateSteps(task);
     for(;;){
       await yieldToEventLoop();
-      const current=this.task(id); // Also rejects shutdown before another DB read.
-      const result=steps.next();
-      if(result.done){
-        const preview=result.value.preview;
-        // An active task can advance while its readonly source view is loading.
-        // Preserve that view, but never present an obsolete proof as applicable.
-        if(current.revision!==task.revision){preview.canApply=false;preview.blockers.push('检查期间任务已变化，请刷新任务后再适配');}
-        return preview;
+      const current=this.task(task.id);
+      if(this.previewScope(current)!==scope){
+        steps.return(undefined as never);
+        // Do not finish expensive projections of a superseded snapshot. Apply still
+        // recomputes its full proof and rejects this deliberately obsolete token.
+        return {taskId:task.id,taskRevision:task.revision,token:fingerprint({obsolete:scope}),canApply:false,
+          blockers:['检查期间任务或资料已变化，请刷新任务后再适配'],changes:[],sources:[]};
       }
+      const result=steps.next();if(result.done)return result.value.preview;
     }
   }
   previewAdaptation(id:string){return this.adaptationState(this.get(id)).preview;}
@@ -212,15 +225,21 @@ export class AutomaticListingService {
     this.tasks.set(id,next);return structuredClone(next);
   }
   get busy(): boolean { return this.worker !== null || this.observing !== null; }
+  private armObservationTimer():void {
+    const active=[...this.tasks.values()].some(task=>['QUEUED','RUNNING','WAITING'].includes(task.status)||task.items.some(row=>row.batchWait));
+    this.timer=setTimeout(()=>{this.timer=null;void this.refreshWaiting().catch(()=>{}).finally(()=>{
+      if(!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.timer)this.armObservationTimer();
+    });},active?10_000:30_000);this.timer.unref();
+  }
   start(): void {
     this.schedulingSuspended = false;
     this.ensureOpen(); if (this.timer) return;
-    this.timer = setInterval(() => { void this.refreshWaiting().catch(() => {}); }, 5000); this.timer.unref();
+    this.armObservationTimer();
     void this.refreshWaiting().catch(() => {});
   }
   suspendScheduling(): void {
     this.schedulingSuspended = true;
-    if (this.timer) clearInterval(this.timer); this.timer = null;
+    if (this.timer) clearTimeout(this.timer); this.timer = null;
   }
   /** Freeze only scheduler timers; the caller blocks mutations for the lease lifetime. */
   holdForMaintenance(): () => void {
@@ -232,7 +251,7 @@ export class AutomaticListingService {
       if (this.closed || this.closing) return;
       this.schedulingSuspended = suspended;
       if (armed && !suspended && !this.timer) {
-        this.timer = setInterval(() => { void this.refreshWaiting().catch(() => {}); }, 5000); this.timer.unref();
+        this.armObservationTimer();
       }
     };
   }
@@ -1121,23 +1140,32 @@ export class AutomaticListingService {
             continue;
           }
           if (!row.draftId || ['DONE','SCREENED'].includes(row.status) || !['READBACK','LABELS'].includes(row.stage)) continue;
+          let savedFailureStamp:string|undefined, savedFailureTime:number|undefined;
           try {
             if(row.stage==='LABELS'&&(row.error||row.outcome))appendAuditEvent(this.db,randomUUID(),row.productId,'automatic-listing.labels-detached','保留旧标签错误；标签改为按需独立处理',JSON.stringify({taskId:task.id,draftId:row.draftId,error:row.error,outcome:row.outcome??null}),new Date().toISOString());
             if (!this.matching(task, row, this.deps.amazon.getDraft(row.draftId))) throw new UserFacingError('已提交草稿归属变化，请核对');
             if(row.stage==='LABELS')row.stage='READBACK';
             {
-              const followup = task.mode === 'live' ? this.deps.followup.get(row.draftId) : { status: 'READY', error: null };
-              if (followup.status === 'NEEDS_ATTENTION') throw new UserFacingError(followup.error || '平台回读需要处理');
+              const followup = task.mode === 'live' ? this.deps.followup.get(row.draftId) : { status: 'READY', error: null, checkedAt:null, lastAttemptAt:null };
+              const observedTimes=[followup.checkedAt,followup.lastAttemptAt].map(value=>Date.parse(value??'')).filter(Number.isFinite);
+              if(observedTimes.length)savedFailureTime=Math.max(...observedTimes);
+              if (followup.status === 'NEEDS_ATTENTION') {
+                savedFailureStamp=fingerprint({stage:row.stage,draft:this.deps.amazon.getDraft(row.draftId),followup});
+                throw new UserFacingError(followup.error || '平台回读需要处理');
+              }
               const candidate = candidates.get(row.draftId);
               if (followup.status !== 'READY' || !candidate?.eligible) {
-                if (followup.status === 'READY' && candidate?.requiresAttention) throw new UserFacingError(candidate.reason);
+                if (followup.status === 'READY' && candidate?.requiresAttention) {
+                  savedFailureStamp=fingerprint({stage:row.stage,draft:this.deps.amazon.getDraft(row.draftId),followup,candidate});
+                  throw new UserFacingError(candidate.reason);
+                }
                 row.status = 'WAITING';
                 row.error = followup.status === 'READY'
                   ? `平台已建档；${candidate?.reason || '等待备货条件确认'}；可售状态单独以平台结果为准`
                   : followup.error || '等待 Amazon 处理原提交并确认建档（原提交后 24 小时内回读）';
-                delete row.outcome; continue;
+                delete row.outcome; delete row.observationFailureStamp; continue;
               }
-              row.error = null; delete row.outcome;
+              row.error = null; delete row.outcome; delete row.observationFailureStamp;
               if(!this.grants.has(task.id)){row.status='WAITING';row.error='平台结果已保存，明确继续任务后再准备备货';continue;}
               const batches = this.deps.procurement.ensureAutomaticBatch(task.id, [row.draftId], { [row.draftId]: row.stockSets });
               const batch = batches.find(value => value.lines.some(line => line.draftId === row.draftId));
@@ -1146,10 +1174,20 @@ export class AutomaticListingService {
             }
             row.status = 'DONE'; row.stage = 'COMPLETE'; row.error = null; delete row.outcome;
           } catch (error) {
+            // Only errors synthesized from a saved observation can be deduplicated.
+            // A thrown dependency/storage/network error is a new failure even when its text matches.
+            if(savedFailureStamp&&row.observationFailureStamp===savedFailureStamp&&row.status==='FAILED'&&row.outcome&&['READBACK_FAILED','READBACK_BRAND_REQUIRES_MANUAL'].includes(row.outcome.code))continue;
+            const legacyOutcome=!row.observationFailureStamp&&savedFailureStamp&&savedFailureTime!==undefined&&row.outcome
+              &&savedFailureTime<=Date.parse(row.outcome.classifiedAt)?structuredClone(row.outcome):undefined;
+            if(savedFailureStamp)row.observationFailureStamp=savedFailureStamp;else delete row.observationFailureStamp;
             recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
             row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
             const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
             if(!canObserve()||task.revision!==revision){interrupted=true;break;}
+            if(legacyOutcome&&classified.outcome){
+              const {classifiedAt:priorAt,...priorProof}=legacyOutcome,{classifiedAt:_newAt,...currentProof}=classified.outcome;
+              if(fingerprint(priorProof)===fingerprint(currentProof))classified.outcome.classifiedAt=priorAt;
+            }
             Object.assign(row,classified);
           }
         }
@@ -1182,7 +1220,7 @@ export class AutomaticListingService {
   async waitForIdle(): Promise<void> { await this.worker; await this.observing; }
   close(): Promise<void> {
     if (this.closing) return this.closing; if (this.closed) return Promise.resolve();
-    if (this.timer) clearInterval(this.timer); this.timer = null;
+    if (this.timer) clearTimeout(this.timer); this.timer = null;
     for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
     this.grants.clear();
     this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });

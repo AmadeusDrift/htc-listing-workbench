@@ -1,4 +1,4 @@
-import { assertConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
+import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { imagePlanFailureConfirmed } from './image-plan-retry.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
@@ -111,6 +111,7 @@ export interface AiDependencies {
   imageGenerationCapability?: () => AiCapabilityInfo;
 }
 interface PreparedRequest {
+  forbiddenRetry?:{prior:AiCall;scopeKey:string};
   imagePlanRequestSha256?:string;
   imagePlanRepair?:{previousPlanId:string;issues:string[]};
   workflowId?:string;
@@ -817,6 +818,7 @@ export class AiService {
       if (!Array.isArray(value.issues) || !value.issues.length || value.issues.length > 50) throw new AiError('INVALID_INPUT');
       repair = { previousPlanId: uuid(value.previousPlanId), issues: value.issues.map(issue => boundedText(issue, 2000)) };
     }
+    let forbiddenRetry:PreparedRequest['forbiddenRetry'];
     const prior = repair ? this.getResult(repair.previousPlanId) : undefined;
     if (repair && !prior) throw new AiError('SOURCE_CHANGED');
     {
@@ -835,13 +837,21 @@ export class AiService {
       for(const previous of calls.filter(previous=>previous.status!=='SUCCEEDED')){
         // Only the exact waiting Batch identity may enter start's guarded receipt replay.
         const waiting=taskAiContext.getStore()?.waitingOperationId===previous.id&&this.batchTasks.find(previous.id);
-        if(!imagePlanFailureConfirmed(this.directory,previous)&&!(waiting&&!waiting.adoption)){
+        const missingRejectionProof=previous.providerId.startsWith('openrouter')&&['AUTH_FAILED','MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN','SERVICE_PERMISSION_REQUIRED'].includes(previous.errorCode??'')&&!confirmedForbiddenRejection(this.db,previous)&&!confirmedAuthenticationRejection(this.db,previous);
+        if((!imagePlanFailureConfirmed(this.directory,previous)||missingRejectionProof)&&!(waiting&&!waiting.adoption)){
           const unknown=new AiError('INTERRUPTED');unknown.callId=previous.id;unknown.diagnosticReason='IMAGE_PLAN_RESULT_UNKNOWN';
           unknown.message='图片规划原请求结果未知，已保留调用与费用记录；本次未发送新请求，请先核对原结果';throw unknown;
         }
       }
-      const denied=calls.find(previous=>previous.status==='FAILED'&&(previous.errorCode==='MODEL_REGION_RESTRICTED'||previous.errorCode==='ROUTING_FORBIDDEN'));
-      if(denied)throw new AiError(denied.errorCode as 'MODEL_REGION_RESTRICTED'|'ROUTING_FORBIDDEN');
+      const results=this.listResults(context.listing.productId);
+      const resolvedIndex=calls.findIndex(previous=>previous.status==='SUCCEEDED'&&results.some(result=>result.callId===previous.id&&result.output.kind==='image-plan'&&resultHasOwner(result,previous)&&result.sourceSha256===listingFingerprint(context)));
+      const unresolved=resolvedIndex<0?calls:calls.slice(0,resolvedIndex);
+      const denied=unresolved.find(previous=>previous.status==='FAILED'&&(previous.errorCode==='MODEL_REGION_RESTRICTED'||previous.errorCode==='ROUTING_FORBIDDEN'||confirmedForbiddenRejection(this.db,previous)));
+      if(denied){
+        if(!confirmedForbiddenRejection(this.db,denied))throw new AiError(denied.errorCode as 'MODEL_REGION_RESTRICTED'|'ROUTING_FORBIDDEN');
+        const scopeKey='image-plan:'+listingFingerprint({workflowId:workflowId??null,source:listingFingerprint(context)});
+        assertConfirmedForbiddenRetry(this.db,denied,scopeKey);forbiddenRetry={prior:denied,scopeKey};
+      }
     }
     return this.start(profile, context.listing, { operation: 'image-plan', context, repair, ...(workflowId?{workflowId:uuid(workflowId)}:{}) }, async activeSignal => {
       const assertFresh = async () => { await this.assertImageFresh(context, assertContextFresh, activeSignal); if (prior) this.imageResult(prior, context, 'image-plan'); };
@@ -852,7 +862,7 @@ export class AiService {
         images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes});
       }
       await assertFresh();
-      return { ...(repair?{imagePlanRepair:repair}:{}),imagePlanRequestSha256:listingFingerprint({context,repair:repair??null}),...(workflowId?{workflowId:uuid(workflowId)}:{}), variantId: context.listing.variantId, assetId: null, assetSha256: null, sourceResultIds: [...imageCopySourceIds(context), ...(prior ? [prior.id] : [])], sourceSha256: listingFingerprint(context), imageContext: context, assertFresh,
+      return { ...(forbiddenRetry?{forbiddenRetry}:{}),...(repair?{imagePlanRepair:repair}:{}),imagePlanRequestSha256:listingFingerprint({context,repair:repair??null}),...(workflowId?{workflowId:uuid(workflowId)}:{}), variantId: context.listing.variantId, assetId: null, assetSha256: null, sourceResultIds: [...imageCopySourceIds(context), ...(prior ? [prior.id] : [])], sourceSha256: listingFingerprint(context), imageContext: context, assertFresh,
         assertBeforeSend:()=>{if(workflowId&&this.imagePlanningAttempts(context,workflowId)>=imagePlanningAllowanceLimit(this.db,workflowId,context,repair))throw new ImagePlanningLimitError();},
         invoke: (credentials, adapterContext) => planProductImage(context, repair?{...repair,previousPlan:prior?.output as import('../../shared/image-ai-contracts.ts').ImagePlanOutput}:undefined, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, {...adapterContext,imagePlanRetry:!!workflowId&&this.imagePlanningAttempts(context,workflowId)>0,beforeSend:body=>{adapterContext.beforeSend?.(body);onRequestSent?.();}}, images) };
     }, signal);
@@ -991,7 +1001,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
+            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { if(prepared.forbiddenRetry)claimConfirmedForbiddenRetry(this.db,prepared.forbiddenRetry.prior,call,prepared.forbiddenRetry.scopeKey); freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); });
           },
           onMetadata: value => { if (!finished && !activeSignal.aborted && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },

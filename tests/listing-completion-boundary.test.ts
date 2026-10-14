@@ -233,3 +233,30 @@ for(const code of ['MODEL_REGION_RESTRICTED','ROUTING_FORBIDDEN'] as const)test(
  assert.equal(f.listing.completionUnknown(op.id),false);for(let n=0;n<2;n++)await assert.rejects(f.listing.complete(f.reference),(error:any)=>error.code===code);
  assert.equal(f.requests.length,1);assert.equal(f.listing.getCompletion(op.id).rounds[0].candidate.id,id);
 });
+
+ test('confirmed OpenRouter403 field continuation retries once and never replenishes on another continue',async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');
+ const f=await fixture(t);f.ai.saveConnection({id:'openrouter',apiKey:'offline-field-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ for(const p of f.ai.getPurposeProfiles())if(['listing_completion','listing_repair','listing_generation'].includes(p.purposeId))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response(JSON.stringify({error:{code:403,message:'This model is not available in your region.'}}),{status:403}));
+ await assert.rejects(f.listing.complete(f.reference));assert.equal(f.requests.length,1);
+ const scope={taskId:randomUUID(),rowKey:'field',phase:'FIELDS',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};
+ await taskAiContext.run(scope,()=>assert.rejects(f.listing.complete(f.reference)));assert.equal(f.requests.length,2);
+ await taskAiContext.run({...scope,explicitContinueAt:'2099-01-02T00:00:00.000Z'},()=>assert.rejects(f.listing.complete(f.reference)));assert.equal(f.requests.length,2);
+ const db=openDatabase(f.directory);try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);}finally{db.close();}
+ });
+
+for(const failure of ['budget','transaction'] as const)test(`403 field ${failure} failure before send does not consume the single manual retry`,async t=>{
+ const {taskAiContext}=await import('../src/main/ai/batch/task-context.ts');const f=await fixture(t);
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-field-rollback'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ for(const p of f.ai.getPurposeProfiles())if(['listing_completion','listing_repair','listing_generation'].includes(p.purposeId))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response(JSON.stringify({error:{code:403,message:'Forbidden'}}),{status:403}));await assert.rejects(f.listing.complete(f.reference));
+ const db=openDatabase(f.directory),scope={taskId:randomUUID(),rowKey:'field',phase:'FIELDS',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};
+ try{
+ if(failure==='budget')f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:1,dailyTokenLimit:null});
+ else db.exec("CREATE TRIGGER fail_claim AFTER INSERT ON audit_events WHEN NEW.action='ai.forbidden.manual-retry' BEGIN SELECT RAISE(ABORT,'synthetic reservation rollback'); END");
+ await taskAiContext.run(scope,()=>assert.rejects(f.listing.complete(f.reference)));assert.equal(f.requests.length,1);assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);
+ if(failure==='budget')f.ai.setUsagePolicy({providerId:'openrouter',dailyCallLimit:null,dailyTokenLimit:null});else db.exec('DROP TRIGGER fail_claim');
+ await taskAiContext.run(scope,()=>assert.rejects(f.listing.complete(f.reference)));assert.equal(f.requests.length,2);assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,1);
+ }finally{db.close();}
+});

@@ -87,7 +87,7 @@ async function start() {
   store = new WorkspaceStore(dataRoot);
   const db = store;
   if (recovered) db.recordWorkspaceEvent('workspace.restore.recovered', recovered === 'rolled-back' ? '启动时已回滚中断的备份恢复，保留原始工作区' : '启动时已完成中断的备份恢复清理');
-  amazon = new AmazonService(dataRoot, id => db.getProduct(id), safeStorage, {
+  amazon = new AmazonService(dataRoot, id => db.getProductSnapshot(id), safeStorage, {
     schemaFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
     dataFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
   });

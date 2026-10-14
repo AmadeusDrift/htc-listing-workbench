@@ -28,6 +28,10 @@ import type { RelayDownloadDependencies } from './download.ts';
 import type { ImageModelCatalog } from '../../shared/image-generation-contracts.ts';
 import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
+import {AiSpendBudget} from '../ai/spend-budget.ts';
+import {SpendBudgetError,priceEvidence,imageSpendBound} from '../ai/spend-records.ts';
+import type {ImagePriceEvidence} from '../../shared/ai-spend-contracts.ts';
+import {ControlledRunScopes} from '../application/controlled-run-scope.ts';
 
 export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
@@ -53,9 +57,11 @@ export class ImageGenerationService {
   private scope?: { fingerprint: string; token: string };
   private fetcher: typeof fetch;
   private catalog?: { keyHash: string; value: ImageModelCatalog };
+  private spend:AiSpendBudget;private controlledScopes:ControlledRunScopes;
   constructor(directory: string, store: WorkspaceStore, storage: SecretStorage, deps: ImageGenerationDependencies) {
     this.directory = directory; this.store = store; this.vault = new ImageGenerationVault(directory, storage);
     this.fetcher = deps.fetch ?? globalThis.fetch; this.db=openDatabase(directory);
+    this.spend=new AiSpendBudget(this.db);this.controlledScopes=new ControlledRunScopes(this.db);
     this.adapter = new OpenRouterImageAdapter({ fetch: deps.fetch }); this.decodePreview = deps.decodePreview;
     this.timeoutMs = deps.timeoutMs ?? 660000;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 1800000) throw new AiError('INVALID_CONFIG');
@@ -181,6 +187,7 @@ export class ImageGenerationService {
     if(!existsSync(join(this.directory,'image-generation','candidates',id))){
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
+      if(this.spend.list().some(r=>r.id===id)){const saved=readImageReceiptSync(this.db,this.directory,intent);if(saved){const settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,id,saved.record.id));if(settled.state==='COST_ANOMALY')throw new SpendBudgetError('SPEND_COST_ANOMALY');}}
       const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
       const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
       const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
@@ -231,7 +238,7 @@ export class ImageGenerationService {
     return undefined;
   }
   private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner}):Promise<GeneratedImageCandidate>{
-    let enteredAdapter=false,stage='validation',recorded=false;let productId:string|undefined;
+    let enteredAdapter=false,stage='validation',recorded=false;let productId:string|undefined,activeRequestId:string|undefined;
     const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId??(error instanceof AiError?error.requestId:undefined),requestOutcome:error instanceof AiError&&error.certainty==='SENT_UNKNOWN'?'RESULT_UNKNOWN':!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
@@ -239,7 +246,14 @@ export class ImageGenerationService {
     const input=parseInput(raw,'openrouter',String(this.getConnection().model));productId=input.productId;this.assertProduct(input);const ownerScope=this.generationScope(input,attempt?.owner);
     stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(callerSignal)throwIfAborted(callerSignal);if(reused)return reused;
     const config=this.config(true);this.assertProduct(input);
+    const controlledScopeId=this.controlledScopes.authorizeImage(ownerScope);
     return await this.controlled(async (signal,responseDeadlineAt) => {
+      let evidence:ImagePriceEvidence|undefined;
+      if(this.spend.needsBound(controlledScopeId)){
+        stage='budget';
+        try{const response=await this.fetcher(`https://openrouter.ai/api/v1/images/models/${config.model}/endpoints`,{method:'GET',redirect:'error',signal});if(!response.ok)throw new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');evidence=priceEvidence(config.model,await readBounded(response,1024*1024,signal),new Date());}
+        catch(error){throwIfAborted(signal);throw error instanceof SpendBudgetError?error:new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');}
+      }
       stage='references';
       const assets = input.referenceAssetIds.map(id => {
         const asset = this.store.getAssetRecord(id); if (!asset || asset.productId !== input.productId) throw new AiError('SOURCE_CHANGED');
@@ -264,11 +278,12 @@ export class ImageGenerationService {
       this.store.freezeSourceVersion(input.productId,input.productRevision);
       stage='request';enteredAdapter=true;
       const requestId=attempt?.requestId??randomUUID();
+      activeRequestId=requestId;
       if(readImageRequestIntent(this.db,requestId)){const error=new AiError('INTERRUPTED');error.message='原生图请求已有发送意图；请回收原响应，未重发';throw error;}
       const intentBase={id:requestId,provider:'openrouter' as const,model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit' as const:'generate' as const,sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})},requestInput=this.imageInputSnapshot(input);
       const intent:ImageRequestIntent={...intentBase,version:2,requestScope:ownerScope,requestInput,requestFingerprint:imageRequestFingerprint(intentBase,requestInput)};
-      const result=await this.adapter.generate({...request,model:config.model},signal,{responseDeadlineAt,beforeSend:()=>transaction(this.db,()=>{throwIfAborted(signal);this.assertProduct(input,assets);this.generationScope(input,attempt?.owner);const pending=this.imageIntents(ownerScope).find(prior=>['unknown','raw'].includes(this.imageOutcome(prior).kind));if(pending)throw this.imageBlocked(pending);saveImageRequestIntent(this.db,intent);}),onProviderReceipt:async receipt=>{
-        const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
+      const result=await this.adapter.generate({...request,model:config.model},signal,{responseDeadlineAt,beforeSend:body=>transaction(this.db,()=>{throwIfAborted(signal);this.assertProduct(input,assets);this.generationScope(input,attempt?.owner);if(this.controlledScopes.authorizeImage(ownerScope)!==controlledScopeId)throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');const pending=this.imageIntents(ownerScope).find(prior=>['unknown','raw'].includes(this.imageOutcome(prior).kind));if(pending)throw this.imageBlocked(pending);if(typeof body!=='string')throw new SpendBudgetError('SPEND_RECORD_INVALID');const bound=evidence?imageSpendBound(body,evidence,new Date().toISOString()):null;this.spend.reserveInTransaction(this.db,{id:requestId,businessKey:listingFingerprint(ownerScope),requestSha256:digest(body),model:config.model,purpose:'image_generation',scopeId:controlledScopeId},body,bound);saveImageRequestIntent(this.db,intent);}),onProviderReceipt:async receipt=>{
+        const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{const saved=await pending;const settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,requestId,saved.id));if(settled.state==='COST_ANOMALY')throw new SpendBudgetError('SPEND_COST_ANOMALY');}finally{this.pendingReceipts.delete(pending);}
       }});
       throwIfAborted(signal);
       // The provider may have been processing while local files changed.
@@ -287,7 +302,7 @@ export class ImageGenerationService {
       stage='save';this.saveCandidate(candidate, result.bytes, preview,record);
       return candidate;
     }, callerSignal,error=>{if(!recorded)record(error);});
-    }catch(error){if(!recorded)record(error);throw enteredAdapter?error:imageRequestNotSent(error);}
+    }catch(error){if(activeRequestId&&this.spend.list().some(r=>r.id===activeRequestId)){try{transaction(this.db,()=>this.spend.markUnknownInTransaction(this.db,activeRequestId!));}catch{/* Retain the original request failure and conservative committed hold. */}}if(!recorded)record(error);throw enteredAdapter?error:imageRequestNotSent(error);}
   }
   /** Main-process workflow entry point; never accepts or returns a caller-selected filesystem path. */
   async readCandidate(id: string): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {

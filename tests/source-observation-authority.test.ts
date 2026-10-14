@@ -51,6 +51,26 @@ test('clear observations cannot override a human-confirmed color or a program-ow
   assert.ok(nativeCandidateIssues(candidate(),locked).some(issue=>issue.code==='BUSINESS_VALUE_LOCKED'));
   assert.deepEqual(locked.businessValues,{color:'Blue'});
 });
+for(const sourceSpec of ['Blue','XZ-190'])test(`human Navy Blue remains protected with selected specification ${sourceSpec}`,()=>{
+  const c=context(observation());c.evidence[0].value=sourceSpec;
+  c.evidence.push({id:'manual-color',name:'color',meaning:'color',source:'human_confirmed',value:'Navy Blue'});
+  const before=structuredClone(c);
+  assert.equal(colorConflict(c),true,'finite vocabulary must not discard an explicit human color');
+  const retained=retainValidNativeCandidates(candidate(),c);
+  assert.deepEqual(retained.candidates.map(field=>field.field),['novel_feature']);
+  assert.match(retained.missing.find(field=>field.field==='color')!.reason,/人工/);
+  assert.deepEqual(c,before);
+});
+test('human color permission preserves raw names and finite translations without guessing an unfamiliar hue',()=>{
+  const c=context(observation());c.evidence=[{id:'manual-color',name:'color',meaning:'color',source:'human_confirmed',value:'Navy Blue'}];
+  const issues=(color:string)=>nativeCandidateIssues(parseFullOutput({kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'color',nativeValue:color}],missing:[]}),c);
+  assert.equal(issues('navy blue').length,0,'exact raw name remains legal without a basic-hue guess');
+  assert.ok(issues('Blue').some(issue=>issue.code==='SOURCE_VALUE_CONFLICT'),'Navy Blue must not be inferred as permission to replace it with Blue');
+  assert.ok(issues('Ocean Dream').some(issue=>issue.code==='SOURCE_VALUE_CONFLICT'),'an unrecognized candidate cannot bypass protection either');
+  c.evidence[0].value='蓝色';assert.equal(issues('Blue').length,0,'existing known translation stays legal');
+  c.evidence[0].value='晨曦雾影';assert.equal(issues('晨曦雾影').length,0);assert.ok(issues('Red').some(issue=>issue.code==='SOURCE_VALUE_CONFLICT'));
+  c.evidence[0].source='raw_source';c.evidence[0].value='unknown';assert.equal(issues('Ocean Dream').length,0,'unconfirmed unknown does not establish a new conflict');
+});
 test('uncertain observations retain the v2 source binding without rejecting an entire product',()=>{
   const projection=projectSourceClaims([{id:'color',name:'color',value:'Blue'}]);
   const raw={kind:'source-image-consistency',version:'source-image-consistency/v2',assets:[{...image,quality:'low-detail'}]};

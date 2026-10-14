@@ -249,7 +249,7 @@ test('source malformed HTTP 200 envelope retains safe text and never becomes a m
   for(const raw of ['{"choices":[', '{"note":"\\u0063onsistency-synthetic-key"']){
     const f=await fixture(t);f.respond(()=>new Response(raw));await assert.rejects(f.observe());
     const saved=readdirSync(join(f.directory,'ai-diagnostics')).map(n=>JSON.parse(readFileSync(join(f.directory,'ai-diagnostics',n),'utf8')));
-    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,'RESPONSE_ENVELOPE_JSON_INVALID');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
+    assert.equal(saved.length,1);assert.equal(saved[0].rejectionReason,raw==='{"choices":['?'RESPONSE_ENVELOPE_JSON_INVALID':'RESPONSE_SECRET_ECHO');assert.equal(JSON.stringify(saved).includes('onsistency-synthetic-key'),false);
     if(raw==='{"choices":[')assert.equal(saved[0].output,raw);
     await assert.rejects(f.ai.prepareSourceConsistency({productId:f.p.id,productRevision:f.store.getProduct(f.p.id).revision,variantId:f.p.variants[0].id}));assert.equal(f.count(),1);
   }

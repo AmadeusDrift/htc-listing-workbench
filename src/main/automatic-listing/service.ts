@@ -67,6 +67,7 @@ export interface AutomaticListingDependencies {
   amazon: Pick<AmazonService, 'executionTargetScope' | 'getDraft' | 'listDrafts' | 'prepareDrafts'> & Partial<Pick<AmazonService, 'getSchema' | 'applyBusinessDefaults' | 'previewPricing' | 'previewTaskAdaptation' | 'applyTaskAdaptation'>>;
   hosting: Pick<HostingService, 'getProfile'>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
+    hasHistoricalRetryAllowance?: (draftId:string)=>boolean;
     getRiskSettings?: () => {enabled:boolean};
     isRiskPolicyCompatible?: (run:ImageWorkflowRun) => boolean;
     getCopyReviewSettings?: () => {enabled:boolean};
@@ -868,7 +869,7 @@ export class AutomaticListingService {
       row.stage = 'IMAGES'; this.save(task);
       if (!this.imageReady(prior)) {
         const changedRiskPolicy=canResumeRiskAdaptation(this.db,task,row,draft,prior,this.deps.store.getProduct(row.productId))||!!prior&&(!this.imagePolicyCompatible(prior)||prior.status==='BLOCKED'&&(this.deps.images.getRiskSettings?.().enabled===false||this.deps.images.getCopyReviewSettings?.().enabled===false));
-        if (row.imageStarted && !canResumeImageWorkflow(prior) && !changedRiskPolicy && !(unknown==='IMAGE_RESULT_UNKNOWN')) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
+        if (row.imageStarted && !canResumeImageWorkflow(prior) && !this.deps.images.hasHistoricalRetryAllowance?.(draft.id) && !changedRiskPolicy && !(unknown==='IMAGE_RESULT_UNKNOWN')) throw new UserFacingError(prior?.error || '上次图片请求未确认完成；未自动重新生图。请在异常商品中核对已有结果后继续。');
         // complete rejects local preflight synchronously and defers admitted work.
         // Save the conservative unknown marker before awaiting that work, not before
         // the no-send entry checks; a rejected entry must remain recoverable.
@@ -876,6 +877,7 @@ export class AutomaticListingService {
         row.imageStarted = true; this.save(task);
         const result = await operation;
         if(result.workflow.rejection)row.rejection={workflowId:result.workflow.id,detail:structuredClone(result.workflow.rejection)};else delete row.rejection;
+        if(result.workflow.retryAllowance)row.imageRetryAllowance={workflowId:result.workflow.id,allowance:structuredClone(result.workflow.retryAllowance)};
         row.imageAttempts = result.workflow.attempt+(result.workflow.legacyImageAttempts??0); this.save(task);
         if (!this.imageReady(result.workflow)) throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');
         draft = result.draft;

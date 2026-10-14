@@ -868,6 +868,28 @@
         "initializeWorkBatches|841524bec5f3921ca70dcfa15a84e236b73048044d1c360999667c5a8122b9e6": 1,
         "retainWorkBatches|967414fce0d7d979126909acbb4b1da9dbbcd70c20c7158cbb2b570d9e5aaecd": 1
       }
+    },
+    "main/image-workflow/retry-allowance.ts": {
+      "role": "images",
+      "review": "Schema31 image retry owner. initialize runs only at migration; grant and consumption record scoped commands; retain merges only the staging restore database. Reviewed seven precise statements; no unrelated registry regeneration.",
+      "commands": [
+        "initializeImageRetryAllowances|CREATE|image_retry_allowances",
+        "initializeImageRetryAllowances|INSERT|image_retry_allowances",
+        "grantImageRetry|INSERT|image_retry_allowances",
+        "saveRetryConsumption|UPDATE|image_retry_allowances",
+        "retainImageRetryHistory|UPDATE|image_retry_allowances",
+        "retainImageRetryHistory|INSERT|image_retry_allowances",
+        "retainImageRetryHistory|UPDATE|image_workflow_runs"
+      ],
+      "statements": {
+        "initializeImageRetryAllowances|e4e80cda7008859871137571486aece7f11c3347412415262af111884f823e05": 1,
+        "initializeImageRetryAllowances|0d5c63491dee908a84c91308c94ad9d2cd96882e33bc0f233640d107b6e83507": 1,
+        "grantImageRetry|0d5c63491dee908a84c91308c94ad9d2cd96882e33bc0f233640d107b6e83507": 1,
+        "saveRetryConsumption|ce7e930da7db87b4ecb934057db54a9d645400a03ea2890e1b375919f973b500": 1,
+        "retainImageRetryHistory|ce7e930da7db87b4ecb934057db54a9d645400a03ea2890e1b375919f973b500": 1,
+        "retainImageRetryHistory|c6849f233c3e9efd2ae31ca2b5640c4bc389b6d31df7bb3141c20994f62ad065": 1,
+        "retainImageRetryHistory|79014e01448946226358f282552c876d16c903afab92f248680e878e563d22e0": 1
+      }
     }
   },
   "opaque": [

@@ -1,4 +1,5 @@
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
+import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
 import {referencePinHistory,retainReferencePinHistory} from './hosting/reference-history.ts';
 import {referencePinArtifactPaths} from './hosting/reference-pins.ts';
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
@@ -194,6 +195,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
     if(version>=28){Object.assign(approved,{image_reference_pins:['id','record_json']});referencePinHistory(database);}
+    if(version>=31){Object.assign(approved,IMAGE_RETRY_TABLES);assertImageRetryHistory(database);}
     if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name), expected = approved[name];
@@ -430,6 +432,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
     retainWorkBatches(current,snapshot,migratedWorkBatches);
+    retainImageRetryHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);

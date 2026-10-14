@@ -1,3 +1,4 @@
+import { validateRetryAllowance } from '../image-workflow/retry-allowance.ts';
 import { validatePurposeSnapshot } from '../ai/purpose-routing.ts';
 import { validateSchemaRetry } from '../catalog/schema-operations.ts';
 import { validateWorkflowRejection } from '../image-workflow/rejection.ts';
@@ -33,18 +34,20 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'imageRetryAllowance','rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
   const productId = identifier(value.productId), variantId = identifier(value.variantId);
   const salesPlan=value.salesPlan===undefined?undefined:validateSalesPlan(value.salesPlan);
   if (value.key !== productId + ':' + (salesPlan?.recipe.key??variantId)) fail();
-  const result: AutomaticListingItem = { key: String(value.key), productId, variantId, productRevision: counter(value.productRevision), sourceStamp: hash(value.sourceStamp),
+  const retry=value.imageRetryAllowance===undefined?undefined:record(value.imageRetryAllowance,'图片额度引用',['workflowId','allowance']);
+  const imageRetryAllowance=retry?{workflowId:identifier(retry.workflowId),allowance:validateRetryAllowance(retry.allowance)}:undefined;
+  const result: AutomaticListingItem = { ...(imageRetryAllowance?{imageRetryAllowance}:{}), key: String(value.key), productId, variantId, productRevision: counter(value.productRevision), sourceStamp: hash(value.sourceStamp),
     productTitle: text(value.productTitle, '商品标题', 2000), sku: text(value.sku, 'SKU', 200, true), stockSets: counter(value.stockSets, 100000),
     sourcesPrepared: value.sourcesPrepared as boolean, status: value.status as AutomaticListingItem['status'], stage: value.stage as AutomaticListingItem['stage'],
     draftId: value.draftId === null ? null : identifier(value.draftId), executionTaskIds: (value.executionTaskIds as unknown[]).map(identifier),
-    imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts, 21), repairAttempts: counter(value.repairAttempts, 5),
+    imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts,21+3*(imageRetryAllowance?.allowance.grants.length??0)), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
   if(value.observationFailureStamp!==undefined)result.observationFailureStamp=hash(value.observationFailureStamp);
   if(value.schemaRetry!==undefined)result.schemaRetry=validateSchemaRetry(value.schemaRetry);

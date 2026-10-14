@@ -67,7 +67,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
           if(plan){
             if(plan.output.kind!=='image-plan')invalid();else assertImagePlan(plan.output,plan.imageContext!,{storedVersion:plan.listingEvidenceContractVersion??null});
             const previous=source&&index===run.sourceReuse!.slotAttempts[slot.index-1]?undefined:slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
-            if(listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
+            if(!attempt.planReuse&&listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
           }
           const appearance=attempt.appearanceReview;
           if(appearance){

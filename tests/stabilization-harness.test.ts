@@ -175,3 +175,11 @@ test('S10 failed teardown bounds a stuck close, records forced cleanup, and pres
   await assert.rejects(runtime.cleanupFailure({close:()=>{attempts++;return attempts===1?new Promise(()=>{}):Promise.resolve();},force:()=>{forces++;},record:(row:{forced:boolean})=>{records.push(row);},timeoutMs:20},failure),(error:unknown)=>error===failure);
   assert.equal(forces,1);assert.equal(attempts,2);assert.deepEqual(records,[{forced:true}]);
 });
+
+for(const mode of ['missing-identity','wrong-nonce'])test(`S10 exited-zero ${mode} cannot satisfy normal stop without a verified handshake`,async()=>{
+  const runtime=await feature(runtimeFile),provider={origin:'http://127.0.0.1:49123',routes:[{id:'foundation',method:'GET',path:'/foundation'}],ftp:null};
+  const policy=await runtime.writePolicy({directory:join(await root(),'worker'),provider,guardFile});
+  const worker=await runtime.launchWorker({policy,guardFile,entry:resolve('tests/fixtures/stabilization/crash-worker.ts'),args:[mode]});let identityFailure:unknown;await assert.rejects(worker.ready(),(error:unknown)=>{identityFailure=error;return true;});
+  const report=await worker.wait();assert.equal(report.identity,null);assert.equal(report.exitCode,0);assert.equal(report.signal,null);assert.equal(report.forced,false);
+  await assert.rejects(worker.stop(),(error:unknown)=>error===identityFailure);await assert.rejects(worker.stop(),(error:unknown)=>error===identityFailure);
+});

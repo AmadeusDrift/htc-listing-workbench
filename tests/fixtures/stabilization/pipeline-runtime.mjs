@@ -59,7 +59,7 @@ export async function launchWorker({policy,guardFile,entry,args=[],executable=pr
 export async function stopWorker(handle){
   const record=owned.get(handle);assert.ok(record,'S10_WORKER_NOT_OWNED');
   const finished=async()=>{let timer;try{const report=await Promise.race([record.completion,new Promise((_done,reject)=>{timer=setTimeout(()=>reject(Error('S10_WORKER_EXIT_TIMEOUT')),3000);})]);
-    if(record.wasForced())throw Error('S10_WORKER_FORCED_STOP');assert.equal(record.child.exitCode,0,'S10_WORKER_STOP_FAILED');assert.equal(record.child.signalCode,null,'S10_WORKER_STOP_FAILED');return report;
+    if(record.wasForced())throw Error('S10_WORKER_FORCED_STOP');await record.readiness;assert.equal(record.child.exitCode,0,'S10_WORKER_STOP_FAILED');assert.equal(record.child.signalCode,null,'S10_WORKER_STOP_FAILED');return report;
   }finally{clearTimeout(timer);}};
   if(record.child.exitCode!==null||record.child.signalCode!==null)return finished();
   await record.readiness;record.mark();if(record.child.connected)record.child.send({s10Stop:record.nonce},()=>{});

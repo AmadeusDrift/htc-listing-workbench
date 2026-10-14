@@ -3,8 +3,23 @@ import { presentRejection } from '../shared/rejection-presentation.ts';
 import type { AutomaticQueueRow, AutomaticListingItem } from '../shared/automatic-listing-contracts.ts';
 import type { ProductDetail, ProductSummary, Variant } from '../shared/contracts.ts';
 
+// Exact compatibility for the old source classifier overwriting a fixed service failure.
+// This changes presentation only; arbitrary provider text must not reclassify user input.
+const legacySourceServiceMessage = 'AI 服务未完成请求，请核对服务状态和调用记录';
+const legacySourceServiceReason = '历史 AI 服务处理未完成；旧分类待复核，尚未确认缺少商品资料。原始记录保留。这是历史记录，查看本提示不会重试。';
+function legacySourceServiceFailure(kind:unknown,code:unknown,message:unknown):boolean {
+  return kind==='NEEDS_INPUT'&&code==='SOURCE_CONSISTENCY_NEEDS_INPUT'&&message===legacySourceServiceMessage;
+}
+function legacyItemSourceServiceFailure(item:AutomaticListingItem):boolean {
+  return item.status==='FAILED'&&item.stage==='SOURCES'&&!item.rejection&&(!item.error||item.error===legacySourceServiceMessage)&&legacySourceServiceFailure(item.outcome?.kind,item.outcome?.code,item.outcome?.message);
+}
+export function automaticQueueDisplayKind(row:AutomaticQueueRow):AutomaticQueueRow['kind'] {
+  return !row.noticeCode&&legacySourceServiceFailure(row.kind,row.reasonCode,row.message)?'SYSTEM_REPAIR':row.kind;
+}
+
 export function automaticItemReason(item:AutomaticListingItem):string{return sanitizeFailureReason(itemReason(item));}
 function itemReason(item: AutomaticListingItem): string {
+  if(legacyItemSourceServiceFailure(item))return legacySourceServiceReason;
   const code = item.outcome?.kind === 'RULE_FILTERED' ? item.outcome.code : item.rejection?.detail.code ?? item.outcome?.code;
   const reasons: Record<string, string> = {
     FIELD_RESULT_UNKNOWN: '字段请求结果未知，请查看已保存的字段调用记录与恢复进度。',
@@ -31,6 +46,7 @@ function itemReason(item: AutomaticListingItem): string {
 }
 export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'notSelected' | 'profitFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
+  if(legacyItemSourceServiceFailure(item))return 'systemRepair';
   if (item.status === 'FAILED'||item.status==='SCREENED') {
     if(item.outcome?.kind==='RULE_FILTERED'){
       if(item.outcome.code==='SKU_SELECTION_FILTERED')return 'notSelected';
@@ -115,6 +131,7 @@ export function filterAutomaticProductGroups(groups: AutomaticProductGroup[], se
 }
 
 export function automaticQueueReason(row:AutomaticQueueRow):string {
+ if(row.kind==='NEEDS_INPUT'&&automaticQueueDisplayKind(row)==='SYSTEM_REPAIR')return legacySourceServiceReason;
  if(row.kind==='UNKNOWN')return presentRejection(undefined,true);
  if(row.kind==='COMPLETED')return '流程已完成';
  if(row.kind==='SUBMITTED')return '已提交，等待平台回读';

@@ -106,3 +106,12 @@ test('summary counts remain available without falsely claiming source details or
   assert.equal(group.excludedCount,null);
   assert.deepEqual(group.sourceVariants,[]);
 });
+
+test('known legacy source service misclassification is presentation-only and counts as system repair',async()=>{
+ const {automaticItemReason}=await import('../src/renderer/automatic-product-groups.ts');
+ const source=product('legacy-service',1),message='AI 服务未完成请求，请核对服务状态和调用记录';
+ const row=item(source,0,{status:'FAILED',stage:'SOURCES',error:message,outcome:{kind:'NEEDS_INPUT',code:'SOURCE_CONSISTENCY_NEEDS_INPUT',message,classifiedAt:'2026-10-14T08:15:17Z'} as any});
+ const before=structuredClone(row);assert.equal(automaticItemOutcome(row),'systemRepair');assert.equal(buildAutomaticProductGroups([row],[source])[0].outcomeCounts.systemRepair,1);assert.match(automaticItemReason(row),/历史 AI 服务处理未完成/);assert.deepEqual(row,before);
+ for(const patch of [{outcome:{...row.outcome,message:'缺少来源原图'}},{outcome:{...row.outcome,message:message+'。'}},{outcome:{...row.outcome,code:'SOURCE_INPUT_REQUIRED'}},{stage:'DRAFT'},{error:'原图与颜色存在冲突'}] as Partial<AutomaticListingItem>[]){assert.equal(automaticItemOutcome({...row,...patch}),'needsInput');}
+ assert.equal(automaticItemOutcome({...row,outcome:{...row.outcome!,kind:'UNKNOWN'}}),'unknown');
+});

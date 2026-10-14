@@ -11,13 +11,16 @@ await writeFile(join(root,'fixture.tsx'),String.raw`
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {AutomaticTaskPanel} from '../../src/renderer/AutomaticTaskPanel';
+import {AutomaticQueueProducts} from '../../src/renderer/AutomaticQueueProducts';
 const source={id:'p1',title:'测试来源',revision:1,variantCount:3,assets:[],variants:[{id:'v1',sku:'S1'},{id:'v2',sku:'S2'},{id:'v3',sku:'S3'}]};
 const item={key:'i1',productId:'p1',variantId:'v1',sku:'S1',stockSets:1,status:'FAILED',stage:'SOURCES',error:'旧请求未知',lastContinuedAt:'2026-10-14T02:00:00Z',failureHistory:[{stage:'SOURCES',reason:'历史鉴权失败',occurredAt:'2026-10-14T01:00:00Z',source:'request-proof'},{stage:'SOURCES',reason:'本地配置变化，本次未发送',occurredAt:'2026-10-14T03:00:00Z',source:'local-check'}],outcome:{kind:'UNKNOWN',code:'SOURCE_CONSISTENCY_SENT_UNKNOWN'}};
-const task={id:'t1',revision:1,status:'PAUSED',targetName:'隔离测试',mode:'live',ruleRevision:1,createdAt:'2026-10-14T00:00:00Z',updatedAt:'2026-10-14T00:00:00Z',items:[item]};
-const state=window.fixture={task,source,calls:[],fail:false,hold:false,summary:true};
+const legacy={...item,key:'legacy',variantId:'v2',sku:'LEGACY',error:'AI 服务未完成请求，请核对服务状态和调用记录',failureHistory:[],outcome:{kind:'NEEDS_INPUT',code:'SOURCE_CONSISTENCY_NEEDS_INPUT',message:'AI 服务未完成请求，请核对服务状态和调用记录',classifiedAt:'2026-10-14T08:15:17Z'}};
+const queue={products:[{productId:'p1',eligibleCount:0,rows:[{key:'legacy',kind:legacy.outcome.kind,reasonCode:legacy.outcome.code,message:legacy.outcome.message,eligible:false,sku:'LEGACY',specification:'历史规格'}]}]};
+const task={id:'t1',revision:1,status:'PAUSED',targetName:'隔离测试',mode:'live',ruleRevision:1,createdAt:'2026-10-14T00:00:00Z',updatedAt:'2026-10-14T00:00:00Z',items:[item,legacy]};
+const state=window.fixture={task,source,calls:[],fail:false,hold:false,summary:true,legacySnapshot:JSON.stringify(legacy)};
 const copy=x=>structuredClone(x);
 window.red={listAutomaticListingTasks:async()=>[copy(task)],getAutomaticListingTask:async()=>copy(task),getAutomaticBatchSummary:async()=>null,previewAutomaticListingAdaptation:async()=>{state.calls.push('check');if(state.hold)await new Promise(resolve=>state.release=resolve);if(state.fail)throw Error('本地来源读取测试失败');return {sources:[copy(source)],changes:[],blockers:[],canApply:false};}};
-window.renderFixture=()=>root.render(<AutomaticTaskPanel products={state.summary?[source]:[]} startedTask={null} busy={false} onManual={()=>state.calls.push('manual')}/>);
+window.renderFixture=()=>root.render(<><AutomaticQueueProducts products={[source]} queue={queue} selectedIds={[]} selectableIds={[]} disabled={false} loading={false} onSelection={()=>state.calls.push('select')} onManual={()=>state.calls.push('manual')} onInbox={()=>{}} onExamples={()=>{}}/><AutomaticTaskPanel products={state.summary?[source]:[]} startedTask={null} busy={false} onManual={()=>state.calls.push('manual')}/></>);
 const root=createRoot(document.getElementById('root'));window.renderFixture();
 `);
 await build({entryPoints:[join(root,'fixture.tsx')],bundle:true,outfile:join(root,'fixture.js'),platform:'browser',format:'iife',jsx:'automatic',logLevel:'silent'});
@@ -31,6 +34,13 @@ try{
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
  const scope=page.locator('[aria-label="当前任务范围"]');
  await expect(page.locator('[aria-label="定向接续与从头检查"]')).toHaveCount(1);
+ await expect(page.locator('[aria-label="任务待确认分类"]')).toContainText('系统待修复 1');
+ await expect(page.locator('[aria-label="任务待确认分类"]')).toContainText('待补资料 0');
+ await expect(page.getByTestId('automatic-p1')).toContainText('系统待修复');
+ await page.getByTestId('automatic-p1').locator('summary').click();
+ await expect(page.getByTestId('automatic-p1').locator('tbody tr')).toContainText('系统待修复');
+ await expect(page.getByTestId('automatic-p1').getByRole('button',{name:'查看商品资料',exact:true})).toHaveCount(1);
+ assert.deepEqual(await page.evaluate(()=>window.fixture.calls),[]);
  // Both keyed siblings must remain unique through the real task poll lifecycle.
  for(let i=0;i<5;i++){
   await page.evaluate(i=>{window.fixture.task.revision++;window.fixture.task.status=i%2?'PAUSED':'RUNNING';},i);
@@ -45,7 +55,10 @@ try{
  await page.getByRole('button',{name:'展开来源商品 测试来源'}).click();
  await expect(page.locator('.automatic-source-body')).toContainText('来源规格详情尚未读取');
  await expect(page.locator('.automatic-source-variants')).toHaveCount(0);
- await page.locator('.automatic-sale-toggle').click();
+ await expect(page.getByTestId('automatic-result-v2')).toContainText('系统待修复');
+ await expect(page.getByTestId('automatic-result-v2')).toContainText('这是历史记录，查看本提示不会重试');
+ assert.equal(await page.evaluate(()=>JSON.stringify(window.fixture.task.items[1])===window.fixture.legacySnapshot),true);
+ await page.getByTestId('automatic-result-v1').locator('.automatic-sale-toggle').click();
  await page.getByText('历史与本次失败证据（刷新不会发起新请求）',{exact:true}).click();
  await expect(page.locator('.automatic-sale-body')).toContainText('历史失败记录时间');
  await expect(page.locator('.automatic-sale-body')).toContainText('本次检查失败记录时间');

@@ -1,9 +1,11 @@
 import type { AiUsage } from '../../shared/ai-contracts.ts';
 import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
 import type { ReasoningEffort,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
+import type { TransportRunEvidence } from '../../shared/run-evidence-contracts.ts';
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
 export interface AdapterContext {
+  onRunEvidence?: (event: TransportRunEvidence) => void;
   deferOpenRouter?:(endpoint:string,body:Record<string,unknown>)=>Promise<{body:any}|null>;
   gateway?:'openrouter'|'deepseek';
   effectiveEffort?:ReasoningEffort;

@@ -34,6 +34,8 @@ test('documented routing metadata distinguishes fallback success, ambiguity, can
  assert.equal(identity({model,openrouter_metadata:{attempts:[{model,provider:'OpenAI',status:503},{model,provider:'Azure',status:200}]}},200).actualProvider,'Azure');
  for(const raw of [{model,provider:'Azure'},{model,openrouter_metadata:{endpoints:{available:[{...selected,selected:false}]}}},{model,openrouter_metadata:{endpoints:{available:[selected,selected]}}},{model,openrouter_metadata:{attempts:[{...selected,status:403}]}}])assert.equal(identity(raw,200).actualProvider,null);
  assert.equal(identity({model,openrouter_metadata:{endpoints:{available:[selected]}}},403).actualProvider,null);
- assert.equal(identity({model,openrouter_metadata:{endpoints:{available:[{...selected,model:'other'}]}}},200).actualProvider,null);
+ assert.deepEqual(identity({model:model+'-20260922',openrouter_metadata:{endpoints:{available:[selected]}}},200),{actualModel:model+'-20260922',actualProvider:'Azure'});
+ assert.deepEqual(identity({model:model+'-20260922',openrouter_metadata:{attempts:[{...selected,status:200}]}} ,200),{actualModel:model+'-20260922',actualProvider:'Azure'});
+ assert.equal(identity({model,openrouter_metadata:{attempts:[{provider:'Azure',model:{bad:true},status:200}]}},200).actualProvider,null);
 });
 

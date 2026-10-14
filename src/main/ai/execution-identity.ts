@@ -8,6 +8,7 @@ export function openRouterExecutionIdentity(raw:unknown,status:number):{actualMo
  const candidates=Array.isArray(attempts)?attempts.filter(v=>Number.isInteger(v?.status)&&v.status>=200&&v.status<300):Array.isArray(available)?available.filter(v=>v?.selected===true):[];
  if(candidates.length!==1)return{actualModel,actualProvider:null};
  const endpoint=candidates[0],model=value(endpoint?.model),provider=value(endpoint?.provider);
- if(!provider||!model||actualModel!==null&&model!==actualModel)return{actualModel,actualProvider:null};
+ // Endpoint aliases and response version identifiers are independently reported; preserve both facts.
+ if(!provider||!model)return{actualModel,actualProvider:null};
  return{actualModel:actualModel??model,actualProvider:provider};
 }

@@ -431,16 +431,16 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
-    retainWorkBatches(current,snapshot,migratedWorkBatches);
-    retainImageRetryHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
     retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);
     retainImagePlanningAttempts(current, snapshot);
+    retainImageRetryHistory(current,snapshot);
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
+    retainWorkBatches(current,snapshot,migratedWorkBatches);
     snapshot.exec('COMMIT');
   } catch (error) { try { snapshot.exec('ROLLBACK'); } catch { /* Transaction may have failed before acquiring its lock. */ } throw error;
   } finally { snapshot.close(); current.close(); }

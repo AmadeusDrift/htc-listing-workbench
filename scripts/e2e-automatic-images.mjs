@@ -757,7 +757,7 @@ try {
   const backupPath = join(artifacts, `${build.packaged ? 'packaged-' : ''}automatic-images-${startedAt.replace(/[:.]/g, '-')}.htcbackup`);
   await app.evaluate(({ dialog }, path) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); }, backupPath);
   const backup = await page.evaluate(() => window.red.createWorkspaceBackup({ passphrase: 'automatic-images-isolated-backup-2026' }));
-  assert.equal(backup.cancelled, false); assert.equal(backup.productCount, 12);
+  assert.equal(backup.cancelled, false); assert.equal(backup.productCount, 13);
   const backupBytes = await readFile(backupPath);
   assert.equal(backupBytes.subarray(0,13).toString(),'HTC-BACKUP-2\n');
   const inspectRoot=await mkdtemp(resolve('.test-data/automatic-images-backup-inspection-'));
@@ -794,7 +794,7 @@ try {
   const restoreCloseError = await closedForRestore; if (restoreCloseError) throw restoreCloseError; app = null; page = null;
   await launch();
   const restoredProducts = await page.evaluate(() => window.red.listProducts());
-  assert.equal(restoredProducts.length, 12); assert.ok(!restoredProducts.some(product => product.id === afterBackup.id));
+  assert.equal(restoredProducts.length, 13); assert.ok(!restoredProducts.some(product => product.id === afterBackup.id));
   assert.deepEqual(await page.evaluate(()=>window.red.getImageRiskSettings()),{enabled:false,scoreThreshold:90,levelThreshold:'high'});
   assert.deepEqual(await page.evaluate(()=>window.red.getCopyReviewSettings()),{enabled:false});
   assert.equal((await page.evaluate(id=>window.red.getAutomaticProductProgress(id),disabledCopy.draft.id)).id,recheckedCopy.workflow.id);

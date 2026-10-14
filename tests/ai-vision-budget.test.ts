@@ -29,6 +29,7 @@ test('vision images must retain their bytes, raster metadata and bounded referen
   const bytes=Buffer.alloc(33); Buffer.from('89504e470d0a1a0a','hex').copy(bytes); bytes.writeUInt32BE(13,8); bytes.write('IHDR',12); bytes.writeUInt32BE(256,16); bytes.writeUInt32BE(256,20);
   const image={assetId:randomUUID(),sha256:createHash('sha256').update(bytes).digest('hex'),mimeType:'image/png',width:256,height:256,bytes};
   assert.equal(visionContent({},[image]).length,2);
+  assert.equal((visionContent({},[image])[1] as any).image_url.detail,'original');
   for (const changed of [{sha256:'a'.repeat(64)},{mimeType:'image/jpeg'},{width:512},{bytes:Buffer.alloc(10*1024*1024+1)}]) assert.throws(()=>visionContent({},[{...image,...changed}]));
   assert.throws(()=>visionContent({},[])); assert.throws(()=>visionContent({},[image,image]));
   assert.throws(()=>visionContent({},Array.from({length:11},()=>({...image,assetId:randomUUID()}))));

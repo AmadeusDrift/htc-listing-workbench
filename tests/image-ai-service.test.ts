@@ -30,6 +30,7 @@ import { saveInput, mockStorage, chat } from './fixtures/listing-ai.ts';
 import { LISTING_REVIEW_OUTPUT_RULES } from '../src/main/listing-ai/review-coverage.ts';
 import { assertImageWorkflowHistory } from '../src/main/image-workflow/history.ts';
 import type { AiCall } from '../src/shared/ai-contracts.ts';
+import {DatabaseSync} from 'node:sqlite';
 
 // Literal pre-presentation history has no new call sidecar; keep original result bytes below unchanged.
 function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiResult) {
@@ -1222,25 +1223,51 @@ test('copy-only repairs reuse exact seven-image approvals without paid calls and
   await assert.rejects(workflow.recheck({draftId:current.id,draftRevision:current.revision,sourceWorkflowId:first.workflow.id}),(error:unknown)=>error instanceof AiError&&error.code==='SOURCE_CHANGED');assert.equal(f.requests.length,before);
 });
 
-test('interrupted IP rechecks reuse old approvals without calls but never override a newer IP rejection',async t=>{
+async function completedApprovalRecheck(t:test.TestContext){
   const f=await fixture(t);let images=0;
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const generation=new ImageGenerationService(f.directory,f.store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{const bytes=Buffer.from(f.bytes);bytes[32]=++images;return Response.json({data:[{b64_json:bytes.toString('base64')}]});}});
   generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',enabled:true,apiKey:'fixture-image-key'});
-  const workflow=new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}});
+  const createWorkflow=()=>new ImageWorkflowService(f.directory,f.store,f.amazon,f.ai,generation,{listing:{currentContext:(...args)=>f.listing.currentContext(...args),complete:async()=>({draft:f.amazon.getDraft(f.draft.id),aiCalls:0,previewAttempts:0,remaining:[]}),reviewCurrentForImages:(input,signal)=>f.listing.reviewCurrentForImages(input,signal)}}),workflow=createWorkflow();
   f.cleanup(async()=>{await workflow.close();await generation.close();});
   const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'COMPLETED');
   const old=f.amazon.getDraft(f.draft.id),changed=f.amazon.saveDraft({id:old.id,revision:old.revision,attributes:{...old.attributes,item_name:[{value:'Blue Round Silicone Coaster'}]}});
   const request={draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id};
+  return {f,workflow,generation,first,request,createWorkflow,images:()=>images};
+}
+function approvalSafetySnapshot(directory:string){
+ const db=new DatabaseSync(join(directory,'red.sqlite'),{readOnly:true});
+ try{const records=Object.fromEntries(['ai_calls','ai_results','ai_usage_ledger','ai_provider_receipts','ai_image_requests','image_workflow_runs'].map(table=>[table,db.prepare('SELECT id,record_json FROM '+table+' ORDER BY id').all()]));return {records,receiptRawHashes:records.ai_provider_receipts.map(row=>{const record=JSON.parse(String(row.record_json));return{id:record.id,sha256:createHash('sha256').update(readFileSync(join(directory,record.relativePath))).digest('hex')};})};}finally{db.close();}
+}
+test('S05 UNKNOWN IP recheck keeps its original call and workflow instead of reusing an old approval',async t=>{
+  const {f,workflow,first,request,createWorkflow,images}=await completedApprovalRecheck(t);
   const oldVersion=(workflow as unknown as {recheckWithFreshEvidence(input:unknown):ReturnType<ImageWorkflowService['recheck']>});
+  const originalHistory=approvalSafetySnapshot(f.directory);
   f.respond(operation=>{if(operation==='ImageModeration')throw new Error('fixture network outage');return operation==='ip-upload'?new Response(null,{status:200}):undefined;});
   const interrupted=await oldVersion.recheckWithFreshEvidence(request);assert.equal(interrupted.workflow.status,'FAILED');assert.equal(interrupted.workflow.stage,'ip-check');
+  const pending=f.ai.listCalls().filter(call=>call.providerId==='aliyun-image-risk'&&call.status==='FAILED'&&call.presentationContext?.draftId===request.draftId&&call.presentationContext.sourceSha256===interrupted.workflow.slots![0].contextSha256);assert.equal(pending.length,1);
+  const original=pending[0];assert.equal(original.errorCode,'NETWORK_ERROR');assert.equal(original.providerReceiptId,undefined);
+  const before=approvalSafetySnapshot(f.directory),calls=f.requests.length,assetBytes=first.workflow.slots!.map(slot=>{const asset=f.store.getAssetRecord(slot.approvedAssetId!)!;return createHash('sha256').update(readFileSync(join(f.directory,asset.originalPath))).digest('hex');});
+  for(const table of ['ai_calls','ai_results','ai_usage_ledger','ai_provider_receipts','ai_image_requests','image_workflow_runs'] as const)for(const row of originalHistory.records[table])assert.equal(before.records[table].find(current=>current.id===row.id)?.record_json,row.record_json,'original '+table+' remains literal after the interrupted new review');
+  for(const raw of originalHistory.receiptRawHashes)assert.equal(before.receiptRawHashes.find(current=>current.id===raw.id)?.sha256,raw.sha256);
   f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
-  const before=f.requests.length,resumed=await workflow.recheck(request);assert.equal(resumed.workflow.approvalReuse?.sourceRunId,first.workflow.id);assert.equal(f.requests.length,before);assert.equal(images,7);
-  await createWorkspaceBackup(f.directory,join(f.directory,'interrupted-ip-reused.htcbackup'),'interrupted IP image reuse backup passphrase');
+  const assertPending=async(active:ImageWorkflowService)=>{
+   await assert.rejects(active.recheck(request),(error:unknown)=>error instanceof AiError&&error.diagnosticReason==='IMAGE_REVIEW_RESULT_UNKNOWN'&&error.callId===original.id&&Reflect.get(error,'workflowId')===interrupted.workflow.id&&Reflect.get(error,'slot')===1&&Reflect.get(error,'step')==='risk');
+   assert.equal(active.getProgress(request.draftId)?.id,interrupted.workflow.id);assert.equal(active.getProgress(request.draftId)?.approvalReuse,undefined);
+   assert.equal(f.requests.length,calls);assert.equal(images(),7);assert.deepEqual(approvalSafetySnapshot(f.directory),before);
+  };
+  await assertPending(workflow);await assertPending(workflow);
+  const providerFetch=(f.ai as unknown as {context:{fetch:typeof fetch}}).context.fetch;await workflow.close();await f.ai.close();
+  const reopenedAi=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:providerFetch});f.ai=reopenedAi;f.listing=new ListingAiService(f.store,f.amazon,reopenedAi);
+  const reopened=createWorkflow();f.cleanup(async()=>{await reopened.close();await reopenedAi.close();});await assertPending(reopened);
+  assert.deepEqual(first.workflow.slots!.map(slot=>{const asset=f.store.getAssetRecord(slot.approvedAssetId!)!;return createHash('sha256').update(readFileSync(join(f.directory,asset.originalPath))).digest('hex');}),assetBytes);
+  t.diagnostic(JSON.stringify({workflowId:interrupted.workflow.id,sourceWorkflowId:first.workflow.id,callId:original.id,errorCode:original.errorCode,receiptId:original.providerReceiptId??null,requestsBefore:calls,requestsAfter:f.requests.length,generations:images(),originalAttempt:interrupted.workflow.slots![0].attempts[0].number}));
+});
+test('S05 a received new high risk result cannot be overridden by an old approval',async t=>{
+  const {f,workflow,request,images}=await completedApprovalRecheck(t),oldVersion=(workflow as unknown as {recheckWithFreshEvidence(input:unknown):ReturnType<ImageWorkflowService['recheck']>});
   f.respond((operation,payload)=>operation==='ImageModeration'?Response.json({Code:200,RequestId:'fixture-new-ip-risk',Data:{DataId:payload.dataId,RiskLevel:'high',Result:[{Label:'tm_goods',Confidence:99,Description:'Distinctive brand detected'}]}}):operation==='ip-upload'?new Response(null,{status:200}):undefined);
   const rejected=await oldVersion.recheckWithFreshEvidence(request);assert.equal(rejected.workflow.slots![0].status,'BLOCKED');
-  const denied=await workflow.recheck(request);assert.equal(denied.workflow.approvalReuse,undefined);assert.notEqual(denied.workflow.status,'COMPLETED');assert.equal(images,7);
+  const calls=f.requests.length,denied=await workflow.recheck(request);assert.equal(denied.workflow.approvalReuse,undefined);assert.notEqual(denied.workflow.status,'COMPLETED');assert.equal(denied.workflow.id,rejected.workflow.id);assert.equal(f.requests.length,calls);assert.equal(images(),7);
 });
 
 for(const code of ['EMPTY_PROMPT','UNSUPPORTED_MEASUREMENT','SOURCE_OBSERVATION_INSUFFICIENT'] as const)test('actionable image reason '+code+' persists exact set-plan call before any generation and survives restart',async t=>{

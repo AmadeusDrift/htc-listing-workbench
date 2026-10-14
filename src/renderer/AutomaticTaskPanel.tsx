@@ -159,7 +159,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p></>}
       </details>
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
-      <AutomaticProductGroups key={`groups:${task.id}`} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
+      <AutomaticProductGroups unitOwner={{taskId:task.id,taskRevision:task.revision,onUpdated:value=>{version.current++;setTask(value);setTasks(values=>values.map(row=>row.id===value.id?value:row));setRefresh(n=>n+1);}}} key={`groups:${task.id}`} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}
   </section>;
 }

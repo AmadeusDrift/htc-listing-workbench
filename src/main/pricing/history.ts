@@ -4,6 +4,8 @@ import { QUOTE_FAILURE_CODES } from '../../shared/listing-rules.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { attributesObject } from '../amazon/context.ts';
 import { readPricingRuleInputs } from './dependencies.ts';
+import { salesPlatformPieces } from '../../shared/source-quantity.ts';
+import { validateUnitSemantics } from '../sales-plans/records.ts';
 function exactKeys(raw: unknown, names: string[]): boolean {
   return !!raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).sort().join() === [...names].sort().join();
 }
@@ -31,15 +33,21 @@ export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonD
     if (Object.keys(quantities).some(field => !['number_of_items','unit_count'].includes(field))) invalid();
     if (dependency.saleUnit !== null) {
       const unit = dependency.saleUnit;
-      if (!unit || typeof unit !== 'object' || Array.isArray(unit) || !exactKeys(unit,['totalPieces','totalCostCny','components'])
+      if (!unit || typeof unit !== 'object' || Array.isArray(unit) || !exactKeys(unit,['totalPieces','totalCostCny','components',...(unit.quantityVersion===2?['quantityVersion','platformPieces']:[])])
         || !Number.isSafeInteger(unit.totalPieces) || Number(unit.totalPieces) < 1 || unit.totalCostCny !== null && !positive(unit.totalCostCny)
         || unit.components !== null && (!Array.isArray(unit.components) || !unit.components.length)) return invalid();
+      if(unit.quantityVersion===2&&unit.platformPieces!==null&&(!Number.isSafeInteger(unit.platformPieces)||Number(unit.platformPieces)<1))invalid();
       for (const component of (Array.isArray(unit.components)?unit.components:[])) {
         if (!component || typeof component !== 'object' || Array.isArray(component)
-          || !exactKeys(component,['variantId','quantity','quotedCostCny','piecesPerQuote','sourcePackPieces'])
+          || !exactKeys(component,['variantId','quantity','quotedCostCny','piecesPerQuote','sourcePackPieces',...(Object.hasOwn(component,'unitSemantics')?['unitSemantics']:[])])
           || typeof component.variantId !== 'string' || !component.variantId
           || ['quantity','piecesPerQuote','sourcePackPieces'].some(key => !Number.isSafeInteger(component[key]) || Number(component[key]) < 1)
           || component.quotedCostCny !== null && !positive(component.quotedCostCny)) invalid();
+        const c=attributesObject(component);
+        if(Object.hasOwn(c,'unitSemantics')){
+          if(unit.quantityVersion!==2||c.piecesPerQuote!==1||c.sourcePackPieces!==1)invalid();
+          try{validateUnitSemantics(c.unitSemantics);}catch{invalid();}
+        }
       }
     }
   }
@@ -67,7 +75,7 @@ export function assertPricingDecision(report: BusinessRuleReport, draft: AmazonD
     if (!complete || cost === undefined || inputs.costCny === null || Math.abs(cost - inputs.costCny) > Math.max(cost, inputs.costCny) * 1e-10) invalid();
   };
   if (e.packageScope === 'source_sale_unit' && (report.pricingBasis?.kind === 'auto_bundle'
-    || recipe && (recipe.components.length !== 1 || recipe.components[0].quantity !== recipe.components[0].sourcePackPieces || report.bundleQuantity !== recipe.totalPieces))) invalid();
+    || recipe && (recipe.components.length !== 1 || recipe.components[0].quantity !== recipe.components[0].sourcePackPieces || report.bundleQuantity !== salesPlatformPieces(recipe)))) invalid();
   if (d.status === 'quoted') {
     if (d.code !== 'QUOTE_VALID' || d.quoteError !== null || report.quote === null || e.saleUnit === 'conflicting' || marketplaceId !== 'ATVPDKIKX0DER') invalid();
     attempted();

@@ -145,6 +145,13 @@ export interface ActualQuoteDetails {
  draftId:string; draftRevision:number; sku:string; ruleRevision:number; sourceRevision:number; bundleQuantity:number|null;
  qualified:boolean; exempt:boolean; issue:{code:string;message:string}|null; currency:'USD'; costCurrency:'CNY';
  offers:{price:number;promotion:boolean;roi:number;commission:number;deliveryFee:number;upfrontCny:number;profitCny:number;billableWeightGrams:number}[];
+ unitPreview?:SalesUnitAdoptionPreview;
+}
+export interface SalesUnitAdoptionInput extends DraftReference {platformPieces?:number;basis?:string;taskId?:string}
+export interface SalesUnitAdoptionPreview {
+ version:1;draftId:string;draftRevision:number;sku:string;token:string;needsReview:boolean;canApply:boolean;blockers:string[];basis:string;
+ previous:import('./sales-plan-contracts.ts').SalesRecipe;proposed:import('./sales-plan-contracts.ts').SalesRecipe|null;
+ fields:string[];purchaseBefore:string;purchaseAfter:string|null;
 }
 export interface AmazonApi {
  getActualQuoteDetails(draftId:string):Promise<ActualQuoteDetails>;

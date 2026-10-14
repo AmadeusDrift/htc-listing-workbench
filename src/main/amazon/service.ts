@@ -42,7 +42,7 @@ import { readListingRules } from '../listing-rules.ts';
 import { applyBusinessRules, ruleSourceMapping } from './business-rules.ts';
 import { declarationSafetyIssues, selectedDeclarationScope } from './declaration-safety.ts';
 import { currentFactAuthority, FACT_PROTECTED_FIELDS } from './fact-authority.ts';
-import { assertStoredPricingForPaid } from './pricing-guard.ts';
+import { assertStoredPricingForPaid,storedSalesUnitIssue } from './pricing-guard.ts';
 import { qualifyActualOffer } from '../pricing/public.ts';
 import { assertCurrentPricingForPaid, pricingQualificationIssue } from '../pricing/qualification.ts';
 import type { BusinessRuleReport } from '../../shared/listing-rules.ts';
@@ -56,6 +56,11 @@ import { relationshipAttributes } from '../sales-plans/families.ts';
 import { buildSalesRecipes, sourceQuotedCost } from '../sales-plans/recipes.ts';
 import { assertSalesPlanNamingIdentity } from '../sales-plans/history.ts';
 import { getSalesParentIdentity, isSameSalesFamily } from '../sales-plans/family-binding.ts';
+import { salesUnitReviewNeeded } from '../sales-plans/unit-adoption.ts';
+import { salesPlatformPieces,salesUnitIssue } from '../../shared/source-quantity.ts';
+import { salesPurchaseDescription } from '../../shared/sales-purchase.ts';
+import type { SalesUnitAdoptionPreview } from '../../shared/amazon-contracts.ts';
+import {localAiRequestResolved} from '../ai/request-certainty.ts';
 
 const PREVIEW_TTL = 15 * 60_000;
 const FINAL_STATES = new Set(['SUBMITTING', 'SUBMITTED', 'PROCESSING', 'BUYABLE', 'DISCOVERABLE', 'UNKNOWN']);
@@ -121,6 +126,7 @@ function readbackTargetScope(target: AmazonTarget): string {
 }
 
 export class AmazonService {
+  private readonly directory: string;
   private persistence: AmazonPersistence;
   private corrections: ListingCorrections;
   private vault: CredentialVault;
@@ -130,6 +136,7 @@ export class AmazonService {
   private busy = new Set<string>();
   private closed = false;
   constructor(directory: string, getProduct: (id: string) => ProductDetail, secretStorage: SecretStorage, dependencies: AmazonDependencies = {}) {
+    this.directory=directory;
     this.persistence = new AmazonPersistence(directory); this.vault = new CredentialVault(directory, secretStorage); this.getProduct = getProduct; this.now = dependencies.now ?? Date.now;
     this.transport = new AmazonTransport({ active: id => this.active(id), generation: id => this.persistence.generation(id), credentials: id => this.vault.read(id, this.persistence.generation(id)),
       pause: (id, message) => this.pauseForError(id, message), audit: event => this.persistence.addCall(event), redact: value => this.vault.redact(value), remember: value => this.vault.remember(value) }, dependencies);
@@ -318,7 +325,91 @@ export class AmazonService {
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }
   getActualQuoteDetails(id:string) {
     const draft=this.getDraft(id),rules=readListingRules(this.persistence.db);
-    return {...qualifyActualOffer(draft,rules,this.now()),draftId:draft.id,draftRevision:draft.revision,sku:draft.sku,ruleRevision:rules.revision,sourceRevision:draft.productRevision,bundleQuantity:draft.businessRules?.bundleQuantity??null};
+    const result=qualifyActualOffer(draft,rules,this.now()),units=storedSalesUnitIssue(this.persistence.db,draft);
+    const unitPreview=draft.salesPlan&&(salesUnitIssue(draft.salesPlan.recipe)||units)?this.previewSalesUnitAdoption({id:draft.id,revision:draft.revision}):undefined;
+    return {...result,...(units?{qualified:false,issue:{code:'SALE_UNIT_UNCONFIRMED',message:units},offers:[]} :{}),draftId:draft.id,draftRevision:draft.revision,sku:draft.sku,ruleRevision:rules.revision,sourceRevision:draft.productRevision,bundleQuantity:draft.salesPlan?salesPlatformPieces(draft.salesPlan.recipe):draft.businessRules?.bundleQuantity??null,...(unitPreview?{unitPreview}:{})};
+  }
+  private unitAdoptionBlockers(record:DraftRecord,taskId?:string):string[] {
+    const d=record.draft,db=this.persistence.db,blockers:string[]=[];
+    try{this.mutable(record);}catch(error){blockers.push(error instanceof Error?error.message:'草稿不可采用');}
+    if(this.busy.has(d.id))blockers.push('草稿请求正在进行，请等待完成后核对');
+    if(d.schema.parentageLevel==='PARENT'||d.salesPlan?.variationTheme?.includes('NUMBER_OF_ITEMS'))blockers.push('父体或件数变体关系需要单独核对，不能通过单位采用改变关系');
+    const tasks=db.prepare("SELECT id,record_json FROM automatic_listing_tasks WHERE EXISTS(SELECT 1 FROM json_each(record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? OR json_extract(i.value,'$.sku')=?)").all(d.id,d.sku);
+    for(const row of tasks){const task=JSON.parse(String(row.record_json));
+      if(row.id!==taskId)blockers.push('原 SKU 被自动任务控制；请暂停原任务并从该任务明确采用');
+      else if(!['PAUSED','NEEDS_ATTENTION'].includes(task.status)||task.items.some((item:any)=>item.draftId===d.id&&(item.status==='RUNNING'||item.batchWait||item.stage==='READBACK'||item.stage==='LABELS'||item.stage==='COMPLETE')))blockers.push('原任务尚未安全暂停或有在途/提交身份，不能采用');
+    }
+    if(taskId&&!tasks.some(row=>row.id===taskId))blockers.push('所选任务不是此草稿的原控制任务');
+    if(new CompletionJournal(db).list(d.id).some(op=>!['DONE','RETIRED'].includes(op.state)))blockers.push('原字段操作尚未结束，先核对原请求结果');
+    if(db.prepare("SELECT 1 FROM execution_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND (json_extract(i.value,'$.submitStarted')=1 OR json_extract(t.record_json,'$.status') IN ('RUNNING','QUEUED'))").get(d.id))blockers.push('存在提交意图或执行任务，请先核对，不能改变单位');
+    if(db.prepare("SELECT 1 FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? AND (json_extract(record_json,'$.status') IN ('RUNNING','WAITING_BATCH') OR EXISTS(SELECT 1 FROM json_each(record_json,'$.slots') s WHERE json_extract(s.value,'$.status') IN ('RUNNING','UNKNOWN'))) ").get(d.id))blockers.push('原图片工作流仍在进行或结果未知，不能改变单位');
+    if(db.prepare("SELECT id,record_json FROM ai_calls WHERE json_extract(record_json,'$.productId')=?").all(d.productId).some(row=>!localAiRequestResolved(db,this.directory,String(row.id),JSON.parse(String(row.record_json)))))blockers.push('来源相关请求仍在进行或结果未知，先按原身份核对');
+    if(this.persistence.records(d.productId).some(other=>other.draft.id!==d.id&&listingHash(other.draft,other.draft.sku)===listingHash(d,d.sku)&&(other.unresolvedWrite||other.draft.submittedAt||FINAL_STATES.has(other.draft.state))))blockers.push('同 SKU 已有其他提交/未知草稿，不能采用');
+    if(this.persistence.listAcceptedSkus(d.targetId).some(row=>row.sku===d.sku&&row.sellerId===d.sellerId&&row.marketplaceId===d.marketplaceId&&row.mode===d.mode))blockers.push('原 SKU 已被平台接收，需走原 SKU 修正流程');
+    return [...new Set(blockers)];
+  }
+  /** Local comparison only: source, history, SKU allocation and requests are untouched. */
+  previewSalesUnitAdoption(raw:unknown):SalesUnitAdoptionPreview {
+    const input=object(raw);if(Object.keys(input).some(k=>!['id','revision','platformPieces','basis','taskId'].includes(k)))throw new UserFacingError('计量预览参数无效');
+    const record=this.checked(input),draft=record.draft;
+    if(!draft.salesPlan)throw new UserFacingError('此草稿没有可追溯销售配方，请先核对原销售单位');
+    const prior=validateSalesPlan(draft.salesPlan),source=this.getProduct(draft.productId),rules=readListingRules(this.persistence.db),receipt=getReceipt(this.persistence.db,source.id);
+    const taskId=input.taskId===undefined?undefined:textField(input.taskId,'原任务',100),blockers=this.unitAdoptionBlockers(record,taskId),basis=input.basis===undefined?'':textField(input.basis,'计量确认依据',2000);
+    const count=input.platformPieces===undefined?null:input.platformPieces;
+    if(count!==null&&(!Number.isSafeInteger(count)||Number(count)<1||Number(count)>1000000))throw new UserFacingError('平台件数必须是明确确认的正整数');
+    const needsReview=!!salesUnitReviewNeeded(prior.recipe,source);
+    if(source.revision!==draft.productRevision)blockers.push('来源资料已变化；不能用尚未采用的新资料替换冻结套装事实');
+    if(!needsReview)blockers.push('当前销售单位无需采用修正，未创建新版本');
+    if(prior.unitAdoption)blockers.push('此单位已显式采用；进一步更改需单独核对原采用记录');
+    let proposed:SalesRecipe|null=null;
+    if(prior.recipe.components.length!==1||prior.recipe.components[0].quantity!==prior.recipe.components[0].sourcePackPieces)blockers.push('历史混套或拆包的实物销售范围无法证明；不自动扩成完整套装或新增 SKU');
+    else {
+      const component=prior.recipe.components[0],variant=source.variants.find(v=>v.id===component.variantId&&v.sku===component.sourceSku);
+      if(!variant)blockers.push('原来源规格身份已变化');
+      else {
+        proposed=buildSalesRecipes({...source,variants:[variant]},receipt,rules)[0]??null;
+        if(!proposed||proposed.components[0].unitSemantics?.kind!=='kit'||proposed.totalCostCny===null){proposed=null;blockers.push('当前资料不能证明完整套装报价，计价单位仍需确认');}
+        else {proposed={...proposed,groupKey:prior.recipe.groupKey,platformPieces:count as number|null,
+          specification:`${proposed.components[0].specification} · ${proposed.totalPieces} 整套（平台件数${count??'待确认'}）`};}
+      }
+    }
+    if(count===null)blockers.push('平台销售件数待明确确认，不自动采用 1 或附件合计数');
+    if(!basis.trim())blockers.push('请记录平台计量口径的明确确认依据');
+    const token=createHash('sha256').update(JSON.stringify({record,source,receipt,rules,taskId:taskId??null,count,basis,blockers,proposed})).digest('hex');
+    return {version:1,draftId:draft.id,draftRevision:draft.revision,sku:draft.sku,token,needsReview,canApply:!blockers.length,blockers,basis,
+      previous:clone(prior.recipe),proposed,fields:['number_of_items','unit_count','purchasable_offer'],purchaseBefore:salesPurchaseDescription(prior.recipe,rules.product.stockSets),purchaseAfter:proposed?salesPurchaseDescription(proposed,rules.product.stockSets):null};
+  }
+  /** Standalone local adoption. Task-owned drafts must use the task owner coordinator. */
+  adoptSalesUnit(raw:unknown):AmazonDraft {
+    const input=object(raw);if(Object.keys(input).some(k=>!['id','revision','platformPieces','basis','token','confirmed'].includes(k)))throw new UserFacingError('计量采用参数无效');
+    if(input.confirmed!==true)throw new UserFacingError('需要明确确认计量差异后采用');
+    const request={id:input.id,revision:input.revision,platformPieces:input.platformPieces,basis:input.basis},token=textField(input.token,'对照标识',64),record=this.checked(input);
+    if(this.busy.has(record.draft.id))throw new UserFacingError('草稿请求正在进行，请等待完成');
+    return this.persistence.transaction(()=>this.applySalesUnitAdoption(request,token,this.persistence.db));
+  }
+  /** Listing owner command; caller supplies a same-workspace synchronous owner transaction. */
+  applySalesUnitAdoption(request:unknown,token:string,db:DatabaseSync,taskId?:string):AmazonDraft {
+    if(!db.isTransaction)throw new UserFacingError('计量采用必须在受控同步事务内执行');
+    const value=object(request),record=this.checked(value),draft=record.draft,before=clone(record);
+    const preview=this.previewSalesUnitAdoption({...value,...(taskId?{taskId}:{})});
+    if(!preview.canApply||!preview.proposed)throw new UserFacingError(preview.blockers.join('；'));
+    if(preview.token!==token)throw new UserFacingError('对照后资料、规则或请求状态已变化，请重新预览');
+    const prior=validateSalesPlan(draft.salesPlan);assertSalesPlanNamingIdentity(db,prior,draft.mode,draft.sellerId);
+    const source=this.getProduct(draft.productId),plan=validateSalesPlan({...prior,recipe:preview.proposed,unitAdoption:{version:1,originalRecipeKey:prior.recipe.key,previousRecipe:prior.recipe,at:this.at(),basis:preview.basis}});
+    const product=projectSalesProduct(source,plan,draft.variantId),variant=product.variants.find(v=>v.id===draft.variantId)!;
+    const attributes=clone(draft.attributes);
+    for(const field of ['number_of_items','unit_count']){
+      if(Object.hasOwn(attributes,field)&&semanticJson(attributes[field])!==semanticJson(draft.businessRules?.fields[field]?.value??null))throw new UserFacingError('数量字段已有人工或 AI 修改，请先核对，未覆盖');
+      delete attributes[field];
+    }
+    const result=this.businessDefaults(product,variant,this.getTarget(draft.targetId),draft.schema,attributes,draft.listingProgram,undefined,plan,source);
+    draft.salesPlan=plan;draft.attributes=result.attributes;draft.businessRules=result.report;draft.revision++;draft.previewedAt=null;record.preview=null;
+    draft.localIssues=validateAttributes(draft.schema.schema,draft.attributes,draft.schema.metaSchema);draft.state=draft.localIssues.some(i=>i.severity==='ERROR')?'BLOCKED':'LOCAL_VALIDATED';
+    record.request=this.request(record);this.event(record,'save','明确采用整套与附件计量；保留原 SKU、原配方历史和请求/图片，等待继续');
+    assertSalesPlanNamingIdentity(db,plan,draft.mode,draft.sellerId);
+    this.persistence.putRecord(record,db);
+    appendAuditEvent(db,randomUUID(),draft.productId,'listing.sales-units.adopted','明确采用销售单位 v2，原命名身份不变',JSON.stringify({version:1,token,before,after:clone(record),basis:preview.basis}),this.at());
+    return clone(draft);
   }
   getDraft(id: string): AmazonDraft { this.ensureOpen(); return this.vault.redact(this.persistence.record(textField(id, '草稿 ID', 100)).draft); }
   /** A definitive INVALID response permits repair; absence of a response never does. Main process only. */
@@ -430,7 +521,9 @@ export class AmazonService {
         if(!proposed[0].color||/随机|任选|可备注|可选|\brandom\b/iu.test(proposed[0].color))throw new UserFacingError('当前来源未确认确切颜色，不能建立颜色变体');
         attributes.color=wrapCandidateValues(schema,draft.marketplaceId,'color',[proposed[0].color]);changed.push('color');
       }
-      if(axes.includes('NUMBER_OF_ITEMS')){attributes.number_of_items=wrapCandidateValues(schema,draft.marketplaceId,'number_of_items',[prior.recipe.totalPieces]);changed.push('number_of_items');}
+      if(axes.includes('NUMBER_OF_ITEMS')){
+        const pieces=salesPlatformPieces(prior.recipe);if(pieces===null)throw new UserFacingError('平台件数尚未确认，不能用于件数变体关系');
+        attributes.number_of_items=wrapCandidateValues(schema,draft.marketplaceId,'number_of_items',[pieces]);changed.push('number_of_items');}
       const issues=validateAttributes(schema.schema,attributes,schema.metaSchema);
       if(issues.some(issue=>issue.attributeNames.some(field=>changed.includes(field))))throw new UserFacingError('迁移的关系或规格字段不满足当前 CHILD Schema');
       const issueKey=(issue:ListingIssue)=>JSON.stringify([issue.code,[...issue.attributeNames].sort()]);

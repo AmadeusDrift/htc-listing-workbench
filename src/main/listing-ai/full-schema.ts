@@ -14,6 +14,7 @@ import { compileAttributesSchema } from '../amazon/schema.ts';
 import { wrapCandidateValues } from '../amazon/field-mapping.ts';
 import { exactSkuColorIdentity } from './sku-colors.ts';
 import { explicitCategoryConflicts } from './full-schema-conflicts.ts';
+import { skuObservationImages } from '../../shared/source-observation-authority.ts';
 
 const fail=(reason:string):never=>{throw new ListingValidationError(reason);};
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
@@ -204,9 +205,13 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
     if(candidate.field==='color'){
       const identity=(value:string)=>exactSkuColorIdentity(plainColorName(value).replace(/([a-z])([A-Z])/g,'$1 $2'));
       const actual=nativeText(candidate.field,candidate.nativeValue!).map(identity).filter(Boolean);
-      const observed=c.sourceProduct?.observations?.flatMap(source=>source.images.filter(image=>!source.productReferenceAssetIds?.includes(image.assetId)).flatMap(image=>image.colors.map(identity).filter(Boolean)))??[];
-      const expected=c.evidence.filter(e=>e.meaning==='color'||e.name==='Selected SKU specification').map(e=>identity(e.value)).filter(Boolean);
-      if(actual.length&&expected.length&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value)))issues.push({code:'SOURCE_VALUE_CONFLICT',message:'color：候选颜色与当前 SKU 明确颜色矛盾，且没有绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
+      const observed=c.sourceProduct?.observations?.flatMap(source=>skuObservationImages(source,c.variantId).flatMap(image=>image.colors.map(identity).filter(Boolean)))??[];
+      const colorEvidence=c.evidence.filter(e=>e.meaning==='color'||e.name==='Selected SKU specification');
+      const expected=colorEvidence.map(e=>identity(e.value)).filter(Boolean);
+      const human=colorEvidence.filter(e=>e.source==='human_confirmed').map(e=>identity(e.value)).filter(Boolean);
+      const humanConflict=human.length>0&&new Set(human).size===1&&actual.some(value=>!human.includes(value));
+      const sourceConflict=expected.length>0&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value));
+      if(actual.length&&(humanConflict||sourceConflict))issues.push({code:'SOURCE_VALUE_CONFLICT',message:humanConflict?'color：候选颜色与人工确认颜色矛盾，图片观察不能覆盖人工值':'color：候选颜色与当前 SKU 明确颜色矛盾，且没有清晰的绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
     }
     if(Object.hasOwn(c.businessValues??{},candidate.field))for(const path of changedBusinessLeaves(c.businessValues![candidate.field],candidate.nativeValue,`/${candidate.field}`))issues.push({code:'BUSINESS_VALUE_LOCKED',message:`${path}：不能覆盖已经确定的业务值`,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});
     attributes[candidate.field]=candidate.nativeValue!;

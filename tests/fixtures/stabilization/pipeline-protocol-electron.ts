@@ -12,7 +12,7 @@ void app.whenReady().then(async()=>{
   const report={protocolOnly:true,businessStarted:false,identity:{pid:process.pid,executable:process.execPath,dataRoot:root,userData:app.getPath('userData'),electron:process.versions.electron},blocked:guard.blocked};
   Object.assign(globalThis,{__s10Dryrun:report,__s10RunNativeProtocol:async()=>{
     const route=policy.routes.find((row:{id:string})=>row.id==='ocr'),p=route.protocol;
-    const result=await recognizeWithAliyun(Buffer.from('s10-owned-image-bytes'),{width:256,height:256},{accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret},new AbortController().signal,{fetch:(url,init)=>net.fetch(url,init),now:()=>new Date(p.now),nonce:()=>p.nonce,maxResponseBytes:1048576});
+    const result=await recognizeWithAliyun(Buffer.from('s10-owned-image-bytes'),{width:256,height:256},{accessKeyId:p.accessKeyId,accessKeySecret:p.accessKeySecret},new AbortController().signal,{fetch:(url,init)=>net.fetch(url instanceof URL?url.href:url,init),now:()=>new Date(p.now),nonce:()=>p.nonce,maxResponseBytes:1048576});
     assert.equal(result.output.kind,'ocr');assert.equal(result.requestId,'s10-native-ocr');
     let denied=0;for(const target of [route.publicUrl+'&Type=Commerce','http://127.0.0.1:1/protocol/ocr','https://outside.invalid/'])try{await net.fetch(target,{method:'POST'});throw Error('native protocol escaped');}catch(error){assert.match(String(error),/S10_NETWORK_BLOCKED/);denied++;}
     return {identity:report.identity,nativeProtocolSent:guard.nativeProtocolSent??0,requestId:result.requestId,denied};

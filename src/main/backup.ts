@@ -436,7 +436,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     }
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
-    retainRequestCallHistory(current,snapshot);
+    retainRequestCallHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));

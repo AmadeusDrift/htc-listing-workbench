@@ -171,7 +171,7 @@ export class ImageGenerationService {
     try{requestId=uuid(attempt.requestId);editCandidateId=attempt.editCandidateId?uuid(attempt.editCandidateId):undefined;
       this.ensureOpen();if(callerSignal)throwIfAborted(callerSignal);
       const intent=readImageRequestIntent(this.db,requestId);
-      if(intent){const input=parseInput(raw,'openrouter',intent.model);this.assertProduct(input);this.assertImageRecoveryIdentity(input,this.generationScope(input,attempt.owner),intent,editCandidateId);const outcome=this.imageOutcome(intent);if(outcome.kind==='candidate')return outcome.candidate!;if(outcome.kind==='raw'){const known=await this.reconcileWorkflowGeneration(requestId);if(known)return known;}throw this.imageBlocked(intent);}
+      if(intent){const input=parseInput(raw,'openrouter',intent.model);this.assertProduct(input);this.assertImageRecoveryIdentity(input,this.generationScope(input,attempt.owner),intent,editCandidateId);const outcome=this.imageOutcome(intent);if(outcome.kind==='candidate')return outcome.candidate!;if(outcome.kind==='raw'){const known=await this.reconcileWorkflowGeneration(requestId);if(callerSignal)throwIfAborted(callerSignal);if(known)return known;}throw this.imageBlocked(intent);}
       if(existsSync(join(this.directory,'image-generation','candidates',requestId)))throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId,message:'历史候选缺少原请求输入与业务身份；保留原图，请核对原请求，未重发'});
     }catch(error){throw imageRequestNotSent(error);}
     return this.generateInternal(raw,callerSignal,assertWorkflowFresh,{requestId,editCandidateId,...(attempt.owner?{owner:attempt.owner}:{})});
@@ -235,7 +235,7 @@ export class ImageGenerationService {
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
     if(this.running)throw new AiError('BUSY');
     const input=parseInput(raw,'openrouter',String(this.getConnection().model));productId=input.productId;this.assertProduct(input);const ownerScope=this.generationScope(input,attempt?.owner);
-    stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(reused)return reused;
+    stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(callerSignal)throwIfAborted(callerSignal);if(reused)return reused;
     const config=this.config(true);this.assertProduct(input);
     return await this.controlled(async (signal,responseDeadlineAt) => {
       stage='references';

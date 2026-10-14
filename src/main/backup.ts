@@ -426,13 +426,13 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string): void {
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
-    retainImageRetryHistory(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
     retainConsistencyAttempts(current,snapshot);
     retainSourceColorAttempts(current, snapshot);
     retainImagePlanningAttempts(current, snapshot);
+    retainImageRetryHistory(current,snapshot);
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
     snapshot.exec('COMMIT');

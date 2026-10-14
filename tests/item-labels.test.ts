@@ -27,7 +27,7 @@ function fixture(t: test.TestContext) {
   const target = {id:targetId,name:'Store',mode:'live',sellerId:'seller',marketplaceId:'ATVPDKIKX0DER',region:'na',locale:'en_US',configured:true,paused:false} as AmazonTarget;
   const draft = {id:draftId,productId,variantId,sku:'SKU-10-PACK',targetId,targetName:'Store',sellerId:'seller',marketplaceId:target.marketplaceId,mode:'live',state:'PROCESSING',schema:{parentageLevel:'NONE'},submittedAt:'2026-10-07T00:00:00.000Z',checkedAt:'2026-10-07T00:30:00.000Z',listingIssues:[],updatedAt:'2026-10-07T00:30:00.000Z'} as unknown as AmazonDraft;
   const base = {listDrafts:()=>[draft],getDraft:()=>draft,getTarget:()=>target,getListingObservation:()=>({draftId,targetId,sellerId:'seller',marketplaceId:target.marketplaceId,sku:draft.sku,checkedAt:draft.checkedAt!,requestId:null,asin:'B012345678',fnsku:null,statuses:[],issues:[]})};
-  const procurement = new ProcurementService(dir,{listProducts:()=>[{id:productId}],getProduct:()=>product},base);
+  const procurement = new ProcurementService(dir,{listProducts:()=>[{id:productId}],getProductSnapshot:()=>product},base);
   const db=openDatabase(dir); db.exec('CREATE TABLE IF NOT EXISTS item_labels(id TEXT PRIMARY KEY, record_json TEXT NOT NULL)'); db.close();
   let now=Date.parse('2026-10-08T00:00:00.000Z'); const requests: JsonObject[]=[];
   let make: () => Promise<{data:JsonObject;status:number;requestId:string|null}> = async()=>({data:{documentDownloads:[{downloadType:'URL',uri:'https://labels.amazon.com/one.pdf'},{downloadType:'URL',uri:'https://labels.amazon.com/two.pdf'}]},status:200,requestId:'request-1'});

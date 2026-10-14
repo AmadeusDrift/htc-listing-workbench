@@ -1,3 +1,4 @@
+import { AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateRetryAllowance } from '../image-workflow/retry-allowance.ts';
 import { validateResumeSelection, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import { validatePurposeSnapshot } from '../ai/purpose-routing.ts';
@@ -173,6 +174,8 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     if(result.kind!==SOURCE_CONSISTENCY_OUTCOMES[result.code as keyof typeof SOURCE_CONSISTENCY_OUTCOMES]||result.pricingReport||result.image)fail();
   }else if(result.code==='READBACK_BRAND_REQUIRES_MANUAL'){
     if(result.kind!=='NEEDS_INPUT'||row.stage!=='READBACK'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
+  }else if(AI_ERROR_CODES.some(code=>result.code==='AI_'+code)){
+    if(result.kind!=='SYSTEM_REPAIR'||result.pricingReport||result.image)fail();
   }else if(['LABELS_FAILED','READBACK_FAILED'].includes(result.code)){
     if(result.kind!=='SYSTEM_REPAIR'||row.stage!==(result.code==='LABELS_FAILED'?'LABELS':'READBACK')||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
   }else if([DECLARATION_SOURCE_CONFLICT,FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT,'AMAZON_BRAND_MANUAL',...ACTUAL_OFFER_CODES].includes(result.code)){

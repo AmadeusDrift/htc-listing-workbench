@@ -1,3 +1,4 @@
+import { appendAuditEvent } from '../storage/audit.ts';
 import { imagePlanningAllowanceLimit } from '../image-workflow/retry-allowance.ts';
 import { decideListingEnums } from './enum-decisions.ts';
 import { factsForVariant, productFactEvidence } from '../../shared/fact-scopes.ts';
@@ -17,7 +18,7 @@ import { parseFullGeneration,retainValidNativeCandidates } from '../listing-ai/f
 import { transaction } from '../application/transaction.ts';
 import { readAiUsageReport } from './usage-report.ts';
 import { TEXT_MODEL_CAPABILITIES } from './model-capabilities.ts';
-import { saveProviderReceipt,readProviderReceipt } from './receipts.ts';
+import { saveProviderReceipt,readProviderReceipt,confirmedAuthenticationRejection } from './receipts.ts';
 import type { AiPurposeId,SaveAiPurposeInput,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { freezeSourceForProduct } from '../products/public.ts';
 import { isSchemaTransientError } from '../amazon/schema-retry.ts';
@@ -32,7 +33,7 @@ import { readManagedImageSync } from './source.ts';
 import type { SourceConsistencyContext } from '../../shared/source-image-consistency-contracts.ts';
 import { resolveConsistencyContext } from "../source-image-consistency/scope.ts";
 import { validateConsistencyContext, consistencyScopeKey } from "../source-image-consistency/contracts.ts";
-import { reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
+import { canRetryConsistencyAuthentication,reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
 import { assertConsistencyView,readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
@@ -225,7 +226,7 @@ export class AiService {
     return id !== 'aliyun' ? { id, apiKey: '' } : { id, accessKeyId: '', accessKeySecret: '', securityToken: '' };
   }
   /** No asynchronous work can observe the intermediate vault/profile state. */
-  private commitProfiles(changes: { profile: AiProfile; credentials?: AiCredentials | null }[]): void {
+  private commitProfiles(changes: { profile: AiProfile; credentials?: AiCredentials | null }[],credentialUpdate?:readonly AiProviderId[]): void {
     const undo: (() => void)[] = []; let transaction = false;
     try {
       this.db.exec('BEGIN IMMEDIATE'); transaction = true;
@@ -233,6 +234,7 @@ export class AiService {
         if (credentials !== undefined) undo.push(credentials === null ? this.vault.remove(profile.id) : this.vault.write(profile.id, credentials, profile.generation));
       }
       for (const { profile } of changes) this.saveProfile(profile);
+      if(credentialUpdate!==undefined)appendAuditEvent(this.db,randomUUID(),null,'ai.credentials.updated','已更新供应商凭据（不含密钥）',JSON.stringify({changed:credentialUpdate.length>0,profiles:changes.map(({profile})=>({id:profile.id,generation:profile.generation,changed:credentialUpdate.includes(profile.id)}))}),this.timestamp());
       this.db.exec('COMMIT'); transaction = false;
     } catch (error) {
       let rollbackFailed = false;
@@ -243,6 +245,7 @@ export class AiService {
     }
   }
   private saveSharedConnection(id: AiVendorId, credentials: AiCredentials, functionModel?: { id: AiProviderId; model: string }): AiConnection {
+    const credentialChanged=AI_VENDOR_FUNCTIONS[id].filter(role=>{const previous=this.storedProfile(role),old=this.vault.inspect(role,previous.generation);return old.state!=='readable'||JSON.stringify(old.credentials)!==JSON.stringify(credentials);});
     const changes = AI_VENDOR_FUNCTIONS[id].map(role => {
       const previous = this.storedProfile(role), model = functionModel?.id === role ? functionModel.model : previous.model;
       // Check the same credential against each role's public fields before writing either file.
@@ -250,7 +253,7 @@ export class AiService {
       const profile = { ...previous, model, configured: true, generation: integer(previous.generation + 1, 1, Number.MAX_SAFE_INTEGER - 1) };
       return { profile, credentials: checked.credentials };
     });
-    this.commitProfiles(changes);
+    this.commitProfiles(changes,credentialChanged);
     for (const { profile } of changes) this.cancel(profile.id, new AiError('CONFIG_CHANGED'));
     return this.connection(id);
   }
@@ -684,7 +687,9 @@ export class AiService {
             }catch{this.db.exec('ROLLBACK');}
           }
         }
-        if(!call||call.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(call.errorCode??'')||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':'INTERRUPTED');
+        const current=this.activePurpose('source_understanding',true),authRetry=canRetryConsistencyAuthentication(this.db,call,{providerId:current.id,generation:current.generation});
+        if(authRetry){const receipt=await readProviderReceipt(this.db,this.directory,call.id) as {status?:number}|null;if(!receipt||![401,403].includes(receipt.status??0))throw new AiError('AUTH_FAILED');}
+        if(!call||call.status!=='FAILED'||!(call.errorCode==='OUTPUT_INVALID'||authRetry)||call.errorCode==='OUTPUT_INVALID'&&hasRetainedInvalidAiOutput(this.directory,call,'source-image-consistency')||(attempt.attemptNumber??1)>=MAX_SOURCE_ATTEMPTS)throw new AiError(call?.errorCode==='OUTPUT_INVALID'?'OUTPUT_INVALID':confirmedAuthenticationRejection(this.db,call)?'AUTH_FAILED':'INTERRUPTED');
       }else{
       const result=validateStoredAiResult(JSON.parse(String(saved.record_json)));
       if(result.output.kind!=='source-image-consistency'||!result.sourceConsistencyContext||consistencyScopeKey(result.sourceConsistencyContext)!==consistencyScopeKey(context))throw new AiError('INVALID_CONFIG');
@@ -953,6 +958,7 @@ export class AiService {
             this.pendingReceipts.add(pending);try{await pending;}finally{this.pendingReceipts.delete(pending);}
           },
           beforeSend: body => {
+            if(!reservingBatch&&taskScope)this.batchTasks.assertCredentialIdentity(taskScope.taskId);
             if(!reservingBatch&&(this.batchTasks.find(batchOperationId)||this.batchTasks.pendingOperation(batchOperationId)))throw new UserFacingError('原Batch身份仍受保护，不能转为普通请求重发');
             requestBytes = Buffer.byteLength(body);
             throwIfAborted(activeSignal); this.assertProfile(profile.id, profile.generation); if (call) throw new AiError('INVALID_CONFIG');

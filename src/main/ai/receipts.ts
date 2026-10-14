@@ -82,3 +82,10 @@ export function saveImageRequestIntent(db:DatabaseSync,intent:ImageRequestIntent
 export function readImageRequestIntent(db:DatabaseSync,id:string):ImageRequestIntent|null{
   const row=db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id);if(!row)return null;const value=parseImageRequest(JSON.parse(String(row.record_json)));if(value.id!==id)throw new UserFacingError('生图请求身份不一致');return value;
 }
+
+/** Only a recorded, matching HTTP denial is a terminal authentication failure. */
+export function confirmedAuthenticationRejection(db:DatabaseSync,call:import('../../shared/ai-contracts.ts').AiCall):boolean {
+ if(call.status!=='FAILED'||call.errorCode!=='AUTH_FAILED'||!call.providerReceiptId)return false;
+ const row=db.prepare('SELECT record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return false;
+ try {const r=parse(JSON.parse(String(row.record_json)));return r.id===call.providerReceiptId&&r.callId===call.id&&r.model===call.model&&r.gateway===(call.providerId.startsWith('openrouter')?'openrouter':'deepseek')&&[401,403].includes(r.status);}catch{return false;}
+}

@@ -1192,7 +1192,7 @@ for(const outcome of ['mismatch','unknown'] as const)test(`actual source observa
   const confirm=()=>ai.decideSourceConsistency({...proofInput,fingerprint:view.fingerprint,decision:'CONFIRMED',reason:'Synthetic independent human checked this exact visual association'});
   if(outcome==='unknown')await assert.rejects(confirm());else await confirm();
   f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
-  const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,outcome==='unknown'?3:2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
+  const after=f.service.get(task.id);assert.equal(after.items[0].draftId,healthy.draftId);assert.equal(sends,2);assert.equal(f.calls.sources,1,'a new current visual proof must not redownload unchanged source identity');
   assert.equal(f.calls.images,outcome==='unknown'?1:2);assert.equal(after.items[1].status,outcome==='unknown'?'FAILED':'DONE');
 });
 
@@ -1240,7 +1240,7 @@ test('release four-SKU synthetic sample separates rule, missing facts and UNKNOW
     const queue=await restored.queue({productIds:[f.product.id],targetId:f.target.id});
     assert.equal(queue.products[0].filteredCount,1);assert.equal(queue.products[0].rows.filter(r=>r.kind==='UNKNOWN').length,1);
     restored.startAuthorized(restored.prepareStart(task.id));await restored.waitForIdle();
-    assert.equal(sends,5);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+    assert.equal(sends,4);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
     assert.equal(JSON.stringify(f.workflow.get(row(0).draftId!)),preserved);assert.equal(JSON.stringify(ai.listResults(f.product.id)),history);
   }finally{await restored.close();}
 });
@@ -2094,4 +2094,11 @@ test('unrelated task progress during creation does not invalidate the selected s
  f.dependencies.previewSales=id=>buildSalesRecipes(id===next.id?next:f.product,null,f.rules);
  f.dependencies.planSales=id=>{setImmediate(()=>old.revision++);return f.dependencies.previewSales!(id).map(recipe=>({namingGroupId:randomUUID(),sourceGroupKey:'next-source',collectedAt:next.createdAt,collectionBasis:'first_import',sku:'NEXT-SALE',baseSku:'NEXT-SALE',recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'fixture',familyResolved:true,namingChildKey:null}));};
  const task=await f.service.create({productIds:[next.id],targetId:f.target.id,profileId:'alpha'});assert.equal(task.items[0].sku,'NEXT-SALE');assert.equal(f.service.list().length,2);
+});
+import { AiError } from '../src/main/ai/errors.ts';
+test('source configuration and authentication failures keep safe system reason without inventing missing facts',async t=>{
+ for(const code of ['CONFIG_CHANGED','AUTH_FAILED','NOT_CONFIGURED'] as const){
+ const f=fixture(t);f.dependencies.prepareSourceConsistency=async input=>{materializeSourceSnapshot(f.directory,f.product,input.variantIds);throw new AiError(code);};const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+ const row=f.service.get(task.id).items[0];assert.equal(row.outcome?.kind,'SYSTEM_REPAIR');assert.equal(row.outcome?.code,`AI_${code}`);assert.match(row.error??'',/AI/);
+ }
 });

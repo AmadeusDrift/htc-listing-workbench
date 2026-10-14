@@ -1,3 +1,5 @@
+import { taskAiContext } from '../ai/batch/task-context.ts';
+import { confirmedAuthenticationRejection } from '../ai/receipts.ts';
 import { isGenerationProvider } from "../ai/primitives.ts";
 import type { DatabaseSync } from 'node:sqlite';
 import type { AiResult,AiCall } from '../../shared/ai-contracts.ts';
@@ -62,10 +64,21 @@ export function listConsistencyAttempts(db:DatabaseSync,context:SourceConsistenc
   return rows(db,'source_consistency_attempts',validateConsistencyAttempt).filter(a=>consistencyScopeKey(a.context)===consistencyScopeKey(context)).sort((a,b)=>(a.attemptNumber??1)-(b.attemptNumber??1));
 }
 export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyAttempt|undefined {return listConsistencyAttempts(db,context).at(-1);}
+/** Model changes alone do not authorize a new request. Credentials must have been explicitly saved. */
+export function canRetryConsistencyAuthentication(db:DatabaseSync,prior:AiCall,current:{providerId:string;generation:number}):boolean {
+ const scope=taskAiContext.getStore();
+ if(!scope?.explicitContinueAt||!Number.isFinite(Date.parse(scope.explicitContinueAt))||!scope.authorize()||!confirmedAuthenticationRejection(db,prior)||current.providerId!==prior.providerId||current.generation<=prior.generation)return false;
+ const events=db.prepare("SELECT action,detail_json,created_at FROM audit_events WHERE action IN ('ai.credentials.updated','ai.connection.saved','ai.connection.imported')").all();
+ return events.some(row=>{
+  try {const detail=JSON.parse(String(row.detail_json));if(detail.changed===false)return false;
+   if(row.action!=='ai.credentials.updated'&&events.some(other=>{if(other.action!=='ai.credentials.updated')return false;const newer=JSON.parse(String(other.detail_json));return newer.profiles?.some((p:any)=>detail.profiles?.some((old:any)=>old.id===p.id&&old.generation===p.generation));}))return false;
+   return Date.parse(String(row.created_at))>=Date.parse(prior.finishedAt??prior.startedAt)&&Date.parse(String(row.created_at))<=Date.parse(scope.explicitContinueAt!)&&Array.isArray(detail.profiles)&&detail.profiles.some((p:any)=>p.id===current.providerId&&p.changed!==false&&Number.isInteger(p.generation)&&p.generation>prior.generation&&p.generation<=current.generation);}catch{return false;}
+ });
+}
 /** Called only in AiUsageLedger.reserve's transaction, before the transport sends bytes. */
-export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string}):void {
+export function reserveConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext,call:{id:string;startedAt:string;providerId?:string;generation?:number}):void {
   const attempts=listConsistencyAttempts(db,context),latest=attempts.at(-1),n=(latest?.attemptNumber??(latest?1:0))+1;
-  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||!isGenerationProvider(prior.providerId)||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!['OUTPUT_INVALID','INTERRUPTED','TIMEOUT','PROVIDER_ERROR','NETWORK_ERROR','CANCELLED'].includes(prior.errorCode??'')||n>MAX_SOURCE_ATTEMPTS)invalid();}
+  if(latest){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(latest.callId),prior=row?validateAiCall(JSON.parse(String(row.record_json))):null;const usageRow=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(latest.callId),usage=usageRow?validateAiUsageRecord(JSON.parse(String(usageRow.record_json))):null;if(!prior||!usage||prior.id!==latest.callId||usage.id!==prior.id||usage.providerId!==prior.providerId||usage.startedAt!==prior.startedAt||!isGenerationProvider(prior.providerId)||prior.productId!==latest.context.productId||prior.productRevision!==latest.context.productRevision||prior.startedAt!==latest.sentAt||listingFingerprint(prior.sourceConsistencyContext)!==listingFingerprint(latest.context)||prior.status!=='FAILED'||!(prior.errorCode==='OUTPUT_INVALID'||call.providerId!==undefined&&call.generation!==undefined&&canRetryConsistencyAuthentication(db,prior,{providerId:call.providerId,generation:call.generation}))||n>MAX_SOURCE_ATTEMPTS)invalid();}
   const record=validateConsistencyAttempt({version:SOURCE_CONSISTENCY_VERSION,id:consistencyAttemptId(context,n),context,callId:call.id,sentAt:call.startedAt,...(n>1?{attemptNumber:n}:{})});
   db.prepare('INSERT INTO source_consistency_attempts VALUES(?,?)').run(record.id,JSON.stringify(record));
 }

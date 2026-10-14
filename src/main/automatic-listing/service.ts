@@ -1,8 +1,9 @@
+import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
 import { listWorkBatches, currentWorkBatch, archiveWorkBatch, addWorkBatchProducts, bindWorkBatchTask } from './work-batches.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
-import { BatchWaitingError } from '../ai/batch/task-context.ts';
+import { taskAiContext,BatchWaitingError } from '../ai/batch/task-context.ts';
 import type { TaskBatchRuntime } from '../ai/batch/task-runtime.ts';
 import type { TaskBatchPlan } from '../../shared/ai-batch-contracts.ts';
 import { isSchemaTransientError, type SchemaTransientError } from '../amazon/schema-retry.ts';
@@ -101,7 +102,7 @@ export interface AutomaticListingDependencies {
   ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
-const retryableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
+const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
 const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
 const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
 const imageReady = hasSevenApprovedImages;
@@ -322,7 +323,8 @@ export class AutomaticListingService {
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
     return null;
   }
-  private async classifyFailure(task:AutomaticListingTask,row:AutomaticListingItem):Promise<void> {
+  private async classifyFailure(task:AutomaticListingTask,row:AutomaticListingItem,failure?:unknown):Promise<void> {
+    const protectedCode=failure instanceof AiError&&failure.code!=='OUTPUT_INVALID'?'AI_'+failure.code:row.outcome?.kind==='SYSTEM_REPAIR'&&(AI_ERROR_CODES.some(code=>code!=='OUTPUT_INVALID'&&row.outcome?.code==='AI_'+code)||['SOURCE_CONSISTENCY_REQUEST_FAILED','SOURCE_CONSISTENCY_UNAVAILABLE','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(row.outcome.code))?row.outcome.code:null;
     let draft:AmazonDraft|undefined, classification:Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'|'image'>={kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'};
     try {
       if(row.draftId)draft=this.deps.amazon.getDraft(row.draftId);
@@ -333,8 +335,9 @@ export class AutomaticListingService {
         row.outcome={version:1,kind:brandError?'NEEDS_INPUT':'SYSTEM_REPAIR',code:brandError?'READBACK_BRAND_REQUIRES_MANUAL':row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
         return;
       }
-      const unknown=this.unknownCode(row,task);
+      const unknown=this.unknownCode(row,task)??(failure instanceof AiError&&failure.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'?'IMAGE_RESULT_UNKNOWN':null);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
+      else if(protectedCode)classification={kind:'SYSTEM_REPAIR',code:protectedCode};
       else if(draft){
         const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
         const factIssue=draft.listingProgram==='haul'?draft.localIssues.find(issue=>[FACT_AUTHORITY_REQUIRED,FACT_SOURCE_CONFLICT].includes(issue.code)&&issue.severity==='ERROR'&&['fact','compliance'].includes(issue.category)&&issue.source==='local'&&!issue.autoFixable):undefined;
@@ -350,12 +353,12 @@ export class AutomaticListingService {
         if(after.revision!==draft.revision||this.unknownCode(row,task))classification={kind:'UNKNOWN',code:this.unknownCode(row,task)??'EVIDENCE_READ_FAILED'};
       }else if(row.stage==='SOURCES'&&row.outcome&&Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code))classification={kind:row.outcome.kind,code:row.outcome.code};
       else if(row.stage==='PLAN'||row.outcome?.code==='SOURCE_INPUT_REQUIRED')classification={kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED'};
-      if(classification.kind!=='UNKNOWN'&&classification.kind!=='RULE_FILTERED'&&!(row.stage==='SOURCES'&&row.outcome&&(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code)||row.outcome.code==='SOURCE_INPUT_REQUIRED'))){
+      if(!protectedCode&&classification.kind!=='UNKNOWN'&&classification.kind!=='RULE_FILTERED'&&!(row.stage==='SOURCES'&&row.outcome&&(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code)||row.outcome.code==='SOURCE_INPUT_REQUIRED'))){
         try{assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);}
         catch(error){if(error instanceof SourceConsistencyError)classification={kind:error.kind,code:error.code};else throw error;}
       }
     }catch{classification={kind:'SYSTEM_REPAIR',code:'EVIDENCE_READ_FAILED'};}
-    if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=((retryableAiUnknown(classification.code)?'上次结果尚未确认；继续任务时先恢复已有结果，确实缺失则按原次数上限自动重试该 AI 步骤。上次错误：':'上次提交结果尚未确认，未自动重发。上次错误：')+(row.error??'请核对已有记录')).slice(0,2000);
+    if(classification.kind==='UNKNOWN'&&!row.error?.startsWith('上次结果尚未确认'))row.error=((recoverableAiUnknown(classification.code)?'上次结果尚未确认；继续任务仅核对或恢复已有结果；未确认结果前不重复发送该 AI 请求。上次错误：':'上次提交结果尚未确认，未自动重发。上次错误：')+(row.error??'请核对已有记录')).slice(0,2000);
     const priceIssue=draft&&classification.code.startsWith('ACTUAL_')?pricingQualificationIssue(draft,this.deps.rules()):null;
     row.outcome={version:1,...classification,message:(classification.image?.message??priceIssue?.message??(classification.pricingReport?(draft?.businessRules?.notices.join('；')||undefined):undefined)??row.error??'处理未完成').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:row.draftId,draftRevision:draft?.revision??null};
     if(classification.kind==='RULE_FILTERED')row.status='SCREENED';
@@ -558,7 +561,7 @@ export class AutomaticListingService {
     catch(error){notes.push('待恢复来源证据：'+errorMessage(error));}
     if(draft&&submitted(draft))blockers.push('已有提交身份；只允许原 SKU 回读/修正');
     if(executions.some(child=>child.items.some(item=>item.submitStarted)))blockers.push('原提交已有发送意图，先核对原请求');
-    const unknown=this.unknownCode(row,task);if(unknown&&!retryableAiUnknown(unknown))blockers.push('原请求结果待核对：'+unknown);
+    const unknown=this.unknownCode(row,task);if(unknown&&!recoverableAiUnknown(unknown))blockers.push('原请求结果待核对：'+unknown);
     let projected:AmazonDraft|undefined;
     if(draft){
       if(this.deps.amazon.previewTaskAdaptation){
@@ -642,7 +645,7 @@ export class AutomaticListingService {
       for(const row of task.items)if(rowSelected(task.resumeScope,row.key)&&this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
       for(const row of task.items)if(rowSelected(task.resumeScope,row.key))this.migrateRepairPolicy(task,row);
       for (const row of task.items) if (rowSelected(task.resumeScope,row.key)&&(!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status === 'FAILED'&&row.stage!=='PLAN'&&!task.adaptation?.blockedKeys.includes(row.key)) {
-        if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!retryableAiUnknown(code))continue;}
+        if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!recoverableAiUnknown(code))continue;}
         if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
           const old=this.deps.amazon.getDraft(row.draftId);
           const activeCompletion=new CompletionJournal(this.db).list(old.id).some(op=>!['DONE','RETIRED'].includes(op.state));
@@ -706,7 +709,7 @@ export class AutomaticListingService {
       const candidates=rows.flatMap(row=>{
         if(!rowSelected(task.resumeScope,row.key)||row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage))return [];
         const unknown=this.unknownCode(row,task);
-        if(unknown&&!retryableAiUnknown(unknown))return [];
+        if(unknown&&!recoverableAiUnknown(unknown))return [];
         const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):this.deps.amazon.listDrafts(productId).find(d=>this.matching(task,row,d));
         return draft&&submitted(draft)?[]:[{row,draft}];
       });
@@ -749,7 +752,7 @@ export class AutomaticListingService {
             if (!rowSelected(task.resumeScope,row.key)||task.adaptation?.blockedKeys.includes(row.key)||['DONE','FAILED','SCREENED'].includes(row.status) || ['READBACK','LABELS'].includes(row.stage)||row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state)) continue;
             try {
               const execute=()=>rowSelected(task.resumeScope,row.key)?this.prepareItem(task,row):Promise.resolve();
-              if(this.deps.batch)await this.deps.batch.run({taskId:task.id,rowKey:row.key,get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,authorize:()=>rowSelected(task.resumeScope,row.key)&&this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)},execute);else await execute();
+              if(this.deps.batch)await this.deps.batch.run({taskId:task.id,rowKey:row.key,explicitContinueAt:row.lastContinuedAt,get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,authorize:()=>rowSelected(task.resumeScope,row.key)&&this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)},execute);else await taskAiContext.run({taskId:task.id,rowKey:row.key,explicitContinueAt:row.lastContinuedAt,phase:row.stage.toLowerCase(),mode:'immediate',authorize:()=>rowSelected(task.resumeScope,row.key)&&this.running(task)&&this.grants.has(task.id)},execute);
               delete row.batchWait;
             }
             catch (error) {
@@ -760,7 +763,7 @@ export class AutomaticListingService {
               if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
               rememberFailure(row,new Date().toISOString(),undefined,'local-check');
-              const classified=structuredClone(row);await this.classifyFailure(task,classified);
+              const classified=structuredClone(row);await this.classifyFailure(task,classified,error);
               if(!this.running(task))break;
               Object.assign(row,classified);this.save(task);
               try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.save(task); break; }
@@ -836,7 +839,7 @@ export class AutomaticListingService {
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
   private async prepareItem(task: AutomaticListingTask, row: AutomaticListingItem): Promise<void> {
     const unknown=this.unknownCode(row,task);
-    if(unknown&&!retryableAiUnknown(unknown)&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
+    if(unknown&&!recoverableAiUnknown(unknown)&&!(unknown==='SUBMISSION_UNKNOWN'&&row.draftId&&submitted(this.deps.amazon.getDraft(row.draftId))))throw new UserFacingError(row.error||'上次付费请求或提交结果尚未确认，请先核对；未自动重发');
     this.checkpoint(task, row);
     if(task.resumeScope?.mode==='recheck'){
       const checked=await this.inspectResumeRow(task,row);this.checkpoint(task,row);
@@ -860,7 +863,7 @@ export class AutomaticListingService {
       const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
       try { assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),variantIds); }
       catch(error) {
-        if(!(error instanceof SourceConsistencyError)||!['SOURCE_CONSISTENCY_NEEDS_INPUT','SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN'].includes(error.code))throw error;
+        if(!(error instanceof SourceConsistencyError)||!['SOURCE_CONSISTENCY_NEEDS_INPUT','SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(error.code))throw error;
         if(!this.deps.prepareSourceConsistency)throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_UNAVAILABLE','来源图与规格校验服务尚未初始化');
         await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
         this.checkpoint(task,row);
@@ -876,7 +879,7 @@ export class AutomaticListingService {
         if(!(error instanceof SourceConsistencyError))throw error;
         // A retained format failure already has its exact source scope. Recover it
         // before frozen-sibling delivery guards; recovery never needs another download.
-        if(['SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN'].includes(error.code)){
+        if(['SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(error.code)){
           if(!this.deps.prepareSourceConsistency)throw error;
           const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
           await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));
@@ -914,7 +917,7 @@ export class AutomaticListingService {
             this.checkpoint(task,sibling);assertProductConsistency(this.db,this.deps.store.getProduct(sibling.productId),sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]);
           }catch(error){
             if(!this.running(task))throw error;
-            consistencyError=error instanceof SourceConsistencyError?error:new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_REQUEST_FAILED',errorMessage(error));
+            consistencyError=error instanceof SourceConsistencyError?error:new SourceConsistencyError('SYSTEM_REPAIR',error instanceof AiError?'AI_'+error.code:'SOURCE_CONSISTENCY_REQUEST_FAILED',errorMessage(error));
             try{assertProductConsistency(this.db,this.deps.store.getProduct(sibling.productId),sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]);}catch(proofError){if(proofError instanceof SourceConsistencyError&&proofError.kind==='UNKNOWN')consistencyError=proofError;}
             missing={variantId:sibling.variantId,message:consistencyError.message};
           }

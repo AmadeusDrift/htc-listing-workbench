@@ -67,9 +67,9 @@ test('historical automatic owner replays cached DONE through Generic/color migra
 });
 
 for (const owner of ['automatic', 'images'] as const) {
-  test(`${owner}: historical unknown field recovery appends attempts across owner restarts and adopts only the recovered success`, async t => {
+  test(`${owner}: historical explicit field rejections retain their budget across owner restarts and adopt only the later success`, async t => {
     const f = await completionOwnerFixture(t, owner);
-    f.respond(() => { throw new Error('Synthetic lost field response'); });
+    f.respond(() => Response.json({error:'synthetic authentication rejection'},{status:401}));
     await assert.rejects(f.run());
     const original = f.listing.completionOperations(f.draft.id)[0];
     const firstCall = structuredClone(f.ai.listCalls()[0]);
@@ -91,12 +91,12 @@ for (const owner of ['automatic', 'images'] as const) {
     assert.equal(f.ai.getUsageSummary('deepseek').attempts, 3);
   });
 
-  test(`${owner}: repeated historical UNKNOWN recovery exhausts the same three-call budget after restarts`, async t => {
+  test(`${owner}: repeated historical UNKNOWN recovery preserves the original call without resending after restarts`, async t => {
     const f = await completionOwnerFixture(t, owner);
     f.respond(() => { throw new Error('Synthetic persistent response loss'); });
     for (let attempt = 0; attempt < 3; attempt++) {
       await assert.rejects(f.run());
-      assert.equal(f.requests.length, attempt + 1);
+      assert.equal(f.requests.length, 1);
       await f.reopen();
     }
     const operations = f.listing.completionOperations(f.draft.id), calls = f.ai.listCalls();
@@ -104,12 +104,12 @@ for (const owner of ['automatic', 'images'] as const) {
       await assert.rejects(f.run());
       await f.reopen();
     }
-    assert.equal(f.requests.length, 3);
+    assert.equal(f.requests.length, 1);
     assert.deepEqual(f.ai.listCalls(), calls);
     assert.deepEqual(f.listing.completionOperations(f.draft.id), operations);
     assert.equal(operations.length, 1);
-    assert.equal(operations[0].rounds[0].candidate.previous?.length, 2);
-    assert.equal(f.ai.getUsageSummary('deepseek').attempts, 3);
+    assert.equal(operations[0].rounds[0].candidate.previous?.length??0, 0);
+    assert.equal(f.ai.getUsageSummary('deepseek').attempts, 1);
   });
 
   test(`${owner}: unknown Amazon submission stops historical AI recovery after restart and preserves every ledger`, async t => {

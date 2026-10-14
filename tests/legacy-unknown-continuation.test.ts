@@ -17,7 +17,7 @@ test('legacy field checkpoint without operation is journaled once, retaining con
   await f.reopen();f.previewFailure(false);f.respond(()=>{throw new Error('lost field response');});
   await assert.rejects(f.run());const op=f.listing.completionOperations(f.draft.id)[0];assert.ok(op,'legacy owner must obtain a durable recovery operation');
   await f.reopen();await assert.rejects(f.run());await f.reopen();await assert.rejects(f.run());
-  assert.equal(f.requests.length,2,'unknown original attempt plus two missing-step retries exhausts three attempts');assert.equal(f.listing.completionOperations(f.draft.id).length,1);
+  assert.equal(f.requests.length,0,'missing original call evidence remains guarded without a new paid attempt');assert.equal(f.listing.getCompletion(op.id).state,'GUARD');assert.equal(f.listing.completionOperations(f.draft.id).length,1);
 });
 for(const boundary of ['result','adoption'] as const)test(`legacy saved ${boundary}: reconstructs original calls with zero extra field requests`,async t=>{
   const f=await completionOwnerFixture(t,'images');let stopped=false;
@@ -46,15 +46,15 @@ test('legacy exhausted missing calls retain all usage and never obtain a fourth 
  for(let i=0;i<2;i++){const next=randomUUID();db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(next,JSON.stringify({...call,id:next}));db.prepare('INSERT INTO ai_usage_ledger VALUES(?,?)').run(next,JSON.stringify({...usage,id:next}));}
  const row=db.prepare('SELECT id,record_json FROM image_workflow_runs').get()!;const run=JSON.parse(String(row.record_json));delete run.contentPreparation.operationId;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(run),row.id);db.prepare('DELETE FROM listing_completion_operations').run();
  }finally{db.close();}
- await f.reopen();await assert.rejects(f.run(),/三次/);assert.equal(f.requests.length,1);assert.equal(f.listing.completionOperations(f.draft.id)[0].legacyRecovery?.callIds.length,3);
- await f.reopen();await assert.rejects(f.run(),/三次/);assert.equal(f.requests.length,1);
+ await f.reopen();await assert.rejects(f.run(),/未自动重发/);assert.equal(f.requests.length,1);assert.equal(f.listing.completionOperations(f.draft.id)[0].legacyRecovery?.callIds.length,3);
+ await f.reopen();await assert.rejects(f.run(),/未自动重发/);assert.equal(f.requests.length,1);
 });
-test('HTTP success without saved output is not adoption and only retries within original budget',async t=>{
+test('HTTP success without saved output is not adoption and never authorizes another send',async t=>{
  const f=await completionOwnerFixture(t,'images');f.respond(()=>{throw Error('lost');});await assert.rejects(f.run());const db=openDatabase(f.directory);
  try{const op=f.listing.completionOperations(f.draft.id)[0],id=op.rounds[0].candidate.id,row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id)!,call=JSON.parse(String(row.record_json));call.status='SUCCEEDED';call.errorCode=null;db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),id);
  const owner=db.prepare('SELECT id,record_json FROM image_workflow_runs').get()!,run=JSON.parse(String(owner.record_json));delete run.contentPreparation.operationId;db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(run),owner.id);db.prepare('DELETE FROM listing_completion_operations').run();}finally{db.close();}
- await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,2);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,3);
- await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,3);
+ await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,1);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,1);
+ await f.reopen();await assert.rejects(f.run());assert.equal(f.requests.length,1);
 });
 test('legacy 67 saved four rounds preserve exhausted budget while latest result remains reusable',async t=>{
  const f=await completionOwnerFixture(t,'images'),send=f.ai.listingFields.bind(f.ai);f.ai.listingFields=async(...args)=>{await send(...args);throw Error('stop after result');};await assert.rejects(f.run());const db=openDatabase(f.directory);
@@ -81,14 +81,14 @@ function removeJournalForLegacy(f:{directory:string;draft:{id:string}}){const db
 const legacyIssue=(field:string)=>({code:'90220',message:'Missing '+field,severity:'ERROR' as const,attributeNames:[field],autoFixable:false,source:'amazon' as const,category:'field' as const});
 test('legacy exhausted reviews stay bound to saved candidate and never send a fourth review',async t=>{
  const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[legacyIssue('material')]});let reviews=0;
- f.respond(p=>{if(p.candidate){reviews++;throw Error('lost review');}return chat(candidateFor(p));});
+ f.respond(p=>{if(p.candidate){reviews++;return new Response('{}',{status:401});}return chat(candidateFor(p));});
  for(let i=0;i<3;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));assert.equal(reviews,3);removeJournalForLegacy(f);
  for(let i=0;i<2;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}),/三次/);
  assert.equal(reviews,3);
 });
 test('legacy exhausted second candidate keeps its own context after the first adoption',async t=>{
  const f=await fixture(t);f.amazon.previewDraft=async()=>{const d=f.amazon.getDraft(f.draft.id);return {...d,state:'BLOCKED',previewIssues:[legacyIssue(d.fieldAdoptions?.length?'color':'material')]};};let candidates=0;
- f.respond(p=>{if(p.candidate)return chat(reviewFor(p));if(++candidates>1)throw Error('lost second candidate');return chat(candidateFor(p));});
+ f.respond(p=>{if(p.candidate)return chat(reviewFor(p));if(++candidates>1)return new Response('{}',{status:401});return chat(candidateFor(p));});
  for(let i=0;i<3;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));assert.equal(candidates,4);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length,1);removeJournalForLegacy(f);
  for(let i=0;i<2;i++)await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}),/三次/);
  assert.equal(candidates,4);

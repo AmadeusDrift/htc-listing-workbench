@@ -503,7 +503,7 @@ export class ListingAiService {
         for(;;){
           let entry=round![kind]!;const saved=journal.result(entry,round!);if(saved&&(kind!=='review'||saved.output.kind==='amazon-fields-review'&&saved.output.verdict==='PASS'))return saved;
           if(!saved&&entry.sent&&!this.ai.hasListingFieldGroup?.(entry.id)&&!this.ai.batchTasks?.find(entry.id)){
-            if(!journal.unknown(operation.id)&&!(kind==='review'&&journal.reviewCoverageOmission(operation.id))){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
+            if(!journal.unknown(operation.id)&&!journal.definitiveRejection(entry.id)&&!(kind==='review'&&journal.reviewCoverageOmission(operation.id))){const recovered=journal.recover({operationId:operation.id,callId:entry.id,contextHash:round!.contextHash});operation=journal.get(operation.id);round=operation.rounds.at(-1)!;return recovered;}
             journal.retryMissing(operation.id,kind);operation=journal.get(operation.id);round=operation.rounds.at(-1)!;entry=round[kind]!;
           }
           const assertBrandDispatch=()=>{const current=this.amazon.getDraft(draft.id),issues=manualBrandIssues(current,[...current.previewIssues,...current.listingIssues]);if(issues.length)throw new UserFacingError(issues.join('；'));};

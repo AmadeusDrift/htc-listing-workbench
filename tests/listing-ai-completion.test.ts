@@ -160,16 +160,15 @@ test('preview cleanup checkpoints an active completion atomically before caller 
   assert.equal(f.listing.beginCompletion({draftId:current.id,draftRevision:current.revision},operation.id).id,operation.id);assert.equal(f.requests.length,0);
 });
 
-for (const step of ['candidate','review']) test(`unknown ${step} retries only the missing call and retains the bounded history`, async t=>{
+for (const step of ['candidate','review']) test(`unknown ${step} preserves the original call and completed evidence without resending`, async t=>{
  const f=await fixture(t);let lost=true;
  f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:f.amazon.getDraft(f.draft.id).fieldAdoptions?.length?'AMAZON_VALIDATED':'BLOCKED',previewIssues:[issue('material')]});
  f.respond(p=>{if(lost&&Boolean(p.candidate)===(step==='review')){lost=false;throw Error('synthetic lost response');}return chat(p.candidate?reviewFor(p):candidateFor(p));});
  await assert.rejects(f.listing.complete(f.reference));
  const before=f.ai.completionJournal.list(f.draft.id)[0], old=structuredClone(before.rounds[0][step as 'candidate'|'review']);
- const result=await f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},undefined,before.id);
- assert.equal((result.draft.attributes.material as any)[0].value,'Silicone');
+ await assert.rejects(f.listing.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},undefined,before.id),/未自动重发/);
  const after=f.ai.completionJournal.get(before.id),entry=after.rounds[0][step as 'candidate'|'review']!;
- assert.deepEqual((entry as any).previous,[old]);assert.equal(f.requests.length,3);
+ assert.deepEqual(entry,old);assert.equal(f.requests.length,step==='review'?2:1);assert.equal(after.rounds[0].candidate.resultId,before.rounds[0].candidate.resultId);
 });
 
 test('saved field candidate with missing journal reference is recovered with zero replacement calls',async t=>{

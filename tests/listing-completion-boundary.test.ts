@@ -14,14 +14,16 @@ import { AiService } from '../src/main/ai/service.ts';
 import { mockStorage } from './fixtures/listing-ai.ts';
 
 const issue={code:'90220',message:'Missing material',severity:'ERROR' as const,attributeNames:['material'],autoFixable:false,source:'amazon' as const,category:'field' as const};
-test('a new completion service retries a lost field response within its original operation',async t=>{
+test('a new completion service preserves a lost field response without another send after key rotation',async t=>{
   const f=await fixture(t);
   f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});
   f.respond(()=>{throw new Error('response lost after entering fetch');});
   await assert.rejects(f.listing.complete(f.reference));
+  const original=f.listing.completionOperations(f.draft.id)[0].rounds[0].candidate.id;
+  f.ai.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});
   const next=new ListingAiService(f.store,f.amazon,f.ai);
   await assert.rejects(next.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision}));
-  assert.equal(f.requests.length,2);assert.equal(next.completionOperations(f.draft.id).length,1);assert.equal(next.completionOperations(f.draft.id)[0].rounds[0].candidate.previous?.length,1);
+  assert.equal(f.requests.length,1);assert.equal(next.completionOperations(f.draft.id).length,1);assert.equal(next.completionOperations(f.draft.id)[0].rounds[0].candidate.id,original);assert.equal(next.completionOperations(f.draft.id)[0].rounds[0].candidate.previous?.length??0,0);
 });
 
 for(const failure of ['quota','journal-write'] as const)test(`${failure} before fetch rolls back all three records and reuses the fixed call ID`,async t=>{
@@ -95,12 +97,12 @@ test('overlapping completion coordinators cannot overwrite a sent round with an 
   assert.equal(f.requests.length,1);const op=f.listing.completionOperations(f.draft.id)[0];assert.equal(op.rounds.length,1);assert.equal(op.rounds[0].candidate.sent,true);
 });
 
-test('a real child process crash preserves paid history and bounded retries on process restart',async t=>{
+test('a real child process crash preserves the original paid request without resending on restart',async t=>{
   const f=await fixture(t);await f.ai.close();
   const run=(mode:string)=>spawnSync(process.execPath,['tests/fixtures/completion-crash.ts',f.directory,f.draft.id,mode],{encoding:'utf8',timeout:20000,windowsHide:true});
   const crash=run('crash');assert.equal(crash.status,73,crash.stderr);assert.equal(crash.stdout.trim(),'FETCH_ENTERED');
-  for(let n=0;n<3;n++){const restart=run('recover');assert.equal(restart.status,0,restart.stderr);assert.equal(restart.stdout.trim(),n<2?'FETCH_ENTERED\nUNKNOWN_PRESERVED':'UNKNOWN_PRESERVED');}
-  const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT id FROM ai_calls').all().length,3);assert.equal(db.prepare('SELECT id FROM ai_usage_ledger').all().length,3);assert.equal(db.prepare('SELECT id FROM ai_results').all().length,0);}finally{db.close();}
+  for(let n=0;n<3;n++){const restart=run('recover');assert.equal(restart.status,0,restart.stderr);assert.equal(restart.stdout.trim(),'UNKNOWN_PRESERVED');}
+  const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT id FROM ai_calls').all().length,1);assert.equal(db.prepare('SELECT id FROM ai_usage_ledger').all().length,1);assert.equal(db.prepare('SELECT id FROM ai_results').all().length,0);}finally{db.close();}
 });
 
 test('a transport timeout after entering fetch is UNKNOWN after restarting the AI service',async t=>{
@@ -110,7 +112,7 @@ test('a transport timeout after entering fetch is UNKNOWN after restarting the A
   try{
     await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference),(error:any)=>error.code==='TIMEOUT');assert.equal(posts,1);assert.equal(ai.listCalls()[0].errorCode,'TIMEOUT');await ai.close();
     ai=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:async()=>{posts++;throw new Error('Unexpected replay');}});
-    await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference));assert.equal(posts,2);
+    await assert.rejects(new ListingAiService(f.store,f.amazon,ai).complete(f.reference));assert.equal(posts,1);
   }finally{await ai.close();}
 });
 
@@ -197,4 +199,29 @@ test('Schema-interrupted review retains response and fees but blocks without a s
   assert.equal(f.requests.length,2);assert.equal(f.ai.listCalls().filter(c=>c.schemaResponseRetained).length,1);
   failing=false;await assert.rejects(f.listing.complete(f.reference,undefined,operation.id),/已收到响应/);
   assert.equal(f.requests.length,2);assert.equal(f.amazon.getDraft(f.draft.id).fieldAdoptions?.length??0,0);
+});
+
+for(const status of [401,403,402,429])test(`explicit HTTP ${status} rejection retains the original three-send budget`,async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});
+ f.respond(()=>new Response(JSON.stringify({error:'synthetic rejection'}),{status}));
+ await assert.rejects(f.listing.complete(f.reference));const op=f.listing.completionOperations(f.draft.id)[0],id=op.rounds[0].candidate.id;
+ assert.equal(f.listing.completionUnknown(op.id),false);
+ f.ai.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});
+ for(let n=0;n<3;n++)await assert.rejects(f.listing.complete(f.reference));
+ const after=f.listing.getCompletion(op.id);assert.equal(f.requests.length,3);assert.equal(after.rounds[0].candidate.previous?.length,2);assert.equal(after.rounds[0].candidate.previous?.[0].id,id);assert.equal(f.ai.getUsageSummary('deepseek').attempts,3);
+});
+
+for(const status of [500,503])test(`ambiguous HTTP ${status} cannot obtain another field call ID`,async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>new Response('{}',{status}));
+ await assert.rejects(f.listing.complete(f.reference));const before=f.listing.completionOperations(f.draft.id)[0];
+ await assert.rejects(f.listing.complete(f.reference),/未自动重发/);assert.equal(f.requests.length,1);assert.equal(f.listing.getCompletion(before.id).rounds[0].candidate.id,before.rounds[0].candidate.id);
+});
+
+test('legacy unsent retry checkpoint cannot bypass the original unknown request',async t=>{
+ const f=await fixture(t);f.amazon.previewDraft=async()=>({...f.amazon.getDraft(f.draft.id),state:'BLOCKED',previewIssues:[issue]});f.respond(()=>{throw Error('synthetic lost reply');});await assert.rejects(f.listing.complete(f.reference));
+ const op=f.listing.completionOperations(f.draft.id)[0],old=structuredClone(op.rounds[0].candidate);
+ op.rounds[0].candidate={id:randomUUID(),sent:false,resultId:null,previous:[old]};f.ai.completionJournal.save(op);
+ f.ai.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});
+ assert.equal(f.listing.completionUnknown(op.id),true);
+ await assert.rejects(f.listing.complete(f.reference),/未自动重发/);assert.equal(f.requests.length,1);assert.deepEqual(f.listing.getCompletion(op.id).rounds[0].candidate,op.rounds[0].candidate);
 });

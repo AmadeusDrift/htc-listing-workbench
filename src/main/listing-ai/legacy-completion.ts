@@ -1,4 +1,5 @@
 import { linkLegacyPreparation } from '../image-workflow/completion-link.ts';
+import { isDefinitiveFieldRejection } from './request-outcome.ts';
 import { isGenerationProvider } from "../ai/primitives.ts";
 import { isFullSchema } from "./native-values.ts";
 import {randomUUID} from 'node:crypto';
@@ -39,6 +40,7 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
   for(const call of bound){const row=db.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(call.id);if(!row)invalid();const usage=validateAiUsageRecord(JSON.parse(String(row!.record_json)));if(call.productId!==draft.productId||call.productRevision!==draft.productRevision||call.presentationContext?.variantId!==draft.variantId||usage.id!==call.id||usage.providerId!==call.providerId||usage.startedAt!==call.startedAt)invalid();}
   if(bound.some(call=>call.status==='RUNNING'))invalid();
   const missing=bound.filter(call=>!results.some(result=>result.callId===call.id));
+  const unresolved=missing.some(call=>!isDefinitiveFieldRejection(call))||!results.length&&!bound.length;
   // A received invalid response must use its frozen response recovery, never a blind resend.
   if(missing.some(call=>call.responseReceived||call.rejection||call.errorCode==='OUTPUT_INVALID'))invalid();
   if(rounds.length&&rounds.some(round=>!isFullSchema(round.context))){if(!legacyScopeHash||rounds.some(round=>isFullSchema(round.context)))invalid();operation.scopeHash=legacyScopeHash!();}
@@ -51,6 +53,7 @@ export function recoverLegacyCompletion(db:DatabaseSync,operation:CompletionOper
     if(!step){step={contextHash,kind,callIds:[]};stepDebts.push(step);}step.callIds.push(call.id);
   }
   operation.legacyRecovery={checkpointIds:owners.map(owner=>owner.id),callIds:[...new Set([...results.map(result=>result.callId),...bound.map(call=>call.id)])],resultIds:results.map(result=>result.id),adoptionIds:(draft.fieldAdoptions??[]).map(a=>a.id),priorRounds:Math.max(0,candidates.length-selected.length),missingAttemptDebt:!results.length&&!missing.length?1:0,stepDebts};
+  if(unresolved)operation.state='GUARD';
   return operation;
 }
 export function linkLegacyCompletionOwners(db:DatabaseSync,draftId:string,operationId:string):void {

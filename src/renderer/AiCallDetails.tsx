@@ -1,5 +1,5 @@
 import type {AiCallDetail} from '../shared/ai-purpose-contracts';
 export function AiCallDetails({details,total}:{details:AiCallDetail[];total:number}){
- const status=(v:AiCallDetail)=>v.status==='SUCCEEDED'?'成功':v.status==='FAILED'?'失败':v.status==='RUNNING'?'处理中':v.httpStatus!==null?(v.httpStatus>=400?'接口拒绝':'已收到响应（不代表已采用）'):'结果未知';
+ const status=(v:AiCallDetail)=>v.status==='SUCCEEDED'?'有效结果已保存（采用另核对）':v.status==='FAILED'?'本地步骤失败（确定性需看原证据）':v.status==='RUNNING'?'处理中':v.httpStatus!==null?(v.httpStatus>=400?'接口拒绝':'已收到响应（不代表已采用）'):'结果未知';
  return <details className="listing-details"><summary>逐次调用模型与提供商（当前日期范围最新 {details.length} / {total} 条）</summary><p className="settings-help">使用已保存回执，不发起网络查询。未返回的实际模型和提供商不根据渠道或所选模型推测。点击“读取明细”手动更新；历史记录不补写。</p><div style={{overflowX:'auto'}}><table><thead><tr><th>请求时间</th><th>渠道 / 所选模型</th><th>实际模型</th><th>实际提供商</th><th>结果</th></tr></thead><tbody>{details.map(call=><tr key={call.id}><td>{new Date(call.startedAt).toLocaleString()}<br/><small>{call.receivedAt?'响应：'+new Date(call.receivedAt).toLocaleString():'尚无响应时间'}</small></td><td>{call.gateway}<br/>{call.model}</td><td>{call.actualModel??'未返回'}</td><td>{call.actualProvider??'未返回'}</td><td>{status(call)}{call.httpStatus!==null?` · HTTP ${call.httpStatus}`:''}</td></tr>)}</tbody></table>{!details.length&&<p>此日期范围没有调用记录。</p>}</div></details>;
 }

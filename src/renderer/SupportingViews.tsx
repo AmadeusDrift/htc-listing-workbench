@@ -17,11 +17,15 @@ import { settingsModules, type SettingsModule } from './settings-navigation';
 import { HostingSettings } from './HostingSettings';
 import { ItemLabelSettings } from './ItemLabelSettings';
 import { SkuNamingSettings } from './SkuNamingSettings';
+import { RunDiagnostics } from './RunDiagnostics';
 
 export function AuditView({ events, products, busy, onRefresh }: { events: AuditEvent[]; products: ProductSummary[]; busy: boolean; onRefresh: () => void }) {
+  const [diagnosticTask, setDiagnosticTask] = useState('');
   return <section className="utility-panel"><div className="section-heading"><div><h2>操作记录</h2><p>查看商品资料、导入导出和图片关联的本地操作记录。</p></div><button type="button" className="button secondary" disabled={busy} onClick={onRefresh}><RefreshCw size={15} />刷新记录</button></div>
     {events.length === 0 ? <div className="asset-empty"><div className="empty-icon"><History size={32} strokeWidth={1.3} /></div><h3>还没有操作记录</h3><p>创建、保存或导入商品后，记录会出现在这里。</p></div> : <div className="audit-table-wrap"><table className="audit-table"><thead><tr><th>时间</th><th>操作内容</th><th>关联商品</th></tr></thead><tbody>{events.map((event) => <tr key={event.id}><td className="audit-time" data-label="时间">{formatDate(event.createdAt)}</td><td data-label="操作内容"><span className="audit-event-dot" />{event.summary}</td><td data-label="关联商品">{event.productId ? products.find((product) => product.id === event.productId)?.title || `商品 ${event.productId.slice(0, 8)}` : <span className="muted">工作区</span>}</td></tr>)}</tbody></table></div>}
-    <div className="utility-footer"><ShieldCheck size={14} />共 {events.length} 条已读取记录</div>
+    {events.some(e => e.evidence) && <details className="listing-details"><summary>运行与错误证据详情</summary>{events.filter(e => e.evidence).map(e => <div key={e.id}><p>{formatDate(e.createdAt)} · {e.evidence!.stage} · {'event' in e.evidence! ? e.evidence!.event : e.evidence!.code} · call：{e.evidence!.callId ?? '历史未保存'}{e.evidence!.taskId && <button type="button" className="button secondary" disabled={busy} onClick={() => setDiagnosticTask(e.evidence!.taskId!)}>查看原任务诊断</button>}</p>{e.evidence!.abortSource && <p>取消来源：{e.evidence!.abortSource}</p>}</div>)}</details>}
+    <RunDiagnostics busy={busy} initialTaskId={diagnosticTask} />
+    <div className="utility-footer"><ShieldCheck size={14} />共 {events.length} 条已读取操作摘要；任务诊断另按完整范围分页</div>
   </section>;
 }
 

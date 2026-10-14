@@ -2,6 +2,7 @@ import {retainCategoryRepairs} from './ai/category-recovery.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
+import { retainRunEvidence } from './diagnostics/run-evidence-history.ts';
 import {referencePinHistory,retainReferencePinHistory} from './hosting/reference-history.ts';
 import {referencePinArtifactPaths} from './hosting/reference-pins.ts';
 import {CANDIDATE_DIRECTORY,candidateBackupPath,candidateBackupFiles,retainCandidateFiles} from './image-generation/candidate-backup.ts';
@@ -449,6 +450,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
     retainWorkBatches(current,snapshot,migratedWorkBatches);
+    retainRunEvidence(current,snapshot);
     snapshot.exec('COMMIT');
   } catch (error) { try { snapshot.exec('ROLLBACK'); } catch { /* Transaction may have failed before acquiring its lock. */ } throw error;
   } finally { snapshot.close(); current.close(); }

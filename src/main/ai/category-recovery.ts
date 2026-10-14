@@ -22,12 +22,12 @@ export function assertCategoryRepairAvailable(db:DatabaseSync,prior:AiCall,scope
 export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:string;calls:AiCall[];results:AiResult[];productId:string;productRevision:number;model:string;effort:string;context:NonNullable<AiCall['categoryContext']>;payloadHash:string;originalBatchCallId?:string}){
  const {db,directory,results,context}=options, calls=categoryCalls(options.calls,options.productId,options.productRevision);
  if(db.prepare("SELECT 1 FROM audit_events WHERE action=? AND json_extract(detail_json,'$.productId')=? AND json_extract(detail_json,'$.productRevision')=?").get(TOMBSTONE,options.productId,options.productRevision))fail('恢复备份前存在类目请求记录，当前备份缺少完整请求结果；本次未重发，请核对历史记录');
- let prior:AiCall|undefined;
+ const priors:AiCall[]=[];
  for(const call of calls){
   if(call.id===options.originalBatchCallId)continue;
   const owned=results.find(r=>r.callId===call.id&&r.productId===call.productId&&r.productRevision===call.productRevision&&r.model===call.model&&r.providerId===call.providerId&&r.output.kind==='category-decision');
   if(call.status==='SUCCEEDED'&&owned)continue;
-  const consumed=db.prepare("SELECT detail_json FROM audit_events WHERE action=? AND json_extract(detail_json,'$.priorCallId')=?").get(ACTION,call.id);
+  const consumed=db.prepare("SELECT detail_json FROM audit_events WHERE action=? AND (json_extract(detail_json,'$.priorCallId')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(detail_json,'$.priorCallIds')) WHERE value=?))").get(ACTION,call.id,call.id);
   if(consumed){const retryId=JSON.parse(String(consumed.detail_json)).retryCallId;const retry=calls.find(c=>c.id===retryId&&c.status==='SUCCEEDED');if(retry&&results.some(r=>r.callId===retry.id&&r.productId===retry.productId&&r.productRevision===retry.productRevision&&r.model===retry.model&&r.providerId===retry.providerId&&r.output.kind==='category-decision'))continue;}
   const phase=call.categoryContext?.phase??(call.purposeSnapshot?.purposeId==='category_decision'?'select':undefined);
   // Unresolved calls block even after a model/configuration change. Never infer a timeout was rejected.
@@ -35,8 +35,7 @@ export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:st
   const exact=!call.categoryContext&&call.status==='FAILED'&&call.errorCode==='PROVIDER_ERROR'&&phase==='select'&&receipt?.callId===call.id&&receipt.model===call.model&&receipt.gateway==='openrouter'&&receipt.endpoint==='/api/alpha/decisions'&&receipt.status===400&&receipt.body?.error?.code===400&&receipt.body.error.message===rejection;
   if(!exact)fail('类目历史请求结果尚未确认或失败原因不属于本次参数修复；原记录保留，本次未重发，请核对原响应');
   if(context.phase==='select'){
-   if(prior)fail('存在多条未解决类目请求，需逐条核对；本次未发送');
-   prior=call;assertCategoryRepairAvailable(db,call,`${call.productId}:${call.productRevision}:select`);
+   priors.push(call);assertCategoryRepairAvailable(db,call,`${call.productId}:${call.productRevision}:select`);
   }
  }
  const saved=results.find(r=>{
@@ -44,13 +43,14 @@ export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:st
   const call=calls.find(c=>c.id===r.callId&&c.status==='SUCCEEDED'&&c.providerId===r.providerId&&c.model===r.model);
   return !!call&&call.purposeSnapshot?.effectiveEffort===options.effort&&(!call.categoryContext||call.categoryContext.requestSha256===context.requestSha256);
  });
- return {saved,prior,calls};
+ return {saved,priors,calls};
 }
 /** Called within usage reservation transaction: claim and new call succeed or roll back together. */
-export function claimCategoryRepair(db:DatabaseSync,prior:AiCall,retry:AiCall):void{
- const scopeKey=`${prior.productId}:${prior.productRevision}:select`;assertCategoryRepairAvailable(db,prior,scopeKey);
+export function claimCategoryRepair(db:DatabaseSync,priors:AiCall[],retry:AiCall):void{
+ const prior=priors[0];if(!prior||priors.some(p=>p.productId!==prior.productId||p.productRevision!==prior.productRevision)||new Set(priors.map(p=>p.id)).size!==priors.length)fail('类目修复历史请求组无效');
+ const scopeKey=`${prior.productId}:${prior.productRevision}:select`;for(const member of priors)assertCategoryRepairAvailable(db,member,scopeKey);
  if(!db.prepare('SELECT 1 FROM ai_calls WHERE id=?').get(retry.id)||!db.prepare('SELECT 1 FROM ai_usage_ledger WHERE id=?').get(retry.id))fail('类目请求记账未完成');
- appendAuditEvent(db,claimId(scopeKey),prior.productId,ACTION,'Decisions 图片参数修复后手动接续一次',JSON.stringify({version:1,scopeKey,priorCallId:prior.id,retryCallId:retry.id}),retry.startedAt);
+ appendAuditEvent(db,claimId(scopeKey),prior.productId,ACTION,'Decisions 图片参数修复后手动接续一次',JSON.stringify({version:2,scopeKey,priorCallId:prior.id,priorCallIds:priors.map(p=>p.id).sort(),retryCallId:retry.id}),retry.startedAt);
 }
 export function retainCategoryRepairs(current:DatabaseSync,snapshot:DatabaseSync):void{
  // Preserve a safety-only tombstone when restoring a snapshot predating a category call.
@@ -67,7 +67,7 @@ export function retainCategoryRepairs(current:DatabaseSync,snapshot:DatabaseSync
  }
 
  for(const row of current.prepare('SELECT * FROM audit_events WHERE action=?').all(ACTION)){
-  const d=JSON.parse(String(row.detail_json));if(d.version!==1||Object.keys(d).sort().join()!=='priorCallId,retryCallId,scopeKey,version'||typeof d.scopeKey!=='string'||!/^[-a-f0-9]{36}:[0-9]+:select$/.test(d.scopeKey)||claimId(d.scopeKey)!==row.id||![d.priorCallId,d.retryCallId].every(v=>typeof v==='string'&&/^[a-f0-9-]{36}$/.test(v)))fail('类目修复接续记录无效');
+  const d=JSON.parse(String(row.detail_json));if(![1,2].includes(d.version)||Object.keys(d).sort().join()!==(d.version===1?'priorCallId,retryCallId,scopeKey,version':'priorCallId,priorCallIds,retryCallId,scopeKey,version')||d.version===2&&(!Array.isArray(d.priorCallIds)||!d.priorCallIds.length||d.priorCallIds.length>10000||!d.priorCallIds.every((v:unknown)=>typeof v==='string'&&/^[a-f0-9-]{36}$/.test(v))||!d.priorCallIds.includes(d.priorCallId)||new Set(d.priorCallIds).size!==d.priorCallIds.length)||typeof d.scopeKey!=='string'||!/^[-a-f0-9]{36}:[0-9]+:select$/.test(d.scopeKey)||claimId(d.scopeKey)!==row.id||![d.priorCallId,d.retryCallId].every(v=>typeof v==='string'&&/^[a-f0-9-]{36}$/.test(v)))fail('类目修复接续记录无效');
   const old=snapshot.prepare('SELECT * FROM audit_events WHERE id=?').get(row.id);if(old){if(old.action!==row.action||old.detail_json!==row.detail_json||old.created_at!==row.created_at)fail('类目修复接续记录冲突');continue;}
   appendAuditEvent(snapshot,String(row.id),null,ACTION,String(row.summary),String(row.detail_json),String(row.created_at));
  }

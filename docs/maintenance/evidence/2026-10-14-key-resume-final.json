@@ -1,0 +1,66 @@
+{
+  "passed": true,
+  "delivery": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-接续与提示修正版-20261014",
+  "exe": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-接续与提示修正版-20261014\\HTC.exe",
+  "archive": "C:\\Users\\12079\\OneDrive\\Desktop\\亚马逊Haul普品\\HTC-2.5.0-接续与提示修正版-20261014.zip",
+  "archiveBytes": 163547268,
+  "archiveSha256": "7414edccbec46207d95325aa730fe1e17d1301572b3838622977679f48c08223",
+  "files": 89,
+  "sourceCommit": "8e611d1ea1fcf6ffaa0874762aa13b074dcce552",
+  "manifestSha256": "1d9883614360bada7e199f6c99cd46e8e30cb18a0bcb0f3386fdf074989b46e7",
+  "exeSha256": "bd14928e0728366fd3f41499cb398ff3f4304dab259a3e605077899a6f8c748e",
+  "allFolderAndArchiveFileHashesVerified": true,
+  "activated": false,
+  "validation": {
+    "fullSuite": {
+      "sourceCommit": "8e611d1ea1fcf6ffaa0874762aa13b074dcce552",
+      "total": 3178,
+      "passed": 3170,
+      "failed": 5,
+      "skipped": 3,
+      "durationMs": 808579.4343,
+      "log": "artifacts/resume-full-8e611d1.log"
+    },
+    "resolvedOldPolicyAssertions": 5,
+    "unresolvedFailures": 0,
+    "policyRetest": {
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "log": "artifacts/resume-policy-retest.log"
+    },
+    "candidateExePassed": true,
+    "candidateInboxRows": [
+      100,
+      51
+    ],
+    "typecheckPassed": true,
+    "boundariesPassed": true
+  },
+  "authorizedCopy": {
+    "passed": true,
+    "isolatedCopy": true,
+    "syntheticCredentials": true,
+    "mockRequests": 3,
+    "realRequests": 0,
+    "originalCallsUnchanged": 1797,
+    "results": [
+      {
+        "sku": "H2-261014-1-B",
+        "status": "MATCH"
+      },
+      {
+        "sku": "H2-261014-1-C",
+        "status": "MATCH"
+      },
+      {
+        "sku": "H2-261014-1-A",
+        "status": "MATCH"
+      }
+    ],
+    "originalSnapshotManifestHashMatches": true
+  },
+  "realTaskTouched": false,
+  "paidNetworkRequests": 0,
+  "schemaVersion": 33
+}

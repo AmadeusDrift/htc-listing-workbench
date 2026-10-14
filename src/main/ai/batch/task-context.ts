@@ -3,7 +3,7 @@ import type { AiPurposeSnapshot } from '../../../shared/ai-purpose-contracts.ts'
 import type { ListingExecutionMode } from '../../../shared/ai-batch-contracts.ts';
 export interface TaskAiScope {
  taskId:string;rowKey:string;phase:string;mode:ListingExecutionMode;
- waitingOperationId?:string;credentialScope?:string;purposes?:AiPurposeSnapshot[];authorize():boolean;
+ explicitContinueAt?:string;waitingOperationId?:string;credentialScope?:string;purposes?:AiPurposeSnapshot[];authorize():boolean;
 }
 export const taskAiContext=new AsyncLocalStorage<TaskAiScope>();
 export class BatchWaitingError extends Error {

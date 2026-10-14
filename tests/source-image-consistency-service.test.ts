@@ -42,14 +42,14 @@ test('concurrent service instances reserve exactly one send and no second usage 
   const f=await fixture(t),other=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
   try{const results=await Promise.allSettled([f.observe(),other.observeSourceConsistency(f.context(),()=>{})]);assert.ok(results.some(r=>r.status==='fulfilled'));assert.equal(f.count(),1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);}finally{await other.close();}
 });
-test('malformed paid output remains recoverable while unknown transport gets bounded retries',async t=>{
+test('malformed paid output remains recoverable while unknown transport stays blocked',async t=>{
   for(const kind of ['malformed','unknown']){
     const f=await fixture(t);f.respond(()=>{if(kind==='unknown')throw new TypeError('synthetic transport unknown');return chat({kind:'source-image-consistency',verdict:'PASS'});});
-    await assert.rejects(f.observe(),e=>{assert.equal(f.count(),1,String(e));return true;});assert.equal(f.count(),1);await assert.rejects(f.observe());assert.equal(f.count(),kind==='unknown'?2:1);
+    await assert.rejects(f.observe(),e=>{assert.equal(f.count(),1,String(e));return true;});assert.equal(f.count(),1);await assert.rejects(f.observe());assert.equal(f.count(),1);
     assert.ok(f.db.prepare('SELECT id FROM source_consistency_attempts WHERE id=?').get(consistencyScopeKey(f.context())));
     assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_assessments').get()!.n,0);
     await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
-    try{restarted.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});restarted.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false});restarted.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:0});await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),kind==='unknown'?2:1);}finally{await restarted.close();}
+    try{restarted.saveConnection({id:'deepseek',apiKey:'rotated-synthetic-key'});restarted.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:false});restarted.setUsagePolicy({providerId:'deepseek',dailyCallLimit:0,dailyTokenLimit:0});await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),1);}finally{await restarted.close();}
   }
 });
 test('presend cancellation and quota rejection do not reserve consistency attempt',async t=>{
@@ -95,11 +95,11 @@ test('midflight pause and managed-byte replacement retain liability without acce
   }
 });
 
-test('assessment write failure rolls back success atomically and retries when original result is unavailable',async t=>{
+test('assessment write failure rolls back success atomically and preserves unknown result protection',async t=>{
   const f=await fixture(t);f.db.exec("CREATE TRIGGER synthetic_assessment_failure BEFORE INSERT ON source_consistency_assessments BEGIN SELECT RAISE(ABORT,'synthetic storage failure'); END");
   await assert.rejects(f.observe());f.db.exec('DROP TRIGGER synthetic_assessment_failure');
   assert.equal(f.db.prepare('SELECT count(*) n FROM ai_results').get()!.n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_assessments').get()!.n,0);assert.equal(f.count(),1);
-  await f.observe();assert.equal(f.count(),2);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,2);
+  await assert.rejects(f.observe());assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);
 });
 
 test('actual older encrypted restore retains unknown send guard without restoring positive proof',async t=>{
@@ -254,10 +254,10 @@ test('source malformed HTTP 200 envelope retains safe text and never becomes a m
   }
 });
 
-test('unknown source owner resumes at most three sends and never resets history',async t=>{
+test('unknown source owner never resends and never resets history',async t=>{
  const f=await fixture(t);f.respond(()=>{throw Error('synthetic unavailable');});const input={productId:f.p.id,productRevision:f.p.revision,variantId:f.p.variants[0].id};
  for(let n=0;n<5;n++)await assert.rejects(f.ai.prepareSourceConsistency(input));
- assert.equal(f.count(),3);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,3);assert.equal(f.ai.getUsageSummary('deepseek').attempts,3);
+ assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);
  await createWorkspaceBackup(f.directory,join(f.directory,'source-retry.htcbackup'),'synthetic source retry backup');
 });
 
@@ -265,4 +265,74 @@ test('unknown source call with corrupt ownership stops without another paid rese
  const f=await fixture(t);f.respond(()=>{throw Error('synthetic unavailable');});await assert.rejects(f.observe());
  const row=f.db.prepare('SELECT record_json FROM ai_calls').get()!,call=JSON.parse(String(row.record_json));call.productRevision++;f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
  await assert.rejects(f.observe());assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);
+});
+
+import { taskAiContext } from '../src/main/ai/batch/task-context.ts';
+import { sourceConsistencyUnknown } from '../src/main/source-image-consistency/proof.ts';
+function explicitlyContinue<T>(action:()=>T):T{return taskAiContext.run({taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate',explicitContinueAt:new Date().toISOString(),authorize:()=>true},action);}
+test('confirmed auth rejection requires refreshed credentials and explicit continue; keeps original budget',async t=>{
+ const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic rejected'}},{status:401}));
+ await assert.rejects(f.observe());const original=f.ai.listCalls()[0];
+ assert.equal(original.errorCode,'AUTH_FAILED');assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),false);
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ f.ai.saveFunctionSettings({id:'deepseek',model:'deepseek-v4-pro',enabled:true});
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ f.ai.saveConnection({id:'deepseek',apiKey:'new-synthetic-key'});
+ await assert.rejects(f.observe());assert.equal(f.count(),1);
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),2);
+ f.ai.saveConnection({id:'deepseek',apiKey:'third-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),3);
+ f.ai.saveConnection({id:'deepseek',apiKey:'fourth-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),3);
+ assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
+});
+test('unknown source transport never resends after changed credentials and explicit continuation',async t=>{
+ const f=await fixture(t);f.respond(()=>{throw new TypeError('synthetic unknown');});await assert.rejects(f.observe());
+ f.ai.saveConnection({id:'deepseek',apiKey:'rotated-unknown-synthetic'});
+ await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+});
+
+test('403 retry survives restart and requires a continuation after the credential update',async t=>{
+ const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic forbidden'}},{status:403}));await assert.rejects(f.observe());
+ assert.equal(readConsistencyView(f.db,f.context()).status,'SYSTEM_REPAIR');assert.deepEqual(readConsistencyView(f.db,f.context()).reasons,['SOURCE_CONSISTENCY_AUTH_FAILED']);
+ const oldScope={taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate' as const,explicitContinueAt:'2020-01-01T00:00:00Z',authorize:()=>true};
+ f.ai.saveConnection({id:'deepseek',apiKey:'restart-rotated-synthetic'});
+ await assert.rejects(taskAiContext.run(oldScope,()=>f.observe()));assert.equal(f.count(),1);
+ await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
+ try{await assert.rejects(restarted.observeSourceConsistency(f.context(),()=>{}));assert.equal(f.count(),1);await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),2);}finally{await restarted.close();}
+});
+test('saving the same credential or bare AUTH_FAILED without HTTP refusal cannot unlock source attempts',async t=>{
+ const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic denied'}},{status:401}));await assert.rejects(f.observe());
+ f.ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);
+ f.db.prepare('DELETE FROM ai_provider_receipts').run();
+ f.ai.saveConnection({id:'deepseek',apiKey:'different-synthetic-key'});await assert.rejects(explicitlyContinue(()=>f.observe()));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);
+});
+test('timeout interrupted and cancelled source records remain unknown after restart and explicit continuation',async t=>{
+ for(const code of ['TIMEOUT','INTERRUPTED','CANCELLED','PROVIDER_ERROR'] as const){
+ const f=await fixture(t);f.respond(()=>{throw new TypeError('synthetic response lost');});await assert.rejects(f.observe());
+ const call=f.ai.listCalls()[0];call.errorCode=code;f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
+ f.ai.saveConnection({id:'deepseek',apiKey:'unknown-new-synthetic'});await f.ai.close();const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,f.dependencies);
+ try{await assert.rejects(explicitlyContinue(()=>restarted.observeSourceConsistency(f.context(),()=>{})));assert.equal(f.count(),1);assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);}finally{await restarted.close();}
+ }
+});
+
+test('actual OpenRouter source request with reference port resumes a stale immediate task scope',async t=>{
+ const f=await fixture(t);await f.ai.close();
+ const ai=new AiService(f.directory,f.store,f.hosting,mockStorage,{...f.dependencies,batchReferences:{prepare:async()=>{throw Error('Immediate mode must not pin Batch references');},validate:()=>true}});
+ try{
+ ai.saveConnection({id:'openrouter',apiKey:'old-openrouter-synthetic'});ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});
+ const purpose=ai.getPurposeProfiles().find(p=>p.purposeId==='source_understanding')!;ai.savePurposeProfile({purposeId:purpose.purposeId,expectedRevision:purpose.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ const plan=ai.taskBatchPlan();ai.saveConnection({id:'openrouter',apiKey:'new-openrouter-synthetic'});
+ const result=await taskAiContext.run({taskId:randomUUID(),rowKey:'source',phase:'sources',mode:'immediate',credentialScope:plan.credentialScope,purposes:plan.purposes,explicitContinueAt:new Date().toISOString(),authorize:()=>true},()=>ai.observeSourceConsistency(f.context(),()=>{}));
+ assert.equal(result.output.kind,'source-image-consistency');assert.equal(f.count(),1);assert.equal(ai.listCalls().length,1);
+ }finally{await ai.close();}
+});
+
+test('legacy saved-connection audit supports denied source recovery without altering old calls',async t=>{
+ const f=await fixture(t);f.respond(()=>Response.json({error:{message:'synthetic old denial'}},{status:401}));await assert.rejects(f.observe());const original=f.ai.listCalls()[0];
+ f.ai.saveConnection({id:'deepseek',apiKey:'legacy-new-synthetic'});
+ const profile=f.ai.listProfiles().find(p=>p.id==='deepseek')!;
+ f.db.prepare("DELETE FROM audit_events WHERE action='ai.credentials.updated'").run();
+ f.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(),null,'ai.connection.saved','Synthetic legacy credential save',JSON.stringify({vendorId:'deepseek',profiles:[{id:profile.id,generation:profile.generation}]}),new Date().toISOString());
+ f.respond(p=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:[]}))}));
+ await explicitlyContinue(()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
 });

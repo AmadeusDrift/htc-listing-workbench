@@ -186,3 +186,29 @@ test('P05 fresh prepared Batch operations obey the current selected SKU before P
  selected=['one'];runtime.resume(one.taskId);await runtime.flush(one.taskId);
  assert.equal(posts,1);assert.equal(body.requests.length,1);assert.ok(runtime.find(one.operationId));assert.equal(runtime.find(two.operationId),undefined);
 });
+
+test('immediate unsent request ignores stale task credential scope but staged Batch does not',async t=>{
+ const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();
+ let current=op.credentialScope;
+ const runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
+ const scope={taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'immediate' as const,credentialScope:'f'.repeat(64),authorize:()=>true};
+ assert.equal(await runtime.run(scope,()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),null);
+ await assert.rejects(runtime.run({...scope,mode:'deferred_batch',credentialScope:current},()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),{name:'BatchWaitingError'});
+ current='d'.repeat(64);
+ await assert.rejects(runtime.run({...scope,credentialScope:op.credentialScope},()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),/连接快照/);
+});
+
+test('changed operation identity cannot bypass existing task Batch after credential rotation',async t=>{
+ const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();
+ let current=op.credentialScope;const runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
+ const scope={taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'deferred_batch' as const,credentialScope:current,authorize:()=>true};
+ await assert.rejects(runtime.run(scope,()=>runtime.request({operation:op,authorize:()=>true,reserve:()=>{}})),{name:'BatchWaitingError'});
+ current='e'.repeat(64);
+ await assert.rejects(runtime.run({...scope,mode:'immediate'},()=>runtime.request({operation:{...op,operationId:randomUUID(),credentialScope:current},authorize:()=>true,reserve:()=>{}})),/连接快照|Batch/);
+});
+
+test('persisted Batch identity blocks a changed operation id even without the old task scope snapshot',async t=>{
+ const fetcher:typeof fetch=async()=>{throw Error('No network');},f=fixture(t,fetcher),op=f.operation();f.service.prepare([op]);
+ const current='e'.repeat(64),runtime=new TaskBatchRuntime(f.db,f.directory,{fetch:fetcher,credential:()=>({apiKey:'synthetic',scope:current})});
+ await assert.rejects(runtime.run({taskId:op.taskId,rowKey:'sku',phase:'copy',mode:'immediate',authorize:()=>true},()=>runtime.request({operation:{...op,operationId:randomUUID(),credentialScope:current},authorize:()=>true,reserve:()=>{}})),/连接快照|Batch/);
+});

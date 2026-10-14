@@ -5,8 +5,12 @@ import { batchFingerprint,readItem } from './records.ts';
 import { taskAiContext,BatchWaitingError } from './task-context.ts';
 import type { TaskAiScope } from './task-context.ts';
 import { readProviderReceipt } from '../receipts.ts';
+import { AiError } from '../errors.ts';
 import { UserFacingError } from '../../../shared/errors.ts';
 
+class BatchIdentityError extends AiError {
+ constructor(message:string){super('CONFIG_CHANGED');this.message=message;}
+}
 type Prepared={operation:BatchOperation;authorize:()=>boolean;reserve:()=>void};
 /** A task sweep stages real adapter requests. Only flush sends the grouped Batch envelope. */
 export class TaskBatchRuntime {
@@ -24,24 +28,32 @@ export class TaskBatchRuntime {
  run<T>(scope:TaskAiScope,action:()=>T):T{return taskAiContext.run(scope,action);}
  find(operationId:string):BatchItem|undefined{const row=this.db.prepare("SELECT id FROM ai_batch_items WHERE json_extract(record_json,'$.operationId')=? AND json_extract(record_json,'$.attempt')=1").get(operationId);return row?readItem(this.db,String(row.id)):undefined;}
  pendingOperation(operationId:string):BatchOperation|undefined{const entry=this.pending.get(operationId);return entry?structuredClone(entry.operation):undefined;}
+ assertCredentialIdentity(taskId:string):string{
+  const currentCredentialScope=this.credential().scope;
+  const protectedTaskBatch=[...this.pending.values()].some(p=>p.operation.taskId===taskId&&p.operation.credentialScope!==currentCredentialScope)||this.batches(taskId).some(b=>b.credentialScope!==currentCredentialScope&&this.service.items(b.id).some(i=>!i.adoption));
+  if(protectedTaskBatch){const error=new AiError('CONFIG_CHANGED');error.message='原 Batch 身份仍受保护，连接快照已变化；本次未发送';throw error;}
+  return currentCredentialScope;
+ }
  async request(prepared:Prepared):Promise<{item:BatchItem;body:any}|null>{
-  const scopeCredential=taskAiContext.getStore()?.credentialScope;if(scopeCredential&&scopeCredential!==this.credential().scope)throw new UserFacingError('任务连接快照已变化，未切换凭据或复制Batch请求');
   const op=prepared.operation,item=this.find(op.operationId),scope=taskAiContext.getStore();
+  const currentCredentialScope=this.assertCredentialIdentity(op.taskId);
+  if((item||this.pending.has(op.operationId)||scope?.waitingOperationId||scope?.mode==='deferred_batch')&&scope?.credentialScope&&scope.credentialScope!==currentCredentialScope){const error=new AiError('CONFIG_CHANGED');error.message='任务连接快照已变化，原 Batch 身份保持保护；本次未发送';throw error;}
+  if(scope?.waitingOperationId&&scope.waitingOperationId!==op.operationId&&!this.find(scope.waitingOperationId)?.adoption)throw new BatchWaitingError(scope.waitingOperationId);
   if(item){
-   if(batchFingerprint(this.operation(item))!==batchFingerprint(op))throw new UserFacingError('原 Batch 请求快照已变化，未新建或改为即时重发');
+   if(batchFingerprint(this.operation(item))!==batchFingerprint(op))throw new BatchIdentityError('原 Batch 请求快照已变化；本次未发送，未新建或改为即时重发');
    if(item.state==='prepared')this.pending.set(op.operationId,prepared);
    if(item.state==='received'){
     if(!prepared.authorize()||this.service.get(item.batchId).locallyStopped)throw new BatchWaitingError(op.operationId);
     const receipt=await readProviderReceipt(this.db,this.directory,item.id) as any;
-    if(!receipt||receipt.status<200||receipt.status>=300)throw new UserFacingError('原Batch逐项收据不可读，未重发');
+    if(!receipt||receipt.status<200||receipt.status>=300)throw new BatchIdentityError('原Batch逐项收据不可读；本次未发送，未重发');
     return {item,body:receipt.body};
    }
-   if(['failed','missing'].includes(item.state))throw new UserFacingError('原 Batch 项目失败或结果缺失，保留费用与身份，未自动重发');
+   if(['failed','missing'].includes(item.state))throw new BatchIdentityError('原 Batch 项目失败或结果缺失，保留费用与身份；本次未发送，未自动重发');
    throw new BatchWaitingError(op.operationId);
   }
   const staged=this.pending.get(op.operationId);
   if(staged){
-   if(batchFingerprint(staged.operation)!==batchFingerprint(op))throw new UserFacingError('待建Batch请求快照已变化，未改为普通请求');
+   if(batchFingerprint(staged.operation)!==batchFingerprint(op))throw new BatchIdentityError('待建Batch请求快照已变化；本次未发送，未改为普通请求');
    this.pending.set(op.operationId,prepared);throw new BatchWaitingError(op.operationId);
   }
   if(scope?.mode!=='deferred_batch'||op.purpose.gateway!=='openrouter'||!op.purpose.capability.batch||op.purpose.capability.endpoint==='decisions')return null;

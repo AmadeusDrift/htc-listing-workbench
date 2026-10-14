@@ -1,3 +1,4 @@
+import { confirmedAuthenticationRejection } from '../ai/receipts.ts';
 import {explicitRandomFulfillment} from '../sales-plans/source-meaning.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -21,7 +22,7 @@ export function sourceConsistencyUnknown(db:DatabaseSync,productId:string,varian
   for(const row of db.prepare("SELECT record_json FROM source_consistency_attempts WHERE json_extract(record_json,'$.context.productId')=?").all(productId)){
     const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId)||latestConsistencyAttempt(db,attempt.context)?.id!==attempt.id)continue;
     const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=callRow?validateAiCall(JSON.parse(String(callRow.record_json))):null;
-    if(!call||call.status!=='SUCCEEDED'&&call.errorCode!=='OUTPUT_INVALID')return true;
+    if(!call||call.status!=='SUCCEEDED'&&call.errorCode!=='OUTPUT_INVALID'&&!confirmedAuthenticationRejection(db,call))return true;
   }
   return false;
 }
@@ -43,6 +44,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
   if(context.fields.some(field=>explicitRandomFulfillment(field.value))){view.status='NEEDS_INPUT';view.reasons=['EXPLICIT_RANDOM_FULFILLMENT'];return view;}
   if(attempt&&!assessment){
     const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
+    if(call&&confirmedAuthenticationRejection(db,call)){view.status='SYSTEM_REPAIR';view.reasons=['SOURCE_CONSISTENCY_AUTH_FAILED'];return view;}
     view.status=call?.errorCode==='OUTPUT_INVALID'?'SYSTEM_REPAIR':call?.status==='SUCCEEDED'?'PENDING':'UNKNOWN';view.reasons=[call?.errorCode==='OUTPUT_INVALID'?'SOURCE_CONSISTENCY_INVALID_OUTPUT':call?.status==='SUCCEEDED'?'SOURCE_CONSISTENCY_RECOVERY_REQUIRED':'SOURCE_CONSISTENCY_SENT_UNKNOWN'];return view;
   }
   if(context.version!==SOURCE_OBSERVATION_VERSION&&context.issues.some(r=>NON_VISUAL_AUTHORITY.has(r))){view.status='NEEDS_INPUT';view.reasons=context.issues;return view;}
@@ -53,6 +55,7 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
 export function assertConsistencyView(view:SourceConsistencyView):void {
   if(view.status==='MATCH'||view.status==='MANUAL')return;
   if(view.reasons.includes('EXPLICIT_RANDOM_FULFILLMENT'))throw new SourceConsistencyError('NEEDS_INPUT','SOURCE_CONSISTENCY_NEEDS_INPUT','销售规格异常：供应商明确随机发货，不能确定实际款式或颜色；请补充实际销售内容。来源：'+view.context.fields.filter(field=>explicitRandomFulfillment(field.value)).map(field=>field.value).join('；').slice(0,800));
+  if(view.reasons.includes('SOURCE_CONSISTENCY_AUTH_FAILED'))throw new SourceConsistencyError('SYSTEM_REPAIR','SOURCE_CONSISTENCY_AUTH_FAILED','来源观察此前收到鉴权拒绝；请更新凭据后显式继续，历史请求与次数保留');
   throw new SourceConsistencyError(view.status==='UNKNOWN'?'UNKNOWN':view.status==='SYSTEM_REPAIR'?'SYSTEM_REPAIR':'NEEDS_INPUT',view.status==='UNKNOWN'?'SOURCE_CONSISTENCY_SENT_UNKNOWN':view.status==='SYSTEM_REPAIR'?'SOURCE_CONSISTENCY_INVALID_OUTPUT':'SOURCE_CONSISTENCY_NEEDS_INPUT',view.status==='UNKNOWN'?'来源图片观察请求结果未知，已阻止自动重发，请核对调用记录':view.status==='SYSTEM_REPAIR'?'来源图片观察未通过格式或记录校验，请修复后核对':'当前来源图片与规格尚未确认一致，请逐 SKU 核对原图和原始规格');
 }
 /** Current-use evidence for schema filling. No product writes and no provider calls. */

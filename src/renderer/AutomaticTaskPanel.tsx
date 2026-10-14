@@ -22,7 +22,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
   const api = window.red;
   const [batchSummary,setBatchSummary]=useState<TaskBatchSummary|null>(null),[batchError,setBatchError]=useState('');
   const [tasks, setTasks] = useState<AutomaticListingTask[]>([]);
-  const [taskRevisionSignature,setTaskRevisionSignature]=useState('');
+  const [queueLifecycleSignature,setQueueLifecycleSignature]=useState('');
   const [selectedId, setSelectedId] = usePageState('automatic:task', '');
   const [task, setTask] = useState<AutomaticListingTask | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,7 +35,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
   const [sourceProducts, setSourceProducts] = useState<ProductDetail[]>([]);
   const [sourceErrors, setSourceErrors] = useState<Record<string, string>>({});
   const [loadingSources, setLoadingSources] = useState(false);
-  const previewRevision = task && ['RUNNING', 'QUEUED'].includes(task.status) ? 'active' : task?.revision;
+  const [checkRequest, setCheckRequest] = useState<{id:string;revision:number;refresh:number;serial:number}|null>(null);
   const groups = useMemo(() => buildAutomaticProductGroups(task?.items ?? [], sourceProducts, products), [task, sourceProducts, products]);
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -47,8 +47,11 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
     }
   }, [startedTask]);
   useEffect(() => {
-    let active = true, timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true, reading = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const visible = () => document.visibilityState !== 'hidden';
     const poll = async () => {
+      if (!active || reading || !visible()) return;
+      reading = true;
       const request = version.current;
       let pollDelay = 30_000;
       try {
@@ -56,26 +59,29 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
         const values=taskIds?allValues.filter(value=>taskIds.includes(value.id)||value.id===startedTask?.id):allValues;
         if(values.some(value=>['RUNNING','QUEUED','WAITING'].includes(value.status)))pollDelay=10_000;
         const id = values.some(value=>value.id===selectedId)?selectedId:values[0]?.id;
+        // Lifecycle transitions invalidate the queue; per-SKU progress stays in this panel.
         const detail = id ? await api.getAutomaticListingTask(id) : null;
         let batch:TaskBatchSummary|null=null,batchFailure='';
         if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
-        if (active && request === version.current && !actionPending.current) { setTaskRevisionSignature(JSON.stringify([...allValues].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,value.revision,value.updatedAt])));setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
+        if (active && request === version.current && !actionPending.current) { setQueueLifecycleSignature(JSON.stringify([...values].sort((left,right)=>left.id.localeCompare(right.id)).map(value=>[value.id,['QUEUED','RUNNING','WAITING'].includes(value.status)?'active':value.status])));setTasks(values); setTask(detail); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
-      finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, pollDelay); } }
+      finally { reading = false; if (active) { setLoading(false); if (visible()) timer = setTimeout(() => { void poll(); }, pollDelay); } }
     };
+    const onVisibility = () => { if (timer) clearTimeout(timer); timer = undefined; if (visible()) void poll(); };
+    document.addEventListener('visibilitychange', onVisibility);
     void poll();
     // Navigation only stops reads. Task lifetime belongs to the main process.
-    return () => { active = false; if (timer) clearTimeout(timer); };
+    return () => { active = false; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVisibility); };
   }, [api, selectedId, refresh, startedTask?.id,JSON.stringify(taskIds)]);
 
-  // Full evidence validation is expensive: do it once per actual task revision,
-  // never for unchanged status polls, and never duplicate it just to read sources.
+  // Full evidence validation is explicit. A changed snapshot invalidates its proof
+  // without starting another expensive read; apply still revalidates in the main process.
   useEffect(() => {
     let active = true;
     const request = version.current;
     setSourceProducts([]);
     setAdaptation(null); setAdaptationError(''); setSourceErrors({});
-    if (!task || !api.previewAutomaticListingAdaptation) {
+    if (!task || !api.previewAutomaticListingAdaptation || checkRequest?.id !== task.id || checkRequest.revision !== task.revision || checkRequest.refresh !== refresh) {
       setLoadingSources(false);
       return () => { active = false; };
     }
@@ -90,7 +96,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
       setAdaptationError(message); setSourceErrors(Object.fromEntries(ids.map(id => [id, message])));
     }).finally(() => { if (active) setLoadingSources(false); });
     return () => { active = false; };
-  }, [api, task?.id, previewRevision, refresh]);
+  }, [api, task?.id, task?.revision, refresh, checkRequest]);
 
   async function changeMode(mode:ListingExecutionMode){
     if(!task||busy||actionPending.current)return;
@@ -117,7 +123,7 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
   }
   const outcomes = summarizeAutomaticItems(task?.items ?? []);
   const taskOptions=useMemo(()=>tasks.map(value => <option key={value.id} value={value.id}>{value.targetName} · {value.productType} · {statusLabels[value.status]} · {formatAutomaticTaskDate(value.createdAt)}</option>),[tasks]);
-  useEffect(()=>{window.dispatchEvent(new Event('automatic-listing-changed'));},[taskRevisionSignature]);
+  useEffect(()=>{if(queueLifecycleSignature)window.dispatchEvent(new Event('automatic-listing-changed'));},[queueLifecycleSignature]);
   const finished = task && ['COMPLETED', 'CANCELLED'].includes(task.status);
   return <section ref={panel} className="amazon-workflow automatic-task-panel" aria-label="自动上架任务">
     <div className="section-heading"><div><h2>自动上架任务</h2><p>任务持续保存执行位置。离开页面不会暂停；异常修正后可继续同一任务。</p></div><button type="button" className="button secondary" disabled={busy || Boolean(pending) || loading} title={busy?'当前有操作进行中':pending?'正在处理任务操作':loading?'正在读取已保存任务':undefined} onClick={() => { setLoading(true); setRefresh(value => value + 1); }}><RefreshCw size={15} />{loading ? '正在读取任务…' : '刷新任务'}</button></div>
@@ -141,11 +147,15 @@ export function AutomaticTaskPanel({ taskIds,products, startedTask, busy, onManu
       {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
       {['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<AutomaticResumePanel key={task.id} task={task} disabled={busy||Boolean(pending)} onUpdated={value=>{setTask(value);setTasks(values=>values.map(row=>row.id===value.id?value:row));setRefresh(value=>value+1);}}/>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
-      {adaptation&&<details className="workflow-notice" aria-label="旧任务适配检查"><summary>当前规则与资料检查（展开明细）</summary>
+      <details className="workflow-notice" aria-label="旧任务适配检查"><summary>当前规则与资料检查（展开明细）</summary>
+        <p>检查仅在点击后执行，并读取全部来源规格。任务进度或资料刷新后，请重新检查再适配。</p>
+        <button type="button" className="button secondary" disabled={busy||Boolean(pending)||loadingSources} onClick={()=>setCheckRequest({id:task.id,revision:task.revision,refresh,serial:(checkRequest?.serial??0)+1})}>检查当前规则与资料</button>
+        {loadingSources&&<p role="status">正在检查当前规则与资料…</p>}
+        {adaptation&&<>
         {adaptation.blockers.map(message=><p key={message}>{message}</p>)}
         {adaptation.changes.length?<ul>{adaptation.changes.map((change,index)=><li key={change.key+':'+index}>{change.sku??'新增规格'}：{change.message}{change.fields.length?'；字段：'+change.fields.join('、'):''}{change.steps.length?'；涉及：'+change.steps.join('、'):''}</li>)}</ul>:<p>未发现需要适配的差异。</p>}
-        <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p>
-      </details>}
+        <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p></>}
+      </details>
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
       <AutomaticProductGroups key={task.id} memoryKey={task.id} groups={groups} sourceErrors={sourceErrors} loadingSources={loadingSources} revision={task.updatedAt} busy={busy} pending={Boolean(pending)} onManual={(id, draftId, context) => { setSelectedId(task.id); onManual(id, draftId, { ...context, taskId: task.id }); }} onShipping={onShipping} />
     </div>}

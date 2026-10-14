@@ -1,3 +1,4 @@
+import type {AiNetworkReport} from '../shared/ai-network-contracts.ts';
 import { AI_PURPOSE_LABELS } from '../shared/ai-purpose-contracts.ts';
 import { UserFacingError } from '../shared/errors.ts';
 import { app, dialog, ipcMain, nativeImage, shell } from 'electron';
@@ -54,7 +55,7 @@ export function decodePreview(bytes: Buffer): Buffer {
   const scale = Math.min(1, 640 / Math.max(width, height));
   return image.resize({ width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)), quality: 'good' }).toPNG();
 }
-export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionHistoryPort, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService): void {
+export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoot: string, expectedUrl: string, amazon: AmazonService, hosting: HostingService, execution: ExecutionService, ai: AiService, images: ImageVersionService, content: ReviewedContentService, performRestore: (prepared: PreparedRestore) => Promise<void>, collection?: CollectionHistoryPort, miaoshou?: MiaoshouService, miaoshouImages?: MiaoshouImageService, operations?: OperationsServices, appearance: Pick<AppearanceStore, 'getAppearance' | 'saveAppearance'> = new AppearanceStore(dataRoot), imageGeneration?: ImageGenerationService, imageWorkflow?: ImageWorkflowService, automatic?: AutomaticListingService, labelServices?: LabelServices, skuNaming?: SkuNamingService, networkDiagnostics?:()=>Promise<AiNetworkReport>): void {
   let active = 0, restoring = false, shuttingDownForRestore = false;
   function handle(channel: string, argumentCount: number, callback: (...args: unknown[]) => unknown) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -70,6 +71,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
       finally { if (entered) active -= 1; }
     });
   }
+  handle('red:ai:network-diagnostics',0,()=>{if(!networkDiagnostics)throw new UserFacingError('当前环境未启用网络诊断');return networkDiagnostics();});
   handle('red:appearance:get', 0, () => appearance.getAppearance());
   if (skuNaming) installSkuNamingIpc(skuNaming, handle, { audit:(action,summary)=>store.recordWorkspaceEvent(action,summary) });
   handle('red:appearance:save', 1, input => appearance.saveAppearance(input));

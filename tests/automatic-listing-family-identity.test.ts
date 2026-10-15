@@ -42,6 +42,7 @@ function fixture(t: test.TestContext) {
     planSales: () => [structuredClone(selected)], existingSale: () => existing ? structuredClone(existing) : undefined,
     previewSales: () => [structuredClone(selected.recipe)],
   } as unknown as AutomaticListingDependencies;
+  dependencies.store.getProductSnapshot=id=>dependencies.store.getProduct(id);
   const service = new AutomaticListingService(directory, dependencies);
   t.after(async () => { await service.close(); assert.ok(resolve(directory).startsWith(root + sep)); rmSync(directory, { recursive: true, force: true, maxRetries: 5 }); });
   const create = (product = oldSource) => service.create({ productIds: [product.id], targetId: target.id, profileId: 'alpha', productType: 'FIGURINE' });

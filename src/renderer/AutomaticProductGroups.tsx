@@ -14,7 +14,7 @@ import type { AutomaticItemOutcome, AutomaticProductGroup } from './automatic-pr
 import { sourceLabel } from './utils';
 import './automatic-product-groups.css';
 
-const stageLabels: Record<AutomaticListingItem['stage'], string> = { PLAN: '来源规格待处理；修正后重新加入任务', SOURCES: '准备来源资料与参考图', CLASSIFY: '自动判断商品类目', DRAFT: '准备文案与草稿', IMAGES: '生成图片、IP 与文字检测', PARENT: '等待父体建档', EXECUTION: '上传图片、验证与提交', READBACK: '已提交，等待读回', LABELS: '核对平台建档结果', COMPLETE: '平台建档已完成' };
+export const stageLabels: Record<AutomaticListingItem['stage'], string> = { PLAN: '来源规格待处理；修正后重新加入任务', SOURCES: '准备来源资料与参考图', CLASSIFY: '自动判断商品类目', DRAFT: '准备文案与草稿', IMAGES: '生成图片、IP 与文字检测', PARENT: '等待父体建档', EXECUTION: '上传图片、验证与提交', READBACK: '已提交，等待读回', LABELS: '核对平台建档结果', COMPLETE: '平台建档已完成' };
 const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行', running: '处理中', waiting: '等待服务返回', completed: '流程完成', systemRepair: '系统待修复', unknown:'结果待核对', unclassified:'历史未分类', ruleFiltered: '其他规则淘汰', notSelected:'本次未选中', profitFiltered:'利润淘汰', needsInput: '待补资料', submittedAwaitingReadback: '已提交待回读', labels: '核对建档' };
 /** A count that takes its tone colour only when it is non-zero, so problems stand out in a row of numbers. */
 export function OutcomeCount({ tone, label, value, suffix = '' }: { tone: 'success' | 'info' | 'warning' | 'danger' | 'neutral'; label: string; value: number; suffix?: string }) {
@@ -22,13 +22,13 @@ export function OutcomeCount({ tone, label, value, suffix = '' }: { tone: 'succe
 }
 interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void;unitOwner?:{taskId:string;taskRevision:number;onUpdated(task:AutomaticListingTask):void} }
 
-function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey,unitOwner }: Actions & { item: AutomaticListingItem; memoryKey: string }) {
-  const [expanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, item.status === 'RUNNING');
+export function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey,unitOwner, initialExpanded, onExpandedChange }: Actions & { item: AutomaticListingItem; memoryKey: string; initialExpanded?:boolean; onExpandedChange?:(expanded:boolean)=>void }) {
+  const [expanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, initialExpanded ?? item.status === 'RUNNING');
   const specification = item.salesPlan?.recipe.specification;
   const outcome = automaticItemOutcome(item);
   const itemTone = outcome === 'systemRepair' ? 'danger' : ['ruleFiltered','profitFiltered','notSelected','needsInput','unknown','unclassified'].includes(outcome) ? 'warning' : outcome === 'completed' ? 'success' : outcome === 'pending' ? 'neutral' : 'info';
   return <li data-testid={`automatic-result-${item.variantId}`} data-state={item.status} data-tone={itemTone}>
-    <button type="button" className="automatic-sale-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+    <button type="button" className="automatic-sale-toggle" aria-expanded={expanded} onClick={() => {setExpanded(value => !value);onExpandedChange?.(!expanded);}}>
       <span><strong>{item.sku}</strong>{specification && <small>{specification}</small>}<small>{stageLabels[item.stage]}{item.stage === 'READBACK' ? '；Amazon 接受提交不等于已可售。' : ''}</small></span>
       <Badge tone={itemTone}>{itemLabels[outcome]}</Badge><ChevronDown size={16} className={expanded ? 'is-expanded' : ''} />
     </button>

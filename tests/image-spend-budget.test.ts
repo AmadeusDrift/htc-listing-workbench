@@ -38,8 +38,9 @@ test('actual image service refuses a configured money budget without a reliable 
 });
 test('actual image service refuses an exhausted money budget before reserving an intent or POST',async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],0);
- await assert.rejects(f.service.generate(f.input),(e:any)=>e.diagnosticReason==='SPEND_LIMIT_EXCEEDED');
+ await assert.rejects(f.service.generate(f.input),(e:any)=>e.diagnosticReason==='SPEND_LIMIT_EXCEEDED'&&e.certainty==='NOT_SENT'&&e.notSent===true);
  assert.equal(f.posts,0);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,0);
+ const evidence=JSON.parse(String(f.db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' ORDER BY rowid DESC LIMIT 1").get()!.detail_json));assert.equal(evidence.certainty,'NOT_SENT');assert.equal(evidence.requestOutcome,'NOT_SENT');
 });
 for(const table of ['ai_spend_reservations','ai_image_requests'])test(`actual image beforeSend rolls back hold and intent together when ${table} owner fails`,async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],100_000);
@@ -48,7 +49,7 @@ for(const table of ['ai_spend_reservations','ai_image_requests'])test(`actual im
 });
 test('actual image UNKNOWN retains its original monetary hold through service restart and changed Key/model/input',async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],100_000,{disconnect:true});await assert.rejects(f.service.generate(f.input));assert.equal(f.posts,1);const first=new AiSpendBudget(f.db).list()[0];assert.equal(first.state,'UNKNOWN');assert.equal(first.bound!.upperUsdMicros,40_000);await f.service.close();
- const restarted=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:bytes=>bytes,fetch:f.fetcher});try{restarted.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'s08-different-synthetic-key'});await assert.rejects(restarted.generate({...f.input,prompt:'changed'}),(e:any)=>e.code==='INTERRUPTED');assert.equal(f.posts,1);assert.deepEqual(new AiSpendBudget(f.db).list()[0],first);}finally{await restarted.close();}
+ const restarted=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:bytes=>bytes,fetch:f.fetcher});try{restarted.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'s08-different-synthetic-key'});await assert.rejects(restarted.generate({...f.input,prompt:'changed'}),(e:any)=>e.code==='INTERRUPTED'&&e.certainty==='SENT_UNKNOWN');assert.equal(f.posts,1);assert.deepEqual(new AiSpendBudget(f.db).list()[0],first);const evidence=JSON.parse(String(f.db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' ORDER BY rowid DESC LIMIT 1").get()!.detail_json));assert.equal(evidence.certainty,'SENT_UNKNOWN');assert.equal(evidence.requestOutcome,'RESULT_UNKNOWN');}finally{await restarted.close();}
 });
 test('actual fee below the upper reserve releases only the difference, while absent fee continues to hold',async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],50_000,{cost:.02});await f.service.generate(f.input);assert.equal(f.posts,1);const budget=new AiSpendBudget(f.db);assert.equal(budget.summary('image-generation-daily').reportedUsdMicros,20_000);assert.equal(budget.summary('image-generation-daily').heldUsdMicros,0);

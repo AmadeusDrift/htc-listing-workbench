@@ -3,8 +3,11 @@ import type { AutomaticListingTask } from '../shared/automatic-listing-contracts
 import type { AutomaticListingService } from './automatic-listing/service.ts';
 import { identifier } from '../shared/validation.ts';
 
-interface Hooks { confirm(task: AutomaticListingTask): Promise<boolean>; audit(action: string, summary: string): void }
-export function installAutomaticListingIpc(service: AutomaticListingService, handle: IpcHandler, hooks: Hooks): void {
+interface Hooks { confirm(task: AutomaticListingTask): Promise<boolean>; audit(action: string, summary: string): void; notifyProgress?:(progress:import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null)=>void }
+export function installAutomaticListingIpc(service: AutomaticListingService, handle: IpcHandler, hooks: Hooks):()=>void {
+  const progressService=service as AutomaticListingService & {getOperationProgress?:()=>import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null;onOperationProgress?:(listener:NonNullable<Hooks['notifyProgress']>)=>()=>void};
+  const release=hooks.notifyProgress?progressService.onOperationProgress?.(hooks.notifyProgress):undefined;
+  handle('red:automatic-listing:operation-progress',0,()=>progressService.getOperationProgress?.()??null);
   const start = async (id: string) => {
     const task = await service.confirmStart(id,hooks.confirm);
     if (!task) return null;
@@ -38,4 +41,5 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
   handle('red:automatic-listing:resume', 1, id => start(identifier(id)));
   handle('red:automatic-listing:pause', 1, id => service.pause(identifier(id)));
   handle('red:automatic-listing:cancel', 1, id => service.cancel(identifier(id)));
+  return release??(()=>{});
 }

@@ -1,4 +1,5 @@
 import { startVisiblePolling, isReadVisible } from './visible-polling.ts';
+import { AutomaticOperationStatus } from './AutomaticOperationStatus';
 import { AutomaticResumePanel } from './AutomaticResumePanel';
 import { AutomaticBatchStatus } from './AutomaticBatchStatus';
 import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-contracts';
@@ -150,6 +151,7 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
     {!!tasks.length && <label className="field"><span>选择自动上架任务</span><select aria-label="选择自动上架任务" value={task?.id ?? selectedId} disabled={Boolean(pending)} onChange={event => { version.current++;setSelectedId(event.target.value); setTask(null);setView(null);setGroupPage(1); setBatchSummary(null); setLoading(true); }}>{taskOptions}</select></label>}
     {taskTotal>20&&<nav aria-label="自动任务分页"><button type="button" disabled={taskPage<=1} onClick={()=>{setSelectedId('');setTaskPage(v=>v-1);setGroupPage(1);}}>上一页任务</button><span>第 {taskPage} / {Math.max(1,Math.ceil(taskTotal/20))} 页任务</span><button type="button" disabled={taskPage>=Math.ceil(taskTotal/20)} onClick={()=>{setSelectedId('');setTaskPage(v=>v+1);setGroupPage(1);}}>下一页任务</button></nav>}
     {!loading && !task && !tasks.length && <p className="small-copy">还没有任务。选好商品、目标和托管服务器后，从上方启动。</p>}
+    {task&&<AutomaticOperationStatus taskId={task.id}/>}
     {task && <div data-testid={`automatic-task-${task.id}`}>
       <div className="workflow-actions automatic-task-heading"><Badge tone={tone(task.status)}>{statusLabels[task.status]}</Badge><strong>{task.targetName} · {task.mode === 'demo' ? '本地演示' : '真实 Haul'} · {task.productType}</strong><span className="small-copy">规则版本 {task.ruleRevision}</span></div>
       {batchError&&<p role="alert" className="workflow-notice">Batch 状态读取失败：{batchError}；请刷新任务。</p>}

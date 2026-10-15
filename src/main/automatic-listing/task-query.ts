@@ -14,8 +14,8 @@ function paging(input:Record<string,unknown>,total:number):AutomaticPageInput {
  if(!Number.isSafeInteger(input.page)||Number(input.page)<1||![20,50,100].includes(Number(input.pageSize))||typeof input.pageSize!=='number')throw new UserFacingError('分页参数无效');
  return {page:Math.min(Number(input.page),Math.max(1,Math.ceil(total/Number(input.pageSize)))),pageSize:input.pageSize as 20|50|100};
 }
-export function taskSummary(task:AutomaticListingTask,present:ItemPresenter=unchanged):AutomaticTaskSummary {
- return {id:task.id,revision:task.revision,status:task.status,targetName:task.targetName,mode:task.mode,productType:task.productType,ruleRevision:task.ruleRevision,createdAt:task.createdAt,updatedAt:task.updatedAt,error:task.error?sanitizeFailureReason(task.error):null,sourceProductIds:[...new Set(task.items.map(row=>row.productId))],sourceProductCount:new Set(task.items.map(row=>row.productId)).size,salesSkuCount:task.items.length,counts:summarizeAutomaticItems(task.items.map(row=>present(row,task)))};
+export function taskSummary(task:AutomaticListingTask,_present:ItemPresenter=unchanged):AutomaticTaskSummary {
+ return {id:task.id,revision:task.revision,status:task.status,targetName:task.targetName,mode:task.mode,productType:task.productType,ruleRevision:task.ruleRevision,createdAt:task.createdAt,updatedAt:task.updatedAt,error:task.error?sanitizeFailureReason(task.error):null,sourceProductIds:[...new Set(task.items.map(row=>row.productId))],sourceProductCount:new Set(task.items.map(row=>row.productId)).size,salesSkuCount:task.items.length,counts:summarizeAutomaticItems(task.items)};
 }
 export function queryTaskSummaries(tasks:Map<string,AutomaticListingTask>,raw:unknown,db:DatabaseSync,present:ItemPresenter=unchanged){
  const input=record(raw,'任务摘要',['taskIds','workBatchId','page','pageSize']);let ids:Set<string>|undefined;
@@ -34,15 +34,17 @@ function itemSummary(item:AutomaticListingItem):AutomaticTaskItemSummary {
  const plan=item.salesPlan;
  return {key:item.key,productId:item.productId,variantId:item.variantId,sku:item.sku,status:item.status,stage:item.stage,draftId:item.draftId,stockSets:item.stockSets,imageStarted:item.imageStarted,imageAttempts:item.imageAttempts,batchId:item.batchId,specification:plan?.recipe.specification??'',color:plan?.recipe.color??'',sourceVariantIds:[...new Set([item.variantId,...(plan?.recipe.components.map(c=>c.variantId)??[])])],parentSku:plan?.parentSku??null,familyKey:plan?.parentSku?'parent:'+plan.parentSku:plan?.sourceGroupKey?'source:'+plan.sourceGroupKey:'unresolved',familyResolved:plan?.familyResolved??false,independent:plan?.parentage==='NONE',outcome:automaticItemOutcome(item),reason:automaticItemReason(item),hasError:Boolean(item.error)};
 }
-export function queryTaskGroups(db:DatabaseSync,task:AutomaticListingTask,input:Record<string,unknown>,present:ItemPresenter=unchanged):AutomaticTaskGroupsPage|AutomaticRevisionConflict {
+export function queryTaskGroups(db:DatabaseSync,task:AutomaticListingTask,input:Record<string,unknown>,_present:ItemPresenter=unchanged,changeStamp?:(key:string)=>string|null):AutomaticTaskGroupsPage|AutomaticRevisionConflict {
  const conflict=taskScope(task,input);if(conflict)return conflict;
  const search=text(input.search,'搜索词',200).toLocaleLowerCase(),groups=new Map<string,AutomaticListingItem[]>();
- for(const original of task.items){const row=present(original,task);const rows=groups.get(row.productId)??[];rows.push(row);groups.set(row.productId,rows);}
+ // Refresh projects durable checkpoints. Receipt reconciliation belongs to an
+ // explicit single-SKU detail read or a business admission, never every row here.
+ for(const row of task.items){const rows=groups.get(row.productId)??[];rows.push(row);groups.set(row.productId,rows);}
  // Only scalar source search fields are read; source repair/adoption and full product snapshots are excluded.
  const sources=search?new Map(db.prepare("SELECT p.id,p.title,p.source_url,(SELECT group_concat(v.sku||' '||v.original_spec||' '||v.normalized_spec||' '||v.source_spec,' ') FROM variants v WHERE v.product_id=p.id) specs FROM products p JOIN json_each(?) ids ON p.id=ids.value").all(JSON.stringify([...groups.keys()])).map(row=>[String(row.id),`${row.title} ${row.source_url} ${row.specs??''}`.toLocaleLowerCase()])):new Map<string,string>();
  const selected=[...groups].filter(([productId,rows])=>!search||sources.get(productId)?.includes(search)||rows.some(row=>[row.productTitle,row.sku,row.salesPlan?.parentSku??'',row.salesPlan?.recipe.specification??'',row.salesPlan?.recipe.color??'',automaticItemReason(row)].some(value=>value.toLocaleLowerCase().includes(search))));
  const page=paging(input,selected.length),start=(page.page-1)*page.pageSize;
- return {kind:'page',...page,task:taskSummary(task,present),total:selected.length,groups:selected.slice(start,start+page.pageSize).map(([productId,rows])=>({productId,title:rows[0].productTitle,items:rows.map(itemSummary),counts:summarizeAutomaticItems(rows)}))};
+ return {kind:'page',...page,task:taskSummary(task),total:selected.length,groups:selected.slice(start,start+page.pageSize).map(([productId,rows])=>({productId,title:rows[0].productTitle,items:rows.map(row=>({...itemSummary(row),...(changeStamp?.(row.key)?{detailStamp:changeStamp(row.key)!}:{})})),counts:summarizeAutomaticItems(rows)}))};
 }
 export function queryResumeItems(task:AutomaticListingTask,input:Record<string,unknown>):AutomaticResumeItemsPage|AutomaticRevisionConflict {
  const conflict=taskScope(task,input);if(conflict)return conflict;

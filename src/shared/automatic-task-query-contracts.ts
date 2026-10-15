@@ -11,6 +11,8 @@ export interface AutomaticTaskSummary extends Pick<AutomaticListingTask,'id'|'re
 export interface AutomaticTaskSummariesInput extends AutomaticPageInput { taskIds?:string[]; workBatchId?:string }
 export interface AutomaticTaskSummariesPage extends AutomaticPageInput { rows:AutomaticTaskSummary[]; total:number; active:boolean; lifecycleSignature:string }
 export interface AutomaticTaskItemSummary extends Pick<AutomaticListingItem,'key'|'productId'|'variantId'|'sku'|'status'|'stage'|'draftId'|'stockSets'|'imageStarted'|'imageAttempts'|'batchId'> {
+ /** UI invalidation only; write commands still require the current task revision. */
+ detailStamp?:string;
  specification:string; color:string; sourceVariantIds:string[]; parentSku:string|null; familyKey:string; familyResolved:boolean; independent:boolean;
  outcome:AutomaticItemOutcome; reason:string; hasError:boolean;
 }
@@ -21,7 +23,7 @@ export interface AutomaticTaskGroupSummary {
 /** Groups preserve first occurrence in the original task. Search filters whole groups before paging. */
 export interface AutomaticTaskGroupsPage extends AutomaticPageInput { kind:'page'; task:AutomaticTaskSummary; groups:AutomaticTaskGroupSummary[]; total:number }
 export interface AutomaticResumeItemsPage extends AutomaticPageInput { kind:'page'; rows:Pick<AutomaticListingItem,'key'|'sku'|'stage'|'draftId'>[]; total:number }
-export type AutomaticTaskItemResult = {kind:'item';taskId:string;revision:number;item:AutomaticListingItem}|AutomaticRevisionConflict;
+export type AutomaticTaskItemResult = {kind:'item';taskId:string;revision:number;item:AutomaticListingItem;diagnostic?:import('./automatic-item-diagnostic.ts').AutomaticItemDiagnostic}|AutomaticRevisionConflict;
 export interface AutomaticTaskQueryApi {
  queryAutomaticTaskSummaries(input:AutomaticTaskSummariesInput):Promise<AutomaticTaskSummariesPage>;
  queryAutomaticTaskGroups(input:AutomaticTaskQuery&{search:string}):Promise<AutomaticTaskGroupsPage|AutomaticRevisionConflict>;

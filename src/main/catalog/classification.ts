@@ -34,6 +34,7 @@ export interface ClassificationDependencies {
     reserve(input:ClassificationInput&{originalCallId:string;originalDecisionId:string;query:string}):CategoryExpansionOperation;
     permit(input:Pick<ClassificationInput,'productId'|'productRevision'>&{requestId:string}):CategoryExpansionOperation;
     search(claim:CategoryExpansionOperation,beforeDispatch:()=>void):Promise<{requestId:string;candidates:ProductTypeOption[];receiptSha256:string;receivedAt:string}>;
+    read?(claim:CategoryExpansionOperation):{requestId:string;candidates:ProductTypeOption[];receiptSha256:string;receivedAt:string}|null|Promise<{requestId:string;candidates:ProductTypeOption[];receiptSha256:string;receivedAt:string}|null>;
     retain(productId:string,snapshot:CategoryExpansionSnapshot):CategoryExpansionSnapshot;
   };
 }
@@ -80,9 +81,10 @@ export async function classifyProduct(input: ClassificationInput, deps: Classifi
     if(!(error instanceof CategoryNoSuitableError)||!deps.expansion)throw error;
     const port=deps.expansion,claim=port.reserve({...input,originalCallId:error.callId,originalDecisionId:error.decisionId,query:categoryExpansionQuery(keywords)});
     let snapshot=claim.snapshot;
+    const originalReceipt=claim.permittedAt?await port.read?.(claim):null;
     if(!snapshot){
-      if(claim.permittedAt){const pending=new AiError('INTERRUPTED');pending.requestId=claim.requestId;pending.certainty='SENT_UNKNOWN';pending.diagnosticReason='CATEGORY_EXPANSION_RESULT_UNKNOWN';pending.message='类目扩展原请求结果待核对；保留原请求身份，本次未重新检索';throw pending;}
-      const receipt=await port.search(claim,()=>{port.permit({productId:input.productId,productRevision:input.productRevision,requestId:claim.requestId});});
+      if(claim.permittedAt&&!originalReceipt){const pending=new AiError('INTERRUPTED');pending.requestId=claim.requestId;pending.certainty='SENT_UNKNOWN';pending.diagnosticReason='CATEGORY_EXPANSION_RESULT_UNKNOWN';pending.message='类目扩展原请求结果待核对；保留原请求身份，本次未重新检索';throw pending;}
+      const receipt=originalReceipt??await port.search(claim,()=>{port.permit({productId:input.productId,productRevision:input.productRevision,requestId:claim.requestId});});
       if(receipt.requestId!==claim.requestId)throw new UserFacingError('类目扩展响应与原请求身份不匹配');
       const expandedHits=[...hits];
       for(const candidate of receipt.candidates){

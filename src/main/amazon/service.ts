@@ -185,7 +185,7 @@ export class AmazonService {
     if(this.beforeEffect.constructor.name==='AsyncFunction')throw new UserFacingError('平台外发权限检查必须同步完成');const result=this.beforeEffect(identity,db) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new UserFacingError('平台外发权限检查必须同步完成');
   }
   private api(...args:Parameters<AmazonTransport['api']>):ReturnType<AmazonTransport['api']>{
-    const [target,operation,path,,,,]=args,prior=args[5],parts=/^\/listings\/2021-08-01\/items\/([^/]+)\/(.+)$/.exec(path),extra=parts?{sellerId:decodeURIComponent(parts[1]),sku:decodeURIComponent(parts[2])}:{},kind:AmazonEffectIdentity['kind']=operation.includes('Definitions')?'schema':operation==='getListingsItem'?'platform-read':'platform-write';
+    const [target,operation,path,,,,]=args,prior=args[5],parts=path.match(/^\/listings\/2021-08-01\/items\/([^/]+)\/(.+)$/),extra=parts?{sellerId:decodeURIComponent(parts[1]),sku:decodeURIComponent(parts[2])}:{},kind:AmazonEffectIdentity['kind']=operation.includes('Definitions')?'schema':operation==='getListingsItem'?'platform-read':'platform-write';
     this.effect(operation,kind,target,undefined,'preflight',extra);args[5]=()=>{this.effect(operation,kind,target,undefined,'before-send',extra);prior?.();};return this.transport.api(...args);
   }
   private at(): string { return new Date(this.now()).toISOString(); }
@@ -288,6 +288,16 @@ export class AmazonService {
     if (!Array.isArray(result.data.productTypes)) throw new UserFacingError('Amazon 商品类型响应无效');
     return result.data.productTypes.filter(isObject).filter(item => typeof item.name === 'string' && /^[A-Z0-9][A-Z0-9_]{0,99}$/.test(item.name)
       && (!Array.isArray(item.marketplaceIds) || item.marketplaceIds.includes(target.marketplaceId))).slice(0, 100).map(item => ({ name: String(item.name), displayName: typeof item.displayName === 'string' ? item.displayName.slice(0, 200) : String(item.name) }));
+  }
+  /** Main-only once lookup. The original M07 request ID owns both permit and raw receipt. */
+  async searchProductTypesObserved(input:{targetId:string;keywords:string;requestId:string},beforeDispatch:()=>void,onReceived:(capture:import('../ai/category-expansion-receipts.ts').CategoryLookupCapture)=>void|Promise<void>) {
+    this.ensureOpen();const target=this.active(textField(input.targetId,'店铺 ID',100)),keywords=textField(input.keywords,'搜索关键词',200);
+    if(target.mode!=='live')throw new UserFacingError('受控候选扩展需要实际平台检索；演示不伪造原始HTTP回执');
+    let receipt:import('../ai/category-expansion-receipts.ts').CategoryLookupCapture|undefined;
+    const result=await this.api(target,'searchDefinitionsProductTypes','/definitions/2020-09-01/productTypes',{marketplaceIds:target.marketplaceId,keywords,locale:target.locale,searchLocale:target.locale},undefined,undefined,{clientRequestId:input.requestId,beforeDispatch,onReceived:async capture=>{await onReceived(capture);receipt=capture;}});
+    if(!receipt||!Array.isArray(result.data.productTypes))throw new UserFacingError('类目扩展没有可核验的原始平台响应');
+    const candidates=result.data.productTypes.filter(isObject).filter(item=>typeof item.name==='string'&&/^[A-Z0-9][A-Z0-9_]{0,99}$/.test(item.name)&&(!Array.isArray(item.marketplaceIds)||item.marketplaceIds.includes(target.marketplaceId))).map(item=>({name:String(item.name),displayName:typeof item.displayName==='string'?item.displayName:String(item.name)}));
+    return {requestId:input.requestId,candidates,receiptSha256:createHash('sha256').update(receipt.bytes).digest('hex'),receivedAt:receipt.receivedAt};
   }
   /** Full Product Type index; browse nodes and seller-specific Haul eligibility are separate. */
   async fetchProductTypeLibrary(targetId: string): Promise<ProductTypeOption[]> {

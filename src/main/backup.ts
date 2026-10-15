@@ -5,6 +5,7 @@ import {assertRecordTable} from './storage/record-table.ts';
 import {CONTROLLED_RUN_TABLES,assertControlledRunHistory,retainControlledRunHistory,pauseControlledRunScopes} from './application/controlled-run-scope.ts';
 import {retainCategoryRepairs} from './ai/category-recovery.ts';
 import {CATEGORY_OPERATION_TABLES,assertCategoryOperationHistory} from './ai/category-operations.ts';
+import {categoryLookupFiles,retainCategoryLookupFiles} from './ai/category-expansion-receipts.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
@@ -140,6 +141,7 @@ function digest(data: Buffer): string { return createHash('sha256').update(data)
 function managedBackupFile(root: string, path: string): string {
   if(candidateBackupPath(path))return resolve(root,path);
   if(/^ai-receipts\/[a-f0-9]{64}\.json$/.test(path))return resolve(root,path);
+  if(/^ai-receipts\/category-expansions\/[a-f0-9-]{36}\.json$/.test(path))return resolve(root,path);
   if (/^documents\/(?:item-labels\/[a-f0-9-]{36}\/[1-9]\d{0,2}|shipments\/[a-f0-9-]{36})\.pdf$/.test(path)) return resolve(root, path);
   return managedAssetPath(root, path);
 }
@@ -310,6 +312,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
     if(version>=35)assertImageReviewLedgerReceipts(database,receiptRoot);
     if(version>=35)for(const f of reviewLedgerFiles(database)){const old=artifactChecks.get(f.path);if(old&&(old.sha256!==f.sha256||old.byteSize!==f.byteSize))throw new UserFacingError('图片审核安全账文件版本冲突');paths.add(f.path);artifactChecks.set(f.path,f);}
+    if(version>=36)for(const file of categoryLookupFiles(database,receiptRoot)){paths.add(file.path);artifactChecks.set(file.path,file);}
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
@@ -451,6 +454,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainRequestCallHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
+    retainCategoryLookupFiles(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     if(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_spend_reservations'").get()){retainSpendHistory(current,snapshot);retainControlledRunHistory(current,snapshot);}
     retainBatchHistory(current,snapshot);

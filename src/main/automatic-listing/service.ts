@@ -497,6 +497,7 @@ export class AutomaticListingService {
         // No request may be reassigned from the old pre-image scope, and a
         // sibling's unknown observation must remain bound to its original send.
         if(this.db.prepare("SELECT 1 FROM ai_calls WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.productRevision')=1 LIMIT 1").get(product.id)
+          ||this.db.prepare("SELECT 1 FROM ai_image_requests WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.productRevision')=1 LIMIT 1").get(product.id)
           ||sourceConsistencyUnknown(this.db,product.id,product.variants.map(v=>v.id)))return false;
         return true;
       }catch{return false;}

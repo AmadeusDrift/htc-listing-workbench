@@ -20,8 +20,13 @@ import {reserveConsistencyAttempt} from '../src/main/source-image-consistency/hi
 import {sourceConsistencyUnknown} from '../src/main/source-image-consistency/proof.ts';
 import {validateAiCall} from '../src/main/ai/validation.ts';
 import {validateAiUsageRecord} from '../src/main/ai/usage.ts';
+import {ImageGenerationService} from '../src/main/image-generation/service.ts';
+import {mockStorage} from './fixtures/listing-ai.ts';
+import {DEFAULT_OPENROUTER_IMAGE_MODEL} from '../src/shared/image-generation-contracts.ts';
+import {readImageRequestIntent} from '../src/main/ai/receipts.ts';
+import {AiSpendBudget} from '../src/main/ai/spend-budget.ts';
 
-async function fixture(t:test.TestContext,confirmed=true){
+async function fixture(t:test.TestContext,confirmed=true,preImage=false){
   t.mock.method(globalThis,'fetch',()=>{throw Error('No real external requests');});
   const root=resolve('.test-data');mkdirSync(root,{recursive:true});const directory=mkdtempSync(join(root,'materialized-source-'));
   const store=new WorkspaceStore(directory),db=openDatabase(directory),at=new Date(Date.now()-10_000).toISOString();
@@ -41,6 +46,15 @@ async function fixture(t:test.TestContext,confirmed=true){
   let service=new AutomaticListingService(directory,dependencies);
   const task=await service.create({productIds:[product.id],targetId:target.id,profileId:'alpha',productType:'BOX'});
   assert.equal(task.items.length,2);assert.equal(product.revision,1);
+  if(preImage){
+    const generation=new ImageGenerationService(directory,store,mockStorage,{decodePreview:bytes=>bytes,fetch:async()=>{throw Error('synthetic pre-image transport lost');}});
+    generation.saveConnection({model:DEFAULT_OPENROUTER_IMAGE_MODEL,enabled:true,apiKey:'synthetic-pre-image-only'});
+    try{await assert.rejects(generation.generate({productId:product.id,productRevision:1,prompt:'Original manual product request',referenceAssetIds:[],size:'auto',quality:'auto',background:'auto'}));}finally{await generation.close();}
+    const intents=db.prepare('SELECT record_json FROM ai_image_requests').all();assert.equal(intents.length,1);
+    const intent=readImageRequestIntent(db,JSON.parse(String(intents[0].record_json)).id)!;
+    assert.equal(intent.version,2);assert.equal(intent.productRevision,1);
+    assert.equal(new AiSpendBudget(db).list()[0].state,'UNKNOWN');assert.equal(db.prepare('SELECT count(*) n FROM ai_calls').get()!.n,0);
+  }
   const imageIds=[...new Set(receipt.skuMappings.flatMap(v=>v.imageIds))];
   const delivered=await imageService.download({productId:product.id,revision:1,imageIds});assert.deepEqual(delivered.failures,[]);assert.equal(delivered.product.revision,5);
   if(confirmed)await confirmSourceConsistencyFixture(directory,store,product.id);
@@ -54,6 +68,15 @@ async function fixture(t:test.TestContext,confirmed=true){
   t.after(async()=>{await service.close();await imageService.close();db.close();store.close();rmSync(directory,{recursive:true,force:true});});
   return{directory,store,db,service,task:historical,snapshot,mapping,receipt,counters:()=>({downloads,sourcePreparations,observations,draftPreparations})};
 }
+
+test('a real pre-image generation intent and UNKNOWN spend prevent materialization rebasing with zero call rows',async t=>{
+  const f=await fixture(t,false,true),row=f.task.items[1],selection={mode:'targeted' as const,selections:[{key:row.key}]};
+  const history=()=>['ai_image_requests','ai_spend_reservations','ai_calls','automatic_listing_tasks'].map(table=>f.db.prepare(`SELECT record_json FROM ${table} ORDER BY id`).all());
+  const before=history();
+  assert.throws(()=>f.service.prepareStart(f.task.id,selection),/来源商品或 SKU/);
+  assert.deepEqual(history(),before);assert.equal(f.service.get(f.task.id).items[1].productRevision,1);
+  assert.equal(new AiSpendBudget(f.db).list()[0].state,'UNKNOWN');assert.deepEqual(f.counters(),{downloads:2,sourcePreparations:0,observations:0,draftPreparations:0});
+});
 
 for(const confirmed of [true,false])test(`explicit continue rebases original source-only sibling and reuses delivered bytes; observation already confirmed=${confirmed}`,async t=>{
   const f=await fixture(t,confirmed),row=f.task.items[1],selection={mode:'targeted' as const,selections:[{key:row.key}]};

@@ -1182,9 +1182,11 @@ export class AutomaticListingService {
       row.status = 'RUNNING'; row.stage = 'SOURCES'; this.saveItem(task,row);
       const result = await this.deps.images.prepareSources({ productId: row.productId, productRevision: row.productRevision, variantIds: [...new Set(siblings.flatMap(value => value.salesPlan?.recipe.components.map(c=>c.variantId)??[value.variantId]))] });
       if (sourceStamp(result.product) !== row.sourceStamp) throw new UserFacingError('准备来源图期间商品资料变化');
+      // One verified source delivery advances the whole frozen sibling group
+      // before any one SKU can freeze it during consistency checking.
+      for(const sibling of siblings)sibling.productRevision=result.product.revision;
       for (const sibling of siblings) {
         this.prepareContinuedRow(task,sibling);
-        sibling.productRevision = result.product.revision;
         let missing = result.missing.find(value => (sibling.salesPlan?.recipe.components.map(c=>c.variantId)??[sibling.variantId]).includes(value.variantId));
         let consistencyError:SourceConsistencyError|undefined;
         if(!missing){

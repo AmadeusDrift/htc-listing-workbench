@@ -1,3 +1,4 @@
+import { beginDatabaseStartupValidation } from './startup-database-validation.ts';
 import {BasicFtpTransport,FtpConnectionPool} from './hosting/ftp.ts';
 import {ControlledAcceptanceSession,CONTROLLED_ACCEPTANCE_FLAG} from './application/controlled-acceptance.ts';
 import {verifyControlledCandidate} from './application/controlled-candidate.ts';
@@ -96,6 +97,8 @@ async function start() {
   const verifiedCandidate=controlledAcceptanceMode?await verifyControlledCandidate(app.getAppPath(),process.execPath):null;
   const recovered = await recoverInterruptedRestore(dataRoot);
   await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
+  const finishStartupValidation=beginDatabaseStartupValidation();
+  try {
   store = new WorkspaceStore(dataRoot);
   const db = store;
   if(verifiedCandidate)controlledAcceptance=new ControlledAcceptanceSession(dataRoot,verifiedCandidate,id=>db.getProductSnapshot(id));
@@ -212,6 +215,7 @@ async function start() {
       } finally { signal.removeEventListener('abort', cancel); }
     },
   });
+  finishStartupValidation();
   if(!controlledAcceptanceMode)await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
   const buildRoot = resolve(__dirname, '../dist');
   // Only files present in the renderer build are addressable by the app protocol.
@@ -317,6 +321,7 @@ async function start() {
   await mainWindow.loadURL(expectedUrl);
   listingFollowup.start();
   if(!controlledAcceptanceMode)labels.resume(); automatic.start();
+  } finally { finishStartupValidation(); }
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {

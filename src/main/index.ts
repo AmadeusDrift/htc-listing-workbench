@@ -1,5 +1,5 @@
 import { beginDatabaseStartupValidation } from './startup-database-validation.ts';
-import { decodePreviewInBackground, closeImageProcessing } from './image-processing/client.ts';
+import { decodePreviewInBackground, decodeArtifactInBackground, closeImageProcessing } from './image-processing/client.ts';
 import { consumeStartupReceipt, saveCleanShutdownReceipt, type StartupReceiptCodec } from './startup-session.ts';
 import { createStartupProgress } from './startup-progress.ts';
 import { openDatabase } from './database.ts';
@@ -36,7 +36,6 @@ import { createPublicImageProbe } from './hosting/public-probe.ts';
 import { ExecutionService } from './execution/service.ts';
 import { AiService } from './ai/service.ts';
 import { ImageVersionService } from './image-versions/service.ts';
-import { decodeArtifact } from './image-versions/decoder.ts';
 import { ReviewedContentService } from './content/service.ts';
 import { CollectionHistory } from './collection/history.ts';
 import { AppearanceStore, appearanceTitleBarOverlay } from './appearance.ts';
@@ -143,7 +142,7 @@ async function start() {
   ai = new AiService(dataRoot, db, hosting, safeStorage, { ...(controlledAcceptanceMode?{requiredSpendScopeId:CONTROLLED_RUN_ID,canManageRecovery:(id:string)=>controlledRecoveryIds?.has(id)===true}:{}), fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
-  images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
+  images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifactInBackground });
   content = new ReviewedContentService(dataRoot, db, ai);
   followup = new FollowupService(dataRoot, amazon,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true,runDraftScope:(id,work)=>{if(!controlledAcceptanceMode)return work();if(!automatic)throw new ControlledRunError();return automatic.runControlledDraft(id,work);}});
   catalog = new CatalogService(dataRoot, amazon);

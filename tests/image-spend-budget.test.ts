@@ -174,3 +174,11 @@ test('actual invalid image output classifies separately without inferring invali
  const unknown={...structuredClone(task.items[0]),imageStarted:true};await owner.classifyFailure(task,unknown,error);assert.ok(unknown.outcome);assert.equal(unknown.outcome.kind,'UNKNOWN');assert.equal(unknown.outcome.code,'IMAGE_RESULT_UNKNOWN');assert.equal(f.posts,1);assert.equal(new AiSpendBudget(f.db).list()[0].actualUsdMicros,null);assert.equal(new AiSpendBudget(f.db).list()[0].state,'UNKNOWN');
  }finally{await owner.close();}
 });
+
+test('P06 same generation service atomically admits only budgeted concurrent requests',async t=>{
+ const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],40_000),second=f.store.createProduct();
+ const results=await Promise.allSettled([f.service.generate(f.input),f.service.generate({...f.input,productId:second.id,productRevision:second.revision})]);
+ assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+ assert.equal(results.filter(r=>r.status==='rejected'&&(r.reason as any).diagnosticReason==='SPEND_LIMIT_EXCEEDED').length,1);
+ assert.equal(f.posts,1);assert.equal(new AiSpendBudget(f.db).list().length,1);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,1);
+});

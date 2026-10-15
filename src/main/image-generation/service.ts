@@ -55,7 +55,9 @@ export class ImageGenerationService {
   private sharedConnection?:{read():string|null;save(key:string):unknown;disconnect():unknown};
   private directory: string; private store: WorkspaceStore; private vault: ImageGenerationVault; private adapter: OpenRouterImageAdapter; private db:DatabaseSync;
   private processPreview: (bytes: Buffer) => Buffer | Promise<Buffer>; private decodePreview: (bytes: Buffer) => Buffer; private timeoutMs: number; private closed = false;
-  private running?: { controller: AbortController; promise: Promise<unknown> };
+  private running = new Set<{ controller: AbortController; promise: Promise<unknown> }>();
+  private queued: {controller:AbortController;start:()=>void;reject:(error:unknown)=>void}[]=[];
+  private workflowRequests=new Map<string,{identity:string;promise:Promise<GeneratedImageCandidate>}>();
   private checked?: { fingerprint: string; result: 'accessible' | 'failed'; at: string };
   private scope?: { fingerprint: string; token: string };
   private fetcher: typeof fetch;
@@ -98,7 +100,7 @@ export class ImageGenerationService {
     const apiKey=this.sharedConnection.read();if(!apiKey)return{state:'absent'};
     return{state:'ready',config:{...(saved.state==='ready'?saved.config:{provider:'openrouter' as const,...imageDefaults('openrouter'),enabled:false}),apiKey,credentialRef:'openrouter'}};
   }
-  get busy(): boolean { return !!this.running; }
+  get busy(): boolean { return this.running.size>0||this.queued.length>0; }
   /** Local ledger observation only: never obtains pricing, models, credits or credentials. */
   getSpendStatus():ImageGenerationSpendStatus{this.ensureOpen();return{currency:'USD',unit:'microUSD',daily:this.spend.status('image-generation-daily'),controlledLifetime:this.spend.status('controlled-live-lifetime'),controlledRunStatus:readControlledRunScope(this.db)?.status??'not-registered',quoteStatus:'not-checked'};}
   setDailySpendLimit(raw:unknown):ImageGenerationSpendStatus{this.ensureOpen();const value=spendObject(raw,['limitUsd','expectedUpdatedAt']);if(value.expectedUpdatedAt!==null)spendDate(value.expectedUpdatedAt);this.spend.setImagePolicy(usdLimitMicros(value.limitUsd),value.expectedUpdatedAt);return this.getSpendStatus();}
@@ -165,16 +167,31 @@ export class ImageGenerationService {
     const value = this.readConnection(); if (value.state !== 'ready' || fingerprint(value.config) !== fingerprint(config)) throw new AiError('CONFIG_CHANGED');
   }
   private controlled<T>(task: (signal: AbortSignal, deadlineAt: number) => Promise<T>, callerSignal?: AbortSignal, beforeMap?:(error:unknown)=>void): Promise<T> {
-    this.ensureOpen(); if (this.running) return Promise.reject(new AiError('BUSY'));
-    const controller = new AbortController(), deadlineAt = Date.now()+this.timeoutMs, timer = setTimeout(() => controller.abort(Object.assign(new AiError('TIMEOUT'), { abortSource: 'TOTAL_TIMEOUT' as const })), this.timeoutMs);
-    const cancel = () => controller.abort(abortError(callerSignal?.reason));
-    if (callerSignal?.aborted) cancel(); else callerSignal?.addEventListener('abort', cancel, { once: true });
-    const state = { controller, promise: undefined as unknown as Promise<T> }; this.running = state;
-    state.promise = Promise.resolve().then(() => { throwIfAborted(controller.signal); return task(controller.signal,deadlineAt); })
-      .catch(error => { try{beforeMap?.(error);}catch{/* Keep original failure mapping. */} throw error instanceof AiError ? error : new AiError('PROVIDER_ERROR'); })
-      .finally(() => { clearTimeout(timer); callerSignal?.removeEventListener('abort', cancel); if (this.running === state) this.running = undefined; });
-    return abortable(state.promise, controller.signal);
+    this.ensureOpen();
+    if(this.queued.length>=16)return Promise.reject(imageRequestNotSent(new AiError('BUSY')));
+    const controller=new AbortController();
+    const cancel=()=>controller.abort(abortError(callerSignal?.reason));
+    if(callerSignal?.aborted)cancel();else callerSignal?.addEventListener('abort',cancel,{once:true});
+    let start!:()=>void;
+    const admitted=new Promise<void>((resolve,reject)=>{start=resolve;const queued={controller,start:resolve,reject};this.queued.push(queued);});
+    const abortQueued=()=>{const index=this.queued.findIndex(entry=>entry.controller===controller);if(index>=0){this.queued.splice(index,1)[0].reject(abortError(controller.signal.reason));}};
+    controller.signal.addEventListener('abort',abortQueued,{once:true});
+    const state={controller,promise:undefined as unknown as Promise<T>};
+    // Queue admission owns no send intent or money hold. The existing
+    // beforeSend transaction binds both to the original durable request ID.
+    state.promise=admitted.then(async()=>{
+      const timer=setTimeout(()=>controller.abort(Object.assign(new AiError('TIMEOUT'),{abortSource:'TOTAL_TIMEOUT' as const})),this.timeoutMs);
+      try{throwIfAborted(controller.signal);return await task(controller.signal,Date.now()+this.timeoutMs);}
+      finally{clearTimeout(timer);}
+    }).catch(error=>{try{beforeMap?.(error);}catch{}throw error instanceof AiError?error:new AiError('PROVIDER_ERROR');})
+      .finally(()=>{callerSignal?.removeEventListener('abort',cancel);controller.signal.removeEventListener('abort',abortQueued);this.running.delete(state);this.pumpQueue();});
+    // The entry stores the actual work promise, including late receipt capture.
+    const entry=this.queued.find(value=>value.controller===controller)!;
+    entry.start=()=>{this.running.add(state);start();};
+    if(controller.signal.aborted)abortQueued();this.pumpQueue();
+    return abortable(state.promise,controller.signal);
   }
+  private pumpQueue():void{while(!this.closed&&this.running.size<2&&this.queued.length){const next=this.queued.shift()!;if(next.controller.signal.aborted)next.reject(abortError(next.controller.signal.reason));else next.start();}}
   async checkConnection(rawProvider?: unknown): Promise<ImageGenerationConnection> {
     this.ensureOpen(); const provider = rawProvider === undefined ? this.vault.activeProvider() : imageProvider(rawProvider), config = this.config(false, provider);
     return this.controlled(async signal => {
@@ -198,6 +215,14 @@ export class ImageGenerationService {
   }
   /** Internal workflow identity is persisted before sending. Renderer inputs cannot select candidates or paths. */
   async generateForWorkflow(raw:unknown,attempt:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner},callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>):Promise<GeneratedImageCandidate>{
+    this.ensureOpen();if(callerSignal)throwIfAborted(callerSignal);const id=uuid(attempt.requestId),identity=listingFingerprint({raw,attempt});
+    const existing=this.workflowRequests.get(id);
+    if(existing){if(existing.identity!==identity)return Promise.reject(imageRequestNotSent(new AiError('SOURCE_CHANGED')));return callerSignal?abortable(existing.promise,callerSignal):existing.promise;}
+    if(this.workflowRequests.size>=18)return Promise.reject(imageRequestNotSent(new AiError('BUSY')));
+    const promise=Promise.resolve().then(()=>this.generateWorkflowRequest(raw,attempt,callerSignal,assertWorkflowFresh)).finally(()=>this.workflowRequests.delete(id));
+    this.workflowRequests.set(id,{identity,promise});return promise;
+  }
+  private async generateWorkflowRequest(raw:unknown,attempt:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner},callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>):Promise<GeneratedImageCandidate>{
     let requestId:string,editCandidateId:string|undefined;
     try{requestId=uuid(attempt.requestId);editCandidateId=attempt.editCandidateId?uuid(attempt.editCandidateId):undefined;
       this.ensureOpen();if(callerSignal)throwIfAborted(callerSignal);
@@ -281,7 +306,6 @@ export class ImageGenerationService {
     const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId??(error instanceof AiError?error.requestId:undefined),requestOutcome:error instanceof AiError&&error.certainty==='SENT_UNKNOWN'?'RESULT_UNKNOWN':!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&['RECEIVED_VALID','RECEIVED_INVALID'].includes(error.certainty??'')?undefined:error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
-    if(this.running)throw new AiError('BUSY');
     const input=parseInput(raw,'openrouter',String(this.getConnection().model));productId=input.productId;this.assertProduct(input);const ownerScope=this.generationScope(input,attempt?.owner);
     this.assertRequiredImageOwner(ownerScope);requiredEntryApproved=true;
     stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(callerSignal)throwIfAborted(callerSignal);if(reused)return reused;
@@ -372,6 +396,6 @@ export class ImageGenerationService {
     } catch(error) { record(error);throw invalidImageOutput('save'); }
     finally { if (temporary) { try { rmSync(temporary, { recursive: true, force: true }); } catch { /* Incomplete candidates have a pending name and are never adopted. */ } } }
   }
-  cancel(reason:AiError = Object.assign(new AiError('CANCELLED'),{abortSource:'USER' as const})): void { this.running?.controller.abort(reason); }
-  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = this.running; this.cancel(Object.assign(new AiError('SERVICE_CLOSED'), { abortSource: 'SHUTDOWN' as const })); if (running) await running.promise.catch(() => {});await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
+  cancel(reason:AiError = Object.assign(new AiError('CANCELLED'),{abortSource:'USER' as const})): void { for(const entry of [...this.queued])entry.controller.abort(reason);for(const entry of this.running)entry.controller.abort(reason); }
+  async close(): Promise<void> { if(this.closed)return;this.closed = true; const running = [...this.running]; this.cancel(Object.assign(new AiError('SERVICE_CLOSED'), { abortSource: 'SHUTDOWN' as const })); await Promise.allSettled(running.map(entry=>entry.promise));await Promise.allSettled([...this.pendingReceipts]); this.db.close(); }
 }

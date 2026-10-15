@@ -1,6 +1,7 @@
 import type { AutomaticListingQueue, AutomaticQueueRow } from '../shared/automatic-listing-contracts.ts';
 import { presentRejection } from '../shared/rejection-presentation.ts';
 import { automaticQueueDisplayKind, automaticQueueReason } from './automatic-product-groups.ts';
+import { automaticQueueOutcome } from '../shared/automatic-status-projection.ts';
 
 export type QueueTab = 'all' | 'pending' | 'repair' | 'filtered' | 'submitted';
 export type QueueProjection = AutomaticListingQueue['products'][number];
@@ -26,13 +27,13 @@ export function queuePresentation(projection: QueueProjection | undefined): { la
   ];
   for (const [kind, label, tone] of priority) {
     const row = projection.rows.find(row => automaticQueueDisplayKind(row) === kind);
-    if (row) return { label, tone, reason: automaticQueueReason(row) };
+    if (row) return { label:automaticQueueOutcome(row)==='invalidOutput'?'已收无效输出':label, tone:automaticQueueOutcome(row)==='invalidOutput'?'warning':tone, reason: automaticQueueReason(row) };
   }
   if (projection.inputIssue) return { label: '待补资料', tone: 'warning', reason: presentRejection('SOURCE_INPUT_REQUIRED') };
   if (projection.eligibleCount) return { label: '可启动', tone: 'info', reason: `${projection.eligibleCount} 个销售 SKU 可启动，其他规格与历史成果保留。` };
   if (projection.rows.some(row => row.kind === 'SUBMITTED')) return { label: '已提交待回读', tone: 'info', reason: '平台接受提交不等于已可售，请在任务中查看回读。' };
   if (projection.rows.length && projection.rows.every(row => row.kind === 'COMPLETED')) return { label: '流程完成', tone: 'success', reason: '查看任务中的备货与标签。' };
   const filtered = projection.rows.find(row => row.kind === 'RULE_FILTERED');
-  if (filtered) return { label: '规则淘汰', tone: 'neutral', reason: automaticQueueReason(filtered) };
+  if (filtered) return { label: {profitFiltered:'利润淘汰',packagingFiltered:'包装抛重限制',notSelected:'本次未选中'}[automaticQueueOutcome(filtered) as 'profitFiltered'|'packagingFiltered'|'notSelected']??'其他规则淘汰', tone: 'neutral', reason: automaticQueueReason(filtered) };
   return { label: '待处理', tone: 'neutral', reason: '查看销售配方与任务记录，确认下一步。' };
 }

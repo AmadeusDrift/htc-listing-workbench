@@ -2,6 +2,13 @@ import type { AutomaticListingItem } from './automatic-listing-contracts.ts';
 import { UserFacingError } from './errors.ts';
 export interface AutomaticResumeSelection { mode:'targeted'|'recheck'; selections:{key:string;slots?:number[]}[] }
 export interface AutomaticFailureEvent { version:1; stage:AutomaticListingItem['stage']; reason:string; occurredAt:string|null;slot?:number;source?:'request-proof'|'local-check' }
+/** A recorded check/receipt time is never the provider request's start time. */
+export function automaticFailureTime(event:Pick<AutomaticFailureEvent,'occurredAt'|'source'>,lastContinuedAt?:string):{label:string;at:string|null} {
+ if(!event.occurredAt)return {label:'原失败时间未保存',at:null};
+ if(event.source==='request-proof')return {label:'原请求明确失败凭据时间',at:event.occurredAt};
+ if(event.source==='local-check')return {label:lastContinuedAt&&Date.parse(event.occurredAt)>=Date.parse(lastContinuedAt)?'本次本地检查时间':'历史本地检查时间',at:event.occurredAt};
+ return {label:'失败记录时间（未保存时间来源）',at:event.occurredAt};
+}
 /** Stored errors are not trusted to contain public-only text. Never render request payloads. */
 export function sanitizeFailureReason(raw:string):string {
  return raw.replace(/(?:request\s*body|response\s*body|body|payload|请求体|响应体)\s*[:=][\s\S]*/gi,'[请求内容已隐藏]')

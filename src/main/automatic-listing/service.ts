@@ -14,10 +14,11 @@ import { canResumeRiskAdaptation } from './risk-adaptation.ts';
 import { adaptationSteps, applyAdaptationRows, assertTaskAdaptationHistory,onlyUnitAdaptationBlock } from './adaptation.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { needsBusinessAuthorityRefresh, manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
+import { automaticRuleOutcome } from '../../shared/automatic-status-projection.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
-import { assertProductConsistency,sourceConsistencyUnknown,SourceConsistencyError } from '../source-image-consistency/proof.ts';
+import { assertProductConsistency,sourceConsistencyUnknown,sourceConsistencyPresentation,SourceConsistencyError } from '../source-image-consistency/proof.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { pricingQualificationIssue } from '../pricing/qualification.ts';
 import { freezeSourceForProduct } from '../products/source-adoption.ts';
@@ -211,9 +212,9 @@ export class AutomaticListingService {
   }
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
-  queryTaskSummaries(raw:unknown) { this.ensureOpen(); return queryTaskSummaries(this.tasks,raw,this.db); }
-  queryTaskGroups(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize','search']); return queryTaskGroups(this.db,this.task(id),input); }
-  getTaskItem(raw:unknown) { const {input,id}=taskQueryId(raw,['itemKey']); return getTaskItem(this.task(id),input); }
+  queryTaskSummaries(raw:unknown) { this.ensureOpen(); return queryTaskSummaries(this.tasks,raw,this.db,this.displayPresenter()); }
+  queryTaskGroups(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize','search']); return queryTaskGroups(this.db,this.task(id),input,this.displayPresenter()); }
+  getTaskItem(raw:unknown) { const {input,id}=taskQueryId(raw,['itemKey']); return getTaskItem(this.task(id),input,(row,task)=>this.displayItem(row,task)); }
   queryResumeItems(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize']); return queryResumeItems(this.task(id),input); }
   /** Owner query includes original rows whose draft was never created. */
   readSalesPlans(productId:string,targetId:string){
@@ -393,6 +394,9 @@ export class AutomaticListingService {
     const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
     if(draft&&(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted))))return 'SUBMISSION_UNKNOWN';
     if(sourceConsistencyUnknown(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]))return 'SOURCE_CONSISTENCY_SENT_UNKNOWN';
+    return this.nonSourceUnknownCode(row,task,draft);
+  }
+  private nonSourceUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask,draft:AmazonDraft|undefined=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined):string|null {
     const journal=new CompletionJournal(this.db);
     // A retained guard without its old draft uses the same source sale identity as begin().
     const identity=completionSafetyIdentity(draft??{mode:task.mode,productId:row.productId,productRevision:row.productRevision,variantId:row.variantId,sku:row.sku,sellerId:task.sellerId,marketplaceId:task.marketplaceId,listingProgram:task.mode==='live'?'haul':'standard',salesPlan:row.salesPlan});
@@ -407,6 +411,23 @@ export class AutomaticListingService {
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
     return null;
   }
+  /** Only failure presentation uses receipt certainty; send/admit/archive guards
+   * continue to use unknownCode and the original source reservation guard. */
+  private displayUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
+    const original=this.unknownCode(row,task);
+    if(original!=='SOURCE_CONSISTENCY_SENT_UNKNOWN'||sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return original;
+    return this.nonSourceUnknownCode(row,task);
+  }
+  private displayItem(row:AutomaticListingItem,task:AutomaticListingTask):AutomaticListingItem {
+    if(row.status!=='FAILED'||row.outcome?.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
+    if(sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return row;
+    const unknown=this.nonSourceUnknownCode(row,task);if(unknown)return {...row,outcome:{...row.outcome,code:unknown}};
+    return {...row,outcome:{...row.outcome,kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'}};
+  }
+  private displayPresenter(){
+    const cache=new WeakMap<AutomaticListingItem,AutomaticListingItem>();
+    return (row:AutomaticListingItem,task:AutomaticListingTask)=>{let value=cache.get(row);if(!value){value=this.displayItem(row,task);cache.set(row,value);}return value;};
+  }
   private async classifyFailure(task:AutomaticListingTask,row:AutomaticListingItem,failure?:unknown):Promise<void> {
     const protectedCode=failure instanceof AiError&&failure.code!=='OUTPUT_INVALID'?'AI_'+failure.code:row.outcome?.kind==='SYSTEM_REPAIR'&&(AI_ERROR_CODES.some(code=>code!=='OUTPUT_INVALID'&&row.outcome?.code==='AI_'+code)||['SOURCE_CONSISTENCY_REQUEST_FAILED','SOURCE_CONSISTENCY_UNAVAILABLE','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(row.outcome.code))?row.outcome.code:null;
     let draft:AmazonDraft|undefined, classification:Pick<AutomaticListingOutcome,'kind'|'code'|'pricingReport'|'image'>={kind:'SYSTEM_REPAIR',code:'SYSTEM_FAILURE'};
@@ -419,8 +440,10 @@ export class AutomaticListingService {
         row.outcome={version:1,kind:brandError?'NEEDS_INPUT':'SYSTEM_REPAIR',code:brandError?'READBACK_BRAND_REQUIRES_MANUAL':row.stage==='LABELS'?'LABELS_FAILED':'READBACK_FAILED',message:(row.error??'已提交商品的后续处理失败').slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:draft.id,draftRevision:draft.revision};
         return;
       }
-      const unknown=this.unknownCode(row,task)??(failure instanceof AiError&&failure.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'?'IMAGE_RESULT_UNKNOWN':null);
+      const unknown=this.displayUnknownCode(row,task)??(failure instanceof AiError&&failure.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'?'IMAGE_RESULT_UNKNOWN':null);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
+      else if(this.unknownCode(row,task)==='SOURCE_CONSISTENCY_SENT_UNKNOWN'&&sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'};
+      else if(failure instanceof AiError&&failure.certainty==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'AI_RECEIVED_INVALID_OUTPUT'};
       else if(protectedCode)classification={kind:'SYSTEM_REPAIR',code:protectedCode};
       else if(draft){
         const declarationConflict=draft.listingProgram==='haul'&&draft.localIssues.some(issue=>issue.code===DECLARATION_SOURCE_CONFLICT&&issue.severity==='ERROR'&&issue.category==='compliance'&&issue.source==='local');
@@ -434,10 +457,10 @@ export class AutomaticListingService {
         if(!this.matching(task,row,draft)||draft.productRevision!==row.productRevision||sourceStamp(this.deps.store.getProduct(row.productId))!==row.sourceStamp||fingerprint(this.deps.rules())!==task.rulesStamp)
           classification={kind:'NEEDS_INPUT',code:'PRICING_EVIDENCE_STALE'};
         const after=this.deps.amazon.getDraft(draft.id);
-        if(after.revision!==draft.revision||this.unknownCode(row,task))classification={kind:'UNKNOWN',code:this.unknownCode(row,task)??'EVIDENCE_READ_FAILED'};
+        if(after.revision!==draft.revision||this.displayUnknownCode(row,task))classification={kind:'UNKNOWN',code:this.displayUnknownCode(row,task)??'EVIDENCE_READ_FAILED'};
       }else if(row.stage==='SOURCES'&&row.outcome&&Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code))classification={kind:row.outcome.kind,code:row.outcome.code};
       else if(row.stage==='PLAN'||row.outcome?.code==='SOURCE_INPUT_REQUIRED')classification={kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED'};
-      if(!protectedCode&&classification.kind!=='UNKNOWN'&&classification.kind!=='RULE_FILTERED'&&!(row.stage==='SOURCES'&&row.outcome&&(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code)||row.outcome.code==='SOURCE_INPUT_REQUIRED'))){
+      if(!protectedCode&&classification.code!=='AI_RECEIVED_INVALID_OUTPUT'&&classification.kind!=='UNKNOWN'&&classification.kind!=='RULE_FILTERED'&&!(row.stage==='SOURCES'&&row.outcome&&(Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code)||row.outcome.code==='SOURCE_INPUT_REQUIRED'))){
         try{assertProductConsistency(this.db,this.deps.store.getProduct(row.productId),row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]);}
         catch(error){if(error instanceof SourceConsistencyError)classification={kind:error.kind,code:error.code};else throw error;}
       }
@@ -481,8 +504,8 @@ export class AutomaticListingService {
           .flatMap(task=>task.items.filter(item=>item.productId===product.id&&((item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)||item.outcome?.pricingReport&&recipe.value&&fingerprint((item.salesPlan?.recipe.components.map(c=>c.variantId)??[item.variantId]).sort())===fingerprint(recipe.value.components.map(c=>c.variantId).sort()))).map(item=>({task,item}))).reverse();
         const latest=histories[0],view:AutomaticQueueRow={key:product.id+':'+recipe.key,productId:product.id,recipeKey:recipe.key,specification:recipe.specification,sku:latest?.item.sku??null,kind:'PENDING',eligible:true,message:'',reconsideration:null,taskId:latest?.task.id??null};
         try{
-          const unsafe=histories.find(h=>this.unknownCode(h.item,h.task));
-          if(unsafe){view.kind='UNKNOWN';view.eligible=false;view.taskId=unsafe.task.id;view.message=unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务';}
+          const unsafe=histories.find(h=>this.displayUnknownCode(h.item,h.task))??histories.find(h=>this.unknownCode(h.item,h.task));
+          if(unsafe){const unknown=this.displayUnknownCode(unsafe.item,unsafe.task);view.kind=unknown?'UNKNOWN':'SYSTEM_REPAIR';view.reasonCode=unknown??'SOURCE_CONSISTENCY_INVALID_OUTPUT';view.eligible=false;view.taskId=unsafe.task.id;view.message=unknown?(unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务'):presentRejection(view.reasonCode);}
           else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读';}
           else if(latest){
             const {task,item}=latest,outcome=item.outcome;
@@ -521,7 +544,7 @@ export class AutomaticListingService {
       }
       const selectedSourceIds=new Set(recipes.flatMap(recipe=>recipe.value?.components.map(c=>c.variantId)??(recipe.legacyVariantId?[recipe.legacyVariantId]:[])));
       if(!planningError)for(const variant of product.variants.filter(v=>!selectedSourceIds.has(v.id)))rows.push({key:product.id+':'+variant.id,productId:product.id,recipeKey:variant.id,specification:variant.originalSpec,sku:null,kind:'RULE_FILTERED',eligible:false,reasonCode:'SKU_SELECTION_FILTERED',message:'本次未选中此来源规格，原始资料与历史记录保留',reconsideration:null,taskId:null});
-      products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&r.reasonCode!=='SKU_SELECTION_FILTERED').length,profitFilteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&['ROI_MAX_PRICE','ROI_PROMOTION_OR_MARGIN','DIMENSIONAL_WEIGHT_LIMIT'].includes(r.reasonCode??'')).length,notSelectedCount:rows.filter(r=>r.reasonCode==='SKU_SELECTION_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
+      products.push({productId:product.id,title:product.title,eligibleCount:rows.filter(r=>r.eligible).length,pendingCount:rows.filter(r=>!['RULE_FILTERED','SUBMITTED','COMPLETED'].includes(r.kind)).length,filteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&r.reasonCode!=='SKU_SELECTION_FILTERED').length,profitFilteredCount:rows.filter(r=>r.kind==='RULE_FILTERED'&&automaticRuleOutcome(r.reasonCode)==='profitFiltered').length,notSelectedCount:rows.filter(r=>r.reasonCode==='SKU_SELECTION_FILTERED').length,...(planningError?{inputIssue:'销售配方待补资料：'+planningError}:{}),rows});
     }
     if(fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(revisions())!==taskRevisions||fingerprint(evidenceState())!==evidenceStamp||snapshots.some(p=>fingerprint(snapshot(p.id))!==fingerprint(p)||fingerprint(this.deps.sourceReceipt?.(p.id)??null)!==fingerprint(receipts.get(p.id))))throw new UserFacingError('读取期间范围已变化，请刷新');
     return {targetId,scope:{mode:target.target.mode,sellerId:target.target.sellerId,marketplaceId:target.target.marketplaceId},ruleRevision:rules.revision,products};

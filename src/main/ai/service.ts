@@ -112,7 +112,7 @@ import { projectSalesProduct, validateSalesPlan } from '../sales-plans/records.t
 import { referenceMeasurementEvidence } from '../image-workflow/image-facts.ts';
 import { currentSourceImageMeasurements } from '../image-workflow/source-measurements.ts';
 import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
-import { recordInvalidAiOutput,readInvalidAiOutputs,hasRetainedInvalidAiOutput,imagePlanRetryForbidden } from './output-diagnostics.ts';
+import { recordInvalidAiOutput,outputRejectionDetails,groupedRecoveryExplanation,readInvalidAiOutputs,hasRetainedInvalidAiOutput,imagePlanRetryForbidden } from './output-diagnostics.ts';
 import type { AiOutputRejectionStage } from './output-diagnostics.ts';
 import { readCopyReviewSettings } from '../listing-ai/review-settings.ts';
 import { SOURCE_COLOR_POLICY_VERSION } from '../../shared/source-color-contracts.ts';
@@ -546,7 +546,13 @@ export class AiService {
         const recovered=await this.recoverGroupedField(operation,index,context);
         if(recovered)continue;
         const prior=this.getCall(fieldGroupCallId(member));
-        if(!prior||!confirmedForbiddenRejection(this.db,prior)){const error=new AiError('INTERRUPTED');error.message=`字段分组 ${member.assignments.map(a=>a.field).join('、')} 的原请求尚未完成本地回收；已保留成果和费用，未复制重发`;throw error;}
+        if(!prior||!confirmedForbiddenRejection(this.db,prior)){
+          const matching=prior&&prior.productId===context.productId&&prior.productRevision===context.productRevision&&(!prior.presentationContext||prior.presentationContext.draftId===context.draftId&&prior.presentationContext.variantId===context.variantId&&prior.presentationContext.sourceSha256===operation.contextHash);
+          const receipt=matching?await readProviderReceipt(this.db,this.directory,prior.id) as {body?:unknown}|null:undefined;
+          const retained=matching&&(hasRetainedInvalidAiOutput(this.directory,prior,'amazon-fields')||receipt?.body!==undefined&&receipt?.body!==null&&receipt?.body!=='[omitted: credential echo]');
+          const error=new AiError('INTERRUPTED');error.callId=prior?.id;error.diagnosticReason=!matching?'RESULT_OWNER_MISMATCH':retained?'RESULT_RETAINED_INVALID':'RESULT_BODY_MISSING';
+          error.message=`字段分组的原请求：${groupedRecoveryExplanation(!matching?'owner-mismatch':retained?'invalid-body':'missing-body')}`;throw error;
+        }
         assertConfirmedForbiddenRetry(this.db,prior,fieldGroupRetryScope(operation,member));retryOf=prior;
       }
       const fields=groupFields(context,member.assignments,all),profile=this.frozenPurposeProfile(member.purpose);
@@ -878,13 +884,15 @@ export class AiService {
     return undefined;
   }
   async imagePlan(rawContext:ProductImageContext,assertContextFresh:()=>void|Promise<void>,rawRepair?:{previousPlanId:string;issues:string[]},signal?:AbortSignal,workflowId?:string,onRequestSent?:()=>void):Promise<AiResult>{
+    let validationFeedback:{reason:string;jsonPath?:string}|undefined;
     for(let attempt=0;;attempt++){
       throwIfAborted(signal??new AbortController().signal);
-      try{return await this.imagePlanOnce(rawContext,assertContextFresh,rawRepair,signal,workflowId,onRequestSent);}
+      try{return await this.imagePlanOnce(rawContext,assertContextFresh,rawRepair,signal,workflowId,onRequestSent,validationFeedback);}
       catch(error){
         if(isSchemaTransientError(error)||!(error instanceof AiError)||error.code!=='OUTPUT_INVALID'||!error.callId||!workflowId||['RESPONSE_NOT_CONTENT','RESPONSE_SECRET_ECHO'].includes(error.diagnosticReason??''))throw error;
         const recovered=await this.recoverImagePlan(error.callId,rawContext,assertContextFresh,signal,rawRepair);
         if(recovered)return recovered;
+        validationFeedback=outputRejectionDetails(error);
         if(attempt>=2||this.imagePlanningAttempts(rawContext,workflowId)>=imagePlanningAllowanceLimit(this.db,workflowId,rawContext,rawRepair))throw new ImagePlanningLimitError(error.callId);
       }
     }
@@ -901,7 +909,7 @@ export class AiService {
       AND json_extract(record_json,'$.presentationContext.workflowId')=?`).get(context.listing.productId,context.listing.productRevision,context.listing.draftId,context.listing.variantId,listingFingerprint(context),context.slot?.index??0,workflowId);
     return Number(row!.attempts);
   }
-  private async imagePlanOnce(rawContext: ProductImageContext, assertContextFresh: () => void | Promise<void>, rawRepair?: { previousPlanId: string; issues: string[] }, signal?: AbortSignal, workflowId?:string,onRequestSent?:()=>void): Promise<AiResult> {
+  private async imagePlanOnce(rawContext: ProductImageContext, assertContextFresh: () => void | Promise<void>, rawRepair?: { previousPlanId: string; issues: string[] }, signal?: AbortSignal, workflowId?:string,onRequestSent?:()=>void,validationFeedback?:{reason:string;jsonPath?:string}): Promise<AiResult> {
     this.ensureOpen(); const context = validateProductImageContext(rawContext), profile = this.activePurpose(rawRepair?'image_plan_repair':'image_plan',true);
     if (context.policyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new AiError('SOURCE_CHANGED');
     let repair: { previousPlanId: string; issues: string[] } | undefined;
@@ -956,7 +964,7 @@ export class AiService {
       await assertFresh();
       return { ...(forbiddenRetry?{forbiddenRetry}:{}),...(repair?{imagePlanRepair:repair}:{}),imagePlanRequestSha256:listingFingerprint({context,repair:repair??null}),...(workflowId?{workflowId:uuid(workflowId)}:{}), variantId: context.listing.variantId, assetId: null, assetSha256: null, sourceResultIds: [...imageCopySourceIds(context), ...(prior ? [prior.id] : [])], sourceSha256: listingFingerprint(context), imageContext: context, assertFresh,
         assertBeforeSend:()=>{if(workflowId&&this.imagePlanningAttempts(context,workflowId)>=imagePlanningAllowanceLimit(this.db,workflowId,context,repair))throw new ImagePlanningLimitError();},
-        invoke: (credentials, adapterContext) => planProductImage(context, repair?{...repair,previousPlan:prior?.output as import('../../shared/image-ai-contracts.ts').ImagePlanOutput}:undefined, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, {...adapterContext,imagePlanRetry:!!workflowId&&this.imagePlanningAttempts(context,workflowId)>0,beforeSend:body=>{adapterContext.beforeSend?.(body);onRequestSent?.();}}, images) };
+        invoke: (credentials, adapterContext) => planProductImage(context, repair?{...repair,previousPlan:prior?.output as import('../../shared/image-ai-contracts.ts').ImagePlanOutput}:undefined, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, {...adapterContext,imagePlanValidationFeedback:validationFeedback,imagePlanRetry:!!workflowId&&this.imagePlanningAttempts(context,workflowId)>0,beforeSend:body=>{adapterContext.beforeSend?.(body);onRequestSent?.();}}, images) };
     }, signal);
   }
   async recognizeGeneratedImage(rawContext: ProductImageContext, rawCandidate: CandidateImageIdentity, bytes: Buffer, assertContextFresh: () => void | Promise<void>, signal?: AbortSignal,owner?:AiDurableRequestPort): Promise<AiResult> {
@@ -1047,7 +1055,7 @@ export class AiService {
     return this.matchingInvocations(scope).filter(call=>call.id!==ignoreId&&!localAiRequestResolved(this.db,this.directory,call.id,call));
   }
   private unknownInvocation(call:AiCall):AiError {
-    const error=new AiError('INTERRUPTED');error.callId=call.id;error.certainty='SENT_UNKNOWN';error.message=call.requestScope?'原业务步骤的请求尚未得到可采用结果；请按原调用核对或恢复，未发送新请求':'旧请求缺少完整业务身份；请按原调用核对，未把缺失身份当作未发送';return error;
+    const error=new AiError('INTERRUPTED');error.callId=call.id;error.certainty='SENT_UNKNOWN';error.message=call.requestScope?'原业务步骤的请求尚未得到可采用结果；请按原调用核对或恢复，未发送新请求':'旧请求缺原业务身份（任务/草稿/SKU/卖家站点关联未完整保存），不能据当前资料补造或重发；请按原调用核对';return error;
   }
   private reviewProfile(id:'aliyun-ocr'|'aliyun-image-risk'|'text',owner:AiDurableRequestPort|undefined):AiProfile {
     const call=owner?this.getCall(uuid(owner.fileId)):undefined;
@@ -1141,6 +1149,7 @@ export class AiService {
       let call: AiCall | undefined=replayCall, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       if(replayCall)id=replayCall.id;
       let batchItem:BatchItem|undefined,reservingBatch=false,preserveStoredCall=false;let adapterContext:AdapterContext;
+      let diagnosticContextSha256:string|undefined;
       let untrustedOutput: { value: unknown } | undefined, rejectionStage: AiOutputRejectionStage = 'operation-output-validation';
       let evidenceContext: Partial<RunEvidence> = {};
       const evidenceStage = profile.routing?.purposeId ?? (source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability);
@@ -1155,7 +1164,7 @@ export class AiService {
       try {
         evidence({ event: 'STAGE_STARTED' });
         throwIfAborted(activeSignal);
-        const prepared = await abortable(prepare(activeSignal), activeSignal); throwIfAborted(activeSignal);assertTaskAuthorized(); if(!replay)this.assertProfile(profile.id, profile.generation);
+        const prepared = await abortable(prepare(activeSignal), activeSignal);diagnosticContextSha256=prepared.listingContext?listingFingerprint(prepared.listingContext):undefined; throwIfAborted(activeSignal);assertTaskAuthorized(); if(!replay)this.assertProfile(profile.id, profile.generation);
         const draftId=(prepared.imageContext?.listing??prepared.listingContext)?.draftId;
         const listingEvidence = prepared.imageContext?.listing ?? prepared.listingContext;
         evidenceContext = {
@@ -1227,7 +1236,10 @@ export class AiService {
         throwIfAborted(activeSignal); if(!replay)this.assertProfile(profile.id, profile.generation);
         await abortable(prepared.assertFresh(), activeSignal); throwIfAborted(activeSignal);assertTaskAuthorized(!!call); if(!replay)this.assertProfile(profile.id, profile.generation);
         rejectionStage = 'result-record-validation';
-        if(durable?.part&&reply.output.kind==='amazon-fields'&&[...reply.output.candidates,...reply.output.missing].some(f=>!durable.part!.fields.includes(f.field)))throw new AiError('OUTPUT_INVALID');
+        if(durable?.part&&reply.output.kind==='amazon-fields'){
+          const outside=[...reply.output.candidates,...reply.output.missing].find(f=>!durable.part!.fields.includes(f.field));
+          if(outside)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:'RESULT_FIELD_SCOPE',validationField:outside.field,validationPath:'$.output'});
+        }
         const resultAt=this.finishedAt(call.startedAt);
         const result = validateAiResult({ ...(replay?{providerReceiptRecovery:{...(call.providerReceiptId?{version:1 as const}:{version:2 as const,receiptSha256:replay.record.sha256}),receiptId:replay.record.id,requestFingerprint:call.requestFingerprint!,scopeSha256:listingFingerprint(call.requestScope!),recoveredAt:resultAt}}:{}), ...(durable?.part?{fieldGroupPart:durable.part}:{}), id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: resultAt, reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
@@ -1255,6 +1267,9 @@ export class AiService {
         if(error instanceof BatchWaitingError)throw error;
         const schemaReceived=isSchemaTransientError(error)&&rejectionStage==='source-freshness'&&!!call;
         const safe = safeError(error, activeSignal);
+        if(safe.code==='OUTPUT_INVALID'&&(rejectionStage==='result-record-validation'||'validationReason' in safe)){
+          const details=outputRejectionDetails(error);safe.diagnosticReason=details.reason;safe.validationField=details.field;safe.validationPath=details.jsonPath;
+        }
         // A denied later effect does not undo the original moderation permit or
         // its already received token. Keep logical UNKNOWN and its original ID.
         if(call&&!replay&&scope.operation==='image-ip-review'&&safe.certainty==='NOT_SENT')Object.assign(safe,{certainty:'SENT_UNKNOWN' as const,notSent:false});
@@ -1271,7 +1286,7 @@ export class AiService {
           catch { this.db.exec('ROLLBACK'); /* The durable pending reservation remains conservative. */ }
           if (safe.code === 'OUTPUT_INVALID' && (untrustedOutput||safe.responseDiagnostic)) {
             const operation = source && typeof source === 'object' && 'operation' in source && typeof source.operation === 'string' ? source.operation : profile.capability;
-            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage:untrustedOutput?rejectionStage:'provider-response-validation',rejectionReason:safe.diagnosticReason??safe.reason,responseDiagnostic:safe.responseDiagnostic,output:untrustedOutput?.value??null});
+            recordInvalidAiOutput(this.directory,{call,operation,createdAt:finishedAt,rejectionStage:untrustedOutput?rejectionStage:'provider-response-validation',rejectionReason:safe.diagnosticReason??safe.reason,diagnosticDetails:outputRejectionDetails(safe),...(durable?.part?{allowedFields:durable.part.fields,groupOperationId:durable.part.operationId}:{}),...(diagnosticContextSha256?{contextSha256:diagnosticContextSha256}:{}),responseDiagnostic:safe.responseDiagnostic,output:untrustedOutput?.value??null});
           }
         }
         throw safe;

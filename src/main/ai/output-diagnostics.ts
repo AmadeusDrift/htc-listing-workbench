@@ -8,6 +8,26 @@ const managedName = /^\d{17}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9
 const canonical = (path: string) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
 export type AiOutputRejectionStage = 'provider-response-validation' | 'operation-output-validation' | 'source-freshness' | 'schema-freshness-transient' | 'result-record-validation';
 
+export interface OutputRejectionDetails { reason:string; field?:string; jsonPath?:string }
+const safeField=(value:unknown):value is string=>typeof value==='string'&&/^[a-zA-Z][a-zA-Z0-9_]{0,99}$/.test(value);
+const safePath=(value:unknown):value is string=>typeof value==='string'&&value.length<=240&&/^\$?(?:[a-zA-Z_][a-zA-Z0-9_]*|\.[a-zA-Z_][a-zA-Z0-9_]*|\[\d{1,5}\])+$/.test(value);
+/** Map locally authored validation explanations; never persist their free text or evidence values. */
+export function outputRejectionDetails(error:unknown):OutputRejectionDetails {
+  const e=error as {diagnosticReason?:unknown;validationReason?:unknown;validationPath?:unknown;validationField?:unknown};
+  if(typeof e?.diagnosticReason==='string'&&/^[A-Z][A-Z_]{2,39}$/.test(e.diagnosticReason))return {reason:e.diagnosticReason,...(safeField(e.validationField)?{field:e.validationField}:{}),...(safePath(e.validationPath)?{jsonPath:e.validationPath}:{})};
+  const reason=typeof e?.validationReason==='string'?e.validationReason:'';
+  const ref=reason.match(/^字段 ([a-zA-Z][a-zA-Z0-9_]{0,99}) 引用不存在的来源 /);
+  if(ref)return {reason:'RESULT_EVIDENCE_REF',field:ref[1],jsonPath:'$.output.candidates'};
+  const contextPaths:Record<string,string>={'完整 Schema 上下文不完整':'$.listingContext','上下文身份无效':'$.listingContext','上下文版本无效':'$.listingContext','完整 Schema 与记录的规则指纹不一致':'$.listingContext.schemaSha256','字段目录无效':'$.listingContext.fields','来源资料无效':'$.listingContext.evidence'};
+  if(Object.hasOwn(contextPaths,reason))return {reason:'RESULT_CONTEXT_INVALID',jsonPath:contextPaths[reason]};
+  if(reason==='来源引用格式无效'||reason==='复核引用不存在的来源')return {reason:'RESULT_EVIDENCE_REF',jsonPath:'$.output'};
+  return {reason:'RESULT_VALIDATION_FAILED'};
+}
+export function groupedRecoveryExplanation(state:'missing-body'|'invalid-body'|'owner-mismatch'):string {
+  const summary={'missing-body':'无完整正文','invalid-body':'有正文但校验未通过','owner-mismatch':'原身份/归属不匹配'}[state];
+  return `${summary}；已保留原调用、成果和费用，未复制重发`;
+}
+
 function safeDirectory(path: string): void {
   const info = lstatSync(path);
   if (!info.isDirectory() || info.isSymbolicLink() || canonical(realpathSync(path)) !== canonical(path)) throw Error('Unsafe diagnostic directory');
@@ -33,7 +53,7 @@ function diagnosticOutput(value: unknown, depth = 0): unknown {
 }
 
 /** Failed-output evidence. Recovery must explicitly revalidate it; never adopt as a successful paid call. */
-export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; responseDiagnostic?:{status:number;byteCount:number}; output: unknown }): void {
+export function recordInvalidAiOutput(directory: string, input: { call: AiCall; operation: string; createdAt: string; rejectionStage: AiOutputRejectionStage; rejectionReason?: string; responseDiagnostic?:{status:number;byteCount:number}; diagnosticDetails?:OutputRejectionDetails; allowedFields?:string[]; contextSha256?:string; groupOperationId?:string; output: unknown }): void {
   let destination: string | undefined, file: number | undefined, complete = false;
   try {
     const { call } = input, name = `${input.createdAt.replace(/[-:.TZ]/g,'')}-${call.id}.json`;
@@ -42,6 +62,10 @@ export function recordInvalidAiOutput(directory: string, input: { call: AiCall; 
     const metadata = { version:1, approved:false, errorCode:'OUTPUT_INVALID', callId:call.id, operation:input.operation,
       productId:call.productId, productRevision:call.productRevision, providerId:call.providerId, model:call.model,
       createdAt:input.createdAt, rejectionStage:input.rejectionStage,
+      ...(input.diagnosticDetails?{diagnosticDetails:outputRejectionDetails({diagnosticReason:input.diagnosticDetails.reason,validationField:input.diagnosticDetails.field,validationPath:input.diagnosticDetails.jsonPath})}:{}),
+      ...(input.allowedFields?{allowedFields:[...new Set(input.allowedFields.filter(safeField))].slice(0,500)}:{}),
+      ...(input.contextSha256&&/^[a-f0-9]{64}$/.test(input.contextSha256)?{contextSha256:input.contextSha256}:{}),
+      ...(input.groupOperationId&&/^[a-f0-9-]{36}$/.test(input.groupOperationId)?{groupOperationId:input.groupOperationId}:{}),
       ...(input.responseDiagnostic&&Number.isInteger(input.responseDiagnostic.status)&&input.responseDiagnostic.status>=100&&input.responseDiagnostic.status<=599&&Number.isSafeInteger(input.responseDiagnostic.byteCount)&&input.responseDiagnostic.byteCount>=0?{responseDiagnostic:{status:input.responseDiagnostic.status,byteCount:input.responseDiagnostic.byteCount}}:{}),
       // Only a fixed code is kept; free text never enters the file through this field.
       ...(input.rejectionReason && /^[A-Z][A-Z_]{2,39}$/.test(input.rejectionReason) ? { rejectionReason:input.rejectionReason } : {}), outputByteLength };

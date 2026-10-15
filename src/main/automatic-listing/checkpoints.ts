@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 const header=(task:AutomaticListingTask)=>{
-  const {items:_items,revision:_revision,updatedAt:_updated,status:_status,error:_error,...scope}=task;
+  const {items:_items,revision:_revision,updatedAt:_updated,status:_status,error:_error,resumeScope:_resumeScope,...scope}=task;
   return JSON.stringify(scope);
 };
 export interface TaskCheckpointChange {
@@ -41,7 +41,7 @@ export class AutomaticTaskCheckpoints {
   revision(id:string):number|undefined{return this.previous.get(id)?.revision;}
   forget(id:string):void{this.previous.delete(id);}
   matches(task:AutomaticListingTask):boolean{const before=this.previous.get(task.id);return !!before&&isDeepStrictEqual(before,task);}
-  prepare(task:AutomaticListingTask, forceFull=false, evidenceKeys:string[]=[],beforeValidate?:(items:AutomaticListingItem[])=>void):TaskCheckpointChange{
+  prepare(task:AutomaticListingTask, forceFull=false, evidenceKeys:string[]=[],beforeValidate?:(items:AutomaticListingItem[])=>void, changedKeys?:readonly string[]):TaskCheckpointChange{
     const prior=this.previous.get(task.id);
     let full=forceFull||!prior||prior.revision!==task.revision-1||header(prior)!==header(task)
       ||prior.items.length!==task.items.length||prior.items.some((row,index)=>row.key!==task.items[index].key)
@@ -49,16 +49,20 @@ export class AutomaticTaskCheckpoints {
     // One comparison pass, then carry the changed set through validation, SQL,
     // diagnostics and cache update. Unchanged SKU payloads are never serialized
     // or cloned by the ordinary checkpoint path.
-    let indices=task.items.flatMap((row,index)=>full||evidenceKeys.includes(row.key)||!isDeepStrictEqual(row,prior!.items[index])?[index]:[]);
+    const explicit=changedKeys===undefined?null:new Set([...changedKeys,...evidenceKeys]);
+    if(explicit&&[...explicit].some(key=>!task.items.some(row=>row.key===key)))throw new UserFacingError('检查点 SKU 范围无效');
+    let indices=task.items.flatMap((row,index)=>full||(explicit?explicit.has(row.key):evidenceKeys.includes(row.key)||!isDeepStrictEqual(row,prior!.items[index]))?[index]:[]);
     if(indices.length>100&&!full){full=true;indices=task.items.map((_,index)=>index);}
     const items=indices.map(index=>task.items[index]);beforeValidate?.(items);
     if(full)validateAutomaticListingTask(task);else validateAutomaticTaskCheckpoint(task,prior!,new Set(items.map(row=>row.key)));
     const priorStages=new Map(prior?.items.map(row=>[row.key,{stage:row.stage,status:row.status}]));
     const serializedItems=items.map(row=>JSON.stringify(row));
     const paths=indices.map(index=>`'$.items[${index}]',json(?)`);
+    const scopePatch=task.resumeScope===undefined?'':",'$.resumeScope',json(?)";
+    const patch=`json_set(record_json,'$.revision',?,'$.updatedAt',?,'$.status',?,'$.error',json(?)${paths.length?','+paths.join(','):''}${scopePatch})`;
     const sql=full?'UPDATE automatic_listing_tasks SET record_json=? WHERE id=? AND json_extract(record_json,\'$.revision\')=?'
-      :`UPDATE automatic_listing_tasks SET record_json=json_set(record_json,'$.revision',?,'$.updatedAt',?,'$.status',?,'$.error',json(?)${paths.length?','+paths.join(','):''}) WHERE id=? AND json_extract(record_json,'$.revision')=?`;
-    const parameters=full?[JSON.stringify(task)]:[task.revision,task.updatedAt,task.status,JSON.stringify(task.error),...serializedItems];
+      :`UPDATE automatic_listing_tasks SET record_json=${task.resumeScope===undefined?`json_remove(${patch},'$.resumeScope')`:patch} WHERE id=? AND json_extract(record_json,'$.revision')=?`;
+    const parameters=full?[JSON.stringify(task)]:[task.revision,task.updatedAt,task.status,JSON.stringify(task.error),...serializedItems,...(task.resumeScope===undefined?[]:[JSON.stringify(task.resumeScope)])];
     return {full,items,priorStages,indices,serializedItems,sql,parameters};
   }
   write(db:DatabaseSync,task:AutomaticListingTask,change:TaskCheckpointChange,priorRevision:number|null):void{

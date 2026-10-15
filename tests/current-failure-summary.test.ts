@@ -11,9 +11,9 @@ test('current errors count distinct products per cause, excluding screened and s
 });
 
 test('same code preserves different field failures and redacts private data', () => {
-  const rows = ['color', 'mounting_type'].map(field => ({ productId: 'p1', status: 'FAILED', stage: 'DRAFT', code: 'FIELD_REQUIRED', kind: 'NEEDS_INPUT', reason: `${field} 缺失 https://private.test/token API_key=secret-123` }));
+  const rows = ['color', 'mounting_type'].map(field => ({ productId: 'p1', status: 'FAILED', stage: 'DRAFT', code: 'FIELD_REQUIRED', kind: 'NEEDS_INPUT', reason: `${field} 缺失 https://private.test/token API_key=secret-123; Authorization: Bearer private-token-123` }));
   const result = summarizeCurrentFailures(rows);
   assert.equal(result.groups.length, 2); assert.equal(result.affectedProducts, 1);
-  assert.doesNotMatch(JSON.stringify(result), /private.test|secret-123/);
+  assert.doesNotMatch(JSON.stringify(result), /private.test|secret-123|private-token-123/);
   assert.equal(summarizeCurrentFailures([{ ...rows[0], code: 'https://secret.test', stage: 'body=secret' }]).groups[0].code, 'UNCLASSIFIED_FAILURE');
 });

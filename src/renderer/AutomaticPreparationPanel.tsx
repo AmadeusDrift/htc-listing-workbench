@@ -28,7 +28,7 @@ interface Props {
 }
 const requiredCapabilities = [
   { capability: 'text', label: '文案与图片规划用途' }, { capability: 'text-review', label: '复核用途' },
-  { capability: 'image-generation', label: 'OpenRouter 生图接口' }, { capability: 'ocr', label: '阿里云 OCR' },
+  { capability: 'image-generation', label: 'OpenRouter 生图接口' },
   { capability: 'image-risk', label: '阿里云图片侵权检测' },
 ] as const;
 
@@ -129,7 +129,7 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
         {hostingError && <p className="workflow-notice" role="alert">托管配置读取失败：{hostingError}</p>}
         {!loadingHosting && !profile && <p className="workflow-notice">配置并启用图片托管后，任务会自动上传图片并检查公开地址。</p>}
         <button type="button" className="text-button automatic-hosting-link" onClick={() => onSettings('hosting')}>管理图片托管<ArrowRight size={14} /></button>
-        {target && <p className="workflow-notice">{target.mode === 'demo' ? '本地演示不会正式发布；文案、出图、OCR 和复核仍会调用已启用的服务并计入用量。' : '真实店铺将使用 Haul 规则并正式提交到 Amazon。启动时会弹出本次范围确认。'} 当前支持美国站 en_US；同款同规格按类目允许的主题建立父子体。</p>}
+        {target && <p className="workflow-notice">{target.mode === 'demo' ? '本地演示不会正式发布；文案、出图和视觉复核仍会调用已启用的服务并计入用量。' : '真实店铺将使用 Haul 规则并正式提交到 Amazon。启动时会弹出本次范围确认。'} 当前支持美国站 en_US；同款同规格按类目允许的主题建立父子体。</p>}
         {target && !supported && <p className="workflow-notice">该目标的站点或语言暂不支持，请选择美国站英文目标。</p>}
       </fieldset>
       <details open={!connectionsReady} className="automatic-connections" aria-label="全局自动化连接" aria-busy={loadingCapabilities} data-state={loadingCapabilities ? undefined : connectionsReady ? 'ready' : 'pending'}>
@@ -160,7 +160,7 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
       </fieldset>
 
       <div className="workflow-actions automatic-launch-actions"><strong>已选 {selected.length} 件商品 · 可启动 {salesRows.length} 个销售 SKU</strong><button type="button" className="button primary" disabled={!canStart} aria-describedby="automatic-start-hint" onClick={() => { void start(); }}><Play size={16} />{starting ? '正在创建任务…' : '启动并自动发布'}</button><span id="automatic-start-hint" className="small-copy">{canStart ? '任务保存在本机。启动后可切换页面；暂停或取消请使用下方任务操作。' : startHint}</span></div>
-      <p className="small-copy automatic-review-scope">每个销售 SKU 生成 7 张图，{riskEnabled?'全部检查侵权风险':'当前已关闭图片风险拦截'}；只检查第一张主图是否带字，其余图片不做 OCR 或文字复核。每个图位初始最多3次尝试；符合条件的失败图位可追加3次，已通过图片保留。</p>
+      <p className="small-copy automatic-review-scope">每个销售 SKU 生成 7 张图，{riskEnabled?'全部检查侵权风险':'当前已关闭图片风险拦截'}；第一张主图由 DeepSeek Flash 直接看图检查是否带字，其余图片不做文字复核。每个图位初始最多3次尝试；符合条件的失败图位可追加3次，已通过图片保留。</p>
       {starting&&<AutomaticOperationStatus starting/>}
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}

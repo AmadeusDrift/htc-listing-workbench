@@ -1413,7 +1413,7 @@ test('direct vision basic keeps original unknown generation locked without anoth
 test('direct vision basic preserves unknown text owner and blocks missing safety journal',async t=>{
  const f=await fixture(t),callId=randomUUID();let original:AiCall|undefined,directCalls=0;const getCall=f.ai.getCall;
  (f.ai as any).getCall=(id:string)=>id===callId?original:getCall();
- f.ai.reviewGeneratedImageDirect=async(context,plan,candidate)=>{
+ f.ai.reviewGeneratedImageDirect=async(context,_plan,candidate)=>{
    directCalls++;const now=new Date().toISOString();original={id:callId,providerId:'deepseek-review',model:'deepseek-flash',generation:1,productId:context.listing.productId,productRevision:context.listing.productRevision,status:'FAILED',errorCode:'TIMEOUT',requestId:null,startedAt:now,finishedAt:now,usage:{promptTokens:0,completionTokens:0,processedImages:0},presentationContext:{kind:'image',draftId:context.listing.draftId,variantId:context.listing.variantId,sourceSha256:listingFingerprint(context),slot:1},requestFingerprint:'e'.repeat(64),requestScope:{version:1,operation:'image-text-review',productId:context.listing.productId,variantId:context.listing.variantId,sku:context.listing.sku,slot:1,candidateSha256:(candidate as {sha256:string}).sha256}} as AiCall;
    const error=new AiError('TIMEOUT');error.callId=callId;throw error;
  };

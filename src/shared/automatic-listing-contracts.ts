@@ -1,3 +1,4 @@
+import type { AutomaticTaskQueryApi } from './automatic-task-query-contracts.ts';
 import type { ItemLabelFormat } from './item-label-contracts.ts';
 import type { ProductClassification } from './category-ai-contracts.ts';
 import { INFERABLE_CATEGORY_FIELDS } from './listing-ai-contracts.ts';
@@ -93,7 +94,7 @@ export interface AutomaticListingTask {
   createdAt: string; updatedAt: string; error: string | null;
 }
 export interface StartAutomaticListingInput { workBatchId?:string; executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
-export interface AutomaticListingApi {
+export interface AutomaticListingApi extends AutomaticTaskQueryApi {
   previewAutomaticSalesUnitAdoption(input:AutomaticSalesUnitInput):Promise<AutomaticSalesUnitPreview>;
   adoptAutomaticSalesUnit(input:AutomaticSalesUnitInput&{token:string;confirmed:true}):Promise<AutomaticListingTask>;
   previewAutomaticResume(input:{taskId:string;scope:import('./automatic-resume.ts').AutomaticResumeSelection}):Promise<{taskRevision:number;token:string;lines:string[]}>;

@@ -1,3 +1,4 @@
+import { MODULE_SCHEMA_VERSION } from '../src/main/storage/migrations.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -15,7 +16,7 @@ function fixture(t: test.TestContext) {
 }
 
 test('schema10 atomically imports source-specific SKU prices, unknown inventory and inbox placement', t => {
-  const { store } = fixture(t); assert.equal(SCHEMA_VERSION, 33);
+  const { store } = fixture(t); assert.equal(SCHEMA_VERSION, MODULE_SCHEMA_VERSION);
   const snapshot = collectionSnapshot(), result = store.receiveCollectionSnapshot(randomUUID(), snapshot), product = store.getProduct(result.productId);
   assert.equal(product.status, 'draft'); assert.equal(product.sourceUrl, snapshot.sourceUrl); assert.equal(product.variants[0].purchasePrice, '0.0350');
   assert.equal(product.variants[0].inventory, null); assert.equal(product.assets.length, 0); assert.equal(product.variants[0].originalSpec, snapshot.skus[0].originalSpec);

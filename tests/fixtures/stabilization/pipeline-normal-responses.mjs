@@ -45,7 +45,7 @@ export function normalChatResponse(body,id){
   }catch{return {status:422,json:{error:{message:'S10 normal fixture has no response for this exact operation'}}};}
 }
 export function normalDecisionResponse(body,id){
-  try{const request=JSON.parse(body.toString());assert.equal(request.model,'openai/gpt-6-luna_decisions');assert.deepEqual(Object.keys(request.questions).sort(),['category','review']);assert.ok(Object.hasOwn(request.questions.category.criteria,'DRINK_COASTER'));assert.ok(Object.hasOwn(request.questions.review.criteria,'clear'));
+  try{const request=JSON.parse(body.toString());assert.equal(request.model,'openai/gpt-6-luna-decisions');assert.deepEqual(Object.keys(request.questions).sort(),['category','review']);assert.ok(Object.hasOwn(request.questions.category.criteria,'DRINK_COASTER'));assert.ok(Object.hasOwn(request.questions.review.criteria,'clear'));
     return {json:{id,answers:{category:{type:'choice',choice:'DRINK_COASTER',confidence:1},review:{type:'choice',choice:'clear',confidence:1}},usage:{input_tokens:100,output_tokens:50,cost:0.001}}};
   }catch{return {status:422,json:{error:{message:'S10 normal fixture has no response for this exact decision'}}};}
 }

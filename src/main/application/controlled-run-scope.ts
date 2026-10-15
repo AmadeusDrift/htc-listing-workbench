@@ -56,7 +56,7 @@ export class ControlledRunScopes {
   if(!effect.draftId)blocked();const saved=this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(effect.draftId);if(!saved)blocked();const draft=JSON.parse(String(saved.record_json)).draft;
   if(!draft||draft.id!==effect.draftId||draft.productId!==effect.productId||draft.sku!==effect.sku||draft.targetId!==scope.targetId||draft.sellerId!==scope.sellerId||draft.marketplaceId!==scope.marketplaceId||draft.mode!=='live'||draft.schema?.parentageLevel!=='NONE'||draft.salesPlan&&draft.salesPlan.parentage!=='NONE')blocked();
   const draftVariants=draft.salesPlan?.recipe?.components?.map((c:any)=>c.variantId)??[draft.variantId];if(listingFingerprint([...new Set(draftVariants)].sort())!==listingFingerprint([...(effect.variantIds??[])].sort()))blocked();
-  const match=scope.items.find(i=>i.itemKey===scope.activeItemKey&&i.productId===effect.productId&&i.sku===effect.sku);if(!match||effect.targetId!==scope.targetId||effect.marketplaceId!==scope.marketplaceId||listingFingerprint([...(effect.variantIds??[])].sort())!==listingFingerprint([...match.variantIds].sort()))blocked();return scope.id;
+  const match=scope.items.find(i=>i.itemKey===scope.activeItemKey&&i.productId===effect.productId&&i.sku===effect.sku);if(!match||(draft.salesPlan?.recipe?.key??null)!==match.recipeKey||effect.targetId!==scope.targetId||effect.marketplaceId!==scope.marketplaceId||listingFingerprint([...(effect.variantIds??[])].sort())!==listingFingerprint([...match.variantIds].sort()))blocked();return scope.id;
  }
 }
 export function assertControlledRunHistory(db:DatabaseSync):void{readControlledRunScope(db);}

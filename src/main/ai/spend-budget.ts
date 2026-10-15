@@ -61,8 +61,9 @@ export class AiSpendBudget {
   const policies:AiSpendPolicy['id'][]=['image-generation-daily',...(identity.scopeId?['controlled-live-lifetime' as const]:[])];
   // Result uncertainty is enforced by the request/domain owner, separately from fee uncertainty.
   const previous=readReservations(db);if(previous.some(r=>r.id===identity.id))throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');
-  if(previous.some(r=>r.state==='COST_ANOMALY'&&r.policyIds.some(id=>policies.includes(id))))throw new SpendBudgetError('SPEND_COST_ANOMALY');
-  for(const id of policies){const summary=this.summary(id,db,at);if(summary.anomaly)throw new SpendBudgetError('SPEND_COST_ANOMALY');if(summary.limitUsdMicros!==null){if(!bound)throw new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');if(summary.unboundedCalls||summary.reportedUsdMicros+summary.heldUsdMicros+bound.upperUsdMicros>summary.limitUsdMicros)throw new SpendBudgetError('SPEND_LIMIT_EXCEEDED');}}
+  // An unconfigured ordinary daily policy observes liabilities without pausing
+  // unrelated work. The finite controlled lifetime policy still locks on any anomaly.
+  for(const id of policies){const summary=this.summary(id,db,at);if(summary.limitUsdMicros!==null){if(summary.anomaly)throw new SpendBudgetError('SPEND_COST_ANOMALY');if(!bound)throw new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');if(summary.unboundedCalls||summary.reportedUsdMicros+summary.heldUsdMicros+bound.upperUsdMicros>summary.limitUsdMicros)throw new SpendBudgetError('SPEND_LIMIT_EXCEEDED');}}
   const record:AiSpendReservation={version:1,...identity,createdAt:at,policyIds:policies,bound,state:'DISPATCH_ATTEMPTED',actualUsdMicros:null,receiptIds:[],receiptProofs:[]};writeReservation(db,record);return record;
  }
  private read(id:string,db:DatabaseSync):AiSpendReservation{const r=readReservations(db).find(r=>r.id===id);if(!r)spendInvalid();return r;}

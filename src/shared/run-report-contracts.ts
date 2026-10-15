@@ -9,13 +9,19 @@ export interface RunCallReport {
   nextAction: 'VERIFY_ORIGINAL_REQUEST' | 'INSPECT_SAVED_RESULT' | 'INSPECT_REJECTION_AND_BUDGET' | 'CONTINUE_FROM_ADOPTED_RESULT' | 'INSPECT_LEGACY_EVIDENCE';
   missing: string[]; evidence: RunEvidence[];
 }
+export interface RunCategoryLookupReport {
+  operationId:string;requestId:string;itemKeys:string[];skus:string[];permittedAt:string|null;
+  httpStatus:number|null;remoteRequestId:string|null;receivedAt:string|null;receivedBytes:number|null;receiptSha256:string|null;
+  snapshotSaved:boolean;snapshotSha256:string|null;candidateCount:number|null;adopted:boolean;adoptedResultIds:string[];
+  certainty:RequestCertainty|null;receiptIntegrity:'SAVED_METADATA_ONLY';missing:string[];
+}
 export interface RunDiagnosticReport {
   reportVersion: 1; generatedAt: string;
   provenance: { appVersion: string | null; sourceCommit: string | null; sourceDigest: string | null; buildDigest: string | null; workspaceId: string; connection: 'CURRENT_PROCESS'; consistentSnapshot: true };
   scope: { taskId: string; taskRevision: number | null; sku: string | null };
   counts: { totalCalls: number; savedReceipts: number; validResults: number; adoptedResults: number; submittedSkus: number; buyableSkus: number; demoSubmittedSkus: number; previewRequests: number; submissionRequests: number; readbackRequests: number; evidenceEvents: number };
   coverage: { missing: string[]; unassignedProductCalls: number; draftReferenceCalls: number; receiptIntegrity: 'SAVED_METADATA_ONLY' };
-  calls: RunCallReport[]; events: RunEvidence[];
+  calls: RunCallReport[]; events: RunEvidence[]; categoryLookups:RunCategoryLookupReport[];
   platform: { id: string; draftId: string; stage: 'preview' | 'submit' | 'readback'; at: string | null; httpStatus: number | null; requestId: string | null }[];
   errors: { stage: string; code: string; at: string | null; callId?: string; requestId?: string; abortSource?: AbortSource; certainty?: RequestCertainty; draftId?: string; itemKey?: string; sku?: string; operationId?: string }[];
   page: { total: number; returned: number; nextCursor: string | null; complete: boolean };

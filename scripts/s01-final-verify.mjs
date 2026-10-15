@@ -4,7 +4,7 @@ import {createWriteStream} from 'node:fs';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {resolve,dirname} from 'node:path';
 import {createRequire} from 'node:module';
-const files=['tests/run-report-classification.test.ts','tests/run-report.test.ts','tests/run-report-certainty.test.ts','tests/run-evidence.test.ts','tests/error-stage-evidence.test.ts','tests/diagnostics.test.ts','tests/openrouter-call-identity.test.ts','tests/automatic-classification.test.ts','tests/category-ai-service.test.ts','tests/release-api-surface.test.ts'];
+const files=['tests/run-report-classification.test.ts','tests/run-report-category-lookup.test.ts','tests/run-report.test.ts','tests/run-report-certainty.test.ts','tests/run-evidence.test.ts','tests/error-stage-evidence.test.ts','tests/diagnostics.test.ts','tests/openrouter-call-identity.test.ts','tests/automatic-classification.test.ts','tests/category-ai-service.test.ts','tests/category-operation-records.test.ts','tests/category-expansion-caller.test.ts','tests/category-expansion-receipts.test.ts','tests/category-expansion-recovery.test.ts','tests/category-expansion-amazon.test.ts','tests/release-api-surface.test.ts'];
 const mode=process.argv[2],label=process.argv[3]??'classification';
 if(!['related','typecheck','boundaries'].includes(mode)||!/^[a-z0-9-]+$/.test(label))throw Error('Use related/typecheck/boundaries and a safe label');
 const git=(...args)=>execFileSync('git',['-c','safe.directory='+process.cwd(),...args],{encoding:'utf8',windowsHide:true}).trim();

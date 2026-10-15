@@ -6,6 +6,7 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { evidenceCode, evidenceId, evidenceItemKey, evidenceSku, evidenceTime, validateRunEvidence } from './run-evidence.ts';
 import { readErrorEvidence } from '../error-evidence.ts';
 import { classificationReferences } from './classification-references.ts';
+import { categoryLookups } from './category-lookups.ts';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const fail = (code = 'RUN_REPORT_INVALID_RECORD'): never => { throw new UserFacingError(code); };
@@ -61,7 +62,7 @@ export class RunReportReader {
     catch (error) { this.db.exec('ROLLBACK'); if (error instanceof UserFacingError) throw error; return fail(); }
   }
   private snapshot(q: RunReportQuery & { pageSize: number }, scope: string, cursor: { after: number; signature: string } | null, full: boolean, context: RunReportContext): RunDiagnosticReport {
-    const task = this.db.prepare(`SELECT ${projection('id')} id,${projection('revision')} revision FROM automatic_listing_tasks WHERE id=?`).get(q.taskId);
+    const task = this.db.prepare(`SELECT ${['id','revision','targetId','sellerId','marketplaceId','locale','mode'].map(key=>`${projection(key)} ${key}`).join(',')} FROM automatic_listing_tasks WHERE id=?`).get(q.taskId);
     if (!task || task.id !== q.taskId) return fail('RUN_REPORT_TASK_MISSING');
     const rawItems = this.db.prepare(`SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.productId') productId,json_extract(i.value,'$.sku') sku,json_extract(i.value,'$.draftId') draftId,json_extract(i.value,'$.productRevision') productRevision,json_extract(i.value,'$.classification') classification
       FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?`).all(q.taskId);
@@ -161,7 +162,8 @@ export class RunReportReader {
         ...(e.callId ? { callId: e.callId } : {}), ...(e.requestId ? { requestId: e.requestId } : {}), ...(e.abortSource ? { abortSource: e.abortSource } : {}), ...(e.certainty ? { certainty: e.certainty } : {}),
         ...(e.draftId ? { draftId: e.draftId } : {}), ...(e.itemKey ? { itemKey: e.itemKey } : {}), ...(e.sku ? { sku: e.sku } : {}), ...(e.operationId ? { operationId: e.operationId } : {}) });
     }
-    const signature = hash([task.revision, calls, events, platform, counts, errors]);
+    const lookups=categoryLookups(this.db,{id:task.id,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,locale:task.locale,mode:task.mode},items,calls,classification);
+    const signature = hash([task.revision, calls, events, platform, counts, errors,lookups]);
     if (cursor && (cursor.signature !== signature || cursor.after > calls.length)) return fail('RUN_REPORT_CURSOR_RELOAD');
     const after = cursor?.after ?? 0, pageCalls = full ? calls : calls.slice(after, after+q.pageSize), next = !full && after+q.pageSize < calls.length ? this.cursor({ scope, signature, after: after+q.pageSize }) : null;
     const unassigned = allCalls.filter(c => typeof c.productId === 'string' && products.has(c.productId) && !selected.some(s => s.id === c.id)).length;
@@ -171,6 +173,6 @@ export class RunReportReader {
       sourceCommit: sha(context.sourceCommit,40), sourceDigest: sha(context.sourceDigest), buildDigest: sha(context.buildDigest), workspaceId: hash(['main', file ?? '']), connection: 'CURRENT_PROCESS', consistentSnapshot: true },
       scope: { taskId: q.taskId, taskRevision: integer(task.revision), sku: q.sku ?? null }, counts,
       coverage: { missing: [...(unassigned || calls.some(c => c.association === 'DRAFT_REFERENCE') ? ['LEGACY_TASK_CALL_LINK'] : []), ...(!sha(context.sourceCommit,40) ? ['BUILD_SOURCE_NOT_SAVED'] : [])], unassignedProductCalls: unassigned, draftReferenceCalls: calls.filter(c => c.association === 'DRAFT_REFERENCE').length, receiptIntegrity: 'SAVED_METADATA_ONLY' },
-      calls: pageCalls, events: full ? events : events.filter(e => !e.callId || pageCalls.some(c => c.callId === e.callId)), platform, errors, page: { total: calls.length, returned: pageCalls.length, nextCursor: next, complete: full || !next && after === 0 } };
+      calls: pageCalls, events: full ? events : events.filter(e => !e.callId || pageCalls.some(c => c.callId === e.callId)), platform, errors,categoryLookups:lookups, page: { total: calls.length, returned: pageCalls.length, nextCursor: next, complete: full || !next && after === 0 } };
   }
 }

@@ -12,8 +12,8 @@ test('registered migrations are atomic, sequential and preserve old record bytes
   db.prepare('INSERT INTO old_receipts VALUES(?,?)').run('unknown','{ "response": null, "attempt": 3 }');
   const before=db.prepare('SELECT raw FROM old_receipts').get()!.raw;
   migrateModules(db);migrateModules(db);assertMigrationJournal(db);
-  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,39);
-  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,18);
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,40);
+  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,19);
   assert.equal(db.prepare('SELECT raw FROM old_receipts').get()!.raw,before);
   db.prepare('UPDATE module_migration_journal SET name=?').run('tampered');
   assert.throws(()=>assertMigrationJournal(db),/迁移/);
@@ -35,7 +35,7 @@ test('schema32 to 33 adds lookup indexes without changing UNKNOWN draft bytes an
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());
  db.exec('PRAGMA user_version=21; CREATE TABLE image_workflow_runs(id TEXT PRIMARY KEY,record_json TEXT);CREATE TABLE ai_results(id TEXT PRIMARY KEY,record_json TEXT);CREATE TABLE listing_completion_operations(id TEXT PRIMARY KEY,record_json TEXT);CREATE TABLE listing_drafts(id TEXT PRIMARY KEY,record_json TEXT); CREATE TABLE product_workspaces(product_id TEXT,lane TEXT); CREATE TABLE automatic_listing_tasks(id TEXT PRIMARY KEY,record_json TEXT NOT NULL); CREATE TABLE ai_profiles(id TEXT PRIMARY KEY,record_json TEXT NOT NULL)');
  migrateModules(db);
- const downgrade=()=>db.exec('DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DROP INDEX record_completion_product;DROP INDEX record_ai_results_call; DROP TABLE ai_category_operations; DROP TABLE image_review_journal; DROP TABLE ai_spend_policies; DROP TABLE ai_spend_reservations; DROP TABLE controlled_run_scopes; DROP INDEX record_drafts_sku; DROP INDEX record_drafts_recipe; DELETE FROM module_migration_journal WHERE version>=33; PRAGMA user_version=32');downgrade();
+ const downgrade=()=>db.exec('DROP INDEX IF EXISTS record_completion_draft;DROP INDEX IF EXISTS record_completion_safety;DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DROP INDEX record_completion_product;DROP INDEX record_ai_results_call; DROP TABLE ai_category_operations; DROP TABLE image_review_journal; DROP TABLE ai_spend_policies; DROP TABLE ai_spend_reservations; DROP TABLE controlled_run_scopes; DROP INDEX record_drafts_sku; DROP INDEX record_drafts_recipe; DELETE FROM module_migration_journal WHERE version>=33; PRAGMA user_version=32');downgrade();
  const raw='{ "draft": {"sku":"KEEP", "state":"UNKNOWN", "salesPlan":{"recipe":{"key":"keep"}}}, "unresolvedWrite": true, "paid": 3 }';
  db.prepare('INSERT INTO listing_drafts VALUES(?,?)').run('unknown',raw);migrateModules(db);
  assert.equal(db.prepare('SELECT record_json FROM listing_drafts').get()!.record_json,raw);

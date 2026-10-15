@@ -1,3 +1,5 @@
+import { MODULE_SCHEMA_VERSION } from '../src/main/storage/migrations.ts';
+import { dropPost33FixtureTables } from './helpers/legacy-schema.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync,mkdtempSync,rmSync } from 'node:fs';
@@ -15,9 +17,9 @@ test('Schema30 creates only model storage; old adoption bytes and unmarked legac
   const source={...normalizeDetail(detailFixture(),'2026-10-13T00:00:00.000Z','demo',v=>v),attributes:[]};
   const received=persistImport(db,store,source,mappingFor(source),'a'.repeat(64),'demo','2026-10-13T01:00:00.000Z'),legacy=store.createProduct();
   const raw=String(db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(received.productId)!.record_json);
-  db.exec('DROP TABLE product_fact_models; DROP TABLE image_retry_allowances; DROP TABLE automatic_work_batches; DELETE FROM module_migration_journal WHERE version>=30; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=29');db.close();store.close();
+  dropPost33FixtureTables(db); db.exec('DROP TABLE product_fact_models; DROP TABLE image_retry_allowances; DROP TABLE automatic_work_batches; DELETE FROM module_migration_journal WHERE version>=30; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=29');db.close();store.close();
   store=new WorkspaceStore(dir);db=openDatabase(dir);
-  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,33);assert.equal(db.prepare('SELECT count(*) n FROM product_fact_models').get()!.n,0,'migration must not fabricate old model records');
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,MODULE_SCHEMA_VERSION);assert.equal(db.prepare('SELECT count(*) n FROM product_fact_models').get()!.n,0,'migration must not fabricate old model records');
   assert.equal(String(db.prepare('SELECT record_json FROM product_source_adoptions WHERE id=?').get(received.productId)!.record_json),raw);
   assert.equal(store.getProduct(received.productId).factScopeModelVersion,1);assert.equal(store.getProduct(legacy.id).factScopeModelVersion,undefined);assertProductFactModels(db);
 });

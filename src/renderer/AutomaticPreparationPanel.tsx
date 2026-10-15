@@ -1,3 +1,4 @@
+import { automaticRuleOutcome } from '../shared/automatic-status-projection';
 import { BatchCoverage } from './AutomaticBatchStatus';
 import type { ListingExecutionMode, TaskBatchPlan } from '../shared/ai-batch-contracts';
 import type { ProblemContext } from './navigation-context';
@@ -145,7 +146,7 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
         {(loadingProducts || loadingRules) && <p className="small-copy" role="status">正在读取本地商品与规则…</p>}
         {rulesError && <p className="workflow-notice" role="alert">规则读取失败：{rulesError}</p>}
         {readErrors.map(message => <p className="workflow-notice" role="alert" key={message}>{message}；请刷新后再启动。</p>)}
-        {plan && !loadingProducts && <div className="workflow-notice"><strong>每个来源链接按配置、资料和代表性选择，最多 {Math.min(4,plan.variantLimit)} 个销售 SKU，不含说明性选项；每个销售 SKU 计划备货 {plan.stockSets} 套。</strong><p>{queue?`本次可启动 ${salesRows.length} 个销售 SKU。`:'选择目标店铺后计算销售配方。'}备货数量按销售单位计算，不直接写入 Haul 库存。</p>{queue?.products.filter(p=>selected.some(value=>value.id===p.productId)).map(product => <p key={product.productId}>{product.title || '未命名商品'}：可启动 {product.eligibleCount}，本次未选中 {product.notSelectedCount??0}，利润淘汰 {product.profitFilteredCount??0}，其他规则淘汰 {product.filteredCount-(product.profitFilteredCount??0)}</p>)}</div>}
+        {plan && !loadingProducts && <div className="workflow-notice"><strong>每个来源链接按配置、资料和代表性选择，最多 {Math.min(4,plan.variantLimit)} 个销售 SKU，不含说明性选项；每个销售 SKU 计划备货 {plan.stockSets} 套。</strong><p>{queue?`本次可启动 ${salesRows.length} 个销售 SKU。`:'选择目标店铺后计算销售配方。'}备货数量按销售单位计算，不直接写入 Haul 库存。</p>{queue?.products.filter(p=>selected.some(value=>value.id===p.productId)).map(product => <p key={product.productId}>{product.title || '未命名商品'}：可启动 {product.eligibleCount}，本次未选中 {product.notSelectedCount??0}，利润淘汰 {product.profitFilteredCount??0}，包装抛重限制 {product.rows.filter(row=>row.kind==='RULE_FILTERED'&&automaticRuleOutcome(row.reasonCode)==='packagingFiltered').length}，其他规则淘汰 {product.rows.filter(row=>row.kind==='RULE_FILTERED'&&automaticRuleOutcome(row.reasonCode)==='ruleFiltered').length}</p>)}</div>}
         {queueLoading&&<p className="small-copy" role="status">正在核对销售配方和已保存结果…</p>}{queueError&&<p className="workflow-notice" role="alert">{queueError}</p>}
         {!!salesRows.length && <details className="listing-details"><summary>查看待处理销售配方</summary><ul className="listing-history">{salesRows.map(row => <li key={row.key}><strong>{row.specification}</strong><p>备货 {rules?.product.stockSets} 套；{row.reconsideration||'使用当前目标店铺规则'}</p></li>)}</ul></details>}
       </fieldset>
@@ -162,6 +163,6 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}
     </section>
-    <AutomaticTaskPanel taskIds={taskIds} products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
+    <AutomaticTaskPanel workBatchId={workBatchId} taskIds={taskIds} products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
   </>;
 }

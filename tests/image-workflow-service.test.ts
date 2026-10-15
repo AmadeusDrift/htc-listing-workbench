@@ -757,15 +757,14 @@ test('invalidated completed approval does not attempt to persist RUNNING with a 
   try{db.prepare('UPDATE assets SET sha256=? WHERE id=?').run('a'.repeat(64),first.workflow.approvedAssetId!);}finally{db.close();}
   await assert.doesNotReject(f.run());
 });
-test('resuming interrupted copy recheck never generates pending images again',async t=>{
+test('legacy interrupted copy recheck without call identity stays pending and never regenerates images',async t=>{
   const f=await fixture(t),first=await f.run();
   const changed=f.amazon.saveDraft({id:f.draft.id,revision:f.draft.revision,attributes:{...f.draft.attributes,item_name:[{value:'Updated title'}]}});
   const risk=f.ai.reviewGeneratedImageRisk;let calls=0;
   f.ai.reviewGeneratedImageRisk=async(...args)=>{if(++calls===2)throw new AiError('RATE_LIMITED');return risk(...args);};
   const partial=await f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id});
   assert.equal(partial.workflow.slots![0].status,'PASSED');assert.equal(partial.workflow.status,'FAILED');
-  const resumed=await f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id});assert.equal(resumed.workflow.id,partial.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED');assert.equal(calls,8);assert.equal(f.calls.filter(call=>call==='generate').length,7);
-  assert.equal((await f.run()).workflow.id,resumed.workflow.id);
+  const proof=openDatabase(f.root);try{const before=proof.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(partial.workflow.id)!.record_json;await assert.rejects(f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id}),(e:unknown)=>e instanceof AiError&&e.diagnosticReason==='IMAGE_REVIEW_IDENTITY_MISSING');assert.equal(calls,2);assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.deepEqual(f.service.getProgress(changed.id),partial.workflow);assert.equal(proof.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(partial.workflow.id)!.record_json,before,'blocked continuation preserves exact persisted original JSON bytes');}finally{proof.close();}
 });
 test('source preparation is deduplicated and cancellable, blocks paid overlap, and drains on close',async t=>{
   const f=await fixture(t),input={productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]};
@@ -823,6 +822,7 @@ test('source colors are prepared before content and counted before any paid imag
   const result=await f.run();
   assert.deepEqual(f.calls.slice(0,3),['source-colors','content','content-review']);
   assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');
+  const stages=f.calls.reduce<Record<string,number>>((counts,stage)=>({...counts,[stage]:(counts[stage]??0)+1}),{});assert.deepEqual(stages,{'source-colors':1,content:1,'content-review':1,'source-ocr':1,'set-plan':1,plan:7,generate:7,'ip-check':7,ocr:1,review:1});t.diagnostic(JSON.stringify({reported:result.aiCalls,stages,paidSteps:2+f.calls.filter(stage=>!['content','generate'].includes(stage)).length}));
   assert.equal(result.aiCalls,22);
 });
 

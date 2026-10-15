@@ -36,13 +36,13 @@ const date = (value: unknown): string => typeof value === 'string' && Number.isF
 const optional = (value: unknown, max = 1000): string | null => value === null ? null : text(value, '任务内容', max, true);
 const itemKeys = ['key','productId','productRevision','sourceStamp','productTitle','variantId','sku','stockSets','sourcesPrepared','status','stage','draftId','executionTaskIds','imageStarted','imageAttempts','repairAttempts','repair','batchId','error'];
 function item(raw: unknown): AutomaticListingItem {
-  const value = record(raw, '自动上架 SKU', [...itemKeys,'imageRetryAllowance','rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp','failureHistory','lastContinuedAt']);
+  const value = record(raw, '自动上架 SKU', [...itemKeys,'unitRecheck','imageRetryAllowance','rejection','classification','salesPlan','parentDraftId','repairPolicyVersion','repairPolicyMigration','familyTransition','sourceColorEvidenceSha256','sourceColorRepair','categoryFieldPolicyVersion','categoryFieldRepair','legacyThemeRepair','outcome','pricingRefresh','schemaRetry','batchWait','observationFailureStamp','failureHistory','lastContinuedAt']);
   if (itemKeys.some(key=>!Object.hasOwn(value,key)) || !['PENDING','RUNNING','WAITING','DONE','FAILED','SCREENED'].includes(String(value.status))
     || !['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(value.stage))
     || typeof value.sourcesPrepared !== 'boolean' || typeof value.imageStarted !== 'boolean' || !Array.isArray(value.executionTaskIds) || value.executionTaskIds.length > 6) fail();
   const productId = identifier(value.productId), variantId = identifier(value.variantId);
   const salesPlan=value.salesPlan===undefined?undefined:validateSalesPlan(value.salesPlan);
-  if (value.key !== productId + ':' + (salesPlan?.recipe.key??variantId)) fail();
+  if (value.key !== productId + ':' + (salesPlan?.unitAdoption?.originalRecipeKey??salesPlan?.recipe.key??variantId)) fail();
   const retry=value.imageRetryAllowance===undefined?undefined:record(value.imageRetryAllowance,'图片额度引用',['workflowId','allowance']);
   const imageRetryAllowance=retry?{workflowId:identifier(retry.workflowId),allowance:validateRetryAllowance(retry.allowance)}:undefined;
   const result: AutomaticListingItem = { ...(imageRetryAllowance?{imageRetryAllowance}:{}), key: String(value.key), productId, variantId, productRevision: counter(value.productRevision), sourceStamp: hash(value.sourceStamp),
@@ -52,6 +52,11 @@ function item(raw: unknown): AutomaticListingItem {
     imageStarted: value.imageStarted as boolean, imageAttempts: counter(value.imageAttempts,21+3*(imageRetryAllowance?.allowance.grants.length??0)), repairAttempts: counter(value.repairAttempts, 5),
     repair: null, batchId: value.batchId === null ? null : identifier(value.batchId), error: optional(value.error, 2000) };
   if(value.lastContinuedAt!==undefined)result.lastContinuedAt=date(value.lastContinuedAt);
+  if(value.unitRecheck!==undefined){
+    const u=record(value.unitRecheck,'计量采用后的原图复核',['sourceWorkflowId','draftRevision','draftStamp']);
+    if(Object.keys(u).length!==3||!salesPlan?.unitAdoption||!result.draftId||!result.imageStarted||!Number.isSafeInteger(u.draftRevision)||Number(u.draftRevision)<1)fail();
+    result.unitRecheck={sourceWorkflowId:identifier(u.sourceWorkflowId),draftRevision:Number(u.draftRevision),draftStamp:hash(u.draftStamp)};
+  }
   if(value.failureHistory!==undefined){
     if(!Array.isArray(value.failureHistory))fail();
     result.failureHistory=(value.failureHistory as unknown[]).map(raw=>{const e=record(raw,'失败事件',['version','stage','reason','occurredAt','slot','source']);if(e.slot!==undefined&&(!Number.isInteger(e.slot)||Number(e.slot)<1||Number(e.slot)>7)||e.source!==undefined&&!['request-proof','local-check'].includes(String(e.source)))fail();if(e.version!==1||!['PLAN','SOURCES','CLASSIFY','DRAFT','IMAGES','PARENT','EXECUTION','READBACK','LABELS','COMPLETE'].includes(String(e.stage)))fail();return {version:1 as const,stage:e.stage as AutomaticListingItem['stage'],reason:sanitizeFailureReason(text(e.reason,'失败原因',2000,true)),occurredAt:e.occurredAt===null?null:date(e.occurredAt),...(e.slot!==undefined?{slot:Number(e.slot)}:{}),...(e.source!==undefined?{source:e.source as 'request-proof'|'local-check'}:{})};});
@@ -174,7 +179,13 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     if(result.kind!==SOURCE_CONSISTENCY_OUTCOMES[result.code as keyof typeof SOURCE_CONSISTENCY_OUTCOMES]||result.pricingReport||result.image)fail();
   }else if(result.code==='READBACK_BRAND_REQUIRES_MANUAL'){
     if(result.kind!=='NEEDS_INPUT'||row.stage!=='READBACK'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
-  }else if(AI_ERROR_CODES.some(code=>result.code==='AI_'+code)){
+  }else if(result.code==='CATEGORY_NO_SUITABLE'){
+    if(result.kind!=='NEEDS_INPUT'||row.stage!=='CLASSIFY'||result.draftId!==null||result.pricingReport||result.image)fail();
+  }else if(['CATEGORY_RESULT_UNKNOWN','CATEGORY_EXPANSION_RESULT_UNKNOWN'].includes(result.code)){
+    if(result.kind!=='UNKNOWN'||result.pricingReport||result.image)fail();
+  }else if(result.code==='CATEGORY_EXPANSION_REJECTED'){
+    if(result.kind!=='SYSTEM_REPAIR'||row.stage!=='CLASSIFY'||result.draftId!==null||result.pricingReport||result.image)fail();
+  }else if(result.code==='AI_RECEIVED_INVALID_OUTPUT'||AI_ERROR_CODES.some(code=>result.code==='AI_'+code)){
     if(result.kind!=='SYSTEM_REPAIR'||result.pricingReport||result.image)fail();
   }else if(['LABELS_FAILED','READBACK_FAILED'].includes(result.code)){
     if(result.kind!=='SYSTEM_REPAIR'||row.stage!==(result.code==='LABELS_FAILED'?'LABELS':'READBACK')||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
@@ -208,9 +219,10 @@ export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask
   }
   if(result.executionMode==='deferred_batch'&&!result.batchPlan?.coverage.some(c=>c.mode==='deferred_batch'))fail();
   if(value.adaptation!==undefined){
-    const a=record(value.adaptation,'适配检查点',['version','token','at','blockedKeys','previousRules']);
+    const a=record(value.adaptation,'适配检查点',['version','token','at','blockedKeys','unitResolvedKeys','previousRules']);
     if(a.version!==1||!Array.isArray(a.blockedKeys)||(a.blockedKeys as unknown[]).some(key=>typeof key!=='string'||!items.some(r=>r.key===key))||!Array.isArray(a.previousRules)||a.previousRules.length>1000)fail();
     result.adaptation={version:1,token:hash(a.token),at:date(a.at),blockedKeys:a.blockedKeys as string[],previousRules:(a.previousRules as unknown[]).map(raw=>{const r=record(raw,'历史规则',['stamp','revision']);return {stamp:hash(r.stamp),revision:counter(r.revision)};})};
+    if(a.unitResolvedKeys!==undefined){if(!Array.isArray(a.unitResolvedKeys)||new Set(a.unitResolvedKeys).size!==a.unitResolvedKeys.length||a.unitResolvedKeys.some(key=>typeof key!=='string'||!(a.blockedKeys as string[]).includes(key)||!items.find(row=>row.key===key)?.salesPlan?.unitAdoption))fail();result.adaptation.unitResolvedKeys=a.unitResolvedKeys as string[];}
   }
   for(const row of items)if(row.schemaRetry&&row.schemaRetry.selection.targetId!==result.targetId)fail();
   for(const row of items)if(row.outcome){const expected=outcomeScope(result,row),actual=row.outcome.scope;

@@ -9,10 +9,28 @@ import type { AmazonDraft, AmazonTarget, JsonObject } from '../src/shared/amazon
 import type { ProductDetail } from '../src/shared/contracts.ts';
 import { AmazonTransport, AmazonTransportError } from '../src/main/amazon/transport.ts';
 import { buildSalesRecipes } from '../src/main/sales-plans/recipes.ts';
+import { validateSalesRecipe, projectSalesProduct } from '../src/main/sales-plans/records.ts';
 import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import { salesPurchaseComponents } from '../src/shared/sales-purchase.ts';
 
 const implementation = await import('../src/main/item-labels/service.ts').catch(() => null);
+
+test('a main-only draft boundary preserves unrelated label rows and procurement through recovery and scheduling',async t=>{
+  const f=fixture(t),batch=f.batch(),[row]=f.service.prepareBatch(batch.id);await f.service.close();
+  const db=openDatabase(f.dir);
+  const stored=JSON.parse(String(db.prepare('SELECT record_json FROM item_labels WHERE id=?').get(row.id)!.record_json));delete stored.requestedAt;
+  db.prepare('UPDATE item_labels SET record_json=? WHERE id=?').run(JSON.stringify(stored),row.id);
+  const snapshot=()=>['item_labels','procurement_batches','audit_events'].map(table=>db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+  const before=snapshot(),managed=new implementation!.ItemLabelService(f.dir,f.amazon,f.procurement,{canManageDraft:()=>false} as any);
+  try {
+    assert.deepEqual(snapshot(),before);managed.resume();await managed.runDue();assert.equal(f.requests.length,0);
+    assert.throws(()=>managed.prepareBatch(batch.id),/受控/);
+    assert.throws(()=>managed.syncBatch(batch.id),/受控/);
+    assert.throws(()=>managed.retry(row.id),/受控/);
+    assert.throws(()=>managed.pauseJob(stored.jobId),/受控/);
+    assert.deepEqual(snapshot(),before);assert.equal(f.requests.length,0);
+  } finally {await managed.close();db.close();}
+});
 export function pdfBytes(): Buffer {
   let body = '%PDF-1.4\n'; const offsets = [0];
   for (const [i,content] of ['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Count 1 /Kids [3 0 R] >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>'].entries()) { offsets.push(Buffer.byteLength(body)); body += `${i+1} 0 obj\n${content}\nendobj\n`; }
@@ -131,8 +149,11 @@ test('label lifecycle is projected from the label owner without revising manual 
 
 test('A30 ten three-piece sales sets request ten labels and preserve source/recipe prices after manual revision',async t=>{
   const f=fixture(t),recipe=buildSalesRecipes(f.product,null,defaultListingRules())[0];
-  recipe.components[0].quantity=3;recipe.totalPieces=3;recipe.totalCostCny=Math.round(recipe.components[0].quotedCostCny!*3/recipe.components[0].piecesPerQuote*1e8)/1e8;recipe.key=createHash('sha256').update(JSON.stringify(recipe.components.map(c=>[c.sourceKey,c.quantity]))).digest('hex');
+  recipe.components[0].quantity=3;recipe.totalPieces=3;recipe.platformPieces=3;recipe.totalCostCny=Math.round(recipe.components[0].quotedCostCny!*3/recipe.components[0].piecesPerQuote*1e8)/1e8;recipe.key=createHash('sha256').update(JSON.stringify(recipe.components.map(c=>[c.sourceKey,c.quantity]))).digest('hex');
   f.draft.salesPlan={namingGroupId:randomUUID(),sourceGroupKey:'synthetic',collectedAt:'2026-10-08T01:00:00Z',collectionBasis:'first_import',sku:f.draft.sku,baseSku:f.draft.sku,recipe,parentage:'NONE',parentSku:null,variationTheme:null,relationReason:'synthetic',familyResolved:true,namingChildKey:recipe.key};
+  assert.equal(validateSalesRecipe(recipe).platformPieces,3);
+  const projected=projectSalesProduct(f.product,f.draft.salesPlan,f.draft.variantId);
+  assert.equal(projected.variants[0].sku,f.draft.sku);assert.equal(projected.variants[0].purchasePrice,String(recipe.totalCostCny));assert.equal(f.product.variants[0].purchasePrice,'2.50');
   const original=JSON.stringify(f.draft.salesPlan),[batch]=f.procurement.ensureAutomaticBatch(randomUUID(),[f.draft.id],{[f.draft.id]:10});
   assert.equal(salesPurchaseComponents(batch.lines[0].salesRecipe!,10)[0].pieces,30);
   await f.service.prepareVerifiedBatch(batch.id);await f.service.runDue();assert.equal((f.requests[0].mskuQuantities as {quantity:number}[])[0].quantity,10);

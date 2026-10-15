@@ -1,4 +1,8 @@
+import {validateUnitImageReview} from './unit-review-checkpoint.ts';
+import {assertReceiptRecovery} from '../ai/receipt-recovery.ts';
+import {dirname} from 'node:path';
 import { assertRetryAllowanceRun, validateRetryAllowance } from './retry-allowance.ts';
+import {validateImageReviewRequests} from './review-checkpoint.ts';
 import {validateAppearanceCheckpoint} from './appearance-review.ts';
 export { imageWorkflowDraftStamp } from './approval-reuse.ts';
 export { selectImageReferences } from '../assets/reference-selection.ts';
@@ -30,9 +34,12 @@ import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
 
+function validateImagePendingRequest(raw:unknown,run:ImageWorkflowRun):NonNullable<ImageWorkflowRun['pendingRequest']>{
+ const p=keys(raw,['version','callId','step','slot','certainty']),slot=integer(p.slot,0,7);if(p.version!==1||p.certainty!=='SENT_UNKNOWN'||!['planning','risk','ocr','text'].includes(String(p.step))||run.status==='COMPLETED'||!run.slots&&slot!==0||p.step!=='planning'&&run.slots&&!run.slots[slot-1]?.attempts.length)throw new UserFacingError('图片未决操作身份不一致');return {version:1,callId:uuid(p.callId),step:p.step as NonNullable<ImageWorkflowRun['pendingRequest']>['step'],slot,certainty:'SENT_UNKNOWN'};
+}
 function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
   const o = keys(raw, ['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets',
-    'planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error'], ['riskPolicy','rejection','imagePolicyVersion','ipReviewResultIds','recheckedFromRunId','listingEvidenceContractVersion']);
+    'planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error'], ['pendingRequest','reviewRequests','riskPolicy','rejection','imagePolicyVersion','ipReviewResultIds','recheckedFromRunId','listingEvidenceContractVersion']);
   if(o.listingEvidenceContractVersion!==undefined&&!(LISTING_EVIDENCE_CONTRACT_VERSIONS as readonly unknown[]).includes(o.listingEvidenceContractVersion))throw new UserFacingError('图片证据契约版本无效');
   if (o.imagePolicyVersion !== undefined && !['product-image/v1','product-image/vision-v2',PRODUCT_IMAGE_POLICY_VERSION].includes(String(o.imagePolicyVersion))) throw new UserFacingError('图片规划版本无效');
   if(o.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION && o.ipReviewResultIds===undefined)throw new UserFacingError('缺少侵权风险检测记录');
@@ -60,12 +67,14 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
     (run.ipReviewResultIds && (run.ipReviewResultIds.length>run.candidateIds.length || run.imagePolicyVersion!==PRODUCT_IMAGE_POLICY_VERSION)) ||
     (run.imagePolicyVersion===PRODUCT_IMAGE_POLICY_VERSION && (run.ocrResultIds.length>run.ipReviewResultIds!.length || run.status==='COMPLETED' && run.ipReviewResultIds!.length!==run.attempt))) throw new UserFacingError('图片流程状态或复核记录不完整');
   if(o.rejection!==undefined)run.rejection=validateWorkflowRejection(o.rejection);
+  if(o.pendingRequest!==undefined)run.pendingRequest=validateImagePendingRequest(o.pendingRequest,run);
+  if(o.reviewRequests!==undefined)run.reviewRequests=validateImageReviewRequests(o.reviewRequests,run);
   return run;
 }
 
 export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['retryAllowance','appearanceReviewEnabled','sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['unitAdoptionReview','pendingRequest','reviewRequests','retryAllowance','appearanceReviewEnabled','sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -108,14 +117,15 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)if(listingFingerprint(run[plural])!==listingFingerprint([...new Set(attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]]:[]))]))invalid();
   if(run.attempt!==attempts.length||new Set(attempts.map(a=>a.requestId)).size!==attempts.length||new Set(refs.map(ref=>ref.id)).size!==refs.length||run.updatedAt<run.createdAt||run.approvedAssetId!==slots[0].approvedAssetId||run.approvedSha256!==slots[0].approvedSha256||new Set(slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])).size!==slots.filter(slot=>slot.status==='PASSED').length)invalid();
   if(imageContext&&(listingFingerprint(imageContext)!==run.contextSha256||imageContext.listing.draftId!==run.draftId||imageContext.listing.productId!==run.productId||imageContext.listing.productRevision!==run.productRevision||imageContext.listing.variantId!==run.variantId||imageContext.listing.sku!==run.sku||listingFingerprint(imageContext.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(refs)))invalid();
+  if(o.unitAdoptionReview!==undefined)run.unitAdoptionReview=validateUnitImageReview(o.unitAdoptionReview);
   if(o.sourceReuse!==undefined){
-    const r=keys(o.sourceReuse,['derivationRunId','sourceRunId','sourceRunHash','sourceProductRevision','sourceContext','slotAttempts','slotContexts']);
+    const r=keys(o.sourceReuse,['derivationRunId','sourceRunId','sourceRunHash','sourceProductRevision','sourceContext','slotAttempts','slotContexts'],['reviewRepairCounts']);
     if(!Array.isArray(r.slotAttempts)||r.slotAttempts.length!==7||!Array.isArray(r.slotContexts)||r.slotContexts.length!==7)invalid();
-    run.sourceReuse={derivationRunId:uuid(r.derivationRunId),sourceRunId:uuid(r.sourceRunId),sourceRunHash:sha256(r.sourceRunHash),sourceProductRevision:integer(r.sourceProductRevision,1,run.productRevision-1),sourceContext:validateProductImageContext(r.sourceContext,evidenceOptions),slotAttempts:(r.slotAttempts as unknown[]).map(v=>integer(v,0,totalLimit)),slotContexts:(r.slotContexts as unknown[]).map(maybeHash)};
+    run.sourceReuse={derivationRunId:uuid(r.derivationRunId),sourceRunId:uuid(r.sourceRunId),sourceRunHash:sha256(r.sourceRunHash),sourceProductRevision:integer(r.sourceProductRevision,1,run.productRevision-1),sourceContext:validateProductImageContext(r.sourceContext,evidenceOptions),slotAttempts:(r.slotAttempts as unknown[]).map(v=>integer(v,0,totalLimit)),slotContexts:(r.slotContexts as unknown[]).map(maybeHash),...(r.reviewRepairCounts===undefined?{}:{reviewRepairCounts:Array.isArray(r.reviewRepairCounts)&&r.reviewRepairCounts.length===7?r.reviewRepairCounts.map(v=>integer(v,0,totalLimit)):invalid()})};
     if(run.sourceReuse.sourceRunId===run.id||run.sourceReuse.sourceContext.listing.productRevision!==run.sourceReuse.sourceProductRevision||run.sourceReuse.sourceContext.listing.draftId!==run.draftId)invalid();
   }
-  for(const slot of slots)if(slot.contextSha256&&(!imageContext||listingFingerprint(validateProductImageContext({...((run.sourceReuse?.slotAttempts[slot.index-1]??0)>0&&slot.attempts.length===run.sourceReuse!.slotAttempts[slot.index-1]?run.sourceReuse!.sourceContext:imageContext),...(setPlan?{setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}},evidenceOptions))!==slot.contextSha256))invalid();
-  if(o.slotPolicy===IMAGE_SET_POLICY&&slots.some(slot=>slot.attempts.length)&&!setPlan)invalid();
+  for(const slot of slots)if(slot.contextSha256&&!(run.unitAdoptionReview&&slot.attempts.length<run.unitAdoptionReview.sourceSlotAttempts[slot.index-1]&&slot.contextSha256===run.unitAdoptionReview.sourceSlotContexts[slot.index-1])&&(!imageContext||listingFingerprint(validateProductImageContext({...((run.sourceReuse?.slotAttempts[slot.index-1]??0)>0&&slot.attempts.length===run.sourceReuse!.slotAttempts[slot.index-1]?run.sourceReuse!.sourceContext:imageContext),...(setPlan?{setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}},evidenceOptions))!==slot.contextSha256))invalid();
+  if(o.slotPolicy===IMAGE_SET_POLICY&&slots.some(slot=>slot.attempts.length)&&!setPlan&&!(run.unitAdoptionReview&&slots.every(slot=>slot.attempts.length<=Math.max(0,run.unitAdoptionReview!.sourceSlotAttempts[slot.index-1]-1))))invalid();
   if(run.status==='COMPLETED'&&(slots.some(slot=>slot.status!=='PASSED')||!run.draftSha256||!run.contextSha256||run.stage!=='complete'||run.error!==null)||run.stage==='complete'&&run.status!=='COMPLETED')invalid();
   if(o.legacyImageAttempts!==undefined)run.legacyImageAttempts=integer(o.legacyImageAttempts,0,2);
   if(o.copyReviewResultId!==undefined)run.copyReviewResultId=uuid(o.copyReviewResultId);
@@ -135,6 +145,8 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   for(const slot of run.slots??[])if(slot.status==='PASSED'&&slot.attempts.at(-1)?.riskBypass?.candidate.sha256!==undefined&&slot.attempts.at(-1)!.riskBypass!.candidate.sha256!==slot.approvedSha256)invalid();
   if(o.approvalReuse!==undefined)run.approvalReuse=validateApprovalReuse(o.approvalReuse,run);
   if(o.rejection!==undefined)run.rejection=validateWorkflowRejection(o.rejection);
+  if(o.pendingRequest!==undefined)run.pendingRequest=validateImagePendingRequest(o.pendingRequest,run);
+  if(o.reviewRequests!==undefined)run.reviewRequests=validateImageReviewRequests(o.reviewRequests,run);
   return run;
 }
 
@@ -167,18 +179,21 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   assertProductConsistency(db,product,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);
   const run = workflowRuns(db, draft.id)[0];
   if (!run) return null;
+  const getResult=(id:string)=>{
+    const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
+    const result=validateStoredAiResult(JSON.parse(String(row.record_json)));if(result.id!==id)return undefined;
+    if(result.providerReceiptRecovery){const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId),file=String(db.prepare('PRAGMA database_list').all().find(r=>r.name==='main')?.file??'');if(!callRow||!file)throw new UserFacingError('图片原恢复回执归属缺失，保留原记录待核');assertReceiptRecovery(db,dirname(file),result,validateAiCall(JSON.parse(String(callRow.record_json))));}return result;
+  };
+  const currentReviews=run.slots?run.slots.flatMap(slot=>{const a=slot.attempts.at(-1);return [a?.ipReviewResultId,a?.ocrResultId,a?.reviewResultId];}):[run.ipReviewResultIds?.at(-1),run.ocrResultIds.at(-1),run.reviewResultIds.at(-1)];
+  for(const id of currentReviews)if(id)getResult(id);
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
-  if(!riskPolicyCompatible(run,readImageRiskSettings(db),id=>{const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);const result=row?validateStoredAiResult(JSON.parse(String(row.record_json))):undefined;return result?.output.kind==='image-ip-review'?result.output:undefined;}))throw new UserFacingError('风险拦截已开启，这套图片的检测证据不满足当前风险阈值或曾跳过检测；原图片与历史保留');
+  if(!riskPolicyCompatible(run,readImageRiskSettings(db),id=>{const result=getResult(id);return result?.output.kind==='image-ip-review'?result.output:undefined;}))throw new UserFacingError('风险拦截已开启，这套图片的检测证据不满足当前风险阈值或曾跳过检测；原图片与历史保留');
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   const adapted=currentImageAdaptation(db,run,draft,product);
   if (run.status !== 'COMPLETED' || !adapted&&run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || (!adapted&&run.draftSha256 !== imageWorkflowDraftStamp(draft)&&!plainColorApprovalMatches(run,draft,product))) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
   const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.
-  const getResult=(id:string)=>{
-    const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
-    const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
-  };
   if(run.imageContext&&!isFullSchema(run.imageContext.listing)&&!imageActualInputsMatch(run.imageContext,draft,product,current,run.imageRecipeSha256)&&!adaptedImageInputsMatch(db,run,draft,product,current))throw new UserFacingError('来源规格、图片、店铺或站点已变化，原图片与付费请求已保留');
   const legacy=buildListingContext(draft,product,current.targetGeneration,true);
   for(const evidence of legacy.evidence)if(!current.evidence.some(item=>item.id===evidence.id))current.evidence.push(evidence);

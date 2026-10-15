@@ -3,6 +3,8 @@ import { SOURCE_OBSERVATION_VERSION } from '../../shared/source-image-consistenc
 import type { SourceClaimField, SourceComparisonProjection, SourceConsistencyContext, SourceConsistencyOutput, SourceConsistencyConclusion, SourceVisualClaim } from '../../shared/source-image-consistency-contracts.ts';
 import { boundedText, keys, uuid } from "../ai/primitives.ts";
 import { AiError } from '../ai/errors.ts';
+import type { SourceReferenceAliases } from '../../shared/source-reference-alias-contracts.ts';
+import { validateSourceReferenceAliases } from './reference-aliases.ts';
 
 const COLORS:Record<string,string[]>={White:['off white','off-white','white','米白','白色','白'],Black:['black','黑色','黑'],Gray:['gray','grey','灰色','灰'],Silver:['silver','银色'],Gold:['gold','金色'],Copper:['copper','铜色'],Red:['red','红色','红'],Pink:['pink','粉色'],Orange:['orange','橙色'],Yellow:['yellow','黄色','黄'],Green:['green','绿色','绿'],Blue:['blue','蓝色','蓝'],Purple:['purple','紫色'],Brown:['brown','棕色'],Beige:['beige','米色'],Clear:['clear','transparent','透明'],Multicolor:['multicolor','multi-color','多彩','彩色']};
 const APPEARANCE:Record<string,string[]>={Round:['round','圆形'],Square:['square','方形'],Rectangular:['rectangular','长方形'],Oval:['oval','椭圆'],Striped:['striped','条纹'],Solid:['solid color','纯色'],PolkaDot:['polka dot','波点'],Floral:['floral','花卉']};
@@ -110,14 +112,18 @@ function validateObservationOutput(raw:unknown):SourceConsistencyOutput {
 }
 
 /** Known JSON-mode shell only. Never invent assets, values, visibility, or bindings. */
-export function normalizeSourceObservations(raw:unknown,context:Pick<SourceConsistencyContext,'claims'|'referenceAssets'>):SourceConsistencyOutput {
+export function normalizeSourceObservations(raw:unknown,context:Pick<SourceConsistencyContext,'claims'|'referenceAssets'>,aliases?:SourceReferenceAliases):SourceConsistencyOutput {
   let diagnosticReason='SOURCE_ENVELOPE_INVALID';
   try {
   const o=keys(raw,['assets'],['kind','type','version']);
   if(o.kind!==undefined&&o.kind!=='source-image-consistency'||o.type!==undefined&&o.type!=='json_object'||o.version!==undefined&&o.version!==SOURCE_OBSERVATION_VERSION)throw new AiError('OUTPUT_INVALID');
   if(!Array.isArray(o.assets))throw new AiError('OUTPUT_INVALID');
   diagnosticReason='SOURCE_ASSET_SCHEMA_INVALID';
-  const assets=o.assets.map(raw=>{const a=keys(raw,['assetId','quality','visibility','lighting','presentation'],['colors','appearance','claims','observations','contentPurpose']);return {...a,colors:a.colors??[],appearance:a.appearance??[],claims:a.claims??[]};});
+  const frozen=aliases===undefined?undefined:validateSourceReferenceAliases(aliases,context as SourceConsistencyContext),seen=new Set<string>();
+  const assets=o.assets.map(raw=>{const a=keys(raw,['assetId','quality','visibility','lighting','presentation'],['colors','appearance','claims','observations','contentPurpose']);
+    let assetId=a.assetId;
+    if(frozen){const entry=frozen.entries.find(entry=>entry.alias===a.assetId);if(!entry||seen.has(entry.alias))throw new AiError('OUTPUT_INVALID');seen.add(entry.alias);assetId=entry.assetId;}
+    return {...a,assetId,colors:a.colors??[],appearance:a.appearance??[],claims:a.claims??[]};});
   diagnosticReason='SOURCE_OBSERVATION_VALUE_INVALID';
   const output=validateConsistencyOutput({kind:'source-image-consistency',version:SOURCE_OBSERVATION_VERSION,assets});
   diagnosticReason='SOURCE_ASSET_REFERENCE_INVALID';

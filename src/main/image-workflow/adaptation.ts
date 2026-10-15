@@ -1,3 +1,4 @@
+import {imageSlotConsumedAttempts} from '../../shared/image-workflow-contracts.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
 import { readImageRiskSettings } from './risk-settings.ts';
 import { semanticJson } from '../amazon/preparation.ts';
@@ -96,7 +97,7 @@ export function assertPartialSourceReuse(run:ImageWorkflowRun,source:ImageWorkfl
   }
   for(const [index,slot] of run.slots!.entries()){
     const old=source!.slots![index],count=proof.slotAttempts[index];
-    if(count!==old.attempts.length||proof.slotContexts[index]!==old.contextSha256||fingerprint(slot.attempts.slice(0,count))!==fingerprint(old.attempts)||old.status==='PASSED'&&fingerprint(slot)!==fingerprint(old))invalid();
+    if((proof.reviewRepairCounts?.[index]??0)!==imageSlotConsumedAttempts(source!,old.index)-old.attempts.length||count!==old.attempts.length||proof.slotContexts[index]!==old.contextSha256||fingerprint(slot.attempts.slice(0,count))!==fingerprint(old.attempts)||old.status==='PASSED'&&fingerprint(slot)!==fingerprint(old))invalid();
   }
 }
 

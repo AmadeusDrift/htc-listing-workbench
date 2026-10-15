@@ -1,3 +1,4 @@
+import type {CONTROLLED_RUN_ID} from '../../application/controlled-run-scope.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { BatchOperation,BatchItem,BatchReference } from '../../../shared/ai-batch-contracts.ts';
 import { BatchService } from './service.ts';
@@ -16,7 +17,7 @@ type Prepared={operation:BatchOperation;authorize:()=>boolean;reserve:()=>void};
 export class TaskBatchRuntime {
  readonly service:BatchService;
  private credential:()=>{apiKey:string;scope:string};private db:DatabaseSync;private directory:string;private pending=new Map<string,Prepared>();
- constructor(db:DatabaseSync,directory:string,deps:{fetch:typeof fetch;credential:()=>{apiKey:string;scope:string};validateReference?:(reference:BatchReference)=>boolean}){
+ constructor(db:DatabaseSync,directory:string,deps:{requiredSpendScopeId?:typeof CONTROLLED_RUN_ID;fetch:typeof fetch;credential:()=>{apiKey:string;scope:string};validateReference?:(reference:BatchReference)=>boolean}){
   this.db=db;this.directory=directory;this.credential=deps.credential;
   this.service=new BatchService(db,directory,{...deps,reserve:item=>{
    const prepared=this.pending.get(item.operationId);

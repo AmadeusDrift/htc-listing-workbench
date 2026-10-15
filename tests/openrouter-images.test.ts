@@ -15,9 +15,11 @@ test('OpenRouter images uses input_references and persists base64 before decode'
 test('invalid image bytes retain the original receipt without another generation',async()=>{
   const {OpenRouterImageAdapter}=await adapter();let calls=0;const receipts:any[]=[];
   const service=new OpenRouterImageAdapter({fetch:async()=>{calls++;return new Response(JSON.stringify({id:'gen_bad',data:[{b64_json:'aW52YWxpZA=='}]}));}});
-  await assert.rejects(service.generate({apiKey:'openrouter-fixture-key',model:'openai/gpt-image-2.5-flare',prompt:'A product photo',size:'auto',quality:'auto',background:'auto',references:[]},new AbortController().signal,{onProviderReceipt:(r:any)=>receipts.push(r)}));
+  await assert.rejects(service.generate({apiKey:'openrouter-fixture-key',model:'openai/gpt-image-2.5-flare',prompt:'A product photo',size:'auto',quality:'auto',background:'auto',references:[]},new AbortController().signal,{onProviderReceipt:(r:any)=>receipts.push(r)}),(e:any)=>e.certainty==='RECEIVED_INVALID');
   assert.equal(calls,1);assert.equal(receipts.length,1);assert.equal(receipts[0].body.data[0].b64_json,'aW52YWxpZA==');
 });
+
+test('pure image decoder does not invent a received-response certainty',async()=>{const{decodeOpenRouterImage}=await adapter();assert.throws(()=>decodeOpenRouterImage({data:[]}),(e:any)=>e.certainty===undefined);});
 test('explicit image rejection is definitive while server failure remains unknown',async()=>{
   const {OpenRouterImageAdapter}=await adapter();
   for(const status of [401,402,429,500,504]){

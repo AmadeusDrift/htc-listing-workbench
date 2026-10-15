@@ -36,6 +36,8 @@ export interface GenerateImageCandidateInput {
   size: ImageGenerationSize; quality: ImageGenerationQuality;
   background: 'auto' | 'opaque' | 'transparent';
 }
+/** Internal workflow producer only; absent manual SKU identity remains broad. */
+export interface ImageGenerationOwner {draftId:string;sku:string;targetId:string;marketplaceId:string;variantIds:string[];slot:number}
 export interface GeneratedImageCandidate {
   id: string; provider: ImageGenerationProvider; model: ImageGenerationModel; mode: 'generate' | 'edit';
   productId: string; productRevision: number; createdAt: string; requestId: string | null;
@@ -46,6 +48,8 @@ export interface GeneratedImageCandidate {
   editSource?: { id:string; sha256:string };
 }
 export interface ImageGenerationApi {
+  getImageGenerationSpendStatus():Promise<import('./ai-spend-contracts.ts').ImageGenerationSpendStatus>;
+  setImageGenerationDailySpendLimit(input:import('./ai-spend-contracts.ts').SetImageDailySpendLimit):Promise<import('./ai-spend-contracts.ts').ImageGenerationSpendStatus>;
   getImageGenerationModels(): Promise<ImageModelCatalog>;
   refreshImageGenerationModels(): Promise<ImageModelCatalog>;
   getImageGenerationConnection(provider?: ImageGenerationProvider): Promise<ImageGenerationConnection>;

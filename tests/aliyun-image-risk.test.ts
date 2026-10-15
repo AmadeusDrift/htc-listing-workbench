@@ -5,14 +5,15 @@ import {signOss4Put} from '../src/main/ai/oss4.ts';
 import {reviewImageWithAliyun} from '../src/main/ai/aliyun-image-risk.ts';
 import {AiError} from '../src/main/ai/errors.ts';
 import {validateImageIpReview} from '../src/main/ai/image-validation.ts';
+import type {PaidAdapterEffect} from '../src/main/ai/transport.ts';
 
 const bytes=Buffer.alloc(33);Buffer.from('89504e470d0a1a0a','hex').copy(bytes);bytes.writeUInt32BE(13,8);bytes.write('IHDR',12);bytes.writeUInt32BE(256,16);bytes.writeUInt32BE(256,20);
 const candidate={id:randomUUID(),sha256:createHash('sha256').update(bytes).digest('hex'),width:256,height:256},planId=randomUUID();
 const credentials={accessKeyId:'main-test-key-id',accessKeySecret:'main-test-key-secret'},now=new Date('2026-10-08T08:00:00.000Z');
 const token={AccessKeyId:'STS.temporary-test-id',AccessKeySecret:'temporary-test-secret',SecurityToken:'temporary-test-token',FileNamePrefix:'upload/fixture/',OssInternetEndPoint:'https://oss-cn-shanghai.aliyuncs.com',BucketName:'oss-cip-test',Expiration:Math.floor(now.getTime()/1000)+1800};
-function fixture(options:{riskLevel?:string;labels?:unknown[];token?:Record<string,unknown>;dataId?:string;code?:number;status?:number;quota?:boolean;uploadStatus?:number}={}) {
+function fixture(options:{riskLevel?:string;labels?:unknown[];token?:Record<string,unknown>;dataId?:string;code?:number;status?:number;quota?:boolean;uploadStatus?:number;beforePaid?:(effect:PaidAdapterEffect)=>void}={}) {
   const requests:{url:string;options:RequestInit}[]=[],reservations:Buffer[]=[];
-  const context={now:()=>now,nonce:randomUUID,maxResponseBytes:100000,beforeSend:(body:string|Buffer)=>{if(options.quota)throw new AiError('QUOTA_EXCEEDED');reservations.push(Buffer.from(body));},fetch:async(url:any,input:RequestInit={})=>{
+  const context={now:()=>now,nonce:randomUUID,maxResponseBytes:100000,beforePaidEffect:options.beforePaid,beforeSend:(body:string|Buffer)=>{if(options.quota)throw new AiError('QUOTA_EXCEEDED');reservations.push(Buffer.from(body));},fetch:async(url:any,input:RequestInit={})=>{
     requests.push({url:String(url),options:input});
     const action=new Headers(input.headers).get('x-acs-action');
     if(action==='DescribeUploadToken')return Response.json({Code:200,Data:{...token,...options.token}});
@@ -22,6 +23,10 @@ function fixture(options:{riskLevel?:string;labels?:unknown[];token?:Record<stri
   }};
   return {requests,reservations,run:()=>reviewImageWithAliyun(bytes,candidate,planId,credentials,new AbortController().signal,context)};
 }
+
+for(const [service,requests]of [['aliyun-upload-token',0],['aliyun-oss-put',1],['aliyun-image-risk',2]] as const)test(`actual Ali ${service} final effect checks fees before its wire and first token before logical reservation`,async()=>{
+ const seen:PaidAdapterEffect[]=[],f=fixture({beforePaid:effect=>{seen.push(effect);if(effect.service===service)throw new AiError('QUOTA_EXCEEDED');}});await assert.rejects(f.run(),(e:any)=>e.code==='QUOTA_EXCEEDED');assert.equal(f.requests.length,requests);assert.equal(f.reservations.length,service==='aliyun-upload-token'?0:1);const rejected=seen.find(e=>e.service===service)!;assert.ok(rejected);assert.equal(rejected.method,service==='aliyun-oss-put'?'PUT':'POST');assert.ok(rejected.url.startsWith('https://'));assert.ok(typeof rejected.body==='string'||Buffer.isBuffer(rejected.body));if(service==='aliyun-oss-put')assert.deepEqual(rejected.body,bytes);if(service==='aliyun-image-risk')assert.equal(new URLSearchParams(Buffer.from(rejected.body).toString()).get('Service'),'aigcViolationDetection');
+});
 
 test('OSS V4 signer matches the documented canonical request with the literal sample secret',()=>{
   const headers=signOss4Put({bucket:'examplebucket',objectName:'exampleobject',region:'cn-hangzhou',accessKeyId:'LTAI-test',accessKeySecret:'yourAccessKeySecret',now:new Date('2025-04-11T06:41:24Z'),headers:{'content-disposition':'attachment','content-length':'3','content-md5':'ICy5YqxZB1uWSwcVLSNLcA==','content-type':'text/plain'},additionalHeaders:['content-disposition','content-length']});

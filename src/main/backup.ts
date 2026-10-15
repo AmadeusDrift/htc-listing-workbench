@@ -1,4 +1,11 @@
+import {assertImageReviewLedgerReceipts,IMAGE_REVIEW_TABLES,validateImageReviewLedger,reviewLedgerFiles,retainImageReviewLedger} from './image-workflow/review-ledger.ts';
+import {retainSalesUnitAdoptions} from './sales-plans/unit-restore-history.ts';
+import {SPEND_TABLES,assertSpendHistory,retainSpendHistory} from './ai/spend-budget.ts';
+import {assertRecordTable} from './storage/record-table.ts';
+import {CONTROLLED_RUN_TABLES,assertControlledRunHistory,retainControlledRunHistory,pauseControlledRunScopes} from './application/controlled-run-scope.ts';
 import {retainCategoryRepairs} from './ai/category-recovery.ts';
+import {CATEGORY_OPERATION_TABLES,assertCategoryOperationHistory} from './ai/category-operations.ts';
+import {categoryLookupFiles,retainCategoryLookupFiles} from './ai/category-expansion-receipts.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
@@ -17,6 +24,9 @@ import { assertSourceAdoptionHistory } from './products/source-adoption.ts';
 import { SCHEMA_OPERATION_TABLES,assertSchemaOperationHistory,restoreSchemaOperations,revokeSchemaInFlight } from './catalog/schema-operations.ts';
 import { PURPOSE_TABLES,assertPurposeHistory } from './ai/purpose-routing.ts';
 import { PROVIDER_RECEIPT_TABLES,providerReceiptFiles,indexProviderReceiptPointers } from './ai/receipts.ts';
+import { assertReceiptRecovery } from './ai/receipt-recovery.ts';
+import { retainRequestCallHistory } from './ai/request-history.ts';
+import { assertOpaqueResponse } from './ai/opaque-response.ts';
 import { BATCH_TABLES,assertBatchHistory } from './ai/batch/records.ts';
 import { FIELD_GROUP_TABLES,assertFieldGroupHistory,retainFieldGroupHistory } from './ai/field-purpose-groups.ts';
 import { pauseBatchHistory,retainBatchHistory,retainProviderReceipts } from './ai/batch/recovery.ts';
@@ -28,7 +38,7 @@ import { assertCompletionHistory, retainCompletionOperations, validateCompletion
 import { createDecipheriv, createHash, randomUUID, scrypt } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdir, readFile, rm, lstat, open } from 'node:fs/promises';
-import { existsSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -131,6 +141,7 @@ function digest(data: Buffer): string { return createHash('sha256').update(data)
 function managedBackupFile(root: string, path: string): string {
   if(candidateBackupPath(path))return resolve(root,path);
   if(/^ai-receipts\/[a-f0-9]{64}\.json$/.test(path))return resolve(root,path);
+  if(/^ai-receipts\/category-expansions\/[a-f0-9-]{36}\.json$/.test(path))return resolve(root,path);
   if (/^documents\/(?:item-labels\/[a-f0-9-]{36}\/[1-9]\d{0,2}|shipments\/[a-f0-9-]{36})\.pdf$/.test(path)) return resolve(root, path);
   return managedAssetPath(root, path);
 }
@@ -153,7 +164,7 @@ async function removeStaging(root: string, path: string, kind: 'staging' | 'roll
   if (existsSync(valid) && (await lstat(valid)).isSymbolicLink()) throw new UserFacingError('恢复目录不能是链接');
   await rm(valid, { recursive: true, force: true });
 }
-function checkDatabase(path: string): { productCount: number; assetCount: number; assetPaths: Set<string>; artifactChecks: Map<string, { sha256: string; byteSize: number }> } {
+function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: number; assetCount: number; assetPaths: Set<string>; artifactChecks: Map<string, { sha256: string; byteSize: number }> } {
   let database: DatabaseSync | undefined;
   try {
     database = new DatabaseSync(path, { readOnly: true });
@@ -194,6 +205,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
       assertUnambiguousRecordJson(database,'listing_drafts');
       for(const index of SALES_IDENTITY_INDEXES){const actual=database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?").get(index.name,index.table);if(actual?.sql!==index.sql)throw new UserFacingError('备份销售身份索引不正确');}
     }
+    if(version>=34){Object.assign(approved,SPEND_TABLES,CONTROLLED_RUN_TABLES);for(const name of [...Object.keys(SPEND_TABLES),...Object.keys(CONTROLLED_RUN_TABLES)]){assertRecordTable(database,name);assertUnambiguousRecordJson(database,name);}assertSpendHistory(database,receiptRoot);assertControlledRunHistory(database);}
     if(version>=32){Object.assign(approved,WORK_BATCH_TABLES);assertWorkBatches(database);}
     if(version>=30){Object.assign(approved,PRODUCT_FACT_MODEL_TABLES);assertProductFactModels(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
@@ -202,6 +214,8 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
     if(version>=28){Object.assign(approved,{image_reference_pins:['id','record_json']});referencePinHistory(database);}
+    if(version>=35)Object.assign(approved,IMAGE_REVIEW_TABLES);
+    if(version>=36){Object.assign(approved,CATEGORY_OPERATION_TABLES);assertCategoryOperationHistory(database);}
     if(version>=31){Object.assign(approved,IMAGE_RETRY_TABLES);assertImageRetryHistory(database);}
     if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
@@ -210,7 +224,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
       if (!expected || actual.length !== expected.length || actual.some(column => column.hidden !== 0 || !expected.includes(String(column.name)))) throw new UserFacingError('备份含有不支持的数据库结构，未更改工作区');
     }
     if (version >= 4) {
-      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {}), ...Object.keys(version >= 20 ? CONSISTENCY_TABLES : {})]) {
+      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {}), ...Object.keys(version >= 20 ? CONSISTENCY_TABLES : {}),...Object.keys(version>=35?IMAGE_REVIEW_TABLES:{})]) {
         const table = database.prepare("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?").get(name);
         if (!table || table.wr !== 0) throw new UserFacingError('备份任务或 FTP 表必须保留标准行标识');
         const columns = database.prepare(`PRAGMA table_xinfo(${name})`).all(), indexes = database.prepare(`PRAGMA index_list(${name})`).all();
@@ -236,7 +250,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
             image_versions: validateImageVersion, image_selections: validateImageSelection, content_versions: validateContentVersion, image_write_operations: validateImageWriteOperation,
             collection_receipts: validateCollectionReceipt, collection_captures: validateCollectionCapture, miaoshou_receipts: validateMiaoshouReceipt,
             miaoshou_sync_runs: validateSyncRun, miaoshou_sync_items: validateSyncItem,
-            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateStoredImageWorkflowRun,
+            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateStoredImageWorkflowRun,image_review_journal:validateImageReviewLedger,
             automatic_listing_tasks: validateAutomaticListingTask, item_labels: validateItemLabelRecord, shipment_documents: validateShipmentDocument };
           const validated = validators[name as keyof typeof validators](value);
           if (validated.id !== row.id) throw new UserFacingError('备份任务或 FTP 记录身份不一致');
@@ -296,8 +310,11 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
-    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});}
-    if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
+    if(version>=35)assertImageReviewLedgerReceipts(database,receiptRoot);
+    if(version>=35)for(const f of reviewLedgerFiles(database)){const old=artifactChecks.get(f.path);if(old&&(old.sha256!==f.sha256||old.byteSize!==f.byteSize))throw new UserFacingError('图片审核安全账文件版本冲突');paths.add(f.path);artifactChecks.set(f.path,f);}
+    if(version>=36)for(const file of categoryLookupFiles(database,receiptRoot)){paths.add(file.path);artifactChecks.set(file.path,file);}
+    if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
+    if(version>=20)for(const asset of assertConsistencyHistory(database,undefined,receiptRoot))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {
       const batches = new Map(database.prepare('SELECT record_json FROM procurement_batches').all().map(row => {
@@ -327,7 +344,7 @@ function checkDatabase(path: string): { productCount: number; assetCount: number
     if (version >= 6) {
       const results = new Map(database.prepare('SELECT record_json FROM ai_results').all().map(row => { const result = validateStoredAiResult(JSON.parse(String(row.record_json))); return [result.id, result] as const; }));
       const calls = new Map(database.prepare('SELECT record_json FROM ai_calls').all().map(row => { const call = validateAiCall(JSON.parse(String(row.record_json))); return [call.id, call] as const; }));
-      for(const result of results.values())assertPresentationResultOwner(result,calls.get(result.callId),database);
+      for(const result of results.values()){assertReceiptRecovery(database,receiptRoot,result,calls.get(result.callId));assertPresentationResultOwner(result,calls.get(result.callId),database);}
       for(const asset of assertSourceColorHistory(database,results,calls))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
       if (version >= 15) assertImageWorkflowHistory(database, results, calls);
       if(version>=16)for(const row of database.prepare('SELECT record_json FROM automatic_listing_tasks').all())assertAutomaticRejectionHistory(database,validateAutomaticListingTask(JSON.parse(String(row.record_json))));
@@ -379,6 +396,7 @@ function disconnectSnapshot(path: string): boolean {
   try{migratedWorkBatches=Number(original.prepare('PRAGMA user_version').get()!.user_version)<32;}finally{original.close();}
   const database = openDatabase(dirname(path));
   try {
+    pauseControlledRunScopes(database);
     revokeSchemaInFlight(database);
     pauseBatchHistory(database);
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE;');
@@ -433,13 +451,17 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     }
     retainCorrectionHistory(current,snapshot);
     retainAiUsage(current, snapshot);
+    retainRequestCallHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
+    retainCategoryLookupFiles(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
+    if(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_spend_reservations'").get()){retainSpendHistory(current,snapshot);retainControlledRunHistory(current,snapshot);}
     retainBatchHistory(current,snapshot);
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);
     retainCopyReviewHistory(current,snapshot);
+    retainSalesUnitAdoptions(current,snapshot);
     retainSchemaRetryBudgets(current,snapshot);
     restoreSchemaOperations(current,snapshot);
     retainSchemaResponseCalls(current,snapshot);
@@ -447,6 +469,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainSourceColorAttempts(current, snapshot);
     retainImagePlanningAttempts(current, snapshot);
     retainImageRetryHistory(current,snapshot);
+    retainImageReviewLedger(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
     retainWorkBatches(current,snapshot,migratedWorkBatches);
@@ -472,8 +495,8 @@ export async function createWorkspaceBackup(directory: string, destination: stri
     const snapshot = join(staging, 'red.sqlite');
     await backup(source, snapshot); source.close(); source = undefined;
     const receiptSnapshot=new DatabaseSync(snapshot);try{indexProviderReceiptPointers(receiptSnapshot,root);}finally{receiptSnapshot.close();}
-    checkDatabase(snapshot); disconnectSnapshot(snapshot);
-    const info = checkDatabase(snapshot);
+    checkDatabase(snapshot,root); disconnectSnapshot(snapshot);
+    const info = checkDatabase(snapshot,root);
     includeCandidateFiles(info,await candidateBackupFiles(root));
     const files: BackupFile[] = [{ path: 'red.sqlite', ...await hashBackupFile(snapshot), role: 'workspace-database' }];
     for (const path of info.assetPaths) {

@@ -125,6 +125,8 @@ function readbackTargetScope(target: AmazonTarget): string {
   return semanticJson({ id, sellerId, marketplaceId, mode, region, locale });
 }
 
+export interface AmazonEffectIdentity {kind:'schema'|'platform-read'|'platform-write'|'target';operation:string;phase:'preflight'|'intent'|'before-send';targetId:string;sellerId:string;marketplaceId:string;productId?:string;draftId?:string;sku?:string;variantIds?:string[];recipeKey?:string|null;parentage?:string}
+export interface AmazonServiceDependencies extends AmazonDependencies {beforeEffect?:(effect:Readonly<AmazonEffectIdentity>,db?:DatabaseSync)=>void;preserveHistoricalRecords?:boolean}
 export class AmazonService {
   private readonly directory: string;
   private persistence: AmazonPersistence;
@@ -133,23 +135,24 @@ export class AmazonService {
   private transport: AmazonTransport;
   private getProduct: (id: string) => ProductDetail;
   private now: () => number;
+  private beforeEffect:AmazonServiceDependencies['beforeEffect'];
   private busy = new Set<string>();
   private closed = false;
-  constructor(directory: string, getProduct: (id: string) => ProductDetail, secretStorage: SecretStorage, dependencies: AmazonDependencies = {}) {
-    this.directory=directory;
+  constructor(directory: string, getProduct: (id: string) => ProductDetail, secretStorage: SecretStorage, dependencies: AmazonServiceDependencies = {}) {
+    this.directory=directory;this.beforeEffect=dependencies.beforeEffect;
     this.persistence = new AmazonPersistence(directory); this.vault = new CredentialVault(directory, secretStorage); this.getProduct = getProduct; this.now = dependencies.now ?? Date.now;
     this.transport = new AmazonTransport({ active: id => this.active(id), generation: id => this.persistence.generation(id), credentials: id => this.vault.read(id, this.persistence.generation(id)),
       pause: (id, message) => this.pauseForError(id, message), audit: event => this.persistence.addCall(event), redact: value => this.vault.redact(value), remember: value => this.vault.remember(value) }, dependencies);
-    this.corrections = new ListingCorrections(this.persistence,{active:id=>this.active(id),schema:r=>this.getSchema({...r.draft.schema,forceRefresh:true}),api:(...args)=>this.transport.api(...args),now:this.now});
+    this.corrections = new ListingCorrections(this.persistence,{beforeEffect:(r,phase)=>this.effect('correction','platform-write',this.persistence.target(r.draft.targetId),r.draft,phase,{},phase==='intent'?this.persistence.db:undefined),active:id=>this.active(id),schema:r=>this.getSchema({...r.draft.schema,forceRefresh:true}),api:(...args)=>this.api(...args),now:this.now});
     try {
       let liveEnabled = false;
       for (const target of this.persistence.targets()) if (target.mode === 'live' && target.configured) {
         this.targetCredentialStatus(target); // Register readable secrets for redaction without changing stored intent.
         // Enforce the single-store rule from stored intent; a temporary decrypt failure is read-only.
-        if (!target.paused && liveEnabled) { target.paused = true; target.lastError = '当前只允许启用一个正式店铺'; this.persistence.putTarget(target); }
+        if (!dependencies.preserveHistoricalRecords && !target.paused && liveEnabled) { target.paused = true; target.lastError = '当前只允许启用一个正式店铺'; this.persistence.putTarget(target); }
         if (!target.paused) liveEnabled = true;
       }
-      this.persistence.recover(this.at()); this.persistence.cleanup(this.now());
+      if(!dependencies.preserveHistoricalRecords){this.persistence.recover(this.at()); this.persistence.cleanup(this.now());}
     } catch (error) { this.persistence.close(); throw error; }
   }
   listCorrections(draftId:string){this.ensureOpen();return this.corrections.list(draftId);}
@@ -177,6 +180,14 @@ export class AmazonService {
       appendAuditEvent(db,randomUUID(),d.productId,'listing.self-package-corrected','独立 SKU 包装自引用本地纠正',JSON.stringify({version:1,suggestionResultId:adoption!.suggestionResultId,before,after:clone(r)}),this.at());return clone(d);
     });}finally{this.busy.delete(r.draft.id);}
   }
+  private effect(operation:string,kind:AmazonEffectIdentity['kind'],target:AmazonTarget,draft?:AmazonDraft,phase:AmazonEffectIdentity['phase']='preflight',extra:Partial<AmazonEffectIdentity>={},db?:DatabaseSync):void{
+    if(!this.beforeEffect)return;if(draft&&(draft.targetId!==target.id||draft.sellerId!==target.sellerId||draft.marketplaceId!==target.marketplaceId||draft.mode!==target.mode))throw new UserFacingError('平台外发草稿与实际店铺身份不一致');const identity=Object.freeze({kind,operation,phase,targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,...(draft?{draftId:draft.id,productId:draft.productId,sku:draft.sku,variantIds:draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId],recipeKey:draft.salesPlan?.recipe.key??null,parentage:draft.salesPlan?.parentage??draft.schema.parentageLevel}:{}),...extra});
+    if(this.beforeEffect.constructor.name==='AsyncFunction')throw new UserFacingError('平台外发权限检查必须同步完成');const result=this.beforeEffect(identity,db) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new UserFacingError('平台外发权限检查必须同步完成');
+  }
+  private api(...args:Parameters<AmazonTransport['api']>):ReturnType<AmazonTransport['api']>{
+    const [target,operation,path,,,,]=args,prior=args[5],parts=path.match(/^\/listings\/2021-08-01\/items\/([^/]+)\/(.+)$/),extra=parts?{sellerId:decodeURIComponent(parts[1]),sku:decodeURIComponent(parts[2])}:{},kind:AmazonEffectIdentity['kind']=operation.includes('Definitions')?'schema':operation==='getListingsItem'?'platform-read':'platform-write';
+    this.effect(operation,kind,target,undefined,'preflight',extra);args[5]=()=>{this.effect(operation,kind,target,undefined,'before-send',extra);prior?.();};return this.transport.api(...args);
+  }
   private at(): string { return new Date(this.now()).toISOString(); }
   private ensureOpen(): void { if (this.closed) throw new UserFacingError('Amazon 服务已关闭'); }
   close(): void { if (!this.closed) { this.transport.clear(); this.persistence.close(); this.closed = true; } }
@@ -199,10 +210,10 @@ export class AmazonService {
   /** Main-process task scope only; no credentials are exposed by this generation stamp. */
   executionTargetScope(id: string): { target: AmazonTarget; generation: number } { return { target: this.getTarget(id), generation: this.persistence.generation(id) }; }
   async readProductData(targetId: string, kind: ProductDataKind, query: Record<string,string>, beforeSend?: () => void): Promise<ApiResult> {
-    this.ensureOpen(); return this.transport.readData(this.active(targetId),kind,query,beforeSend);
+    this.ensureOpen();const target=this.active(targetId);const guard=()=>{this.effect('readProductData','platform-read',target,undefined,'before-send',{...(query.sku?{sku:query.sku}:{})});beforeSend?.();};guard();return this.transport.readData(target,kind,query,guard);
   }
   async createMarketplaceItemLabels(targetId: string, body: JsonObject, beforeSend?: () => void): Promise<ApiResult> {
-    this.ensureOpen(); return this.transport.createMarketplaceItemLabels(this.active(targetId), body, beforeSend);
+    this.ensureOpen();const target=this.active(targetId);const guard=()=>{const rows=Array.isArray(body.mskuQuantities)?body.mskuQuantities:[];if(!rows.length)this.effect('createItemLabels','platform-write',target);for(const row of rows){this.effect('createItemLabels','platform-write',target,undefined,'before-send',{sku:isObject(row)?String(row.msku??''):''});}beforeSend?.();};guard();return this.transport.createMarketplaceItemLabels(target,body,guard);
   }
   async downloadItemLabel(url: string): Promise<Buffer> { this.ensureOpen(); return this.transport.downloadItemLabel(url); }
   restoreItemLabelDownloads(scope:LabelDownloadScope,documents:{uri:string;expiration:number}[]):void {
@@ -236,6 +247,7 @@ export class AmazonService {
     const id = existing?.id ?? randomUUID();
     const target: AmazonTarget = { id, name: credentials.name, mode: 'live', sellerId: credentials.sellerId, marketplaceId: credentials.marketplaceId,
       marketplaceName: marketplace(credentials.marketplaceId, credentials.region), region: credentials.region, locale: credentials.locale, configured: true, paused: false, credentialUpdatedAt: this.at(), lastError: null };
+    this.effect('importTarget','target',target);
     if (JSON.stringify(this.vault.redact(target)) !== JSON.stringify(target)) throw new UserFacingError('店铺公开字段中不能包含敏感授权配置');
     const rollback = this.vault.write(id, credentials, this.persistence.generation(id) + 1); this.transport.clear(id);
     try {
@@ -253,6 +265,7 @@ export class AmazonService {
   }
   pauseTarget(input: unknown): AmazonTarget {
     this.ensureOpen(); const value = object(input); const target = this.persistence.target(textField(value.targetId, '店铺 ID', 100));
+    this.effect('pauseTarget','target',target);
     if (typeof value.paused !== 'boolean') throw new UserFacingError('暂停状态无效');
     if (!value.paused && !this.publicTarget(target).configured) throw new UserFacingError('店铺授权当前不可用，不能解除暂停，请先检查凭据状态');
     if (!value.paused && target.mode === 'live') {
@@ -264,23 +277,33 @@ export class AmazonService {
     target.paused = value.paused; target.lastError = null; this.persistence.putTarget(target); this.invalidateTarget(target.id); this.transport.clear(target.id); return this.publicTarget(target);
   }
   disconnectTarget(id: string): void {
-    this.ensureOpen(); const target = this.persistence.target(textField(id, '店铺 ID', 100)); if (target.mode === 'live') this.vault.remove(target.id);
+    this.ensureOpen(); const target = this.persistence.target(textField(id, '店铺 ID', 100));this.effect('disconnectTarget','target',target); if (target.mode === 'live') this.vault.remove(target.id);
     target.configured = false; target.paused = true; target.lastError = null; this.persistence.putTarget(target, true); this.invalidateTarget(id); this.transport.clear(id);
   }
   async searchProductTypes(input: unknown): Promise<ProductTypeOption[]> {
     const value = object(input); const target = this.active(textField(value.targetId, '店铺 ID', 100));
     const keywords = textField(value.keywords, '搜索关键词', 200);
     if (target.mode === 'demo') { this.demoCall(target, 'searchDefinitionsProductTypes'); return [{ name: DEMO_TYPE, displayName: '收纳袋（HTC 本地演示示例）' }]; }
-    const result = await this.transport.api(target, 'searchDefinitionsProductTypes', '/definitions/2020-09-01/productTypes', { marketplaceIds: target.marketplaceId, keywords, locale: target.locale, searchLocale: target.locale });
+    const result = await this.api(target, 'searchDefinitionsProductTypes', '/definitions/2020-09-01/productTypes', { marketplaceIds: target.marketplaceId, keywords, locale: target.locale, searchLocale: target.locale });
     if (!Array.isArray(result.data.productTypes)) throw new UserFacingError('Amazon 商品类型响应无效');
     return result.data.productTypes.filter(isObject).filter(item => typeof item.name === 'string' && /^[A-Z0-9][A-Z0-9_]{0,99}$/.test(item.name)
       && (!Array.isArray(item.marketplaceIds) || item.marketplaceIds.includes(target.marketplaceId))).slice(0, 100).map(item => ({ name: String(item.name), displayName: typeof item.displayName === 'string' ? item.displayName.slice(0, 200) : String(item.name) }));
+  }
+  /** Main-only once lookup. The original M07 request ID owns both permit and raw receipt. */
+  async searchProductTypesObserved(input:{targetId:string;keywords:string;requestId:string},beforeDispatch:()=>void,onReceived:(capture:import('../ai/category-expansion-receipts.ts').CategoryLookupCapture)=>void|Promise<void>) {
+    this.ensureOpen();const target=this.active(textField(input.targetId,'店铺 ID',100)),keywords=textField(input.keywords,'搜索关键词',200);
+    if(target.mode!=='live')throw new UserFacingError('受控候选扩展需要实际平台检索；演示不伪造原始HTTP回执');
+    let receipt:import('../ai/category-expansion-receipts.ts').CategoryLookupCapture|undefined;
+    const result=await this.api(target,'searchDefinitionsProductTypes','/definitions/2020-09-01/productTypes',{marketplaceIds:target.marketplaceId,keywords,locale:target.locale,searchLocale:target.locale},undefined,undefined,{clientRequestId:input.requestId,beforeDispatch,onReceived:async capture=>{await onReceived(capture);receipt=capture;}});
+    if(!receipt||!Array.isArray(result.data.productTypes))throw new UserFacingError('类目扩展没有可核验的原始平台响应');
+    const candidates=result.data.productTypes.filter(isObject).filter(item=>typeof item.name==='string'&&/^[A-Z0-9][A-Z0-9_]{0,99}$/.test(item.name)&&(!Array.isArray(item.marketplaceIds)||item.marketplaceIds.includes(target.marketplaceId))).map(item=>({name:String(item.name),displayName:typeof item.displayName==='string'?item.displayName:String(item.name)}));
+    return {requestId:input.requestId,candidates,receiptSha256:createHash('sha256').update(receipt.bytes).digest('hex'),receivedAt:receipt.receivedAt};
   }
   /** Full Product Type index; browse nodes and seller-specific Haul eligibility are separate. */
   async fetchProductTypeLibrary(targetId: string): Promise<ProductTypeOption[]> {
     const target = this.active(textField(targetId, '店铺 ID', 100)), generation = this.persistence.generation(target.id);
     if (target.mode === 'demo') return [{ name: DEMO_TYPE, displayName: '本地演示商品类型' }];
-    const result = await this.transport.api(target, 'searchDefinitionsProductTypes', '/definitions/2020-09-01/productTypes', { marketplaceIds: target.marketplaceId, locale: target.locale });
+    const result = await this.api(target, 'searchDefinitionsProductTypes', '/definitions/2020-09-01/productTypes', { marketplaceIds: target.marketplaceId, locale: target.locale });
     if (generation !== this.persistence.generation(target.id)) throw new UserFacingError('店铺授权已变化，请重新同步类目库');
     this.active(target.id);
     if (!Array.isArray(result.data.productTypes) || !result.data.productTypes.length || result.data.productTypes.length > 20000) throw new UserFacingError('Amazon 产品类型列表无效，已保留原类目缓存');
@@ -295,6 +318,7 @@ export class AmazonService {
     if (options.forceRefresh !== undefined && typeof options.forceRefresh !== 'boolean') throw new UserFacingError('Schema 刷新参数无效');
     const key = schemaKey(target, selected); const cached = this.persistence.schema(key);
     if (!options.forceRefresh && cached && Date.parse(cached.expiresAt) > this.now()) return { ...cached, fromCache: true };
+    this.effect('getSchema','schema',target,undefined,'preflight',{parentage:selected.parentageLevel});
     try {
     let snapshot: AmazonSchema;
     if (target.mode === 'demo') {
@@ -302,13 +326,13 @@ export class AmazonService {
       snapshot = demoSchema(target, selected, this.now()); this.demoCall(target, 'getDefinitionsProductType');
     } else {
       const generation = this.persistence.generation(target.id);
-      const result = await this.transport.api(target, 'getDefinitionsProductType', `/definitions/2020-09-01/productTypes/${encodeURIComponent(selected.productType)}`, {
+      const result = await this.api(target, 'getDefinitionsProductType', `/definitions/2020-09-01/productTypes/${encodeURIComponent(selected.productType)}`, {
         sellerId: target.sellerId, marketplaceIds: target.marketplaceId, requirements: selected.requirements, requirementsEnforced: 'ENFORCED', parentageLevel: selected.parentageLevel, locale: selected.locale, productTypeVersion: 'LATEST' });
       const data = result.data;
       if (!Array.isArray(data.marketplaceIds) || data.marketplaceIds.length !== 1 || data.marketplaceIds[0] !== target.marketplaceId || data.productType !== selected.productType || data.requirements !== selected.requirements || data.requirementsEnforced !== 'ENFORCED'
         || (selected.locale !== 'DEFAULT' && data.locale !== selected.locale) || !isObject(data.productTypeVersion) || typeof data.productTypeVersion.version !== 'string') throw new UserFacingError('Amazon Schema 返回的站点、语言、类目或要求集不匹配');
-      const schema = await this.transport.schemaLink(target, data.schema);
-      const meta = data.metaSchema ? await this.transport.schemaLink(target, data.metaSchema) : { schema: {} };
+      const schema = await this.transport.schemaLink(target, data.schema,()=>this.effect('downloadSchema','schema',target,undefined,'before-send',{parentage:selected.parentageLevel}));
+      const meta = data.metaSchema ? await this.transport.schemaLink(target, data.metaSchema,()=>this.effect('downloadMetaSchema','schema',target,undefined,'before-send',{parentage:selected.parentageLevel})) : { schema: {} };
       this.active(target.id); if (generation !== this.persistence.generation(target.id)) throw new UserFacingError('店铺授权已变化，请重新获取 Schema');
       try { compileAttributesSchema(schema.schema, meta.schema); } catch { throw new UserFacingError('Amazon Schema 包含当前版本不支持的约束，已阻止使用；请升级 HTC'); }
       const propertyGroups: AmazonSchema['propertyGroups'] = {};
@@ -322,6 +346,9 @@ export class AmazonService {
     } catch(error) { if(isSchemaTransientError(error)) error.selection={...selected}; throw error; }
   }
   listDrafts(productId: string): AmazonDraft[] { this.ensureOpen(); return this.persistence.records(textField(productId, '商品 ID', 100)).map(record => this.vault.redact(record.draft)); }
+  readSalesPlans(productId:string,targetId:string){
+    this.ensureOpen();return this.listDrafts(productId).filter(d=>d.targetId===targetId&&d.salesPlan).map(d=>({productId:d.productId,targetId:d.targetId,sellerId:d.sellerId,marketplaceId:d.marketplaceId,mode:d.mode,plan:clone(d.salesPlan!)}));
+  }
   listAcceptedSkus(targetId: string): AcceptedAmazonSku[] { this.ensureOpen(); return this.persistence.listAcceptedSkus(textField(targetId, '店铺 ID', 100)); }
   getActualQuoteDetails(id:string) {
     const draft=this.getDraft(id),rules=readListingRules(this.persistence.db);
@@ -478,6 +505,7 @@ export class AmazonService {
   async rebindUnsubmittedFamily(input:{id:string;revision:number;plan:SalesListingPlan},signal?:AbortSignal):Promise<AmazonDraft> {
     if(Object.keys(object(input)).some(key=>!['id','revision','plan'].includes(key)))throw new UserFacingError('父子关系迁移只接受草稿版本和已核对的销售关系');
     const record=this.checked(input),before=clone(record),draft=record.draft;
+    this.effect('rebindFamily','platform-write',this.persistence.target(draft.targetId),draft,'preflight',{parentage:input.plan.parentage});
     const checkCancelled=()=>{if(signal?.aborted)throw new UserFacingError('父子关系迁移已取消');};
     checkCancelled();this.mutable(record);this.enter(draft.id);
     try {
@@ -621,6 +649,7 @@ export class AmazonService {
     const selected = selection(input); const value = object(input); const target = this.active(selected.targetId); const program = listingProgram(value.listingProgram);
     const product = this.getProduct(textField(value.productId, '商品 ID', 100)); const variantId = textField(value.variantId, 'SKU 身份', 100); const variant = product.variants.find(v => v.id === variantId);
     if (!variant) throw new UserFacingError('所选 SKU 不属于当前商品');
+    this.effect('createDraft','platform-write',target,undefined,'preflight',{productId:product.id,sku:variant.sku,variantIds:[variantId],recipeKey:null,parentage:selected.parentageLevel});
     if (['.', '..'].includes(textField(variant.sku, 'SKU', 100))) throw new UserFacingError('SKU 不能使用路径片段 . 或 ..');
     if (this.persistence.locked(listingHash(target, variant.sku))) throw new UserFacingError('此 SKU 有结果未知或未确认的提交，请先回读并人工核对；不能新建草稿重放');
     const schema = await this.getSchema(selected);
@@ -630,11 +659,12 @@ export class AmazonService {
     const attributes = resolved.attributes;
     assertListingProgram(program, schema, attributes);
     const record = this.newDraftRecord(product, variant, target, schema, attributes, program, resolved.report);
-    this.persistence.putRecord(record); return clone(record.draft);
+    this.persistence.transaction(()=>{this.effect('createDraft','platform-write',target,record.draft,'intent',{},this.persistence.db);this.persistence.putRecord(record);}); return clone(record.draft);
   }
   /** salesPlans is supplied only by the main-process automatic coordinator, never by IPC input. */
   async prepareDrafts(input: unknown, salesPlans?: readonly SalesListingPlan[]): Promise<PrepareAmazonDraftsResult> {
     this.ensureOpen(); const { items, listingProgram: program = 'standard', ...selected } = preparationInput(input,!!salesPlans); const target = this.active(selected.targetId);
+    if(this.beforeEffect)for(const item of items){const source=this.getProduct(item.productId),variant=source.variants.find(v=>v.id===item.variantId),plan=salesPlans?.find(p=>p.recipe.components.some(c=>c.variantId===item.variantId));this.effect('prepareDrafts','platform-write',target,undefined,'preflight',{productId:source.id,sku:plan?.sku??variant?.sku,variantIds:plan?.recipe.components.map(c=>c.variantId)??[item.variantId],recipeKey:plan?.recipe.key??null,parentage:plan?.parentage??selected.parentageLevel});}
     if(salesPlans && salesPlans.length!==items.length) throw new UserFacingError('销售组合数量与草稿不一致');
     const plans=salesPlans?.map(raw=>{
       const plan=validateSalesPlan(raw);
@@ -651,6 +681,7 @@ export class AmazonService {
       try {
         const product = projectSalesProduct(this.getProduct(item.productId),plans?.[index],item.variantId); const variant = product.variants.find(variant => variant.id === item.variantId);
         if (!variant) throw new UserFacingError('所选 SKU 不属于当前商品');
+
         sku = variant.sku;
         if (product.id !== item.productId || product.revision !== item.productRevision) throw new UserFacingError('来源商品版本已变化，请刷新后重新准备');
         if (['.', '..'].includes(textField(sku, 'SKU', 100))) throw new UserFacingError('SKU 不能使用路径片段 . 或 ..');
@@ -713,6 +744,7 @@ export class AmazonService {
           result.items.push(reject('当前商品版本已有内容不同的草稿，可能已被人工修改；请核对已有草稿，不能覆盖或重复创建')); continue;
         }
         if (existing.length) {
+          this.effect('prepareDrafts','platform-write',currentTarget,existing[0].draft,'intent',{},this.persistence.db);
           this.normalizeHaulRecord(existing[0]); this.persistence.putRecord(existing[0]);
           const draft = existing[0].draft;
           const declarationIssues=this.declarationIssues(draft);
@@ -725,6 +757,7 @@ export class AmazonService {
         }
         const record = this.newDraftRecord(product, variant, currentTarget, schema, attributes, program, businessRules);
         if(plans?.[index]) { record.draft.salesPlan=plans[index]; this.updateSourceMapping(record); }
+        this.effect('prepareDrafts','platform-write',currentTarget,record.draft,'intent',{},this.persistence.db);
         this.validate(record); records.push(record);
         result.items.push({ productId: item.productId, variantId: item.variantId, sku, disposition: 'CREATED', draft: clone(record.draft), issues: clone(record.draft.localIssues), error: null });
       }
@@ -984,6 +1017,7 @@ export class AmazonService {
   private listingQuery(record: DraftRecord): Record<string, string> { return { marketplaceIds: record.draft.marketplaceId, issueLocale: record.draft.schema.locale }; }
   async previewDraft(input: unknown, completionId?: string): Promise<AmazonDraft> {
     const record = this.checked(input);
+    this.effect('previewDraft','platform-write',this.persistence.target(record.draft.targetId),record.draft);
     // Before the preview try/catch: failure must not persist its catch-path feedback either.
     if(completionId&&new CompletionJournal(this.persistence.db).get(completionId).scopedRepair)this.assertThemeRepairSafe(record.draft.id);
     this.enter(record.draft.id);
@@ -995,7 +1029,8 @@ export class AmazonService {
       if (!locallyValid && !sendable) throw new UserFacingError('本地校验未通过，请先处理字段问题');
       let result: ApiResult;
       if (target.mode === 'demo') { result = { data: { sku: record.draft.sku, status: locallyValid ? 'VALID' : 'INVALID', submissionId: `DEMO-PREVIEW-${randomUUID()}`, issues: locallyValid ? [] : record.draft.localIssues.map(issue => ({code:issue.code,message:issue.message,severity:issue.severity,attributeNames:issue.attributeNames})) }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'previewListingsItem'); }
-      else result = await this.transport.api(target, 'previewListingsItem', this.listingPath(record), { ...this.listingQuery(record), mode: 'VALIDATION_PREVIEW', includedData: 'issues' }, this.request(record), () => {
+      else result = await this.api(target, 'previewListingsItem', this.listingPath(record), { ...this.listingQuery(record), mode: 'VALIDATION_PREVIEW', includedData: 'issues' }, this.request(record), () => {
+        this.effect('previewDraft','platform-write',target,record.draft,'before-send');
         this.currentProduct(record); assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
       });
       record.previewResponse = result.data; record.draft.requestId = result.requestId; this.exchange(record, 'preview', result); this.persistence.putRecord(record);
@@ -1024,7 +1059,7 @@ export class AmazonService {
   }
   async submitDraft(input: unknown, confirmed: boolean, taskGuard?: () => void): Promise<AmazonDraft> {
     if (confirmed !== true) throw new UserFacingError('正式提交需要原生确认对话框确认');
-    const record = this.checked(input); this.enter(record.draft.id); let begun = false;
+    const record = this.checked(input);this.mutable(record);this.effect('submitDraft','platform-write',this.persistence.target(record.draft.targetId),record.draft); this.enter(record.draft.id); let begun = false;
     const hash = listingHash(record.draft, record.draft.sku);
     const assertSubmissionPricing=()=>{
       const issue=pricingQualificationIssue(record.draft,readListingRules(this.persistence.db),this.now());if(!issue)return;
@@ -1050,6 +1085,7 @@ export class AmazonService {
       }
       if (!canSendToPreview(record.draft)) throw new UserFacingError('本地校验未通过，不能正式提交');
       const guard = () => {
+        this.effect('submitDraft','platform-write',target,record.draft,'before-send');
         try { taskGuard?.(); } catch { throw new TaskWriteNotSentError(); }
         this.currentProduct(record); this.active(target.id); this.requirePreview(this.persistence.record(record.draft.id), target, true);
         assertListingProgram(record.draft.listingProgram, current, record.draft.attributes);
@@ -1058,10 +1094,10 @@ export class AmazonService {
         if(issues.length){record.draft.localIssues.push(...issues);throw new UserFacingError('本地校验未通过，安全声明须核对后再提交');}
       };
       assertCurrentPricingForPaid(record.draft,readListingRules(this.persistence.db),this.now());
-      record.draft.state = 'SUBMITTING'; record.draft.requestId = null; record.request = this.request(record); this.event(record, 'submit', '已记录提交意图；本次写入不会自动重试'); this.persistence.beginWrite(hash, record); begun = true;
+      record.draft.state = 'SUBMITTING'; record.draft.requestId = null; record.request = this.request(record); this.event(record, 'submit', '已记录提交意图；本次写入不会自动重试'); this.persistence.beginWrite(hash, record,()=>this.effect('submitDraft','platform-write',target,record.draft,'intent',{},this.persistence.db)); begun = true;
       let result: ApiResult;
       if (target.mode === 'demo') { guard(); result = { data: { sku: record.draft.sku, status: 'ACCEPTED', submissionId: `DEMO-${randomUUID()}`, issues: [] }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'putListingsItem'); }
-      else result = await this.transport.api(target, 'putListingsItem', this.listingPath(record), { ...this.listingQuery(record), includedData: 'issues' }, record.request, guard);
+      else result = await this.api(target, 'putListingsItem', this.listingPath(record), { ...this.listingQuery(record), includedData: 'issues' }, record.request, guard);
       record.submitResponse = result.data; record.draft.requestId = result.requestId; record.draft.listingIssues = remoteIssues(result.data.issues, target.mode);
       this.exchange(record, 'submit', result);
       if (result.data.status === 'ACCEPTED' && result.data.sku === record.draft.sku && typeof result.data.submissionId === 'string' && result.data.submissionId
@@ -1089,6 +1125,7 @@ export class AmazonService {
   }
   async readListing(input: unknown, beforeSend?: () => void): Promise<AmazonDraft> {
     let record = this.checked(input);
+    this.effect('readListing','platform-read',this.persistence.target(record.draft.targetId),record.draft);
     if (!record.draft.submittedAt && !['UNKNOWN', 'SUBMITTING'].includes(record.draft.state)) throw new UserFacingError('此草稿尚未正式提交，不能回读；请先完成校验、预览和确认提交');
     this.enter(record.draft.id);
     try {
@@ -1104,7 +1141,7 @@ export class AmazonService {
       };
       if (target.mode === 'demo') { beforeSend?.(); result = { data: { sku: record.draft.sku, summaries: record.draft.submittedAt ? [{ marketplaceId: target.marketplaceId, status: ['BUYABLE', 'DISCOVERABLE'] }] : [], issues: [],relationships:record.draft.salesPlan?.parentage==='CHILD'?[{marketplaceId:target.marketplaceId,relationships:[{type:'VARIATION',parentSkus:[record.draft.salesPlan.parentSku!],variationTheme:{theme:record.draft.salesPlan.variationTheme!,attributes:[]}}]}]:[] }, status: 200, requestId: `DEMO-${randomUUID()}` }; this.demoCall(target, 'getListingsItem'); }
       else {
-        try { result = await this.transport.api(target, 'getListingsItem', this.listingPath(record), { ...this.listingQuery(record), includedData: 'summaries,issues,attributes,offers,fulfillmentAvailability,relationships' }, undefined, beforeSend); }
+        try { result = await this.api(target, 'getListingsItem', this.listingPath(record), { ...this.listingQuery(record), includedData: 'summaries,issues,attributes,offers,fulfillmentAvailability,relationships' }, undefined, beforeSend); }
         catch (error) {
           record = currentRecord();
           if (error instanceof AmazonTransportError) { record.readResponse = error.response; this.exchange(record, 'readback', error); this.persistence.putRecord(record); }

@@ -5,9 +5,10 @@ import { createServer as tcpServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import { appendFileSync, closeSync, fsyncSync, openSync, readFileSync, existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, posix } from 'node:path';
 import { createRequire } from 'node:module';
 const { worktreeRoot, assertTrustedWithin } = createRequire(import.meta.url)('./trusted-path.cjs');
+const {validateProtocolRoute,verifyProtocol}=createRequire(import.meta.url)('./pipeline-protocol.cjs');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const safePath = path => typeof path === 'string' && /^\/[a-zA-Z0-9/_.-]+$/.test(path) && !path.includes('..') && !path.includes('//');
 
@@ -25,29 +26,40 @@ function verifyRoutes(routes) {
   return routes.map(route=>{assert.ok(/^[a-z0-9-]+$/.test(route.id)&&!ids.has(route.id),'S10_ROUTE_ID_INVALID');ids.add(route.id);
     assert.ok(['GET','POST','PUT','PATCH','DELETE','HEAD'].includes(route.method)&&safePath(route.path),'S10_ROUTE_INVALID');const key=route.method+' '+route.path;assert.ok(!keys.has(key),'S10_ROUTE_DUPLICATE');keys.add(key);
     if(route.credential){assert.ok(/^[a-z-]+$/.test(route.credential.header)&&/^Bearer s10-[a-z0-9-]+$/.test(route.credential.value),'S10_FIXTURE_CREDENTIAL_REQUIRED');}
-    if(route.publicUrl){const url=new URL(route.publicUrl);assert.ok(url.protocol==='https:'&&!url.username&&!url.password&&!url.search&&!url.hash,'S10_PUBLIC_ROUTE_INVALID');}
-    return route;
+    if(route.publicUrl){const url=new URL(route.publicUrl);assert.ok(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash&&(!url.search||route.protocol),'S10_PUBLIC_ROUTE_INVALID');}
+    if(route.protocol)validateProtocolRoute(route);
+    return structuredClone(route);
   });
 }
 async function listen(server){await new Promise((done,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',done);});return server.address().port;}
 
-export async function createFakeProvider({directory,routes,ftp=false,maxRequestBytes=8*1024*1024}) {
+export async function createFakeProvider({directory,routes,responders={},ftp=false,passiveFault=null,observeConnections=false,maxRequestBytes=8*1024*1024}) {
   directory=resolve(directory);assertTrustedWithin(join(worktreeRoot,'.test-data'),directory);assert.ok(Number.isSafeInteger(maxRequestBytes)&&maxRequestBytes>0);
   await mkdir(directory,{recursive:true});assertTrustedWithin(worktreeRoot,directory);const ledger=ledgerStore(directory),known=verifyRoutes(routes),sockets=new Set(),held=new Map();let closed=false;
+  for(const [id,respond]of Object.entries(responders))assert.ok(known.some(row=>row.id===id)&&typeof respond==='function','S10_RESPONSE_HANDLER_INVALID');
+  if(passiveFault)assert.ok(ftp&&['epsv-port','pasv-host'].includes(passiveFault.kind)&&Number.isSafeInteger(passiveFault.port)&&passiveFault.port>0&&passiveFault.port<65536,'S10_PASSIVE_FAULT_INVALID');
   const connections=server=>server.on('connection',socket=>{sockets.add(socket);socket.on('error',()=>{});socket.on('close',()=>sockets.delete(socket));});
   const server=httpServer(async(request,response)=>{
     const route=known.find(row=>row.method===request.method&&row.path===request.url);
+    if(known.some(row=>row.protocol))ledger.append({event:'arrival',method:request.method??'GET',routeId:route?.id??null});
     const reject=(status,reason)=>{ledger.append({event:'rejected',method:request.method??'GET',reason});request.resume();response.writeHead(status);response.end();};
     if(!route)return reject(404,'route');if(route.credential&&request.headers[route.credential.header]!==route.credential.value)return reject(403,'credential');
     const parts=[];let size=0;
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
-      const row=ledger.append({event:'request',routeId:route.id,method:route.method,path:route.path,bodySha256:digest(Buffer.concat(parts)),bodyBytes:size});
-      const output=route.response??{},bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(output.json??{}));
-      response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':String(row.sequence),'content-length':String(bytes.length)});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestSequence:row.sequence,status:output.status??200});
+      const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
+      const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true,publicUrlSha256:digest(route.publicUrl)}:{})});
+      const output=responders[route.id]?await responders[route.id]({body:input,headers:new Headers(request.headers),requestId:row.requestId}):route.response??{};let json=output.json??{};
+      if(output.issueTokenFor){const target=known.find(row=>row.id===output.issueTokenFor);assert.equal(target?.protocol?.kind,'oss4');assert.equal(route.protocol?.action,'DescribeUploadToken');const p=target.protocol;
+        json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};
+      }
+      let bytes=output.bytes?Buffer.from(output.bytes):Buffer.from(JSON.stringify(json));
+      if(output.fromFtpPath){assert.equal(route.protocol?.kind,'public-image');assert.equal(output.fromFtpPath,route.protocol.remotePath);bytes=await readFile(ftpPath(output.fromFtpPath));assert.equal(digest(bytes),route.protocol.sha256);assert.ok(ledger.rows.some(row=>row.event==='ftp-upload'&&row.path===output.fromFtpPath&&row.bodySha256===route.protocol.sha256));}
+      if(output.redirectToPath)assert.ok(safePath(output.redirectToPath),'S10_REDIRECT_FIXTURE');
+      response.writeHead(output.status??200,{'content-type':output.contentType??'application/json','x-s10-request-id':row.requestId,'x-amzn-requestid':row.requestId,'x-request-id':row.requestId,'content-length':String(bytes.length),...(output.redirectToPath?{location:`http://127.0.0.1:${port}${output.redirectToPath}`}:{})});response.flushHeaders();ledger.append({event:'headers',routeId:route.id,requestId:row.requestId,requestSequence:row.sequence,status:output.status??200});
       const finish=()=>{if(!response.destroyed){response.end(bytes);ledger.append({event:'body',routeId:route.id,requestSequence:row.sequence,bodySha256:digest(bytes),bodyBytes:bytes.length});}};
       if(output.holdBody){const pending=held.get(route.id)??[];pending.push(finish);held.set(route.id,pending);}else finish();
     }catch(error){if(!response.destroyed){response.writeHead(500);response.end();}ledger.append({event:'transport-error',routeId:route.id,errorCode:error.code??'LOCAL_ERROR'});}
-  });connections(server);const port=await listen(server),ftpSockets=new Set();let controlServer,dataServer,ftpPort,dataPort;
+  });connections(server);if(observeConnections)server.on('connection',()=>ledger.append({event:'http-connection'}));const port=await listen(server),ftpSockets=new Set();let controlServer,dataServer,ftpPort,dataPort;
   const ftpRoot=join(directory,'ftp-files');
   const ftpPath=remote=>{assert.ok(safePath(remote)&&remote.startsWith('/s10/'),'S10_FTP_PATH_INVALID');const file=resolve(ftpRoot,remote.slice(1));assertTrustedWithin(ftpRoot,file);return file;};
   if(ftp){await mkdir(ftpRoot,{recursive:true});let activeData=null,transfer=null;
@@ -57,24 +69,27 @@ export async function createFakeProvider({directory,routes,ftp=false,maxRequestB
         void (async()=>{const file=ftpPath(current.path);await mkdir(dirname(file),{recursive:true});assertTrustedWithin(ftpRoot,file);await writeFile(file,bytes);ledger.append({event:'ftp-upload',method:'STOR',path:current.path,bodySha256:digest(bytes),bodyBytes:bytes.length});socket.end();current.control.write('226 Transfer complete\r\n');})().catch(()=>{socket.destroy();current.control.write('550 Upload failed\r\n');});
       });socket.on('close',()=>{ftpSockets.delete(socket);if(activeData===socket)activeData=null;});
     });dataPort=await listen(dataServer);
-    controlServer=tcpServer(control=>{ftpSockets.add(control);control.on('error',()=>{});control.on('close',()=>ftpSockets.delete(control));control.write('220 S10 loopback\r\n');let pending='',user=false,authenticated=false;
+    controlServer=tcpServer(control=>{ftpSockets.add(control);control.on('error',()=>{});control.on('close',()=>ftpSockets.delete(control));control.write('220 S10 loopback\r\n');let pending='',user=false,authenticated=false,cwd='/s10';
       control.on('data',chunk=>{pending+=chunk.toString();if(pending.length>8192){control.destroy();return;}for(;;){const end=pending.indexOf('\r\n');if(end<0)break;const line=pending.slice(0,end);pending=pending.slice(end+2);const split=line.indexOf(' '),command=split<0?line:line.slice(0,split),value=split<0?'':line.slice(split+1);
+        ledger.append({event:'ftp-command',command});
         if(command==='USER'){user=value==='s10-user';control.write('331 Password required\r\n');}
         else if(command==='PASS'){authenticated=user&&value==='s10-password';control.write(authenticated?'230 Logged in\r\n':'530 Login incorrect\r\n');}
         else if(command==='QUIT')control.end('221 Goodbye\r\n');
         else if(!authenticated)control.write('530 Login required\r\n');
         else if(command==='FEAT')control.write('211-Features\r\n SIZE\r\n UTF8\r\n211 End\r\n');
         else if(['TYPE','STRU','OPTS'].includes(command))control.write('200 OK\r\n');
-        else if(command==='PWD')control.write('257 "/s10"\r\n');
-        else if(command==='EPSV')control.write(`229 Entering Extended Passive Mode (|||${dataPort}|)\r\n`);
+        else if(command==='PWD')control.write(`257 "${cwd}"\r\n`);
+        else if(command==='EPSV')control.write(passiveFault?.kind==='pasv-host'?'502 EPSV unavailable\r\n':`229 Entering Extended Passive Mode (|||${passiveFault?.kind==='epsv-port'?passiveFault.port:dataPort}|)\r\n`);
+        else if(command==='PASV'&&passiveFault?.kind==='pasv-host')control.write(`227 Entering Passive Mode (10,0,0,1,${Math.floor(passiveFault.port/256)},${passiveFault.port%256})\r\n`);
         else if(command==='SIZE'){try{const file=ftpPath(value);control.write(existsSync(file)?`213 ${readFileSync(file).length}\r\n`:'550 Not found\r\n');}catch{control.write('550 Invalid path\r\n');}}
-        else if(['CWD','MKD'].includes(command)){try{ftpPath(value+'/probe');control.write(command==='CWD'?'250 Changed\r\n':'257 Created\r\n');}catch{control.write('550 Invalid path\r\n');}}
+        else if(['CWD','MKD'].includes(command)){try{assert.ok(!value.includes('..')&&!value.includes('\\')&&!value.includes('//'));const target=value.startsWith('/')?value:posix.join(cwd,value);if(!(command==='CWD'&&target==='/'))ftpPath(target+'/probe');if(command==='CWD')cwd=target;control.write(command==='CWD'?'250 Changed\r\n':'257 Created\r\n');}catch{control.write('550 Invalid path\r\n');}}
         else if(command==='STOR'){try{ftpPath(value);assert.ok(activeData&&!transfer);transfer={path:value,control};control.write('150 Transfer ready\r\n');}catch{activeData?.destroy();activeData=null;control.write('550 Invalid transfer\r\n');}}
         else control.write('502 Unsupported\r\n');
       }});
     });ftpPort=await listen(controlServer);
   }
-  return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>route),directory,ledgerPath:ledger.path,
+  return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>structuredClone(route)),directory,ledgerPath:ledger.path,
+    register(route,respond){assert.ok(!closed&&typeof respond==='function','S10_REGISTRATION_CLOSED');const copy=verifyRoutes([...known,route]).at(-1);known.push(copy);responders[copy.id]=respond;ledger.append({event:'route-registered',routeId:copy.id,method:copy.method,path:copy.path,publicUrlSha256:digest(copy.publicUrl)});return structuredClone(copy);},
     ftp:ftp?{host:'127.0.0.1',port:ftpPort,dataPort,user:'s10-user',password:'s10-password'}:null,
     ledger:()=>structuredClone(ledger.rows),release(id){const releases=held.get(id)??[];held.delete(id);releases.forEach(fn=>fn());},readFtp:path=>readFile(ftpPath(path)),
     async close(){if(closed)return;closed=true;held.clear();for(const socket of [...sockets,...ftpSockets])socket.destroy();await Promise.all([server,controlServer,dataServer].filter(Boolean).map(value=>new Promise(done=>value.close(done))));}

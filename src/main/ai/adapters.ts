@@ -1,5 +1,10 @@
+import {aliyunFinalContext} from './aliyun-final-receipt.ts';
+import {containsSecret} from './secret-echo.ts';
+export {containsSecret} from './secret-echo.ts';
+import {createHash} from 'node:crypto';
 import { requestOpenRouterJson } from './adapters/openrouter-chat.ts';
 import { openRouterMetadata } from './adapters/openrouter-http.ts';
+import {opaqueResponse} from './opaque-response.ts';
 import type { AiOutput, ContentSuggestionOutput, OcrOutput, SegmentationOutput } from '../../shared/ai-contracts.ts';
 import { signAcs3 } from './acs3.ts';
 import { AiError, httpError } from './errors.ts';
@@ -19,10 +24,6 @@ export interface TextPayload {
   variant: { id: string; originalSpec: string; normalizedSpec: string };
   confirmedFacts: { id: string; name: string; value: string }[];
   unverifiedOcr: { resultId: string; assetId: string; assetSha256: string; text: string; verified: false }[];
-}
-export function containsSecret(value: unknown, credentials: AiCredentials): boolean {
-  const json = JSON.stringify(value);
-  return Object.values(credentials).some(secret => typeof secret === 'string' && (json.includes(secret) || json.includes(JSON.stringify(secret).slice(1,-1)) || json.includes(encodeURIComponent(secret))));
 }
 function metadata(body: Record<string, unknown>, usage: ProviderMetadata['usage'], credentials: AiCredentials, context: AdapterContext): ProviderMetadata {
   const result = { requestId: requestId(body.RequestId ?? body.id), usage: validateUsage(usage), usageKnown: true };
@@ -47,7 +48,10 @@ function noSecrets<T>(value: T, credentials: AiCredentials): T { if (containsSec
 
 export async function recognizeWithAliyun(bytes: Buffer, size: { width: number; height: number }, credentials: AliyunCredentials, signal: AbortSignal, context: AdapterContext): Promise<AdapterResult<OcrOutput>> {
   const signed = signAcs3({ host: 'ocr-api.cn-hangzhou.aliyuncs.com', action: 'RecognizeAllText', version: '2021-07-07', query: { Type: 'Commerce' }, body: bytes, contentType: 'application/octet-stream', now: context.now(), nonce: context.nonce(), ...credentials });
-  const raw = await postJson(signed.url, signed.headers, bytes, signal, context, body => failureMetadata(body, 'ocr', credentials, context));
+  const raw = await postJson(signed.url, signed.headers, bytes, signal, context.onReviewEffect?aliyunFinalContext(context,{action:'RecognizeAllText',region:'cn-hangzhou',host:'ocr-api.cn-hangzhou.aliyuncs.com',apiVersion:'2021-07-07',candidateSha256:createHash('sha256').update(bytes).digest('hex')},'RecognizeAllText/Commerce',[credentials]):context, body => failureMetadata(body, 'ocr', credentials, context));
+  return parseAliyunOcr(raw,size,credentials,context);
+}
+export function parseAliyunOcr(raw:unknown,size:{width:number;height:number},credentials:AliyunCredentials,context:AdapterContext):AdapterResult<OcrOutput> {
   return outputError(() => {
     const body = object(raw);
     if (body.Code !== undefined && body.Code !== 'success' && body.Code !== 'Success') { failureMetadata(body, 'ocr', credentials, context); throw httpError(400, body.Code); }
@@ -123,6 +127,11 @@ export async function requestDeepSeekJson(payload: unknown, system: string, mode
     if(safe!=='[omitted: credential echo]')context.onMetadata?.(openRouterMetadata(raw));
     const requestId=typeof raw?.id==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(raw.id)?raw.id:null;
     await context.onProviderReceipt!({gateway:'deepseek',endpoint:'/chat/completions',model,status,requestId,receivedAt:context.now().toISOString(),body:raw,costUsd:null});
+    if(safe==='[omitted: credential echo]'){credentialEcho=true;if(diagnosticOperation)captureSource(text);throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:'RESPONSE_SECRET_ECHO'});}
+  },captureRawBytes:async(status:number,bytes:Buffer)=>{
+    const safe=!bytes.includes(Buffer.from(credentials.apiKey))&&safeSourceResponseText(bytes.toString('utf8'),credentials)!=='[omitted: credential echo]';credentialEcho||=!safe;
+    await context.onProviderReceipt!({gateway:'deepseek',endpoint:'/chat/completions',model,status,requestId:null,receivedAt:context.now().toISOString(),body:safe?opaqueResponse(bytes):'[omitted: credential echo]',costUsd:null});
+    if(!safe)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:'RESPONSE_SECRET_ECHO'});
   }}:{})};
   let raw:unknown;
   try{raw=await postJson('https://api.deepseek.com/chat/completions', { 'content-type': 'application/json', accept: 'application/json', authorization: `Bearer ${credentials.apiKey}` }, body, signal, transport, data => failureMetadata(data, 'text', credentials, context));}

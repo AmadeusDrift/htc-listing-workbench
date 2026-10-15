@@ -146,7 +146,9 @@ for(const revoke of [false,true,'stop'] as const)test(`runtime isolates group su
 });
 
 import { chat } from './fixtures/listing-ai.ts';
-for(const scenario of ['unscoped','immediate-openrouter','immediate-deepseek','deferred-deepseek','deferred-unpinned-vision'] as const)test(`ordinary retry allocates a new paid attempt: ${scenario}`,async t=>{
+// The 2026-10-14 UNKNOWN rule supersedes the old ordinary-retry expectation:
+// a transport failure without the original result must retain its paid identity.
+for(const scenario of ['unscoped','immediate-openrouter','immediate-deepseek','deferred-deepseek','deferred-unpinned-vision'] as const)test(`ordinary UNKNOWN retains its original paid attempt: ${scenario}`,async t=>{
  const f=await listingFixture(t),context=(f.ai as any).context,original=context.fetch,openrouter=!scenario.includes('deepseek');let posts=0;
  if(openrouter){f.ai.saveConnection({id:'openrouter',apiKey:'ordinary-attempt-fixture-key'});f.ai.saveFunctionSettings({id:'openrouter',model:'openai/gpt-6-luna',enabled:true});for(const p of f.ai.getPurposeProfiles())if(!p.purposeId.endsWith('_decision'))f.ai.savePurposeProfile({purposeId:p.purposeId,expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});}
  const vision=scenario==='deferred-unpinned-vision',color=f.ai.sourceColorContext({productId:f.product.id,productRevision:f.product.revision,variantId:f.product.variants[0].id}),providerId=openrouter?'openrouter':'deepseek';
@@ -154,9 +156,10 @@ for(const scenario of ['unscoped','immediate-openrouter','immediate-deepseek','d
  f.ai.setUsagePolicy({providerId,dailyCallLimit:2,dailyTokenLimit:null});
  const scope={taskId:randomUUID(),rowKey:f.draft.productId+':'+f.draft.variantId,phase:'fields',mode:scenario.startsWith('deferred')?'deferred_batch' as const:'immediate' as const,authorize:()=>true};
  const execute=()=>vision?f.ai.observeSourceColor(color,()=>{}):f.listing.suggest(f.reference),run=()=>scenario==='unscoped'?execute():f.ai.batchTasks.run(scope,execute);
- await assert.rejects(run(),{code:'NETWORK_ERROR'});const result=await run();assert.equal(result.output.kind,vision?'source-color':'amazon-fields');
- assert.equal(posts,2);const calls=f.ai.listCalls();assert.equal(calls.length,2);assert.notEqual(calls[0].id,calls[1].id);assert.equal(f.ai.getUsageSummary(providerId).attempts,2);assert.equal(f.ai.getUsageSummary(providerId).unknownCalls,1);
- await assert.rejects(run(),{code:'QUOTA_EXCEEDED'});assert.equal(posts,2);assert.equal(f.ai.getUsageSummary(providerId).attempts,2);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);
+ await assert.rejects(run(),{code:'NETWORK_ERROR'});const calls=f.ai.listCalls(),raw=JSON.stringify(calls),usage=JSON.stringify(f.ai.getUsageSummary(providerId));assert.equal(calls.length,1);
+ for(let i=0;i<2;i++)await assert.rejects(run(),(error:any)=>error.code==='INTERRUPTED'&&error.callId===calls[0].id&&error.certainty==='SENT_UNKNOWN');
+ assert.equal(posts,1);assert.equal(JSON.stringify(f.ai.listCalls()),raw);assert.equal(JSON.stringify(f.ai.getUsageSummary(providerId)),usage);
+ assert.equal(f.ai.getUsageSummary(providerId).attempts,1);assert.equal(f.ai.getUsageSummary(providerId).unknownCalls,1);assert.equal(f.ai.batchTasks.batches(scope.taskId).length,0);
 });
 
 test('switching immediate while a Batch operation is only staged cannot send an ordinary duplicate',async t=>{

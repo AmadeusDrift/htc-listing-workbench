@@ -2,18 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { createCipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { AiService } from '../src/main/ai/service.ts';
+import { AiError } from '../src/main/ai/errors.ts';
 import { AiUsageLedger, retainAiUsage } from '../src/main/ai/usage.ts';
 import { WorkspaceStore } from '../src/main/store.ts';
 import { HostingService } from '../src/main/hosting/service.ts';
 import { openDatabase, SCHEMA_VERSION } from '../src/main/database.ts';
+import { MODULE_SCHEMA_VERSION } from '../src/main/storage/migrations.ts';
 import { createWorkspaceBackup, prepareWorkspaceRestore, commitWorkspaceRestore } from '../src/main/backup.ts';
 import { fixture, holdFetch, isCode, json, responseFor, storage } from './fixtures/ai-control.ts';
 import { dropRecordQueryIndexes } from './helpers/legacy-schema.ts';
+
+async function waitForRequestSettlement(service:AiService){const signal=AbortSignal.timeout(5000);while(service.busy)await nextTurn(undefined,{signal});}
+async function paidHistory(directory:string){
+ const db=openDatabase(directory);let rows:Record<string,{id:string;record_json:string}[]>;
+ try{rows=Object.fromEntries(['ai_calls','ai_usage_ledger','ai_provider_receipts','ai_spend_reservations'].map(table=>[table,db.prepare(`SELECT id,record_json FROM ${table} ORDER BY rowid`).all().map(({id,record_json})=>{if(typeof id!=='string'||typeof record_json!=='string')throw Error('Invalid synthetic paid history');return{id,record_json};})]));}finally{db.close();}
+ const raw=await Promise.all(rows.ai_provider_receipts.map(async row=>{const receipt=JSON.parse(row.record_json);return{id:row.id,bytes:await readFile(join(directory,receipt.relativePath))};}));return{rows,raw};
+}
+function dropPostV7FixtureTables(db:DatabaseSync){db.exec('DROP TABLE IF EXISTS ai_spend_policies; DROP TABLE IF EXISTS ai_spend_reservations; DROP TABLE IF EXISTS controlled_run_scopes; DROP TABLE IF EXISTS image_review_journal; DROP TABLE IF EXISTS ai_category_operations');}
+const originalUnknown=(id:string)=>(error:unknown)=>error instanceof AiError&&error.code==='INTERRUPTED'&&error.callId===id&&error.certainty==='SENT_UNKNOWN';
 
 test('usage policy defaults unlimited, validates narrowly and persists across generations and restarts', async t => {
   const f = await fixture(t);
@@ -49,18 +61,31 @@ test('the final daily call is reserved atomically and duplicate waiters consume 
 });
 
 for (const failure of ['http-unknown', 'network', 'timeout', 'known-failure', 'invalid-output'] as const) test(`${failure}: paid attempts retain unknown reservations or independently valid provider usage`, async t => {
-  const f = await fixture(t, { timeoutMs: 20, fetch: async () => {
+  let entered!:()=>void;const wireEntered=new Promise<void>(resolve=>entered=resolve);
+  const f = await fixture(t, { ...(failure==='timeout'?{timeoutMs:1000}:{}), fetch: async () => {
+    entered();
     if (failure === 'network') throw new Error('network detail');
     if (failure === 'timeout') return new Promise<Response>(() => {});
     if (failure === 'http-unknown') return json({ id: 'failed-request' }, 500);
     if (failure === 'known-failure') return json({ id: 'failed-request', usage: { prompt_tokens: 10, completion_tokens: 2 } }, 500);
     return json({ id: 'invalid-copy', usage: { prompt_tokens: 8, completion_tokens: 4 }, choices: [{ finish_reason: 'stop', message: { content: '{invalid' } }] });
   } }); f.enable('deepseek');
-  await assert.rejects(f.service.suggest(f.textInput));
+  const pending=f.service.suggest(f.textInput),rejected=assert.rejects(pending,isCode(failure==='timeout'?'TIMEOUT':failure==='network'?'NETWORK_ERROR':failure==='invalid-output'?'OUTPUT_INVALID':'PROVIDER_ERROR'));
+  let originalId:string|undefined;
+  if(failure==='timeout'){
+    await Promise.race([wireEntered,rejected.then(()=>{throw Error('Timeout fixture never reached its original paid POST');})]);
+    assert.equal(f.requests.length,1);assert.equal(f.requests[0].options?.method,'POST');const reserved=f.service.getUsageSummary('deepseek');assert.equal(reserved.attempts,1);assert.equal(reserved.pendingCalls,1);assert.ok(reserved.reservedTokens>4096);originalId=f.service.listCalls()[0].id;assert.equal(f.service.listCalls()[0].status,'RUNNING');
+  }
+  await rejected;await waitForRequestSettlement(f.service);
   const summary = f.service.getUsageSummary('deepseek'); assert.equal(summary.attempts, 1); assert.equal(summary.pendingCalls, 0);
   const known = failure === 'known-failure' || failure === 'invalid-output'; assert.equal(summary.unknownCalls, known ? 0 : 1); assert.equal(summary.reportedTokens, known ? 12 : 0);
-  assert.equal(summary.reservedTokens > 4096, !known); assert.equal(f.service.listCalls().length, 1);
-  if (!known) { f.service.setUsagePolicy({ providerId: 'deepseek', dailyCallLimit: null, dailyTokenLimit: summary.reservedTokens }); await assert.rejects(f.service.suggest(f.textInput), isCode('QUOTA_EXCEEDED')); assert.equal(f.requests.length, 1); }
+  assert.equal(summary.reservedTokens > 4096, !known); assert.equal(f.service.listCalls().length, 1);assert.equal(f.requests.length,1);const call=f.service.listCalls()[0];if(originalId)assert.equal(call.id,originalId);
+  if (!known) {
+    const before=await paidHistory(f.directory);f.service.setUsagePolicy({ providerId: 'deepseek', dailyCallLimit: null, dailyTokenLimit: summary.reservedTokens });
+    await assert.rejects(f.service.suggest(f.textInput),originalUnknown(call.id));assert.deepEqual(await paidHistory(f.directory),before);
+    const other=f.store.createProduct();await assert.rejects(f.service.suggest({productId:other.id,productRevision:other.revision,variantId:other.variants[0].id,ocrResultIds:[]}),isCode('QUOTA_EXCEEDED'));
+    assert.deepEqual(await paidHistory(f.directory),before);assert.equal(f.requests.length,1);
+  }
 });
 
 test('review reserves the actual 16384 output budget and OCR reports image counts without invented tokens', async t => {
@@ -80,12 +105,13 @@ test('over-budget actual usage stays recorded; UTC rollover and generation chang
 });
 
 test('schema 7 upgrades preserve historical attempts and unknown token liability', async t => {
-  const f = await fixture(t); f.enable('deepseek'); await f.service.suggest(f.textInput); f.respond(async () => json({}, 500)); await assert.rejects(f.service.suggest(f.textInput)); await f.service.close();
-  const old = new DatabaseSync(join(f.directory, 'red.sqlite')); dropRecordQueryIndexes(old); old.exec('DROP TABLE IF EXISTS ai_usage_policies; DROP TABLE IF EXISTS ai_usage_ledger; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS product_fact_models; DROP TABLE IF EXISTS image_retry_allowances; DROP TABLE IF EXISTS automatic_work_batches; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE IF EXISTS ai_field_groups; DROP TABLE IF EXISTS image_reference_pins; DROP TABLE IF EXISTS ai_copy_review_upgrades; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=7'); old.close();
+  const f = await fixture(t); f.enable('deepseek'); await f.service.suggest(f.textInput); f.respond(async () => json({}, 500)); await assert.rejects(f.service.suggest(f.textInput));const originalId=f.service.listCalls().find(call=>call.status==='FAILED')!.id; await f.service.close();
+  const old = new DatabaseSync(join(f.directory, 'red.sqlite')); dropRecordQueryIndexes(old); dropPostV7FixtureTables(old); old.exec('DROP TABLE IF EXISTS ai_usage_policies; DROP TABLE IF EXISTS ai_usage_ledger; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS product_fact_models; DROP TABLE IF EXISTS image_retry_allowances; DROP TABLE IF EXISTS automatic_work_batches; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE IF EXISTS ai_field_groups; DROP TABLE IF EXISTS image_reference_pins; DROP TABLE IF EXISTS ai_copy_review_upgrades; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=7'); old.close();
   const restarted = new AiService(f.directory, f.store, f.hosting, storage, { fetch: async () => { throw new Error('must not send'); } });
   try {
-    assert.equal(SCHEMA_VERSION, 33); const summary = restarted.getUsageSummary('deepseek'); assert.equal(summary.attempts, 2); assert.equal(summary.reportedTokens, 40); assert.equal(summary.unknownCalls, 1); assert.equal(summary.unboundedCalls, 1); assert.equal(summary.usedTokens, null);
-    restarted.setUsagePolicy({ providerId: 'deepseek', dailyCallLimit: null, dailyTokenLimit: 1000000000000 }); await assert.rejects(restarted.suggest(f.textInput), isCode('QUOTA_EXCEEDED'));
+    assert.equal(SCHEMA_VERSION, MODULE_SCHEMA_VERSION); const summary = restarted.getUsageSummary('deepseek'); assert.equal(summary.attempts, 2); assert.equal(summary.reportedTokens, 40); assert.equal(summary.unknownCalls, 1); assert.equal(summary.unboundedCalls, 1); assert.equal(summary.usedTokens, null);
+    restarted.setUsagePolicy({ providerId: 'deepseek', dailyCallLimit: null, dailyTokenLimit: 1000000000000 });const before=await paidHistory(f.directory);await assert.rejects(restarted.suggest(f.textInput),originalUnknown(originalId));
+    const other=f.store.createProduct();await assert.rejects(restarted.suggest({productId:other.id,productRevision:other.revision,variantId:other.variants[0].id,ocrResultIds:[]}),isCode('QUOTA_EXCEEDED'));assert.deepEqual(await paidHistory(f.directory),before);assert.equal(f.requests.length,2);
   } finally { await restarted.close(); }
 });
 
@@ -121,11 +147,14 @@ test('a failure to insert the RUNNING call rolls back reservation and sends no H
 });
 
 test('known zero usage is distinct from missing or malformed provider usage', async t => {
-  const f = await fixture(t); f.enable('deepseek');
-  for (const usage of [{ prompt_tokens: 0, completion_tokens: 0 }, { prompt_tokens: 9 }, { prompt_tokens: 9, completion_tokens: 1, total_tokens: 0 }]) {
-    f.respond(async () => json({ id: 'failure', usage }, 500)); await assert.rejects(f.service.suggest(f.textInput));
+  const aggregate={attempts:0,unknownCalls:0,reportedTokens:0,reservedTokens:0};
+  for (const [index,usage] of [{ prompt_tokens: 0, completion_tokens: 0 }, { prompt_tokens: 9 }, { prompt_tokens: 9, completion_tokens: 1, total_tokens: 0 }].entries()) {
+    const f=await fixture(t);f.enable('deepseek');f.respond(async () => json({ id: 'failure', usage }, 500)); await assert.rejects(f.service.suggest(f.textInput),isCode('PROVIDER_ERROR'));await waitForRequestSettlement(f.service);
+    const summary=f.service.getUsageSummary('deepseek');assert.equal(summary.attempts,1);assert.equal(summary.pendingCalls,0);assert.equal(summary.unknownCalls,index===0?0:1);assert.equal(summary.reportedTokens,0);assert.equal(summary.reservedTokens>4096,index!==0);assert.equal(f.requests.length,1);
+    const call=f.service.listCalls()[0],before=await paidHistory(f.directory);await assert.rejects(f.service.suggest(f.textInput),originalUnknown(call.id));assert.deepEqual(await paidHistory(f.directory),before);assert.equal(f.requests.length,1);
+    aggregate.attempts+=summary.attempts;aggregate.unknownCalls+=summary.unknownCalls;aggregate.reportedTokens+=summary.reportedTokens;aggregate.reservedTokens+=summary.reservedTokens;
   }
-  const summary = f.service.getUsageSummary('deepseek'); assert.equal(summary.attempts, 3); assert.equal(summary.unknownCalls, 2); assert.equal(summary.reportedTokens, 0); assert.ok(summary.reservedTokens > 8192);
+  assert.equal(aggregate.attempts,3);assert.equal(aggregate.unknownCalls,2);assert.equal(aggregate.reportedTokens,0);assert.ok(aggregate.reservedTokens>8192);
 });
 
 test('reservation belongs to UTC send day even if completion crosses midnight or clock moves backwards', async t => {
@@ -177,7 +206,7 @@ test('genuine version 7 encrypted backup restores and backfills already consumed
   const f = await fixture(t); f.enable('deepseek'); await f.service.suggest(f.textInput); await f.service.close(); await f.hosting.close(); f.closeStore();
   const old = new DatabaseSync(join(f.directory, 'red.sqlite'));
   const paths = [...new Set(old.prepare('SELECT original_path,preview_path FROM assets').all().flatMap(row => [String(row.original_path), String(row.preview_path)]))];
-  dropRecordQueryIndexes(old); old.exec('DROP TABLE ai_usage_policies; DROP TABLE ai_usage_ledger; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS product_fact_models; DROP TABLE IF EXISTS image_retry_allowances; DROP TABLE IF EXISTS automatic_work_batches; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE IF EXISTS ai_field_groups; DROP TABLE IF EXISTS image_reference_pins; DROP TABLE IF EXISTS ai_copy_review_upgrades; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=7; PRAGMA journal_mode=DELETE'); old.close();
+  dropRecordQueryIndexes(old); dropPostV7FixtureTables(old); old.exec('DROP TABLE ai_usage_policies; DROP TABLE ai_usage_ledger; DROP TABLE IF EXISTS listing_followups; DROP TABLE IF EXISTS category_libraries; DROP TABLE IF EXISTS procurement_batches; DROP TABLE IF EXISTS image_workflow_runs; DROP TABLE IF EXISTS automatic_listing_tasks; DROP TABLE IF EXISTS item_labels; DROP TABLE IF EXISTS shipment_documents; DROP TABLE IF EXISTS sku_naming_identities; DROP TABLE IF EXISTS sku_naming_groups; DROP TABLE IF EXISTS sku_naming_sequences; DROP TABLE IF EXISTS source_image_provenance; DROP TABLE IF EXISTS source_consistency_attempts; DROP TABLE IF EXISTS source_consistency_assessments; DROP TABLE IF EXISTS source_consistency_decisions; DROP TABLE IF EXISTS source_consistency_bindings; DROP TABLE IF EXISTS listing_correction_attempts; DROP TABLE IF EXISTS listing_corrections; ALTER TABLE amazon_write_locks DROP COLUMN owner_kind; ALTER TABLE amazon_write_locks DROP COLUMN owner_id; DROP TABLE IF EXISTS module_migration_journal; DROP TABLE IF EXISTS source_snapshots; DROP TABLE IF EXISTS product_source_adoptions; DROP TABLE IF EXISTS product_fact_scopes; DROP TABLE IF EXISTS product_fact_models; DROP TABLE IF EXISTS image_retry_allowances; DROP TABLE IF EXISTS automatic_work_batches; DROP TABLE IF EXISTS schema_fetch_operations; DROP TABLE IF EXISTS ai_purpose_profiles; DROP TABLE IF EXISTS ai_provider_receipts; DROP TABLE IF EXISTS ai_image_requests; DROP TABLE IF EXISTS ai_batches; DROP TABLE IF EXISTS ai_batch_items; DROP TABLE IF EXISTS ai_field_groups; DROP TABLE IF EXISTS image_reference_pins; DROP TABLE IF EXISTS ai_copy_review_upgrades; DROP INDEX IF EXISTS record_drafts_sku; DROP INDEX IF EXISTS record_drafts_recipe; PRAGMA user_version=7; PRAGMA journal_mode=DELETE'); old.close();
   const database = await readFile(join(f.directory, 'red.sqlite')), hash = (data: Buffer) => createHash('sha256').update(data).digest('hex');
   const assets = await Promise.all(paths.map(async path => { const data = await readFile(join(f.directory, path)); return { path, data: data.toString('base64'), sha256: hash(data) }; }));
   const manifest = { format: 'htc-workspace-backup', version: 1, source: { application: 'HTC', kind: 'local-workspace', databaseVersion: 7 }, retention: { amazonDays: 180, logDays: 365, dataOldestAt: null, expiresAt: null }, createdAt: new Date().toISOString(), database: database.toString('base64'), databaseSha256: hash(database), assets };

@@ -1,17 +1,31 @@
 import type { AiUsage } from '../../shared/ai-contracts.ts';
-import { AiError, abortable, httpError, throwIfAborted } from './errors.ts';
+import { AiError, abortable, httpError, throwIfAborted,receivedDeepSeekRejection } from './errors.ts';
 import type { ReasoningEffort,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
+import { responseCollection, transportEvidence } from './response-lifecycle.ts';
 import type { TransportRunEvidence } from '../../shared/run-evidence-contracts.ts';
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
+export interface PaidAdapterEffect {service:import('./paid-effect-budget.ts').PaidEffectDescription['service'];url:string;method:'POST'|'PUT';body:string|Buffer}
+/** Last-effect price/scope check, independent of a domain result/recovery flag. */
+export function checkPaidAdapterEffect(context:AdapterContext,effect:PaidAdapterEffect):void{
+ const callback=context.beforePaidEffect;if(!callback)return;if(callback.constructor.name==='AsyncFunction')throw new AiError('INVALID_CONFIG');const result=callback(Object.freeze({...effect,body:Buffer.isBuffer(effect.body)?Buffer.from(effect.body):effect.body})) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new AiError('INVALID_CONFIG');
+}
 export interface AdapterContext {
+  beforePaidEffect?:(effect:Readonly<PaidAdapterEffect>)=>void;
+  /** Main-only collector policy. Date.now clock, never the fixture/provider timestamp. */
+  responseDeadlineAt?: number;
+  responseTimeoutMs?: number;
+  responseBodyTimeoutMs?: number;
   onRunEvidence?: (event: TransportRunEvidence) => void;
   deferOpenRouter?:(endpoint:string,body:Record<string,unknown>)=>Promise<{body:any}|null>;
   gateway?:'openrouter'|'deepseek';
   effectiveEffort?:ReasoningEffort;
   purposeSnapshot?:AiPurposeSnapshot;
+  onReviewEffect?:(kind:import('../../shared/image-workflow-contracts.ts').ImageReviewRequestV2['effects'][number]['kind'],event:'permit'|'received')=>void;
   onProviderReceipt?:(receipt:ProviderReceiptCapture)=>void|Promise<void>;
   captureRawResponse?:(status:number,text:string)=>Promise<void>;
+  /** Complete undecodable bytes are opaque receipt evidence, never domain data. */
+  captureRawBytes?:(status:number,bytes:Buffer)=>Promise<void>;
   thinking?: boolean;
   imagePlanRetry?:boolean;
   /** Adapter-owned safe capture, enabled only for source observation and image planning responses. */
@@ -23,10 +37,13 @@ export interface AdapterContext {
   /** Synchronous reservation at the last boundary before one paid POST. */
   beforeSend?: (body: string | Buffer) => void;
 }
-export interface ProviderReceiptCapture{gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;body:unknown;costUsd:number|null}
+export interface AliyunFinalIdentity {action:'RecognizeAllText'|'ImageModeration';region:'cn-hangzhou'|'cn-shanghai';host:'ocr-api.cn-hangzhou.aliyuncs.com'|'green-cip.cn-shanghai.aliyuncs.com';apiVersion:'2021-07-07'|'2022-03-02';candidateSha256:string}
+interface ReceiptCaptureBase {endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;body:unknown;costUsd:number|null}
+export type ProviderReceiptCapture=ReceiptCaptureBase&({gateway:'openrouter'|'deepseek'}|{gateway:'aliyun';aliyun:AliyunFinalIdentity});
 export const emptyUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
-export async function readBounded(response: Response, max: number, signal: AbortSignal, onInvalidResponseText?: (text:string)=>void, captureRawResponse?:(status:number,text:string)=>Promise<void>): Promise<unknown> {
+export async function readBounded(response: Response, max: number, signal: AbortSignal, onInvalidResponseText?: (text:string)=>void, captureRawResponse?:(status:number,text:string)=>Promise<void>,captureRawBytes?:(status:number,bytes:Buffer)=>Promise<void>,onBodyRead?:(evidence:{receivedBytes:number;complete:boolean})=>void): Promise<unknown> {
   let size=0;
+  const progress=(complete:boolean)=>{try{onBodyRead?.({receivedBytes:size,complete});}catch{/* Read-only progress cannot alter response handling. */}};
   const invalid=(reason:string):AiError=>{const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;error.responseDiagnostic={status:response.status,byteCount:size};return error;};
   const length = response.headers.get('content-length');
   if(length!==null&&(!/^\d+$/.test(length)||Number(length)>max)){
@@ -41,12 +58,15 @@ export async function readBounded(response: Response, max: number, signal: Abort
       const { value, done } = await abortable(reader.read(), signal, cancel);
       if (done) break;
       size += value.byteLength;
+      progress(false);
       if (size > max) throw invalid('RESPONSE_SIZE_LIMIT');
       chunks.push(value);
     }
     throwIfAborted(signal);
-    if (!size) throw invalid('RESPONSE_BODY_EMPTY');
-    let text:string;try{text=new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));}catch{throw invalid('RESPONSE_UTF8_INVALID');}
+    progress(true);
+    if (!size) {await captureRawResponse?.(response.status,'');throw invalid('RESPONSE_BODY_EMPTY');}
+    const received=Buffer.concat(chunks);
+    let text:string;try{text=new TextDecoder('utf-8', { fatal: true }).decode(received);}catch{await captureRawBytes?.(response.status,received);throw invalid('RESPONSE_UTF8_INVALID');}
     await captureRawResponse?.(response.status,text);
     try{return JSON.parse(text);}catch{
       try{onInvalidResponseText?.(text);}catch{/* Adapter capture must not replace the original parse failure. */}
@@ -54,30 +74,46 @@ export async function readBounded(response: Response, max: number, signal: Abort
     }
   } catch (error) {
     cancel(); throwIfAborted(signal);
-    if (error instanceof AiError) throw error;
+    if (error instanceof AiError) { error.responseDiagnostic ??= {status:response.status,byteCount:size}; throw error; }
     throw invalid('RESPONSE_READ_FAILED');
   } finally { reader.releaseLock(); }
 }
 /** One paid POST only. A redirect or ambiguous network failure is never retried automatically. */
 export async function postJson(url: string, headers: Record<string, string>, body: string | Buffer, signal: AbortSignal, context: AdapterContext, onErrorResponse?: (body: unknown) => void): Promise<unknown> {
   throwIfAborted(signal);
-  context.beforeSend?.(body);
-  let response: Response;
+  const collection=context.captureRawResponse?responseCollection(signal,context):undefined;
+  const transportSignal=collection?.signal??signal;
+  let response: Response|undefined,complete=false,dispatched=false,receivedBytes=0,receivedBody:unknown;
+  const onBodyRead=(evidence:{receivedBytes:number;complete:boolean})=>{receivedBytes=evidence.receivedBytes;complete=evidence.complete;};
+  const captureRaw=context.captureRawResponse?async(status:number,text:string)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:Buffer.byteLength(text)});await context.captureRawResponse!(status,text);}:undefined;
+  const captureBytes=context.captureRawBytes?async(status:number,bytes:Buffer)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:bytes.length});await context.captureRawBytes!(status,bytes);}:undefined;
   try {
-    const request=context.fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal });
-    response = await (context.captureRawResponse?request:abortable(request,signal));
-  } catch { throwIfAborted(signal); throw new AiError('NETWORK_ERROR'); }
+  if(context.beforePaidEffect){const action=new Headers(headers).get('x-acs-action'),host=new URL(url).hostname,service:PaidAdapterEffect['service']=action==='DescribeUploadToken'?'aliyun-upload-token':action==='ImageModeration'?'aliyun-image-risk':action==='RecognizeAllText'?'aliyun-ocr':action==='ImageMatting'?'aliyun-segmentation':host==='api.deepseek.com'?'deepseek-chat':'provider-result-download';checkPaidAdapterEffect(context,{service,url,method:'POST',body});}
+  context.beforeSend?.(body);
+  dispatched=true;
+  transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});
+  try {
+    const request=context.fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal:transportSignal });
+    response = await abortable(request,transportSignal);
+  } catch { throwIfAborted(transportSignal); throw new AiError('NETWORK_ERROR'); }
+  collection?.headers();transportEvidence(context,{event:'HEADERS_RECEIVED',httpStatus:response.status,certainty:'SENT_UNKNOWN'});
   if(!context.captureRawResponse)throwIfAborted(signal);
-  const captureSignal=context.captureRawResponse?AbortSignal.timeout(30_000):signal;
+  const captureSignal=transportSignal;
   if (!response.ok) {
     let code: unknown;
     try {
-      const data = await readBounded(response, context.maxResponseBytes, captureSignal,undefined,context.captureRawResponse);
+      const data = await readBounded(response, context.maxResponseBytes, captureSignal,undefined,captureRaw,captureBytes,onBodyRead);receivedBody=data;
       if (data && typeof data === 'object') code = (data as Record<string, unknown>).Code;
       onErrorResponse?.(data);
-    } catch { throwIfAborted(signal); }
+    } catch(error) { if(collection)throw error;throwIfAborted(signal); }
     throw httpError(response.status, code);
   }
-  const value=await readBounded(response, context.maxResponseBytes, captureSignal, context.onInvalidResponseText,context.captureRawResponse);
+  const value=await readBounded(response, context.maxResponseBytes, captureSignal, context.onInvalidResponseText,captureRaw,captureBytes,onBodyRead);
   throwIfAborted(signal);return value;
+  } catch(error) {
+    const failure=error instanceof AiError?error:new AiError('NETWORK_ERROR');
+    failure.certainty??=!dispatched?'NOT_SENT':complete&&context.captureRawResponse&&response&&receivedDeepSeekRejection(response.status,receivedBody,failure.code)?'DEFINITIVE_REJECTION':complete&&response?.ok&&failure.code==='OUTPUT_INVALID'&&['RESPONSE_BODY_EMPTY','RESPONSE_UTF8_INVALID','RESPONSE_ENVELOPE_JSON_INVALID'].includes(failure.diagnosticReason??'')?'RECEIVED_INVALID':'SENT_UNKNOWN';
+    transportEvidence(context,{event:'STAGE_BLOCKED',certainty:failure.certainty,abortSource:failure.abortSource??'NONE',errorCode:failure.code,...(response?{httpStatus:response.status}:{}),receivedBytes});
+    throw error;
+  } finally { collection?.close(); }
 }

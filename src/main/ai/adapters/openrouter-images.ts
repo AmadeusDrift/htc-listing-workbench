@@ -25,7 +25,7 @@ export class OpenRouterImageAdapter{
     throwIfAborted(signal);if(!response.ok)throw new AiError('SERVICE_PERMISSION_REQUIRED');
     const raw=await readBounded(response,1024*1024,signal) as any;if(!raw||!(Array.isArray(raw.endpoints)||Array.isArray(raw.data?.endpoints)))throw new AiError('OUTPUT_INVALID');
   }
-  async generate(input:OpenRouterImageRequest,signal:AbortSignal,hooks:Pick<AdapterContext,'onProviderReceipt'|'beforeSend'>={}){
+  async generate(input:OpenRouterImageRequest,signal:AbortSignal,hooks:Pick<AdapterContext,'onProviderReceipt'|'beforeSend'|'onRunEvidence'|'responseDeadlineAt'|'responseTimeoutMs'|'responseBodyTimeoutMs'>={}){
     try{
       throwIfAborted(signal);
       if(!input||typeof input!=='object'||!OPENROUTER_IMAGE_MODELS.includes(input.model as any)||typeof input.apiKey!=='string'||!/^[\x21-\x7e]{8,4096}$/.test(input.apiKey)||typeof input.prompt!=='string'||!input.prompt.trim()||input.prompt.length>32000||!['auto','1024x1024','1536x1024','1024x1536'].includes(input.size)||!['auto','low','medium','high'].includes(input.quality)||!['auto','transparent','opaque'].includes(input.background)||!Array.isArray(input.references)||input.references.length>16)throw new AiError('INVALID_INPUT');
@@ -37,6 +37,6 @@ export class OpenRouterImageAdapter{
     }catch(error){throw imageRequestNotSent(error);}
     const body={model:input.model,prompt:input.prompt,n:1,size:input.size,quality:input.quality,background:input.background,output_format:'png',provider:{allow_fallbacks:true,require_parameters:true},...(input.references.length?{input_references:input.references.map(r=>({type:'image_url',image_url:{url:`data:${r.mimeType};base64,${r.bytes.toString('base64')}`}}))}:{})};
     let raw;try{raw=await postOpenRouter('/api/v1/images',body,{apiKey:input.apiKey},signal,{fetch:this.fetcher,now:()=>new Date(),nonce:()=>'',maxResponseBytes:this.maxResponseBytes,...hooks});}catch(error){if(error instanceof AiError&&error.code==='OUTPUT_INVALID')error.message=invalidImageOutput('response').message;throw error;}
-    const result=decodeOpenRouterImage(raw);if(result.requestId?.includes(input.apiKey)||result.requestId?.includes(input.prompt))result.requestId=null;return result;
+    let result:ReturnType<typeof decodeOpenRouterImage>;try{result=decodeOpenRouterImage(raw);}catch(error){if(error instanceof AiError&&error.code==='OUTPUT_INVALID')error.certainty??='RECEIVED_INVALID';throw error;}if(result.requestId?.includes(input.apiKey)||result.requestId?.includes(input.prompt))result.requestId=null;return result;
   }
 }

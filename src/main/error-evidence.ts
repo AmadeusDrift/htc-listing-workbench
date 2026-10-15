@@ -10,6 +10,13 @@ export interface ErrorEvidenceContext {
   callId?:string;operationId?:string;itemKey?:string;sku?:string;abortSource?:AbortSource;certainty?:RequestCertainty;
 }
 const codes=new Set<string>([...AI_ERROR_CODES,'EACCES','EPERM','ENOENT','ENOSPC','EIO','EROFS','EMFILE','ENFILE','ENOMEM','SQLITE_BUSY','SQLITE_FULL','SQLITE_IOERR']);
+const validField=(v:unknown):v is string=>typeof v==='string'&&/^[a-zA-Z][a-zA-Z0-9_]{0,99}$/.test(v);
+const validPath=(v:unknown):v is string=>typeof v==='string'&&v.length<=240&&/^\$?(?:[a-zA-Z_][a-zA-Z0-9_]*|\.[a-zA-Z_][a-zA-Z0-9_]*|\[\d{1,5}\])+$/.test(v);
+function networkDetail(v:unknown):import('../shared/error-evidence-contracts.ts').NetworkDiagnostic|undefined {
+  if(!v||typeof v!=='object')return undefined;const n=v as any;
+  if(!['DNS','CONNECTION_RESET','CONNECTION_REFUSED','TIMEOUT','TLS','PROXY','UNKNOWN'].includes(n.cause)||!['connect','body','save'].includes(n.stage)||!Number.isSafeInteger(n.receivedBytes)||n.receivedBytes<0||n.httpStatus!==undefined&&(!Number.isInteger(n.httpStatus)||n.httpStatus<100||n.httpStatus>599))return undefined;
+  return {cause:n.cause,stage:n.stage,receivedBytes:n.receivedBytes,...(n.httpStatus===undefined?{}:{httpStatus:n.httpStatus})};
+}
 const id=(value:unknown)=>typeof value==='string'&&/^[0-9a-f-]{36}$/i.test(value)?value:undefined;
 
 /** No messages, response bodies, absolute paths, URLs or arbitrary error properties enter this record.
@@ -30,6 +37,9 @@ export function recordErrorEvidence(write:(detail:Record<string,unknown>)=>void,
       const abortSource=Reflect.get(error,'abortSource');if(ABORT_SOURCES.includes(abortSource))detail.abortSource=abortSource;
       const certainty=Reflect.get(error,'certainty');if(REQUEST_CERTAINTIES.includes(certainty))detail.certainty=certainty;
       const reason=Reflect.get(error,'diagnosticReason');if(evidenceCode(reason))detail.diagnosticReason=reason;
+      const path=Reflect.get(error,'validationPath');if(validPath(path))detail.validationPath=path;
+      const field=Reflect.get(error,'validationField');if(validField(field))detail.validationField=field;
+      const network=networkDetail(Reflect.get(error,'networkDiagnostic'));if(network)detail.networkDiagnostic=network;
       const status=Reflect.get(error,'httpStatus');if(error instanceof AiError&&Number.isInteger(status)&&status>=400&&status<=599)detail.httpStatus=status;
       const stack=Reflect.get(error,'stack');
       if(typeof stack==='string'){
@@ -45,14 +55,15 @@ export function recordErrorEvidence(write:(detail:Record<string,unknown>)=>void,
 export function readErrorEvidence(raw: unknown): ErrorStageEvidence | null {
   try {
     if(!raw||typeof raw!=='object'||Array.isArray(raw)||Object.getPrototypeOf(raw)!==Object.prototype)return null;
-    const value=raw as Record<string,unknown>,allowed=['version','stage','code','productId','taskId','variantId','draftId','requestId','callId','operationId','itemKey','sku','abortSource','certainty','executionTaskIds','requestOutcome','httpStatus','callsite','diagnosticReason'];
+    const value=raw as Record<string,unknown>,allowed=['version','stage','code','productId','taskId','variantId','draftId','requestId','callId','operationId','itemKey','sku','abortSource','certainty','executionTaskIds','requestOutcome','httpStatus','callsite','diagnosticReason','validationPath','validationField','networkDiagnostic'];
     if(Reflect.ownKeys(value).some(k=>typeof k!=='string'||!allowed.includes(k))||Object.values(Object.getOwnPropertyDescriptors(value)).some(d=>!('value' in d))||value.version!==1||typeof value.stage!=='string'||!/^[A-Za-z][A-Za-z0-9._-]{0,79}$/.test(value.stage)||!(value.code==='UNKNOWN_LOCAL_ERROR'||typeof value.code==='string'&&codes.has(value.code)))return null;
     for(const key of ['productId','taskId','variantId','draftId','requestId','callId','operationId'])if(value[key]!==undefined&&!evidenceId(value[key]))return null;
     if(value.itemKey!==undefined&&!evidenceItemKey(value.itemKey)||value.sku!==undefined&&!evidenceSku(value.sku)||value.abortSource!==undefined&&!ABORT_SOURCES.includes(value.abortSource as AbortSource)||value.certainty!==undefined&&!REQUEST_CERTAINTIES.includes(value.certainty as RequestCertainty)||value.diagnosticReason!==undefined&&!evidenceCode(value.diagnosticReason))return null;
+    if(value.validationPath!==undefined&&!validPath(value.validationPath)||value.validationField!==undefined&&!validField(value.validationField)||value.networkDiagnostic!==undefined&&!networkDetail(value.networkDiagnostic))return null;
     if(value.httpStatus!==undefined&&(!Number.isInteger(value.httpStatus)||Number(value.httpStatus)<100||Number(value.httpStatus)>599))return null;
     if(value.executionTaskIds!==undefined&&(!Array.isArray(value.executionTaskIds)||value.executionTaskIds.length>20||value.executionTaskIds.some(v=>!evidenceId(v))))return null;
     if(value.requestOutcome!==undefined&&!['NOT_SENT','DEFINITIVE_FAILURE','RESULT_UNKNOWN'].includes(String(value.requestOutcome)))return null;
     if(value.callsite!==undefined&&(typeof value.callsite!=='string'||!/^src\/main\/(?:image-generation\/(?:service|adapter|relay-request|tyai-adapter|gemini-adapter)|automatic-listing\/service|execution\/service)\.(?:ts|js):\d{1,6}:\d{1,5}$/.test(value.callsite)))return null;
-    return {...value} as unknown as ErrorStageEvidence;
+    return {...value,...(value.networkDiagnostic===undefined?{}:{networkDiagnostic:networkDetail(value.networkDiagnostic)})} as unknown as ErrorStageEvidence;
   }catch{return null;}
 }

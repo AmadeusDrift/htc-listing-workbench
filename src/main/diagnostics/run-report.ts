@@ -7,6 +7,7 @@ import { evidenceCode, evidenceId, evidenceItemKey, evidenceSku, evidenceTime, v
 import { readErrorEvidence } from '../error-evidence.ts';
 import { classificationReferences } from './classification-references.ts';
 import { categoryLookups } from './category-lookups.ts';
+import { summarizeCurrentFailures } from './current-failures.ts';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const fail = (code = 'RUN_REPORT_INVALID_RECORD'): never => { throw new UserFacingError(code); };
@@ -64,13 +65,15 @@ export class RunReportReader {
   private snapshot(q: RunReportQuery & { pageSize: number }, scope: string, cursor: { after: number; signature: string } | null, full: boolean, context: RunReportContext): RunDiagnosticReport {
     const task = this.db.prepare(`SELECT ${['id','revision','targetId','sellerId','marketplaceId','locale','mode'].map(key=>`${projection(key)} ${key}`).join(',')} FROM automatic_listing_tasks WHERE id=?`).get(q.taskId);
     if (!task || task.id !== q.taskId) return fail('RUN_REPORT_TASK_MISSING');
-    const rawItems = this.db.prepare(`SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.productId') productId,json_extract(i.value,'$.sku') sku,json_extract(i.value,'$.draftId') draftId,json_extract(i.value,'$.productRevision') productRevision,json_extract(i.value,'$.classification') classification
+    const rawItems = this.db.prepare(`SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.productId') productId,json_extract(i.value,'$.sku') sku,json_extract(i.value,'$.draftId') draftId,json_extract(i.value,'$.productRevision') productRevision,json_extract(i.value,'$.classification') classification,
+      json_extract(i.value,'$.status') status,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.outcome.kind') kind,json_extract(i.value,'$.outcome.code') code,COALESCE(json_extract(i.value,'$.error'),json_extract(i.value,'$.outcome.message')) reason
       FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?`).all(q.taskId);
     const items: ScopeItem[] = rawItems.filter(row => q.sku === undefined || row.sku === q.sku).map(row => {
       if (!evidenceItemKey(row.key) || !evidenceId(row.productId) || !evidenceSku(row.sku) || row.draftId !== null && !evidenceId(row.draftId)) return fail();
       return { key: row.key, productId: row.productId, sku: row.sku, draftId: id(row.draftId) };
     });
     if (q.sku !== undefined && !items.length) return fail('RUN_REPORT_SKU_MISSING');
+    const currentFailures = summarizeCurrentFailures(rawItems.filter(row => q.sku === undefined || row.sku === q.sku));
     const classification = classificationReferences(this.db,rawItems.filter(row=>q.sku===undefined||row.sku===q.sku).map(row=>({key:String(row.key),productId:String(row.productId),sku:String(row.sku),productRevision:row.productRevision,classification:row.classification})));
     const classifiedCalls = new Map(classification.map(ref=>[ref.callId,ref]));
     const drafts = new Set(items.flatMap(i => i.draftId ? [i.draftId] : [])), keys = new Set(items.map(i => i.key)), products = new Set(items.map(i => i.productId));
@@ -159,11 +162,12 @@ export class RunReportReader {
       let e; try { e = readErrorEvidence(JSON.parse(row.detail_json)); } catch { continue; }
       if (!e || q.sku !== undefined && e.sku !== q.sku && !(e.itemKey && keys.has(e.itemKey)) && !(e.draftId && drafts.has(e.draftId))) continue;
       errors.push({ stage: e.stage, code: e.diagnosticReason ?? e.code, at: time(row.created_at),
+        ...(e.validationField ? { validationField:e.validationField } : {}), ...(e.validationPath ? { validationPath:e.validationPath } : {}), ...(e.networkDiagnostic ? { networkDiagnostic:e.networkDiagnostic } : {}),
         ...(e.callId ? { callId: e.callId } : {}), ...(e.requestId ? { requestId: e.requestId } : {}), ...(e.abortSource ? { abortSource: e.abortSource } : {}), ...(e.certainty ? { certainty: e.certainty } : {}),
         ...(e.draftId ? { draftId: e.draftId } : {}), ...(e.itemKey ? { itemKey: e.itemKey } : {}), ...(e.sku ? { sku: e.sku } : {}), ...(e.operationId ? { operationId: e.operationId } : {}) });
     }
     const lookups=categoryLookups(this.db,{id:task.id,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,locale:task.locale,mode:task.mode},items,calls,classification);
-    const signature = hash([task.revision, calls, events, platform, counts, errors,lookups]);
+    const signature = hash([task.revision, calls, events, platform, counts, errors,lookups,currentFailures]);
     if (cursor && (cursor.signature !== signature || cursor.after > calls.length)) return fail('RUN_REPORT_CURSOR_RELOAD');
     const after = cursor?.after ?? 0, pageCalls = full ? calls : calls.slice(after, after+q.pageSize), next = !full && after+q.pageSize < calls.length ? this.cursor({ scope, signature, after: after+q.pageSize }) : null;
     const unassigned = allCalls.filter(c => typeof c.productId === 'string' && products.has(c.productId) && !selected.some(s => s.id === c.id)).length;
@@ -173,6 +177,6 @@ export class RunReportReader {
       sourceCommit: sha(context.sourceCommit,40), sourceDigest: sha(context.sourceDigest), buildDigest: sha(context.buildDigest), workspaceId: hash(['main', file ?? '']), connection: 'CURRENT_PROCESS', consistentSnapshot: true },
       scope: { taskId: q.taskId, taskRevision: integer(task.revision), sku: q.sku ?? null }, counts,
       coverage: { missing: [...(unassigned || calls.some(c => c.association === 'DRAFT_REFERENCE') ? ['LEGACY_TASK_CALL_LINK'] : []), ...(!sha(context.sourceCommit,40) ? ['BUILD_SOURCE_NOT_SAVED'] : [])], unassignedProductCalls: unassigned, draftReferenceCalls: calls.filter(c => c.association === 'DRAFT_REFERENCE').length, receiptIntegrity: 'SAVED_METADATA_ONLY' },
-      calls: pageCalls, events: full ? events : events.filter(e => !e.callId || pageCalls.some(c => c.callId === e.callId)), platform, errors,categoryLookups:lookups, page: { total: calls.length, returned: pageCalls.length, nextCursor: next, complete: full || !next && after === 0 } };
+      calls: pageCalls, events: full ? events : events.filter(e => !e.callId || pageCalls.some(c => c.callId === e.callId)), platform, errors,categoryLookups:lookups,currentFailures, page: { total: calls.length, returned: pageCalls.length, nextCursor: next, complete: full || !next && after === 0 } };
   }
 }

@@ -55,6 +55,8 @@ export interface ImageWorkflowSlot {
 }
 export interface UnitAdoptionImageReview {version:1;taskId:string;itemKey:string;sourceRunId:string;sourceRunHash:string;adoptionSha256:string;adoptedDraftRevision:number;adoptedDraftStamp:string;sourceSlotAttempts:number[];sourceSlotContexts:(string|null)[];sourceRepairCounts:number[]}
 export interface ImageWorkflowRun {
+  /** Read-only legacy UNKNOWN reference; never a request identity or retry grant. */
+  planningUnknown?:{version:1;callId:string;certainty:'SENT_UNKNOWN'};
   unitAdoptionReview?:UnitAdoptionImageReview;
   pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text';slot:number;certainty:'SENT_UNKNOWN'};
   reviewRequests?:ImageReviewRequest[];

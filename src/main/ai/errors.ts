@@ -22,6 +22,9 @@ export class AiError extends UserFacingError {
   callId?:string;
   requestId?:string;
   diagnosticReason?:string;
+  validationPath?:string;
+  validationField?:string;
+  networkDiagnostic?: import('../../shared/error-evidence-contracts.ts').NetworkDiagnostic;
   responseDiagnostic?:{status:number;byteCount:number};
   abortSource?: import('../../shared/run-evidence-contracts.ts').AbortSource;
   certainty?: import('../../shared/run-evidence-contracts.ts').RequestCertainty;
@@ -74,4 +77,12 @@ export function httpError(status: number, providerCode?: unknown): AiError {
 export function receivedDeepSeekRejection(status:number,body:unknown,errorCode:string):boolean {
   if(![401,402,403,429].includes(status)||body===undefined||body==='[omitted: credential echo]'||typeof body==='string'&&!body.trim())return false;
   return httpError(status,(body as any)?.error?.code).code===errorCode;
+}
+
+/** Diagnostic-only allowlist: no original cause/message/URL is retained. */
+export function networkFailure(error:unknown,stage:import('../../shared/error-evidence-contracts.ts').NetworkDiagnostic['stage'],httpStatus?:number,receivedBytes=0):AiError {
+  const codes:Record<string,import('../../shared/error-evidence-contracts.ts').NetworkDiagnostic['cause']>={ENOTFOUND:'DNS',EAI_AGAIN:'DNS',ECONNRESET:'CONNECTION_RESET',ECONNREFUSED:'CONNECTION_REFUSED',ETIMEDOUT:'TIMEOUT',UND_ERR_CONNECT_TIMEOUT:'TIMEOUT',CERT_HAS_EXPIRED:'TLS',DEPTH_ZERO_SELF_SIGNED_CERT:'TLS',UNABLE_TO_VERIFY_LEAF_SIGNATURE:'TLS',ERR_TLS_CERT_ALTNAME_INVALID:'TLS',ERR_PROXY_CONNECTION_FAILED:'PROXY',ERR_TUNNEL_CONNECTION_FAILED:'PROXY'};
+  let cause:import('../../shared/error-evidence-contracts.ts').NetworkDiagnostic['cause']='UNKNOWN';
+  try{let current=error;for(let i=0;i<3&&current&&typeof current==='object';i++){const code=Reflect.get(current,'code');if(typeof code==='string'&&Object.hasOwn(codes,code)){cause=codes[code];break;}current=Reflect.get(current,'cause');}}catch{/* Untrusted accessors cannot replace the failure. */}
+  return Object.assign(new AiError('NETWORK_ERROR'),{networkDiagnostic:{cause,stage,...(Number.isInteger(httpStatus)&&httpStatus!>=100&&httpStatus!<=599?{httpStatus}:{}),receivedBytes:Number.isSafeInteger(receivedBytes)&&receivedBytes>=0?receivedBytes:0}});
 }

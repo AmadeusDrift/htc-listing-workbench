@@ -1,5 +1,6 @@
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import { SourceConsistencyError } from '../src/main/source-image-consistency/proof.ts';
+import { ownsLegacyPlanningCall } from '../src/main/image-workflow/planning-unknown.ts';
 import { sceneSet } from './fixtures/image-set.ts';
 import { attachNativeHistory } from './helpers/source-image-receipt.ts';
 import test from 'node:test';
@@ -50,6 +51,36 @@ test('native historical multiplicity blocks orphan refs in runSeven, completed r
   assert.equal(await prior.service.getRuleFilterEvidence(prior.draft.id),null);assert.equal(prior.calls.length,count);
 });
 const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+test('old planning UNKNOWN keeps its original read-only call through restart without inventing requestScope',async t=>{
+  const f=await fixture(t),callId=randomUUID();let original:AiCall|undefined,plans=0;
+  const getCall=f.ai.getCall;
+  (f.ai as any).getCall=(id:string)=>id===callId?original:getCall();
+  f.ai.imagePlan=async(context,_fresh,_repair,_signal,workflowId)=>{
+    plans++;const now=new Date().toISOString();
+    original={id:callId,providerId:'deepseek',model:'deepseek-flash',generation:1,productId:context.listing.productId,productRevision:context.listing.productRevision,status:'FAILED',errorCode:'CANCELLED',requestId:null,startedAt:now,finishedAt:now,usage:{promptTokens:0,completionTokens:0,processedImages:0},presentationContext:{kind:'image',draftId:context.listing.draftId,variantId:context.listing.variantId,sourceSha256:listingFingerprint(context),slot:0,workflowId:String(workflowId)}} as AiCall;
+    const error=new AiError('INTERRUPTED');error.callId=callId;error.diagnosticReason='IMAGE_PLAN_RESULT_UNKNOWN';throw error;
+  };
+  const result=await f.run();assert.equal(result.workflow.planningUnknown?.callId,callId);assert.equal(result.workflow.pendingRequest,undefined);assert.equal(original?.requestScope,undefined);assert.equal(f.calls.includes('generate'),false);
+  for(const changed of ['draft','workflow','source','variant','sku'] as const){
+    const call=structuredClone(original!),run=structuredClone(result.workflow);
+    if(changed==='draft')call.presentationContext!.draftId=randomUUID();
+    if(changed==='workflow')call.presentationContext!.workflowId=randomUUID();
+    if(changed==='source')call.presentationContext!.sourceSha256='b'.repeat(64);
+    if(changed==='variant')call.presentationContext!.variantId=randomUUID();
+    if(changed==='sku')run.sku='another-sale';
+    assert.equal(ownsLegacyPlanningCall(run,call),false,changed);
+  }
+  assert.equal(f.service.getProgressPresentation(f.draft.id)?.resultUnknown,true);
+  const db=openDatabase(f.root);try{
+    db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(callId,JSON.stringify(original));
+    const historical=structuredClone(result.workflow);delete historical.planningUnknown;
+    db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(historical),historical.id);
+    const before=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(historical.id)!.record_json);
+    assert.equal(f.service.getPlanningUnknown(f.draft.id)?.callId,callId);assert.equal(f.service.getProgress(f.draft.id)?.planningUnknown,undefined);
+    assert.equal(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(historical.id)!.record_json),before);
+  }finally{db.close();}
+  await f.service.close();const reopened=f.reopen();try{assert.equal(reopened.getPlanningUnknown(f.draft.id)?.callId,callId);assert.equal(reopened.getProgressPresentation(f.draft.id)?.resultUnknown,true);assert.equal(plans,1);}finally{await reopened.close();}
+});
 function copyReview(context:ListingAiContext,copy:{field:any;values:string[]}[]){
   return {kind:'listing-current-review' as const,verdict:'PASS' as const,currentListingCopy:copy,copySha256:listingFingerprint(copy),issues:[],checks:copy.flatMap(item=>item.values.map((value,index)=>{
     const evidenceIds=context.evidence.filter(e=>['material','color','item_shape','care_instructions'].includes(item.field)?e.meaning===item.field:true).map(e=>e.id);
@@ -814,6 +845,8 @@ test('planned missing main URL does not prevent generating its images',async t=>
 test('remaining required fields stop before paying for image planning or generation',async t=>{
   const f=await fixture(t);f.listing.complete=async()=>({draft:f.draft,aiCalls:0,previewAttempts:0,remaining:['color missing']});
   const result=await f.run();assert.equal(result.workflow.status,'BLOCKED');assert.match(result.workflow.error!,/color missing/);assert.equal(f.calls.includes('generate'),false);assert.equal(f.calls.includes('content-review'),false);
+  assert.equal(result.workflow.contentPreparation?.state,'DONE','operation ended without claiming field readiness');
+  assert.deepEqual(result.workflow.contentPreparation?.remaining,['color missing']);assert.deepEqual(result.remaining,['color missing']);assert.equal(f.calls.includes('set-plan'),false);
 });
 
 test('source colors are prepared before content and counted before any paid image planning',async t=>{

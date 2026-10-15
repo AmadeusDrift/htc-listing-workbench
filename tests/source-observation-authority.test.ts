@@ -17,6 +17,15 @@ function context(source?:SourceObservationEvidence):ListingAiContext {
   const fullSchema={schema:{type:'object',properties:{color:{type:'string'},novel_feature:{type:'boolean'}}},metaSchema:{}};
   return {variantId,fields:[{name:'color',requirement:'required'}],evidence:[{id:variantId+':spec',name:'Selected SKU specification',meaning:'general',value:'Blue',source:'selected_sku'}],currentAttributes:{},businessValues:{},fullSchema,schemaSha256:listingFingerprint(fullSchema),sourceProduct:{selectedSku:{id:variantId},assets:[],observations:source?[source]:[]}} as unknown as ListingAiContext;
 }
+
+test('uncertain lighting preserves clear general visible features without promoting color observations',async t=>{
+  const f=await fixture(t),source=observation({lighting:'uncertain',observations:[{name:'shape',values:['Round'],visibility:'visible'},{name:'color',values:['Red'],visibility:'visible'}]}, {variantId:f.product.variants[0].id,assessmentId:randomUUID()});
+  f.ai.sourceObservationEvidence=()=>source;const before=JSON.stringify(source),requests=f.requests.length;
+  const current=f.listing.currentContext(f.draft,f.product,0);
+  assert.ok(current.evidence.some(e=>e.source==='image_observation'&&e.name==='shape'&&e.value==='Round'));
+  assert.equal(current.evidence.some(e=>e.source==='image_observation'&&e.name==='color'),false);
+  assert.equal(JSON.stringify(source),before);assert.equal(f.requests.length,requests);
+});
 const candidate=()=>parseFullOutput({kind:'amazon-fields',contract:'listing-full-schema/v1',candidates:[{field:'color',nativeValue:'Red',evidenceIds:[variantId+':spec'],transformation:'translate'},{field:'novel_feature',nativeValue:true,evidenceIds:[],transformation:'infer'}],missing:[]});
 const colorConflict=(c:ListingAiContext)=>nativeCandidateIssues(candidate(),c).some(issue=>issue.code==='SOURCE_VALUE_CONFLICT'&&issue.attributeNames.includes('color'));
 

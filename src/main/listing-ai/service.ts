@@ -1,5 +1,5 @@
 import { programRelationField } from '../amazon/program-relations.ts';
-import { skuObservationImages } from '../../shared/source-observation-authority.ts';
+import { generalObservationEvidence } from './general-observations.ts';
 import { retainAdoptedObservationEvidence } from './observation-evidence.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { taskAiContext } from '../ai/batch/task-context.ts';
@@ -110,10 +110,7 @@ export class ListingAiService {
       context.sourceProduct!.assets=this.sourceAssets(draft,product);
       const observations=[...new Set(draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId])].map(variantId=>this.ai.sourceObservationEvidence({productId:product.id,productRevision:product.revision,variantId}));
       context.sourceProduct!.observations=observations;
-      for(const source of observations)for(const image of skuObservationImages(source,source.variantId))for(const [index,observation] of (image.observations??[]).entries()){
-        if(observation.visibility!=='visible')continue;
-        context.evidence.push({id:`${source.variantId}:observation:${image.assetId}:${index}`,name:observation.name,value:observation.values.join(', '),meaning:'general',source:'image_observation'});
-      }
+      for(const source of observations)context.evidence.push(...generalObservationEvidence(source));
       return validateListingContext(context);
     }
     if(!this.ai.listResults(product.id).some(result=>result.output.kind==='source-color'&&result.productRevision===product.revision))return context;

@@ -353,6 +353,36 @@ test('an unlinked child submit intent takes precedence over a confirmed pricing 
   f.service.cancel(task.id);assert.equal((await f.service.queue({productIds:[f.product.id],targetId:f.target.id})).products[0].eligibleCount,0);
 });
 
+test('source observation exhaustion does not suggest waiting for ready siblings to submit',async t=>{
+  const f=fixture(t);f.rules.product.variantLimit=2;
+  f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-BLUE',originalSpec:'Blue',normalizedSpec:'Blue',sourceSpec:'Blue'});
+  materializeSourceSnapshot(f.directory,f.product,f.product.variants.map(v=>v.id));
+  f.dependencies.images.prepareSources=async()=>({product:structuredClone(f.product),missing:[]});
+  const prepare=f.dependencies.prepareSourceConsistency!;let attempts=0;
+  f.dependencies.prepareSourceConsistency=async(...args)=>{
+    attempts++;if(attempts===1)return prepare(...args);
+    const error=new AiError('QUOTA_EXCEEDED');error.message='来源观察原重试次数已耗尽；历史次数和费用保留，本次未发送新请求';throw error;
+  };
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const failed=f.service.get(task.id).items.find(row=>row.status==='FAILED');assert.ok(failed);assert.match(failed.error??'',/次数已耗尽/);assert.doesNotMatch(failed.error??'',/全部提交后|来源版本已冻结/);
+  assert.equal(attempts,2);assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+});
+
+test('legacy planning UNKNOWN remains structured through image return and read-only task categorization',async t=>{
+  const f=fixture(t),callId=randomUUID();let completions=0;
+  f.dependencies.images.complete=async raw=>{
+    completions++;
+    const draft=f.dependencies.amazon.getDraft((raw as any).draftId);
+    const workflow={id:randomUUID(),draftId:draft.id,status:'FAILED',stage:'planning',attempt:0,slots:[],planningUnknown:{version:1,callId,certainty:'SENT_UNKNOWN'},error:'原图片规划调用待核对'};
+    f.workflow.set(draft.id,workflow);return {draft,aiCalls:0,previewAttempts:0,remaining:[],workflow} as any;
+  };
+  f.dependencies.images.getPlanningUnknown=id=>f.workflow.get(String(id))?.planningUnknown??null;
+  const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
+  const row=f.service.get(task.id).items[0];assert.equal(row.outcome?.kind,'UNKNOWN');assert.equal(row.outcome?.code,'IMAGE_RESULT_UNKNOWN');assert.match(row.error??'',/原图片规划/);
+  const before=JSON.stringify(f.service.get(task.id));await f.service.queue({productIds:[f.product.id],targetId:f.target.id});
+  assert.equal(JSON.stringify(f.service.get(task.id)),before);assert.equal(f.calls.submissions,0);assert.equal(completions,1);
+});
+
 function installPricingFailure(f:ReturnType<typeof fixture>,change:(draft:AmazonDraft)=>void=()=>{}){
   const prepare=f.dependencies.amazon.prepareDrafts;
   f.dependencies.amazon.prepareDrafts=async (input,plans)=>{

@@ -12,6 +12,9 @@ import { clearImageGenerationConnection } from '../src/main/image-generation/vau
 import { AiError } from '../src/main/ai/errors.ts';
 import type { SecretStorage } from '../src/main/amazon/vault.ts';
 import { DEFAULT_OPENROUTER_IMAGE_MODEL as model } from '../src/shared/image-generation-contracts.ts';
+import { readProviderReceipt } from '../src/main/ai/receipts.ts';
+import {readImageRequestIntent,readImageReceiptSync} from '../src/main/ai/receipts.ts';
+import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
 
 const key = randomBytes(32), secret = 'sk-fixture-image-secret';
 const storage: SecretStorage = {
@@ -21,6 +24,14 @@ const storage: SecretStorage = {
 };
 const png = Buffer.alloc(33); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(13, 8); png.write('IHDR', 12); png.writeUInt32BE(256, 16); png.writeUInt32BE(256, 20);
 const code = (value: string) => (error: unknown) => error instanceof AiError && error.code === value;
+
+for(const [status,message,definitive] of [[200,'Synthetic processing failure',false],[503,'Upstream unavailable',false],[503,'No available providers found for the selected model.',true]] as const)test(`image ${status}/${definitive} failure keeps original body and identical recovery classification with zero new POST`,async t=>{
+  const raw={id:'gen_s02_failed_image',error:{code:status===200?502:status,message},usage:{cost:.035}},f=await fixture(t,{fetch:async()=>Response.json(raw,{status})});f.enable();const requestId=randomUUID();
+  let first:any;await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}),(error:any)=>{first=error;return error.httpStatus===status&&error.definitive===definitive;});
+  const db=openDatabase(f.directory);try{const receipt:any=await readProviderReceipt(db,f.directory,requestId);assert.deepEqual(receipt.body,raw);assert.equal(receipt.costUsd,.035);}finally{db.close();}
+  await assert.rejects(f.service.reconcileWorkflowGeneration(requestId),(error:any)=>error.code===first.code&&error.httpStatus===status&&error.definitive===definitive);
+  assert.equal(f.calls.length,1);assert.equal((await readdir(join(f.directory,'image-generation','candidates')).catch(()=>[])).length,0);
+});
 async function fixture(t: test.TestContext, deps: Partial<ImageGenerationDependencies> = {}) {
   await mkdir(resolve('.test-data'), { recursive: true });
   const directory = await mkdtemp(resolve('.test-data/image-generation-')), store = new WorkspaceStore(directory);
@@ -32,11 +43,95 @@ async function fixture(t: test.TestContext, deps: Partial<ImageGenerationDepende
     if (deps.fetch) return deps.fetch(url, init);
     return new Response(JSON.stringify(String(url).includes('/models/') ? { endpoints: [] } : { data: [{ b64_json: png.toString('base64') }] }), { headers: { 'x-request-id': 'req-fixture' } });
   } });
-  t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
+  let storeClosed=false;const closeStore=()=>{if(!storeClosed){store.close();storeClosed=true;}};
+  t.after(async () => { await service.close(); closeStore(); await rm(directory, { recursive: true, force: true }); });
   const input = { productId: product.id, productRevision: product.revision, prompt: 'A product on a white background', referenceAssetIds: [] as string[], size: 'auto' as const, quality: 'auto' as const, background: 'auto' as const };
   const enable = () => service.saveConnection({ model, enabled: true, apiKey: secret });
-  return { service, directory, store, product, calls, input, enable };
+  return { service, directory, store, product, calls, input, enable,closeStore };
 }
+
+test('manual image UNKNOWN cannot use a new prompt, references, Key, model or workflow request ID to resend',async t=>{
+  const f=await fixture(t,{fetch:async()=>{throw Error('fixture disconnected');}});f.enable();await assert.rejects(f.service.generate(f.input));const db=openDatabase(f.directory);let id:string;try{id=String(db.prepare('SELECT id FROM ai_image_requests').get()!.id);}finally{db.close();}
+  const blocked=(error:any)=>error.code==='INTERRUPTED'&&error.requestId===id;
+  await assert.rejects(f.service.generate({...f.input,prompt:'Changed prompt',referenceAssetIds:[f.product.assets[0].id]}),blocked);
+  f.service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-rotated-image-key'});
+  await assert.rejects(f.service.generate(f.input),blocked);await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);assert.equal(f.calls.length,1);
+});
+
+test('a verified workflow new attempt can repaint a known candidate without rewriting or adopting it',async t=>{
+  const f=await fixture(t);f.enable();const draftId=randomUUID(),variantId=f.product.variants[0].id,owner={draftId,sku:'S02-BOUNDED',targetId:'s02-target',marketplaceId:'US',variantIds:[variantId],slot:1};
+  const db=openDatabase(f.directory);try{db.prepare('INSERT INTO listing_drafts(id,product_id,request_json,schema_checksum,validation_json,state,created_at,record_json) VALUES(?,?,?,?,?,?,?,?)').run(draftId,f.product.id,'{}','synthetic','{}','DRAFT',new Date().toISOString(),JSON.stringify({draft:{id:draftId,productId:f.product.id,productRevision:f.product.revision,sku:owner.sku,targetId:owner.targetId,marketplaceId:owner.marketplaceId,variantId}}));}finally{db.close();}
+  const originalId=randomUUID(),first=await f.service.generateForWorkflow(f.input,{requestId:originalId,owner});
+  const original=(f.service as any).db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(originalId).record_json,receipt=JSON.stringify(await readProviderReceipt((f.service as any).db,f.directory,originalId)),bytes=(await f.service.readCandidate(originalId)).bytes;
+  assert.equal((await f.service.generateForWorkflow(f.input,{requestId:originalId,owner})).id,first.id);assert.equal(f.calls.length,1);
+  let budgetChecks=0;const nextId=randomUUID(),second=await f.service.generateForWorkflow(f.input,{requestId:nextId,owner},undefined,()=>{budgetChecks++;});
+  assert.equal(second.id,nextId);assert.notEqual(second.id,first.id);assert.equal(f.calls.length,2);assert.equal(budgetChecks,1);
+  assert.equal((f.service as any).db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(originalId).record_json,original);assert.equal(JSON.stringify(await readProviderReceipt((f.service as any).db,f.directory,originalId)),receipt);assert.deepEqual((await f.service.readCandidate(originalId)).bytes,bytes);
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID(),owner},undefined,()=>{throw new AiError('QUOTA_EXCEEDED');}),code('QUOTA_EXCEEDED'));assert.equal(f.calls.length,2);
+});
+
+test('manual known candidate input reuses the original without another POST',async t=>{
+ const f=await fixture(t);f.enable();const first=await f.service.generate(f.input),again=await f.service.generate(f.input);assert.equal(again.id,first.id);assert.equal(f.calls.length,1);
+});
+
+test('manual late raw image restores the original candidate without a new Key or paid request',async t=>{
+  let start!:()=>void,release!:(value:Response)=>void;const started=new Promise<void>(resolve=>{start=resolve;}),held=new Promise<Response>(resolve=>{release=resolve;});
+  const f=await fixture(t,{fetch:async()=>{start();return held;}});f.enable();const controller=new AbortController(),pending=f.service.generate(f.input,controller.signal),rejected=assert.rejects(pending,code('CANCELLED'));await started;controller.abort();await rejected;
+  release(Response.json({id:'gen_s02_original_image',data:[{b64_json:png.toString('base64')}],usage:{cost:.08}}));while(f.service.busy)await new Promise(resolve=>setTimeout(resolve,5));
+  const db=openDatabase(f.directory);let id:string;try{id=String(db.prepare('SELECT id FROM ai_image_requests').get()!.id);}finally{db.close();}
+  f.service.disconnect();const recovered=await f.service.generate(f.input);assert.equal(recovered.id,id);assert.equal(recovered.requestId,'gen_s02_original_image');assert.equal(f.calls.length,1);assert.deepEqual((await f.service.readCandidate(id)).bytes,png);
+});
+
+test('two service connections atomically reserve only one unresolved manual image intent',async t=>{
+  let started!:()=>void,release!:(response:Response)=>void;const start=new Promise<void>(resolve=>{started=resolve;}),held=new Promise<Response>(resolve=>{release=resolve;});
+  const f=await fixture(t,{fetch:async()=>{started();return held;}});f.enable();let otherPosts=0;const other=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:bytes=>bytes,fetch:async()=>{otherPosts++;throw Error('must not send');}});
+  try{const first=f.service.generate(f.input);await start;await assert.rejects(other.generate({...f.input,prompt:'Different prompt'}),(error:any)=>error.code==='INTERRUPTED');release(Response.json({data:[{b64_json:png.toString('base64')}]}));await first;assert.equal(f.calls.length,1);assert.equal(otherPosts,0);}finally{release(Response.json({data:[{b64_json:png.toString('base64')}]}));await other.close();}
+});
+
+test('late raw image cannot be adopted for a different prompt, references or configured model',async t=>{
+  let start!:()=>void,release!:(value:Response)=>void;const started=new Promise<void>(resolve=>{start=resolve;}),held=new Promise<Response>(resolve=>{release=resolve;});
+  const f=await fixture(t,{fetch:async()=>{start();return held;}});f.enable();const controller=new AbortController(),pending=f.service.generate(f.input,controller.signal),rejected=assert.rejects(pending,code('CANCELLED'));await started;controller.abort();await rejected;
+  release(Response.json({id:'gen_s02_raw_identity',data:[{b64_json:png.toString('base64')}],usage:{cost:.08}}));while(f.service.busy)await new Promise(resolve=>setTimeout(resolve,5));
+  const db=openDatabase(f.directory);let requestId:string;try{requestId=String(db.prepare('SELECT id FROM ai_image_requests').get()!.id);}finally{db.close();}
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===requestId);
+  await assert.rejects(f.service.generate({...f.input,prompt:'Different intended scene'}),(e:any)=>e.code==='SOURCE_CHANGED'&&e.requestId===requestId);
+  await assert.rejects(f.service.generate({...f.input,referenceAssetIds:[f.product.assets[0].id]}),code('SOURCE_CHANGED'));
+  f.service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-rotated-key'});await assert.rejects(f.service.generate(f.input),code('SOURCE_CHANGED'));
+  const restored=await f.service.generateForWorkflow(f.input,{requestId});assert.equal(restored.id,requestId);assert.equal(restored.model,model);assert.equal(f.calls.length,1);
+});
+
+test('workflow candidate request ID cannot point to a different frozen input, slot or SKU',async t=>{
+  const f=await fixture(t);f.enable();const requestId=randomUUID(),draftId=randomUUID(),variantId=randomUUID(),owner={draftId,sku:'S02-ORIGINAL',targetId:'s02-target',marketplaceId:'US',variantIds:[variantId],slot:0};
+  const db=openDatabase(f.directory);try{db.prepare('INSERT INTO listing_drafts(id,product_id,request_json,schema_checksum,validation_json,state,created_at,record_json) VALUES(?,?,?,?,?,?,?,?)').run(draftId,f.product.id,'{}','synthetic','{}','DRAFT',new Date().toISOString(),JSON.stringify({draft:{id:draftId,productId:f.product.id,productRevision:f.product.revision,sku:owner.sku,targetId:owner.targetId,marketplaceId:owner.marketplaceId,variantId}}));}finally{db.close();}
+  const original=await f.service.generateForWorkflow(f.input,{requestId,owner});
+  await assert.rejects(f.service.generateForWorkflow({...f.input,prompt:'Wrong frozen prompt'},{requestId,owner}),code('SOURCE_CHANGED'));
+  await assert.rejects(f.service.generateForWorkflow({...f.input,referenceAssetIds:[f.product.assets[0].id]},{requestId,owner}),code('SOURCE_CHANGED'));
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId,owner:{...owner,slot:1}}),code('SOURCE_CHANGED'));
+  const edited=openDatabase(f.directory);try{const raw=JSON.parse(String(edited.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(draftId)!.record_json));raw.draft.sku='S02-CHANGED';edited.prepare('UPDATE listing_drafts SET record_json=? WHERE id=?').run(JSON.stringify(raw),draftId);}finally{edited.close();}
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId,owner:{...owner,sku:'S02-CHANGED'}}),code('SOURCE_CHANGED'));
+  assert.equal(f.calls.length,1);assert.equal((await f.service.readCandidate(original.id)).candidate.id,original.id);
+});
+
+test('older backup retains whole unresolved manual image intent and blocks changed configuration without a POST',async t=>{
+  const f=await fixture(t,{fetch:async()=>{throw Error('synthetic disconnected');}});f.enable();const backup=join(f.directory,'before-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'s02-synthetic-passphrase');await assert.rejects(f.service.generate(f.input));
+  const db=openDatabase(f.directory);let raw:string,id:string;try{const row=db.prepare('SELECT id,record_json FROM ai_image_requests').get()!;id=String(row.id);raw=String(row.record_json);}finally{db.close();}
+  const prepared=await prepareWorkspaceRestore(f.directory,backup,'s02-synthetic-passphrase'),staged=openDatabase(prepared.stagingDirectory);try{assert.equal(staged.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id)?.record_json,raw);}finally{staged.close();}
+  await f.service.close();f.closeStore();await commitWorkspaceRestore(f.directory,prepared);const store=new WorkspaceStore(f.directory);let posts=0;const service=new ImageGenerationService(f.directory,store,storage,{decodePreview:b=>b,fetch:async()=>{posts++;throw Error('must not send');}});
+  try{service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-restored-key'});await assert.rejects(service.generate({...f.input,prompt:'Changed after restore'}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id);await assert.rejects(service.generateForWorkflow(f.input,{requestId:randomUUID()}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id);assert.equal(posts,0);}finally{await service.close();store.close();}
+});
+
+for(const variant of ['empty401','whitespace401','echo401','utf8401','missing401','plain503','processing200'] as const)test(`unsafe ${variant} image receipt remains the original UNKNOWN across manual/reconcile/restart/old backup`,async t=>{
+  const status=variant==='plain503'?503:variant==='processing200'?200:401,body=variant==='empty401'?'':variant==='whitespace401'?'   ':variant==='utf8401'?Buffer.from([0xff,0x61]):JSON.stringify({error:{code:status,message:variant==='echo401'?secret:variant==='plain503'?'Upstream unavailable':'Synthetic processing failure'}});
+  const f=await fixture(t,{fetch:async()=>variant==='missing401'?new Response(null,{status}):new Response(body,{status})});f.enable();const backup=join(f.directory,'before-unsafe-image.htcbackup');await createWorkspaceBackup(f.directory,backup,'s02-synthetic-passphrase');const first:any=await f.service.generate(f.input).catch(e=>e);assert.equal(first.certainty,'SENT_UNKNOWN');
+  const db=openDatabase(f.directory);let id:string,rawIntent:string,rawReceipts:string,rawBytes:Buffer|undefined;try{const row=db.prepare('SELECT id,record_json FROM ai_image_requests').get()!;id=String(row.id);rawIntent=String(row.record_json);rawReceipts=JSON.stringify(db.prepare('SELECT * FROM ai_provider_receipts ORDER BY rowid').all());const intent=readImageRequestIntent(db,id)!,saved=readImageReceiptSync(db,f.directory,intent);if(saved){rawBytes=await readFile(join(f.directory,saved.record.relativePath));assert.equal(saved.record.costUsd,null);if(variant==='echo401')assert.equal(saved.capture.body,'[omitted: credential echo]');}}finally{db.close();}
+  const blocked=(e:any)=>e.code==='INTERRUPTED'&&e.requestId===id;
+  await assert.rejects(f.service.generate(f.input),blocked);await assert.rejects(f.service.generate({...f.input,prompt:'Changed prompt',referenceAssetIds:[f.product.assets[0].id]}),blocked);
+  if(variant==='missing401')assert.equal(await f.service.reconcileWorkflowGeneration(id),null);else await assert.rejects(f.service.reconcileWorkflowGeneration(id),(e:any)=>e.certainty==='SENT_UNKNOWN');
+  f.service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-new-image-key'});await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);assert.equal(f.calls.length,1);
+  await f.service.close();let newPosts=0;const reopened=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:b=>b,fetch:async()=>{newPosts++;throw Error('must not send');}});try{await assert.rejects(reopened.generate(f.input),blocked);}finally{await reopened.close();}assert.equal(newPosts,0);
+  const prepared=await prepareWorkspaceRestore(f.directory,backup,'s02-synthetic-passphrase');f.closeStore();await commitWorkspaceRestore(f.directory,prepared);const store=new WorkspaceStore(f.directory),service=new ImageGenerationService(f.directory,store,storage,{decodePreview:b=>b,fetch:async()=>{newPosts++;throw Error('must not send');}});
+  try{service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-after-restore-key'});await assert.rejects(service.generate({...f.input,prompt:'Changed after restore'}),blocked);await assert.rejects(service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);const restored=openDatabase(f.directory);try{assert.equal(restored.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(id)?.record_json,rawIntent);assert.equal(JSON.stringify(restored.prepare('SELECT * FROM ai_provider_receipts ORDER BY rowid').all()),rawReceipts);const saved=readImageReceiptSync(restored,f.directory,readImageRequestIntent(restored,id)!);if(rawBytes)assert.deepEqual(await readFile(join(f.directory,saved!.record.relativePath)),rawBytes);assert.equal(restored.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,1);}finally{restored.close();}assert.equal(newPosts,0);assert.equal(f.calls.length,1);}finally{await service.close();store.close();}
+});
 test('saving encrypts key, exposes only metadata, makes no network calls and survives restart', async t => {
   const f = await fixture(t);
   assert.equal(f.service.getConnection().credentialState, 'absent');
@@ -116,7 +211,7 @@ test('busy, cancel and late provider completion cannot save a candidate', async 
 });
 test('config changes invalidate in-flight requests and remove access evidence', async t => {
   let start!: () => void; const started = new Promise<void>(resolve => { start = resolve; });
-  const f = await fixture(t, { fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
+  const f = await fixture(t, { timeoutMs:100,fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
   const pending = f.service.generate(f.input); await started;
   f.service.disconnect(); await assert.rejects(pending, code('CONFIG_CHANGED'));
   assert.equal(f.service.getConnection().configured, false);
@@ -124,8 +219,8 @@ test('config changes invalidate in-flight requests and remove access evidence', 
 });
 test('deadline stops a stuck provider without resending and close drains operation', async t => {
   const f = await fixture(t, { timeoutMs: 15, fetch: async () => new Promise<Response>(() => {}) }); f.enable();
-  await assert.rejects(f.service.generate(f.input), code('TIMEOUT')); assert.equal(f.calls.length, 1); assert.equal(f.service.busy, false);
-  await f.service.close(); await assert.rejects(f.service.generate(f.input), code('SERVICE_CLOSED'));
+  await assert.rejects(f.service.generate(f.input), code('TIMEOUT')); assert.equal(f.calls.length, 1);
+  await f.service.close(); assert.equal(f.service.busy,false);await assert.rejects(f.service.generate(f.input), code('SERVICE_CLOSED'));assert.equal(f.calls.length,1);
 });
 test('invalid decoded output is rejected and nothing is saved', async t => {
   const f = await fixture(t, { decodePreview: () => { throw new Error('private decoder detail'); } }); f.enable();
@@ -172,11 +267,12 @@ test('trusted candidate reads verify metadata and local bytes rather than accept
 test('workflow cancellation interrupts generation using its caller signal with no retry or candidate commit', { timeout: 1000 }, async t => {
   let start!: () => void;
   const started = new Promise<void>(resolve => { start = resolve; });
-  const f = await fixture(t, { fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
+  const f = await fixture(t, { timeoutMs:100,fetch: async () => { start(); return new Promise<Response>(() => {}); } }); f.enable();
   const controller = new AbortController(), pending = f.service.generate(f.input, controller.signal);
   const rejected = assert.rejects(pending, code('CANCELLED'));
   await started; controller.abort(); await rejected;
-  assert.equal(f.calls.length, 1); assert.equal(f.service.busy, false);
+  assert.equal(f.calls.length, 1); assert.equal(f.service.busy, true);
+  await assert.rejects(f.service.generate(f.input),code('BUSY'));
   await assert.rejects(f.service.generate(f.input, controller.signal), code('CANCELLED')); assert.equal(f.calls.length, 1);
 });
 
@@ -267,12 +363,12 @@ test('generation preview records original error code before safe mapping and kee
   assert.doesNotMatch(JSON.stringify(audit),/sk-fixture-image-secret/);
 });
 
-for(const failure of [400,502,'network','notSent'] as const)test(`generation persists ${failure} evidence without changing dispatch count`,async t=>{
-  const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('Bearer sk-private https://private.test/path');return Response.json({error:{message:'private '+secret}},{status:typeof failure==='number'?failure:500});}});
+for(const failure of [400,'safe400',502,'network','notSent'] as const)test(`generation persists ${failure} evidence without changing dispatch count`,async t=>{
+  const f=await fixture(t,{fetch:async()=>{if(failure==='network')throw Error('Bearer sk-private https://private.test/path');return Response.json({error:{message:failure==='safe400'?'Synthetic parameter refusal':'private '+secret}},{status:typeof failure==='number'?failure:failure==='safe400'?400:500});}});
   if(failure!=='notSent')f.enable();
   const requestId=randomUUID();await assert.rejects(f.service.generateForWorkflow(f.input,{requestId}));
   const db=openDatabase(f.directory);let detail:any;try{detail=JSON.parse(String(db.prepare("SELECT detail_json FROM audit_events WHERE action='operation.failed' ORDER BY rowid DESC LIMIT 1").get()!.detail_json));}finally{db.close();}
-  assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,failure==='notSent'?'NOT_SENT':failure===400?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN');
-  assert.equal(detail.httpStatus,typeof failure==='number'?failure:undefined);
+  assert.equal(detail.requestId,requestId);assert.equal(detail.requestOutcome,failure==='notSent'?'NOT_SENT':failure==='safe400'?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN');
+  assert.equal(detail.httpStatus,typeof failure==='number'?failure:failure==='safe400'?400:undefined);
   assert.equal(f.calls.length,failure==='notSent'?0:1);assert.doesNotMatch(JSON.stringify(detail),/sk-private|private.test|sk-fixture-image-secret/);
 });

@@ -7,6 +7,16 @@ import type { ProductImageContext, ProductImagePolicyVersion, ImageSetPlan, Imag
 export interface ImageRiskSettings { enabled:boolean; scoreThreshold?:number; levelThreshold?:'low'|'medium'|'high' }
 export interface CopyReviewSettings { enabled:boolean }
 
+/** An original review request; absence in historical records never proves NOT_SENT. */
+export interface ImageReviewRequest {
+  version:1;requestId:string;step:'risk'|'ocr'|'text';runId:string;draftId:string;
+  productId:string;productRevision:number;variantId:string;sku:string;slot:number;attempt:number;
+  generationRequestId:string;candidate:CandidateImageIdentity;planResultId:string;ocrResultId:string|null;
+  contextSha256:string;requestFingerprint:string;
+  execution:{providerId:import('./ai-contracts.ts').AiProviderId;model:string;generation:number;purposeSnapshot:import('./ai-purpose-contracts.ts').AiPurposeSnapshot|null};
+  reservedAt:string;state:'SENT_UNKNOWN'|'RESULT_STORED';resultId:string|null;
+}
+
 export const IMAGE_WORKFLOW_STAGES = ['content', 'planning', 'generating', 'ip-check', 'ocr', 'reviewing', 'adopting', 'complete'] as const;
 export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
 export interface ImageRetryGrantRef {id:string;slot:number;afterAttempt:number;requestId:string;scope:'generation'|'planning'}
@@ -34,6 +44,7 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  reviewRequests?:ImageReviewRequest[];
   retryAllowance?:ImageRetryAllowance;
   /** Absent means historical, not retroactively reviewed. */
   appearanceReviewEnabled?:boolean;

@@ -38,7 +38,9 @@ export interface AiUsageSummary {
   unboundedCalls: number; policy: AiUsagePolicy;
 }
 export interface AiCall {
-  categoryContext?:{version:1;phase:'keywords'|'select'|'judge';requestSha256:string};
+  requestFingerprint?:string;
+  requestScope?:import('./ai-request-identity-contracts.ts').AiRequestScope;
+  categoryContext?:import('./category-ai-contracts.ts').CategoryPhaseContext;
   purposeAssignments?:import('./ai-purpose-contracts.ts').FieldPurposeAssignment[];
   providerReceiptId?:string;
   purposeSnapshot?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;
@@ -91,6 +93,7 @@ export interface TextReviewOutput {
 }
 export type AiOutput = AppearanceReviewOutput | OcrOutput | SegmentationOutput | ContentSuggestionOutput | TextReviewOutput | ListingFieldsOutput | ListingFieldsReviewOutput | ImagePlanOutput | GeneratedImageOcrOutput | ImageTextReviewOutput | ImageIpReviewOutput | ListingCurrentReviewOutput | CategoryDecision | SourceColorOutput | SourceConsistencyOutput;
 export interface AiResult {
+  providerReceiptRecovery?:import('./ai-request-identity-contracts.ts').ProviderReceiptRecovery;
   fieldGroupPart?:{operationId:string;fields:string[]};
   fieldGroupAssembly?:{version:1;operationId:string;sources:AiResult[];assembledAt:string};
   fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1';originalResult:unknown;originalSha256:string;recoveredAt:string};

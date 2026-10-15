@@ -17,6 +17,8 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
     catch (error) { service.cancel(task.id); throw error; }
   });
   handle('red:automatic-listing:adaptation-preview',1,id=>service.previewAdaptationForUi(identifier(id)));
+  handle('red:automatic-listing:unit-preview',1,input=>service.previewSalesUnitAdoption(input));
+  handle('red:automatic-listing:unit-adopt',1,input=>service.adoptSalesUnit(input));
   handle('red:automatic-listing:adaptation-apply',1,input=>service.applyAdaptation(input));
   handle('red:automatic-listing:batch-summary',1,id=>service.batchSummary(identifier(id)));
   handle('red:automatic-listing:execution-mode',1,input=>service.setExecutionMode(input));
@@ -24,6 +26,10 @@ export function installAutomaticListingIpc(service: AutomaticListingService, han
   handle('red:automatic-listing:work-batches',0,()=>service.listWorkBatches());
   handle('red:automatic-listing:work-batch-add',1,input=>service.addWorkBatchProducts(input));
   handle('red:automatic-listing:work-batch-archive',1,async id=>{const batch=await service.archiveWorkBatch(identifier(id));hooks.audit('automatic-listing.archived','归档当前工作批次并新建空批次');return batch;});
+  handle('red:automatic-listing:summaries',1,input=>service.queryTaskSummaries(input));
+  handle('red:automatic-listing:groups',1,input=>service.queryTaskGroups(input));
+  handle('red:automatic-listing:item',1,input=>service.getTaskItem(input));
+  handle('red:automatic-listing:resume-items',1,input=>service.queryResumeItems(input));
   handle('red:automatic-listing:list', 0, () => service.list());
   handle('red:automatic-listing:queue',1,raw=>service.queue(raw));
   handle('red:automatic-listing:get', 1, id => service.get(identifier(id)));

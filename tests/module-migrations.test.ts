@@ -12,8 +12,8 @@ test('registered migrations are atomic, sequential and preserve old record bytes
   db.prepare('INSERT INTO old_receipts VALUES(?,?)').run('unknown','{ "response": null, "attempt": 3 }');
   const before=db.prepare('SELECT raw FROM old_receipts').get()!.raw;
   migrateModules(db);migrateModules(db);assertMigrationJournal(db);
-  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,33);
-  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,12);
+  assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,34);
+  assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal').get()!.n,13);
   assert.equal(db.prepare('SELECT raw FROM old_receipts').get()!.raw,before);
   db.prepare('UPDATE module_migration_journal SET name=?').run('tampered');
   assert.throws(()=>assertMigrationJournal(db),/迁移/);
@@ -35,11 +35,15 @@ test('schema32 to 33 adds lookup indexes without changing UNKNOWN draft bytes an
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());
  db.exec('PRAGMA user_version=21; CREATE TABLE listing_drafts(id TEXT PRIMARY KEY,record_json TEXT); CREATE TABLE product_workspaces(product_id TEXT,lane TEXT); CREATE TABLE automatic_listing_tasks(id TEXT PRIMARY KEY,record_json TEXT NOT NULL); CREATE TABLE ai_profiles(id TEXT PRIMARY KEY,record_json TEXT NOT NULL)');
  migrateModules(db);
- const downgrade=()=>db.exec('DROP INDEX record_drafts_sku; DROP INDEX record_drafts_recipe; DELETE FROM module_migration_journal WHERE version=33; PRAGMA user_version=32');downgrade();
+ const downgrade=()=>db.exec('DROP TABLE ai_spend_policies; DROP TABLE ai_spend_reservations; DROP TABLE controlled_run_scopes; DROP INDEX record_drafts_sku; DROP INDEX record_drafts_recipe; DELETE FROM module_migration_journal WHERE version>=33; PRAGMA user_version=32');downgrade();
  const raw='{ "draft": {"sku":"KEEP", "state":"UNKNOWN", "salesPlan":{"recipe":{"key":"keep"}}}, "unresolvedWrite": true, "paid": 3 }';
  db.prepare('INSERT INTO listing_drafts VALUES(?,?)').run('unknown',raw);migrateModules(db);
  assert.equal(db.prepare('SELECT record_json FROM listing_drafts').get()!.record_json,raw);
  for(const index of SALES_IDENTITY_INDEXES)assert.equal(db.prepare('SELECT sql FROM sqlite_master WHERE name=?').get(index.name)!.sql,index.sql);
  downgrade();db.prepare('UPDATE listing_drafts SET record_json=?').run('{"draft":{"sku":"A","sku":"B"}}');
  assert.throws(()=>migrateModules(db),/重复 JSON/);assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,32);assert.equal(db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='record_drafts_sku'").get()!.n,0);
+});
+test('schema33 to 34 rolls back every money table and version if the later controlled-scope owner fails',async t=>{
+ const {migrateModules}=await import('../src/main/storage/migrations.ts'),db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA user_version=21;CREATE TABLE listing_drafts(id TEXT PRIMARY KEY,record_json TEXT);CREATE TABLE product_workspaces(product_id TEXT,lane TEXT);CREATE TABLE automatic_listing_tasks(id TEXT PRIMARY KEY,record_json TEXT NOT NULL);CREATE TABLE ai_profiles(id TEXT PRIMARY KEY,record_json TEXT NOT NULL)');migrateModules(db);
+ db.exec('DROP TABLE ai_spend_policies;DROP TABLE ai_spend_reservations;DROP TABLE controlled_run_scopes;DELETE FROM module_migration_journal WHERE version=34;PRAGMA user_version=33;CREATE TABLE controlled_run_scopes(original TEXT);INSERT INTO controlled_run_scopes VALUES(\'keep\')');assert.throws(()=>migrateModules(db),/already exists/);assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,33);assert.equal(db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name IN ('ai_spend_policies','ai_spend_reservations')").get()!.n,0);assert.equal(db.prepare('SELECT original FROM controlled_run_scopes').get()!.original,'keep');assert.equal(db.prepare('SELECT count(*) n FROM module_migration_journal WHERE version=34').get()!.n,0);assert.equal(db.isTransaction,false);
 });

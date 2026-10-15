@@ -6,29 +6,36 @@ import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { useEffect } from 'react';
 import { ArrowRight, Box, ChevronDown, Search } from 'lucide-react';
-import type { AutomaticListingItem } from '../shared/automatic-listing-contracts';
-import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
+import type { AutomaticListingItem,AutomaticListingTask } from '../shared/automatic-listing-contracts';
+import { SettingsStatusBadge as Badge, type SettingsStatusTone } from './SettingsStatusBadge';
 import { ImageSlotProgress } from './ImageSlotProgress';
 import { automaticItemOutcome, automaticItemReason, filterAutomaticProductGroups } from './automatic-product-groups';
 import type { AutomaticItemOutcome, AutomaticProductGroup } from './automatic-product-groups';
 import { sourceLabel } from './utils';
 import './automatic-product-groups.css';
 
-const stageLabels: Record<AutomaticListingItem['stage'], string> = { PLAN: '来源规格待处理；修正后重新加入任务', SOURCES: '准备来源资料与参考图', CLASSIFY: '自动判断商品类目', DRAFT: '准备文案与草稿', IMAGES: '生成图片、IP 与文字检测', PARENT: '等待父体建档', EXECUTION: '上传图片、验证与提交', READBACK: '已提交，等待读回', LABELS: '核对平台建档结果', COMPLETE: '平台建档已完成' };
-const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行', running: '处理中', waiting: '等待服务返回', completed: '流程完成', systemRepair: '系统待修复', unknown:'结果待核对', unclassified:'历史未分类', ruleFiltered: '其他规则淘汰', notSelected:'本次未选中', profitFiltered:'利润淘汰', needsInput: '待补资料', submittedAwaitingReadback: '已提交待回读', labels: '核对建档' };
+export const stageLabels: Record<AutomaticListingItem['stage'], string> = { PLAN: '来源规格待处理；修正后重新加入任务', SOURCES: '准备来源资料与参考图', CLASSIFY: '自动判断商品类目', DRAFT: '准备文案与草稿', IMAGES: '生成图片、IP 与文字检测', PARENT: '等待父体建档', EXECUTION: '上传图片、验证与提交', READBACK: '已提交，等待读回', LABELS: '核对平台建档结果', COMPLETE: '平台建档已完成' };
+export const itemLabels: Record<AutomaticItemOutcome, string> = { pending: '待执行', running: '处理中', waiting: '等待服务返回', completed: '流程完成', systemRepair: '系统待修复', unknown:'结果待核对', unclassified:'历史未分类', ruleFiltered: '其他规则淘汰', notSelected:'本次未选中', profitFiltered:'利润淘汰', needsInput: '待补资料', submittedAwaitingReadback: '已提交待回读', labels: '核对建档' };
 /** A count that takes its tone colour only when it is non-zero, so problems stand out in a row of numbers. */
 export function OutcomeCount({ tone, label, value, suffix = '' }: { tone: 'success' | 'info' | 'warning' | 'danger' | 'neutral'; label: string; value: number; suffix?: string }) {
   return <span className="outcome-count" data-tone={value ? tone : undefined}>{label} {value}{suffix}</span>;
 }
-interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void }
+export function automaticItemTone(outcome:AutomaticItemOutcome):SettingsStatusTone {
+  return outcome === 'systemRepair' ? 'danger' : ['ruleFiltered','profitFiltered','notSelected','needsInput','unknown','unclassified'].includes(outcome) ? 'warning' : outcome === 'completed' ? 'success' : outcome === 'pending' ? 'neutral' : 'info';
+}
+export function automaticGroupPresentation(status:AutomaticProductGroup['statusCounts'],outcomes:AutomaticProductGroup['outcomeCounts'],size:number):{tone:SettingsStatusTone;label:string} {
+  return {tone:outcomes.systemRepair ? 'danger' : outcomes.needsInput || outcomes.profitFiltered || outcomes.notSelected || outcomes.ruleFiltered || outcomes.unknown || outcomes.unclassified ? 'warning' : status.DONE === size ? 'success' : status.RUNNING || outcomes.submittedAwaitingReadback ? 'info' : 'neutral',label:outcomes.systemRepair ? `${outcomes.systemRepair} 个系统待修复` : outcomes.unknown ? `${outcomes.unknown} 个结果待核对` : outcomes.unclassified ? `${outcomes.unclassified} 个历史未分类` : outcomes.needsInput ? `${outcomes.needsInput} 个待补资料` : outcomes.profitFiltered ? `${outcomes.profitFiltered} 个利润淘汰` : outcomes.notSelected ? `${outcomes.notSelected} 个本次未选中` : outcomes.ruleFiltered ? `${outcomes.ruleFiltered} 个规则淘汰` : status.DONE === size ? '流程全部完成' : outcomes.submittedAwaitingReadback ? `${outcomes.submittedAwaitingReadback} 个已提交待回读` : status.RUNNING ? '处理中' : status.WAITING ? '等待返回' : '待执行'};
+}
+interface Actions { busy: boolean; pending: boolean; revision: string; onManual(productId: string, draftId?: string, context?: ProblemContext): void; onShipping?: (batchId: string) => void;unitOwner?:{taskId:string;taskRevision:number;onUpdated(task:AutomaticListingTask):void} }
 
-function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey }: Actions & { item: AutomaticListingItem; memoryKey: string }) {
-  const [expanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, item.status === 'RUNNING');
+export function SalesItem({ item, busy, pending, revision, onManual, onShipping, memoryKey,unitOwner, initialExpanded, onExpandedChange, expanded:controlledExpanded }: Actions & { item: AutomaticListingItem; memoryKey: string; initialExpanded?:boolean; expanded?:boolean; onExpandedChange?:(expanded:boolean)=>void }) {
+  const [memoryExpanded, setExpanded] = usePageState(`task:${memoryKey}:sale:${item.key}`, initialExpanded ?? item.status === 'RUNNING');
+  const expanded=controlledExpanded??memoryExpanded;
   const specification = item.salesPlan?.recipe.specification;
   const outcome = automaticItemOutcome(item);
-  const itemTone = outcome === 'systemRepair' ? 'danger' : ['ruleFiltered','profitFiltered','notSelected','needsInput','unknown','unclassified'].includes(outcome) ? 'warning' : outcome === 'completed' ? 'success' : outcome === 'pending' ? 'neutral' : 'info';
+  const itemTone = automaticItemTone(outcome);
   return <li data-testid={`automatic-result-${item.variantId}`} data-state={item.status} data-tone={itemTone}>
-    <button type="button" className="automatic-sale-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+    <button type="button" className="automatic-sale-toggle" aria-expanded={expanded} onClick={() => {if(onExpandedChange)onExpandedChange(!expanded);else setExpanded(value => !value);}}>
       <span><strong>{item.sku}</strong>{specification && <small>{specification}</small>}<small>{stageLabels[item.stage]}{item.stage === 'READBACK' ? '；Amazon 接受提交不等于已可售。' : ''}</small></span>
       <Badge tone={itemTone}>{itemLabels[outcome]}</Badge><ChevronDown size={16} className={expanded ? 'is-expanded' : ''} />
     </button>
@@ -36,7 +43,7 @@ function SalesItem({ item, busy, pending, revision, onManual, onShipping, memory
     {expanded && <div className="automatic-sale-body">
       {(item.failureHistory?.length||item.status==='FAILED')&&<details className="workflow-notice"><summary>历史与本次失败证据（刷新不会发起新请求）</summary><ul>{(item.failureHistory??[{stage:item.stage,reason:item.error??item.outcome?.message??'未保存具体原因',occurredAt:null,slot:undefined,source:undefined}]).map((event,index)=><li key={index}>{event.stage}{event.slot?` · 图位 ${event.slot}`:''} · {event.occurredAt?`${item.lastContinuedAt&&event.occurredAt>=item.lastContinuedAt?'本次检查失败':'历史失败'}记录时间：${new Date(event.occurredAt).toLocaleString()}${event.source==='request-proof'?'（原请求明确失败凭据）':'（本地检查记录，不是原请求时间）'}`:'原失败时间未保存'} · {sanitizeFailureReason(event.reason)}</li>)}</ul><p>当前页面读取未发送新请求；历史失败不表示本次重新执行。继续后仅按授权范围核对和接续。</p></details>}
       <p className="small-copy">备货 {item.stockSets} 套 · 标签按销售单位生成{item.imageAttempts ? ` · 图片尝试 ${item.imageAttempts} 次` : ''}</p>
-      {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision}/>}
+      {item.draftId&&<ActualQuoteDetailsPanel draftId={item.draftId} revision={revision} unitScope={unitOwner?{...unitOwner,itemKey:item.key}:undefined}/>}
       {item.draftId && (item.imageStarted || item.stage === 'IMAGES') && <ImageSlotProgress draftId={item.draftId} revision={revision} active={item.stage === 'IMAGES' && item.status === 'RUNNING'} onLocateSlot={imageSlot => onManual(item.productId, item.draftId!, { variantId: item.variantId, imageSlot })} sku={item.sku} color={item.salesPlan?.recipe.color || specification} />}
       {item.classification && <p className="small-copy">类目：{item.classification.productType} · {item.classification.reason}</p>}
       {item.salesPlan && <p className="small-copy">每套 {item.salesPlan.recipe.totalPieces} 件 · {item.salesPlan.relationReason}</p>}
@@ -80,12 +87,12 @@ export function AutomaticProductGroups({ groups, sourceErrors, loadingSources, m
       const expanded = expandedIds.includes(group.productId) || Boolean(query) && !collapsedSearchIds.includes(group.productId);
       const status = group.statusCounts;
       const outcomes = group.outcomeCounts;
-      const groupTone = outcomes.systemRepair ? 'danger' : outcomes.needsInput || outcomes.profitFiltered || outcomes.notSelected || outcomes.ruleFiltered || outcomes.unknown || outcomes.unclassified ? 'warning' : status.DONE === group.items.length ? 'success' : status.RUNNING || outcomes.submittedAwaitingReadback ? 'info' : 'neutral';
+      const presentation=automaticGroupPresentation(status,outcomes,group.items.length),groupTone=presentation.tone;
       return <article className="automatic-source-group" key={group.productId} data-tone={groupTone} data-testid={`automatic-product-group-${group.productId}`}>
         <button type="button" className="automatic-source-toggle" aria-label={`${expanded ? '收起' : '展开'}来源商品 ${group.title}`} aria-expanded={expanded} aria-controls={`automatic-group-body-${group.productId}`} onClick={() => { setExpandedIds(values => expanded ? values.filter(id => id !== group.productId) : [...values, group.productId]); if (query) setCollapsedSearchIds(values => expanded ? [...values, group.productId] : values.filter(id => id !== group.productId)); }}>
           <span className="workspace-thumb">{group.coverUrl ? <img src={group.coverUrl} alt="来源商品图片" loading="lazy" /> : <Box size={24} strokeWidth={1.35} />}</span>
           <span className="automatic-source-identity"><strong>{group.title}</strong><small>{group.sourceUrl ? sourceLabel(group.sourceUrl) : '来源链接未保存'} · 来源规格 {group.sourceVariantCount ?? (loadingSources ? '读取中' : sourceErrors[group.productId] ? '读取失败' : '尚未读取')}{group.sourceCountSnapshot ? '（已读快照）' : ''} · 本次销售 SKU {group.items.length}</small><small><OutcomeCount tone="success" label="流程完成" value={outcomes.completed} /> · <OutcomeCount tone="info" label="已提交待回读" value={outcomes.submittedAwaitingReadback} /> · <OutcomeCount tone="info" label="处理中" value={outcomes.running + outcomes.labels} /> · <OutcomeCount tone="info" label="等待服务" value={outcomes.waiting} /> · 待执行 {outcomes.pending}{group.excludedCount !== null ? ` · 未纳入本次 ${group.excludedCount}` : ''}</small>{Boolean(status.FAILED+status.SCREENED) && <small><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="warning" label="历史未分类" value={outcomes.unclassified} /></small>}</span>
-          <Badge tone={groupTone}>{outcomes.systemRepair ? `${outcomes.systemRepair} 个系统待修复` : outcomes.unknown ? `${outcomes.unknown} 个结果待核对` : outcomes.unclassified ? `${outcomes.unclassified} 个历史未分类` : outcomes.needsInput ? `${outcomes.needsInput} 个待补资料` : outcomes.profitFiltered ? `${outcomes.profitFiltered} 个利润淘汰` : outcomes.notSelected ? `${outcomes.notSelected} 个本次未选中` : outcomes.ruleFiltered ? `${outcomes.ruleFiltered} 个规则淘汰` : status.DONE === group.items.length ? '流程全部完成' : outcomes.submittedAwaitingReadback ? `${outcomes.submittedAwaitingReadback} 个已提交待回读` : status.RUNNING ? '处理中' : status.WAITING ? '等待返回' : '待执行'}</Badge>
+          <Badge tone={groupTone}>{presentation.label}</Badge>
           <ChevronDown size={17} className={expanded ? 'is-expanded' : ''} />
         </button>
         {expanded && <div className="automatic-source-body" id={`automatic-group-body-${group.productId}`}>

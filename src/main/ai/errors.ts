@@ -20,8 +20,11 @@ export class AiError extends UserFacingError {
   readonly code: AiErrorCode;
   rejection?: import('../../shared/rejection-presentation.ts').OutputRejection;
   callId?:string;
+  requestId?:string;
   diagnosticReason?:string;
   responseDiagnostic?:{status:number;byteCount:number};
+  abortSource?: import('../../shared/run-evidence-contracts.ts').AbortSource;
+  certainty?: import('../../shared/run-evidence-contracts.ts').RequestCertainty;
   readonly reason?: AiRejectionReason;
   constructor(code: AiErrorCode, reason?: AiRejectionReason) { super(MESSAGES[code]); this.code = code; if (reason) this.reason = reason; }
 }
@@ -32,8 +35,13 @@ export class ImagePlanningLimitError extends AiError {
     this.message='图片规划已达到 3 次尝试，已保留原图和请求记录。请先核对失败规划；已通过图片保留。';
   }
 }
+export function abortError(reason: unknown): AiError {
+  if (reason instanceof AiError) { if(!reason.abortSource&&reason.code==='CANCELLED')reason.abortSource='USER';if(!reason.abortSource&&reason.code==='TIMEOUT')reason.abortSource='TOTAL_TIMEOUT';return reason; }
+  if (reason instanceof DOMException && reason.name === 'TimeoutError') return Object.assign(new AiError('TIMEOUT'), { abortSource: 'TOTAL_TIMEOUT' as const });
+  return Object.assign(new AiError('CANCELLED'), { abortSource: 'USER' as const });
+}
 export function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw signal.reason instanceof AiError ? signal.reason : new AiError('CANCELLED');
+  if (signal.aborted) throw abortError(signal.reason);
 }
 export function abortable<T>(promise: Promise<T>, signal: AbortSignal, onAbort: () => void = () => {}): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -42,14 +50,14 @@ export function abortable<T>(promise: Promise<T>, signal: AbortSignal, onAbort: 
     const abort = () => {
       if (settled) return; settled = true; cleanup();
       try { onAbort(); } catch { /* Cancellation must settle even when transport cleanup fails. */ }
-      reject(signal.reason instanceof AiError ? signal.reason : new AiError('CANCELLED'));
+      reject(abortError(signal.reason));
     };
     promise.then(value => { if (!settled) { settled = true; cleanup(); resolve(value); } }, error => { if (!settled) { settled = true; cleanup(); reject(error); } });
     if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
   });
 }
 export function safeError(error: unknown, signal?: AbortSignal): AiError {
-  if (signal?.aborted) return signal.reason instanceof AiError ? signal.reason : new AiError('CANCELLED');
+  if (signal?.aborted) return abortError(signal.reason);
   return error instanceof AiError ? error : new AiError('PROVIDER_ERROR');
 }
 export function httpError(status: number, providerCode?: unknown): AiError {
@@ -60,4 +68,10 @@ export function httpError(status: number, providerCode?: unknown): AiError {
   if (status === 402 || /^(QuotaExceeded|InsufficientBalance|Arrearage|InsufficientQuota|FreeQuotaExhausted)/i.test(code)) return new AiError('QUOTA_EXCEEDED');
   if (status === 429 || /^(Throttling|RateLimit)/i.test(code)) return new AiError('RATE_LIMITED');
   return new AiError('PROVIDER_ERROR');
+}
+/** Requires independently verified complete receipt bytes at the caller. A
+ * rejection does not establish zero cost or permission for another request. */
+export function receivedDeepSeekRejection(status:number,body:unknown,errorCode:string):boolean {
+  if(![401,402,403,429].includes(status)||body===undefined||body==='[omitted: credential echo]'||typeof body==='string'&&!body.trim())return false;
+  return httpError(status,(body as any)?.error?.code).code===errorCode;
 }

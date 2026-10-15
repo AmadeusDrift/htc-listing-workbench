@@ -28,7 +28,7 @@ for(const outcome of ['success','timeout','400'] as const)test(`legacy exact400 
  const prior=f.service.listCalls()[0],db=(f.service as any).db;delete prior.categoryContext;
  db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(prior),prior.id);
  await assert.rejects(f.service.decideCategory(input));assert.equal(f.requests.length,1);
- const scope={taskId:crypto.randomUUID(),rowKey:'test',phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:new Date(Date.parse(prior.finishedAt!)+1000).toISOString(),authorize:()=>true};
+ const scope={taskId:crypto.randomUUID(),rowKey:f.product.id+':'+f.product.variants[0].id,phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:new Date(Date.parse(prior.finishedAt!)+1000).toISOString(),authorize:()=>true};
  f.respond(async()=>{if(outcome==='timeout')throw Error('timeout');return outcome==='400'?json(denied,400):json({answers:{category:{type:'choice',choice:'CLEANING_CLOTH'},review:{type:'choice',choice:'clear'}},usage:{input_tokens:1,output_tokens:0}});});
  if(outcome==='success'){
   const result=await taskAiContext.run(scope,()=>f.service.decideCategory(input));
@@ -69,7 +69,7 @@ for(const reason of ['arbitrary400','missingReceipt'])test(`legacy ${reason} can
  const f=await fixture(t,{fetch:async()=>json(reason==='arbitrary400'?{error:{code:400,message:'other failure'}}:denied,400)});f.service.saveConnection({id:'openrouter',apiKey:'fixture-only'});f.service.setEnabled({id:'openrouter',enabled:true});
  const input={productId:f.product.id,productRevision:f.product.revision,phase:'select' as const,candidates:[{name:'CLEANING_CLOTH',displayName:'Cleaning cloth'}]};await assert.rejects(f.service.decideCategory(input));const call=f.service.listCalls()[0];delete call.categoryContext;(f.service as any).db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
  if(reason==='missingReceipt'){const {rm}=await import('node:fs/promises');await rm(f.directory+'/ai-receipts',{recursive:true});}
- await assert.rejects(taskAiContext.run({taskId:crypto.randomUUID(),rowKey:'test',phase:'CATEGORY',mode:'immediate',explicitContinueAt:new Date(Date.parse(call.finishedAt!)+1000).toISOString(),authorize:()=>true},()=>f.service.decideCategory(input)));
+ await assert.rejects(taskAiContext.run({taskId:crypto.randomUUID(),rowKey:f.product.id+':'+f.product.variants[0].id,phase:'CATEGORY',mode:'immediate',explicitContinueAt:new Date(Date.parse(call.finishedAt!)+1000).toISOString(),authorize:()=>true},()=>f.service.decideCategory(input)));
  assert.equal(f.requests.length,1);
 });
 
@@ -91,7 +91,7 @@ for(const historical of ['two400','mixedUnknown','two403'] as const)test(`multip
  if(historical!=='mixedUnknown'){const r=await saveProviderReceipt(db,f.directory,second.id,{gateway:'openrouter',endpoint:'/api/alpha/decisions',model:second.model,status,requestId:null,receivedAt:second.finishedAt!,body,costUsd:null},second.purposeSnapshot);second.providerReceiptId=r.id;}
  db.prepare('INSERT INTO ai_calls(id,record_json) VALUES(?,?)').run(second.id,JSON.stringify(second));
  const originals=f.service.listCalls().map(c=>JSON.stringify(c));
- const scope={taskId:crypto.randomUUID(),rowKey:'test',phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:new Date(Date.parse(first.finishedAt!)+1000).toISOString(),authorize:()=>true};
+ const scope={taskId:crypto.randomUUID(),rowKey:f.product.id+':'+f.product.variants[0].id,phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:new Date(Date.parse(first.finishedAt!)+1000).toISOString(),authorize:()=>true};
  f.respond(async()=>json({answers:{category:{type:'choice',choice:'CLEANING_CLOTH'},review:{type:'choice',choice:'clear'}},usage:{input_tokens:1,output_tokens:0}}));
  if(historical==='two400'){
   const result=await taskAiContext.run(scope,()=>f.service.decideCategory(input));assert.equal(f.requests.length,2);

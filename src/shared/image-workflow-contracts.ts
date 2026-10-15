@@ -58,6 +58,8 @@ export interface ImageWorkflowRun {
   /** Read-only legacy UNKNOWN reference; never a request identity or retry grant. */
   planningUnknown?:{version:1;callId:string;certainty:'SENT_UNKNOWN'};
   unitAdoptionReview?:UnitAdoptionImageReview;
+  /** Dependency transition only: original OCR call, journal certainty and usage hold remain untouched. */
+  retiredOcrDependencies?:{callId:string;at:string}[];
   pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text';slot:number;certainty:'SENT_UNKNOWN'};
   reviewRequests?:ImageReviewRequest[];
   retryAllowance?:ImageRetryAllowance;

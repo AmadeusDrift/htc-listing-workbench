@@ -133,11 +133,17 @@ async function fixture(t: test.TestContext, options: { riskScore?:number|null; r
     recognize:async()=>{calls.push('source-ocr');return outputResult({kind:'ocr',text:'',lines:[]});},
     getCall: ()=>({status:'SUCCEEDED'}),
     getProfile: ()=>({enabled:true,configured:true,generation:1}),
+    directImageReviewProfile:()=>({enabled:true,configured:true,generation:1}),
     imagePlan: async(imageContext:ProductImageContext,_fresh?:unknown,_repair?:unknown,_signal?:unknown,_workflowId?:unknown,onRequestSent?:()=>void)=>{onRequestSent?.();calls.push(imageContext.setPolicy&&!imageContext.slot?'set-plan':'plan');if(options.rotateKeyDuringPlan)configurationScope=randomUUID();return outputResult({...(imageContext.setPolicy&&!imageContext.slot?{setPlan:sceneSet()}:{}),kind:'image-plan',prompt:'Show this product',textMode:'none',expectedText:[],ipRisk:{verdict:options.ipVerdict??'PASS',findings:options.ipVerdict&&options.ipVerdict!=='PASS'?[{category:'character',name:'Mickey Mouse',evidence:'Distinctive named character in source image.',referenceAssetIds:[imageContext.referenceAssets[0].assetId]}]:[]},...(!options.legacyPlan?{productUnderstanding:{summary:'A blue round coaster with a raised rim.',referenceAssetIds:imageContext.referenceAssets.map(asset=>asset.assetId),uncertainties:options.insufficient?['Selected SKU cannot be identified.']:['Exact size is unknown.'],sufficient:!options.insufficient}}:{})});},
     reviewGeneratedImageRisk: async(_context:unknown,plan:AiResult,candidate:unknown)=>{calls.push('ip-check'); if(options.riskFailure)throw new AiError('SERVICE_PERMISSION_REQUIRED'); const value=outputResult({kind:'image-ip-review',candidate,planResultId:plan.id,service:'aigcViolationDetection',verdict:options.generatedRisk?'BLOCKED':'PASS',riskLevel:options.riskLevel??(options.generatedRisk?'high':'none'),labels:[{label:options.riskScore!==undefined||options.generatedRisk?'tm_goods':'nonLabel',confidence:options.riskScore!==undefined?options.riskScore:options.generatedRisk?99:null,description:options.generatedRisk?'疑似品牌商标':'未检出风险'}]});
       const context=_context as ProductImageContext,db=openDatabase(root);
       try{db.prepare('INSERT INTO ai_results VALUES(?,?)').run(value.id,JSON.stringify({...value,providerId:'aliyun-image-risk',productId:product.id,productRevision:product.revision,variantId:draft.variantId,assetId:null,assetSha256:null,sourceResultIds:[...(context.listingReviewResultId?[context.listingReviewResultId]:[]),plan.id],model:'aigcViolationDetection',createdAt:new Date().toISOString(),reviewState:'unreviewed',imageContext:context,...(context.listing.contract==='listing-full-schema/v1'?{listingEvidenceContractVersion:'listing-evidence/v4'}:{}),sourceSha256:listingFingerprint(context),imageRequestBytes:1}));}finally{db.close();}return value;},
     recognizeGeneratedImage: async(_context:unknown,candidate:unknown)=>{calls.push('ocr');return outputResult({kind:'generated-image-ocr',candidate,text:'',lines:[]});},
+    reviewGeneratedImageDirect: async(context:ProductImageContext,plan:AiResult,candidate:unknown,bytes:Buffer)=>{
+      calls.push('direct-review');assert.ok(bytes.length>0);assert.equal(hash(bytes),(candidate as {sha256:string}).sha256);
+      reviewCount++;const rejected=options.rejectSlot===context.slot?.index||reviewCount<=(options.rejected??0);
+      return outputResult({kind:'image-text-review',method:'candidate-vision/v1',candidate,planResultId:plan.id,ocrResultId:null,verdict:rejected?'NEEDS_CHANGES':'PASS',noTextVerified:!rejected,checks:[],expectedTextChecks:[],issues:rejected?['Visible text contradicts the source.']:[],visualReview:'not_performed'},context);
+    },
     reviewGeneratedImage: async(_c:unknown,plan:AiResult,ocr:AiResult,candidate:unknown)=>{
       calls.push('review'); reviewCount++; if(options.mutate)store.saveProduct({...store.getProduct(product.id),title:'changed'});
       const rejected=options.rejectSlot===(_c as ProductImageContext).slot?.index||reviewCount <= (options.rejected??0);
@@ -1386,4 +1392,60 @@ test('P05 selected slot cannot expand authorization to whole-set copy policy rec
  assert.throws(()=>f.service.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[2]}),/当前需要整套审核策略重新核验，请按SKU预览并确认范围/);
  assert.deepEqual(f.calls,calls);assert.deepEqual(f.service.getProgress(f.draft.id),before);
  const next=await f.run();assert.equal(next.workflow.status,'COMPLETED');assert.equal(next.workflow.recheckedFromRunId,first.workflow.id);assert.equal(f.calls.slice(calls.length).includes('generate'),false);assert.equal(f.calls.slice(calls.length).includes('content-review'),true);
+});
+
+test('direct vision basic completes seven slots with OCR disabled and retains candidate on review resume',async t=>{
+ const f=await fixture(t);const profile=f.ai.getProfile;
+ f.ai.getProfile=(id?:string)=>id==='aliyun-ocr'?{enabled:false,configured:false,generation:1}:profile();
+ f.ai.recognize=async()=>{throw new Error('source OCR must never be called');};
+ f.ai.recognizeGeneratedImage=async()=>{throw new Error('generated OCR must never be called');};
+ const direct=f.ai.reviewGeneratedImageDirect;let fail=true;
+ f.ai.reviewGeneratedImageDirect=async(...args)=>{if(fail){fail=false;throw new AiError('NETWORK_ERROR');}return direct(...args);};
+ const first=await f.run();assert.equal(first.workflow.status,'FAILED');const candidate=first.workflow.slots![0].attempts[0].candidateId;assert.ok(candidate);
+ const second=await f.run();assert.equal(second.workflow.status,'COMPLETED');assert.equal(second.workflow.slots!.length,7);assert.ok(second.workflow.slots!.every(slot=>slot.status==='PASSED'));assert.equal(second.workflow.slots![0].attempts[0].candidateId,candidate);assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.equal(f.calls.includes('ocr'),false);assert.equal(f.calls.includes('source-ocr'),false);assert.deepEqual(second.workflow.ocrResultIds,[]);assert.equal(second.workflow.slots![0].attempts[0].ocrResultId,null);
+});
+
+test('direct vision basic keeps original unknown generation locked without another request',async t=>{
+ const f=await fixture(t,{generationError:true});const first=await f.run(),before=f.calls.length;
+ assert.equal(first.workflow.slots![0].attempts[0].state,'UNKNOWN');const requestId=first.workflow.slots![0].attempts[0].requestId;
+ const second=await f.run();assert.equal(second.workflow.slots![0].attempts[0].requestId,requestId);assert.equal(second.workflow.slots![0].attempts.length,1);assert.equal(f.calls.length,before);assert.equal(f.calls.filter(call=>call==='generate').length,1);assert.equal(f.calls.includes('direct-review'),false);
+});
+test('direct vision basic preserves unknown text owner and blocks missing safety journal',async t=>{
+ const f=await fixture(t),callId=randomUUID();let original:AiCall|undefined,directCalls=0;const getCall=f.ai.getCall;
+ (f.ai as any).getCall=(id:string)=>id===callId?original:getCall();
+ f.ai.reviewGeneratedImageDirect=async(context,plan,candidate)=>{
+   directCalls++;const now=new Date().toISOString();original={id:callId,providerId:'deepseek-review',model:'deepseek-flash',generation:1,productId:context.listing.productId,productRevision:context.listing.productRevision,status:'FAILED',errorCode:'TIMEOUT',requestId:null,startedAt:now,finishedAt:now,usage:{promptTokens:0,completionTokens:0,processedImages:0},presentationContext:{kind:'image',draftId:context.listing.draftId,variantId:context.listing.variantId,sourceSha256:listingFingerprint(context),slot:1},requestFingerprint:'e'.repeat(64),requestScope:{version:1,operation:'image-text-review',productId:context.listing.productId,variantId:context.listing.variantId,sku:context.listing.sku,slot:1,candidateSha256:(candidate as {sha256:string}).sha256}} as AiCall;
+   const error=new AiError('TIMEOUT');error.callId=callId;throw error;
+ };
+ const first=await f.run();
+ const pending={version:1 as const,callId,step:'text' as const,slot:1,certainty:'SENT_UNKNOWN' as const};
+ const db=openDatabase(f.root);try{db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(callId,JSON.stringify(original));db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify({...first.workflow,pendingRequest:pending}),first.workflow.id);}finally{db.close();}
+ const before=f.calls.length,rawCall=JSON.stringify(original);
+ const second=await f.run();assert.equal(directCalls,1);assert.equal(f.calls.length,before);assert.equal(second.workflow.pendingRequest?.callId,callId);assert.equal(JSON.stringify(original),rawCall);assert.equal(second.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].candidateId);assert.match(second.workflow.error!,/文字审核结果未知/);
+});
+
+test('direct vision basic retires only proven legacy OCR dependency while retaining its call and hold',async t=>{
+ const {writeImageReviewLedger,reviewEvidenceFile}=await import('../src/main/image-workflow/review-ledger.ts');
+ const {transaction}=await import('../src/main/application/transaction.ts');
+ const f=await fixture(t),direct=f.ai.reviewGeneratedImageDirect,makePlan=f.ai.imagePlan;
+ f.ai.imagePlan=async(...args)=>{const result=await makePlan(...args);result.imageContext=args[0];result.sourceSha256=listingFingerprint(args[0]);return result;};
+ f.ai.reviewGeneratedImageDirect=async()=>{throw new AiError('NETWORK_ERROR');};
+ const first=await f.run(),run=structuredClone(first.workflow),slot=run.slots![0],attempt=slot.attempts[0],local=await f.generation.readCandidate(attempt.candidateId!);
+ const plan=f.ai.getResult(attempt.planResultId!),actual=plan.imageContext!;
+ assert.equal(listingFingerprint(actual),slot.contextSha256);
+ const at=new Date().toISOString(),callId=randomUUID(),candidate={id:local.candidate.id,sha256:local.candidate.sha256,width:local.candidate.width,height:local.candidate.height};
+ const prepared:import('../src/shared/image-workflow-contracts.ts').ImageReviewRequestV2={version:2,requestId:callId,step:'ocr',runId:run.id,draftId:run.draftId,productId:run.productId,productRevision:run.productRevision,variantId:run.variantId,sku:run.sku,slot:1,attempt:1,generationRequestId:attempt.requestId,candidate,planResultId:attempt.planResultId!,ocrResultId:null,contextSha256:slot.contextSha256!,requestFingerprint:null,execution:{providerId:'aliyun-ocr',model:'RecognizeAllText/Commerce',generation:1,purposeSnapshot:null},preparedAt:at,reservedAt:null,state:'PREPARED',resultId:null,effects:[{id:listingFingerprint({requestId:callId,kind:'ocr'}),kind:'ocr',state:'UNPERMITTED',permittedAt:null,receivedAt:null}]};
+ run.updatedAt=at;run.stage='ocr';run.status='INTERRUPTED';run.reviewRequests=[prepared];
+ const frozenRun=structuredClone(run),request={...prepared,state:'SENT_UNKNOWN' as const,reservedAt:at,requestFingerprint:'d'.repeat(64),effects:[{...prepared.effects[0],state:'PERMITTED' as const,permittedAt:at}]};
+ const call:AiCall={id:callId,providerId:'aliyun-ocr',model:'RecognizeAllText/Commerce',generation:1,productId:run.productId,productRevision:run.productRevision,status:'RUNNING',errorCode:null,requestId:null,startedAt:at,finishedAt:null,usage:{promptTokens:0,completionTokens:0,processedImages:0},requestFingerprint:request.requestFingerprint,presentationContext:{kind:'image',draftId:run.draftId,variantId:run.variantId,slot:1,sourceSha256:slot.contextSha256!},requestScope:{version:1,operation:'generated-image-ocr',productId:run.productId,variantId:run.variantId,sku:run.sku,slot:1,candidateSha256:candidate.sha256,targetId:actual.listing.targetId,marketplaceId:actual.listing.marketplaceId}};
+ const directory=join(f.root,'image-generation','candidates',candidate.id);await mkdir(directory,{recursive:true});
+ await writeFile(join(directory,'candidate.json'),JSON.stringify(local.candidate));await writeFile(join(directory,'image.png'),local.bytes);await writeFile(join(directory,'preview.png'),local.preview);
+ const files=['candidate.json','image.png','preview.png'].map(name=>reviewEvidenceFile(f.root,`image-generation/candidates/${candidate.id}/${name}`));for(const ref of actual.referenceAssets)files.push(reviewEvidenceFile(f.root,f.store.getAssetRecord(ref.assetId)!.originalPath));
+ run.reviewRequests=[request];run.pendingRequest={version:1,callId,step:'ocr',slot:1,certainty:'SENT_UNKNOWN'};
+ const db=openDatabase(f.root),rawCall=JSON.stringify(call),rawHold=JSON.stringify({id:callId,state:'PENDING',reservedTokens:1200});let rawLedger='';
+ try{transaction(db,()=>{db.prepare('INSERT INTO ai_calls VALUES(?,?)').run(callId,rawCall);db.prepare('INSERT INTO ai_usage_ledger VALUES(?,?)').run(callId,rawHold);db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(run),run.id);writeImageReviewLedger(db,{version:1,id:callId,request,context:actual,frozenRun,files,call,result:null,adopted:null});});rawLedger=String(db.prepare('SELECT record_json FROM image_review_journal WHERE id=?').get(callId)!.record_json);}finally{db.close();}
+ const getCall=f.ai.getCall;(f.ai as any).getCall=(id:string)=>id===callId?call:getCall();f.ai.reviewGeneratedImageDirect=direct;
+ f.ai.recognize=async()=>{throw Error('unexpected source OCR');};f.ai.recognizeGeneratedImage=async()=>{throw Error('unexpected generated OCR');};
+ const second=await f.run();assert.equal(second.workflow.status,'COMPLETED',second.workflow.error??'');assert.equal(second.workflow.slots![0].attempts[0].candidateId,candidate.id);assert.equal(f.calls.filter(c=>c==='generate').length,7);assert.equal(second.workflow.retiredOcrDependencies?.[0].callId,callId);assert.equal(second.workflow.pendingRequest,undefined);assert.equal(second.workflow.reviewRequests?.find(r=>r.requestId===callId)?.state,'SENT_UNKNOWN');
+ const saved=openDatabase(f.root);try{assert.equal(saved.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(callId)!.record_json,rawCall);assert.equal(saved.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(callId)!.record_json,rawHold);assert.equal(saved.prepare('SELECT record_json FROM image_review_journal WHERE id=?').get(callId)!.record_json,rawLedger);}finally{saved.close();}
 });

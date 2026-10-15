@@ -75,5 +75,5 @@ export function listingReply(kind,{sku,marketplaceId:market=marketplaceId,parent
   identity(sku);assert.equal(market,marketplaceId);assert.ok(['preview','submit','readback'].includes(kind));
   if(kind!=='readback')return {sku,status:kind==='preview'?'VALID':'ACCEPTED',submissionId:'s10-'+kind+'-'+sku,issues:[]};
   if(parentSku){identity(parentSku);assert.ok(typeof variationTheme==='string'&&/^[A-Z_]+$/.test(variationTheme));}
-  return {sku,summaries:[{marketplaceId:market,asin:'B0S10TEST01',status:['BUYABLE','DISCOVERABLE']}],issues:[],relationships:parentSku?[{marketplaceId:market,relationships:[{type:'VARIATION',parentSkus:[parentSku],variationTheme:{theme:variationTheme,attributes:[]}}]}]:[]};
+  return {sku,summaries:[{marketplaceId:market,asin:'B0S10TST01',status:['BUYABLE','DISCOVERABLE']}],issues:[],relationships:parentSku?[{marketplaceId:market,relationships:[{type:'VARIATION',parentSkus:[parentSku],variationTheme:{theme:variationTheme,attributes:[]}}]}]:[]};
 }

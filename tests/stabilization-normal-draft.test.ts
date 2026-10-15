@@ -51,6 +51,7 @@ test('external replies preserve ACCEPTED versus BUYABLE and parent relation with
   const api=draft(),input={sku:'S10-CHILD',marketplaceId:'ATVPDKIKX0DER'};
   assert.equal(api.listingReply('preview',input).status,'VALID');assert.equal(api.listingReply('submit',input).status,'ACCEPTED');
   const read=api.listingReply('readback',{...input,parentSku:'S10-PARENT',variationTheme:'COLOR_NAME'});
+  assert.match(read.summaries[0].asin,/^[A-Z0-9]{10}$/);
   assert.deepEqual(read.summaries[0].status,['BUYABLE','DISCOVERABLE']);assert.equal(read.relationships[0].relationships[0].parentSkus[0],'S10-PARENT');
   assert.equal('state' in read,false);assert.equal('workflow' in read,false);assert.throws(()=>api.listingReply('COMPLETED',input));
 });

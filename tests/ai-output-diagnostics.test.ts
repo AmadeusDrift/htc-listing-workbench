@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync
 import { join } from 'node:path';
 import { fixture, chat } from './fixtures/listing-ai.ts';
 import { AiError } from '../src/main/ai/errors.ts';
+import { readInvalidAiOutputs } from '../src/main/ai/output-diagnostics.ts';
 import { requestDeepSeekJson } from '../src/main/ai/adapters.ts';
 
 const invalidOutput = { kind:'amazon-fields', candidates:null, missing:[], unexpected:'Unapproved response for offline diagnosis' };
@@ -29,19 +30,19 @@ test('a paid-boundary service output failure retains only its unapproved reply a
   for(const forbidden of ['fixture-shared-listing-key','UNVERIFIED TITLE','PRIVATE_BRAND','schemaSha256','listingContext','requestHeaders']) assert.equal(serialized.includes(forbidden),false,forbidden);
 });
 
-test('credential echoes are rejected before diagnostic capture while their reported usage still settles', async t => {
+test('credential echoes retain only bounded metadata and keep their usage unknown', async t => {
   const f=await fixture(t); f.respond(()=>chat({...invalidOutput,unexpected:'fixture-shared-listing-key'}));
   await assert.rejects(f.listing.suggest(f.reference),outputInvalid);
-  assert.deepEqual(diagnosticFiles(f.directory),[]); assert.equal(f.ai.listResults(f.product.id).length,0);
-  assert.equal(f.requests.length,1); assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,150);
+  const saved=diagnostics(f.directory);assert.equal(saved.length,1);assert.equal(saved[0].output,null);assert.equal(saved[0].rejectionReason,'RESPONSE_SECRET_ECHO');assert.equal(JSON.stringify(saved).includes('fixture-shared-listing-key'),false);assert.deepEqual(readInvalidAiOutputs(f.directory,f.ai.listCalls()[0],'amazon-fields'),[]);assert.equal(f.ai.listResults(f.product.id).length,0);
+  assert.equal(f.requests.length,1); assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,0);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
 });
 
 test('JSON-escaped credential echoes cannot bypass the diagnostic secret gate', async t => {
   const f=await fixture(t),key='offline-key-with-"quote-and-\\slash';
   f.ai.saveConnection({id:'deepseek',apiKey:key}); f.respond(()=>chat({...invalidOutput,unexpected:key}));
   await assert.rejects(f.listing.suggest(f.reference),outputInvalid);
-  assert.deepEqual(diagnosticFiles(f.directory),[]); assert.equal(f.requests.length,1);
-  assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,150);
+  const saved=diagnostics(f.directory);assert.equal(saved.length,1);assert.equal(saved[0].output,null);assert.equal(saved[0].rejectionReason,'RESPONSE_SECRET_ECHO');assert.equal(JSON.stringify(saved).includes(key),false);assert.deepEqual(readInvalidAiOutputs(f.directory,f.ai.listCalls()[0],'amazon-fields'),[]);assert.equal(f.requests.length,1);
+  assert.equal(f.ai.getUsageSummary('deepseek').reportedTokens,0);assert.equal(f.ai.getUsageSummary('deepseek').unknownCalls,1);
 });
 
 test('successful replies create no failure diagnostic and never trigger a duplicate request', async t => {

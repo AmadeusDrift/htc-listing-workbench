@@ -28,6 +28,7 @@ export interface AdapterContext {
   captureRawBytes?:(status:number,bytes:Buffer)=>Promise<void>;
   thinking?: boolean;
   imagePlanRetry?:boolean;
+  imagePlanValidationFeedback?:{reason:string;jsonPath?:string};
   /** Adapter-owned safe capture, enabled only for source observation and image planning responses. */
   onInvalidResponseText?: (text:string)=>void;
   fetch: typeof fetch; now: () => Date; nonce: () => string; maxResponseBytes: number;

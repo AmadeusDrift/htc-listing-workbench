@@ -1,4 +1,4 @@
-import { AiError,httpError,throwIfAborted,abortable } from '../errors.ts';
+import { AiError,networkFailure,httpError,throwIfAborted,abortable } from '../errors.ts';
 import type { AdapterContext } from '../transport.ts';
 import type { ProviderMetadata } from '../transport.ts';
 import { emptyUsage,checkPaidAdapterEffect } from '../transport.ts';
@@ -64,7 +64,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   throwIfAborted(collection.signal);dispatched=true;
   transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});
   try{response=await abortable(context.fetch('https://openrouter.ai'+endpoint,{method:'POST',headers:{'content-type':'application/json',accept:'application/json',...(endpoint==='/api/v1/chat/completions'?{'X-OpenRouter-Metadata':'enabled'}:{}),authorization:`Bearer ${credentials.apiKey}`},body:serialized,redirect:'error',signal:collection.signal}),collection.signal);}
-  catch{throwIfAborted(collection.signal);throw new AiError('NETWORK_ERROR');}
+  catch(error){throwIfAborted(collection.signal);throw networkFailure(error,'connect');}
   collection.headers();transportEvidence(context,{event:'HEADERS_RECEIVED',httpStatus:response.status,receivedBytes:0,certainty:'SENT_UNKNOWN'});
   const length=response.headers.get('content-length');if(length!==null&&(!/^\d+$/.test(length)||!Number.isSafeInteger(Number(length))||Number(length)>context.maxResponseBytes)){void response.body?.cancel().catch(()=>{});throw new AiError('OUTPUT_INVALID');}
   const reader=response.body?.getReader();if(!reader)throw new AiError('OUTPUT_INVALID');
@@ -91,7 +91,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   if(!safe)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:'RESPONSE_SECRET_ECHO',responseDiagnostic:{status:response.status,byteCount:size}});
   if(!valid)throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:size?'RESPONSE_ENVELOPE_JSON_INVALID':'RESPONSE_BODY_EMPTY'});return raw;
   } catch(error) {
-    const known=error instanceof AiError?error:new AiError('NETWORK_ERROR');
+    const known=error instanceof AiError?error:networkFailure(error,complete?'save':response?'body':'connect',response?.status,size);
     const state=complete&&response?openRouterReceiptState(response.status,capturedBody):'unknown';
     known.certainty??=!dispatched?'NOT_SENT':state==='rejected'&&'definitive' in known&&known.definitive===true?'DEFINITIVE_REJECTION':(state==='invalid'||state==='available'&&response?.ok)&&known.code==='OUTPUT_INVALID'&&known.diagnosticReason!=='RESPONSE_SECRET_ECHO'?'RECEIVED_INVALID':'SENT_UNKNOWN';
     transportEvidence(context,{event:'STAGE_BLOCKED',certainty:known.certainty,abortSource:known.abortSource??'NONE',errorCode:known.code,...(response?{httpStatus:response.status}:{}),receivedBytes:size});

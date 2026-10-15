@@ -42,6 +42,7 @@ test('local argument and nested network diagnostics survive fixed audit reader w
  for(const [raw,reason,cause] of [[new Error('net::ERR_INVALID_ARGUMENT'),'TRANSPORT_INVALID_ARGUMENT','UNKNOWN'],[Object.assign(new Error('private fixture-secret URL'),{cause:{code:'ENOTFOUND'}}),undefined,'DNS'],[new Error('fixture-secret'),undefined,'UNKNOWN']] as const){
   let caught:any;await assert.rejects(postJson('https://offline.invalid',{},'{}',signal,{...context,fetch:async()=>{throw raw;}}),(e:any)=>{caught=e;return e.code==='NETWORK_ERROR';});
   assert.equal(caught.certainty,'SENT_UNKNOWN');assert.equal(caught.diagnosticReason,reason);assert.deepEqual(caught.networkDiagnostic,{cause,stage:'connect',receivedBytes:0});
+  if(reason)assert.equal(caught.message,'AI请求参数未被本地网络组件接受，请核对调用记录；未自动重发');
   let record:any;recordErrorEvidence(detail=>{record=detail;},caught,{stage:'ocr'});assert.equal(readErrorEvidence(record)?.diagnosticReason,reason);assert.deepEqual(readErrorEvidence(record)?.networkDiagnostic,caught.networkDiagnostic);assert.ok(!JSON.stringify(record).includes('fixture-secret'));
  }
 });

@@ -70,7 +70,9 @@ function verifyProtocol(route,headers,bytes){
     assert.ok(same(h.get('authorization'),`OSS4-HMAC-SHA256 Credential=${p.accessKeyId}/${scope},Signature=${signature}`),'S10_PROTOCOL_SIGNATURE');permitted=new Set([...Object.keys(signed),'authorization']);
   }else{
     const signed={host:url.hostname,'x-acs-action':p.action,'x-acs-version':p.version,'x-acs-content-sha256':sha(bytes),'x-acs-date':new Date(p.now).toISOString().replace(/\.\d{3}Z$/,'Z'),'x-acs-signature-nonce':p.nonce,'content-type':p.contentType};
-    for(const [name,value]of Object.entries(signed))assert.equal(h.get(name),value,'S10_PROTOCOL_HEADER');
+    // Electron derives wire Host from the already bound URL. The ACS signature
+    // still includes that host, while the transport intentionally omits it.
+    for(const [name,value]of Object.entries(signed))if(name!=='host')assert.equal(h.get(name),value,'S10_PROTOCOL_HEADER');
     const names=Object.keys(signed).sort(),signedNames=names.join(';');
     const canonical=['POST','/',url.search.slice(1),names.map(name=>`${name}:${signed[name].trim()}\n`).join(''),signedNames,sha(bytes)].join('\n');
     const signature=createHmac('sha256',p.accessKeySecret).update('ACS3-HMAC-SHA256\n'+sha(canonical)).digest('hex');

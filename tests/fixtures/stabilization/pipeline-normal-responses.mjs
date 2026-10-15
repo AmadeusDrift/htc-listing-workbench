@@ -1,6 +1,7 @@
 // External provider response fixtures only. No service completion/DB writes.
 import assert from 'node:assert/strict';
 import {deflateSync} from 'node:zlib';
+import {createHash} from 'node:crypto';
 export function normalPng(index){
   const width=1024,height=1024,crc=bytes=>{let v=0xffffffff;for(const b of bytes){v^=b;for(let k=0;k<8;k++)v=v&1?0xedb88320^(v>>>1):v>>>1;}return(v^0xffffffff)>>>0;};
   const chunk=(name,bytes)=>{const type=Buffer.from(name),size=Buffer.alloc(4),check=Buffer.alloc(4);size.writeUInt32BE(bytes.length);check.writeUInt32BE(crc(Buffer.concat([type,bytes])));return Buffer.concat([size,type,bytes,check]);};
@@ -33,6 +34,7 @@ export function normalChatOutput(payload){
     return {kind:'image-plan',...(!payload.slot?{setPlan:{style:'Natural soft light and neutral surfaces.',dimensionEvidenceIds:dimension?[dimension]:[],dimensionReason:'The original source explicitly gives the product length in cm.',slots:Array.from({length:7},(_,i)=>({index:i+1,role:i===0?'main_scene':i===1&&dimension?'dimensions':'scene',focus:i===1?'Product length':'Tabletop context '+(i+1),evidenceIds:i===1&&dimension?[dimension]:[],scene:'Distinct tabletop setting '+(i+1),prompt:i===1&&dimension?'Show the selected blue square coaster with an accurate 9 cm product-length label.':'Scene '+(i+1)+'. '+prompt,textMode:i===1&&dimension?'planned':'none',expectedText:i===1?expectedText:[]}))}}:{}),ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:{summary:'Blue square silicone drink coaster matching the selected source',referenceAssetIds:payload.referenceImages.map(i=>i.assetId),uncertainties:['No hidden or unsupported features are inferred.'],sufficient:true},prompt:frozen?.prompt??prompt,textMode:frozen?.textMode??'none',expectedText:frozen?.expectedText??[]};
   }
   if(payload.operation==='image-appearance-review')return {verdict:'PASS',checks:[{aspect:'identity',expected:'Blue square coaster from the selected source',observed:'Blue square coaster in the generated fixture',reason:'Synthetic independent appearance response; IDs and actual candidate bytes remain checked by the real service.',referenceAssetIds:payload.referenceImages.map(i=>i.assetId)}]};
+  if(payload.operation==='image-text-review'&&payload.method==='candidate-vision/v1')return {verdict:'PASS',checks:payload.plan.expectedText.map((line,index)=>({source:'line',index,text:line.text,verdict:'SUPPORTED',evidenceIds:line.evidenceIds,reason:'The independently returned synthetic review matches the known fixture pixels.'})),expectedTextChecks:payload.plan.expectedText.map((_,index)=>({index,present:true,reason:'The synthetic caption is present.'})),noTextVerified:payload.plan.expectedText.length===0,issues:[]};
   if(payload.operation==='image-text-review')return {verdict:'PASS',checks:payload.reviewItems.map(item=>({...item,verdict:'SUPPORTED',evidenceIds:payload.plan.expectedText.flatMap(line=>line.evidenceIds),reason:'The OCR label matches the original measured source evidence.'})),expectedTextChecks:payload.plan.expectedText.map((_,index)=>({index,present:true,reason:'The planned label occurs in the OCR text.'})),noTextVerified:payload.reviewItems.length===0,issues:[]};
   if(payload.candidate){return {kind:'amazon-fields-review',verdict:'PASS',checks:payload.candidate.candidates.flatMap(c=>c.items.map((item,index)=>({field:c.field,index,verdict:'SUPPORTED',evidenceIds:item.evidenceIds??ids(payload,c.field),reason:'Matches the explicit synthetic source facts.',claims:[{text:item.value,verdict:'SUPPORTED',evidenceIds:item.evidenceIds??ids(payload,c.field),reason:'Matches the explicit synthetic source facts.'}]}))),issues:[]};}
   if(payload.contract==='listing-full-schema/v1'){
@@ -43,6 +45,12 @@ export function normalChatOutput(payload){
 }
 export function normalChatResponse(body,id){
   try{const {request,payload}=requestPayload(body);assert.ok(['openai/gpt-6-luna','openai/gpt-6.1-sol','deepseek-flash','deepseek-v4-pro'].includes(request.model));
+    if(payload.operation==='image-text-review'&&payload.method==='candidate-vision/v1'){
+      const images=request.messages[1].content.filter(part=>part.type==='image_url');assert.equal(images.length,1);
+      const match=/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(images[0].image_url.url);assert.ok(match);
+      const pixels=Buffer.from(match[1],'base64');assert.equal(createHash('sha256').update(pixels).digest('hex'),payload.candidate.sha256);
+      assert.equal(pixels.readUInt32BE(16),payload.candidate.width);assert.equal(pixels.readUInt32BE(20),payload.candidate.height);
+    }
     return {json:{id,choices:[{finish_reason:'stop',message:{content:JSON.stringify(normalChatOutput(payload))}}],usage:{prompt_tokens:100,completion_tokens:50,total_tokens:150,cost:0.001}}};
   }catch{return {status:422,json:{error:{message:'S10 normal fixture has no response for this exact operation'}}};}
 }

@@ -79,7 +79,7 @@ export function createNormalServices(dataRoot:string,storage:SecretStorage,fetch
         const profile=aiService.purposeProfile(purpose,['source_understanding','category_analysis','category_decision','image_plan'].includes(purpose),purpose==='image_text_review');
         if(!profile.configured||!profile.enabled)throw new UserFacingError(`用途 ${purpose} 的 ${profile.routing?.gateway} 连接尚未配置或启用，请在逐用途设置中核对`);
       }
-      for (const id of ['aliyun-ocr',...(workflowService.getRiskSettings().enabled?['aliyun-image-risk']:[])]) {
+      for (const id of [...(workflowService.getRiskSettings().enabled?['aliyun-image-risk']:[])]) {
         const profile = aiService.getProfile(id); if (!profile.configured || !profile.enabled) throw new UserFacingError('请先在设置中配置并启用内容生成、内容复核、OCR 和侵权检测');
       }
       const generation = generationService.getConnection(); if (!generation.configured || !generation.enabled) throw new UserFacingError('请先在设置中配置并启用生图服务');

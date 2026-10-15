@@ -6,6 +6,7 @@ import type { ImageGenerationConnection,ImageGenerationSize,ImageGenerationQuali
 import { ImageRiskSettings } from './ImageRiskSettings';
 import { AppearanceReviewSettings } from './AppearanceReviewSettings';
 import { CopyReviewSettings } from './CopyReviewSettings';
+import { ImageSpendSettings } from './ImageSpendSettings';
 import { errorText,formatDate } from './utils';
 import './image-generation-settings.css';
 
@@ -51,6 +52,7 @@ export function ImageGenerationSettings({visible,busy,onAiSettings}:{visible:boo
       <p className="settings-help">生图按普通接口调用，当前不支持 Batch。保存和打开本页不会生成图片。{connection?.checkedAt&&<>最近检查：{formatDate(connection.checkedAt)}</>}</p>
       {error&&<p className="workflow-warning" role="alert">{error}</p>}{notice&&<p className="workflow-notice" role="status">{notice}</p>}
     </form>
+    <ImageSpendSettings visible={visible} busy={busy}/>
     <div className="image-generation-other"><h4>自动七图规则</h4><p className="settings-help">每个销售 SKU 七张图：第一张为无字场景主图，其余根据可靠商品资料表达卖点。自动补填尺寸不作为图片实测依据。方案与提示词使用该用途已配置的模型。</p><button type="button" className="button secondary" onClick={onAiSettings}><ArrowRight size={15}/>逐用途模型与思考设置</button></div>
   </section>;
 }

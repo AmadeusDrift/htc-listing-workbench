@@ -47,6 +47,8 @@ const api: RedApi = {
   importProcurementShipmentDocument: id => invoke('red:shipment-documents:import', id),
   openProcurementShipmentDocument: id => invoke('red:shipment-documents:open', id),
   getImageGenerationConnection: provider => provider === undefined ? invoke('red:image-generation:connection') : invoke('red:image-generation:provider-connection', provider),
+  getImageGenerationSpendStatus:()=>invoke('red:image-generation:spend-status'),
+  setImageGenerationDailySpendLimit:input=>invoke('red:image-generation:spend-limit-save',input),
   getImageGenerationModels: () => invoke('red:image-generation:models'),
   refreshImageGenerationModels: () => invoke('red:image-generation:refresh-models'),
   saveImageGenerationConnection: input => invoke('red:image-generation:save', input),

@@ -30,9 +30,10 @@ import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
 import {AiSpendBudget} from '../ai/spend-budget.ts';
 import {prepareImageSpendReceiptProof} from '../ai/spend-receipts.ts';
-import {SpendBudgetError,priceEvidence,imageSpendBound} from '../ai/spend-records.ts';
+import {SpendBudgetError,priceEvidence,imageSpendBound,spendObject,spendDate,usdLimitMicros} from '../ai/spend-records.ts';
+import type {ImageGenerationSpendStatus} from '../../shared/ai-spend-contracts.ts';
 import type {ImagePriceEvidence} from '../../shared/ai-spend-contracts.ts';
-import {ControlledRunScopes,ControlledRunError} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,ControlledRunError,readControlledRunScope} from '../application/controlled-run-scope.ts';
 
 export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
@@ -78,6 +79,9 @@ export class ImageGenerationService {
     return{state:'ready',config:{...(saved.state==='ready'?saved.config:{provider:'openrouter' as const,...imageDefaults('openrouter'),enabled:false}),apiKey,credentialRef:'openrouter'}};
   }
   get busy(): boolean { return !!this.running; }
+  /** Local ledger observation only: never obtains pricing, models, credits or credentials. */
+  getSpendStatus():ImageGenerationSpendStatus{this.ensureOpen();return{currency:'USD',unit:'microUSD',daily:this.spend.status('image-generation-daily'),controlledLifetime:this.spend.status('controlled-live-lifetime'),controlledRunStatus:readControlledRunScope(this.db)?.status??'not-registered',quoteStatus:'not-checked'};}
+  setDailySpendLimit(raw:unknown):ImageGenerationSpendStatus{this.ensureOpen();const value=spendObject(raw,['limitUsd','expectedUpdatedAt']);if(value.expectedUpdatedAt!==null)spendDate(value.expectedUpdatedAt);this.spend.setImagePolicy(usdLimitMicros(value.limitUsd),value.expectedUpdatedAt);return this.getSpendStatus();}
   getModels(): ImageModelCatalog {
     this.ensureOpen(); const current = this.readConnection('openrouter');
     return structuredClone(current.state === 'ready' && this.catalog?.keyHash === digest(current.config.apiKey) ? this.catalog.value : ({source:'builtin' as const,fetchedAt:null,models:OPENROUTER_IMAGE_MODELS.map(id=>({id,protocol:'images' as const,endpoints:['/api/v1/images']}))}));

@@ -1,6 +1,7 @@
 import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import { readItemDiagnostic } from './item-diagnostic.ts';
+import {readRoundSpend} from './round-spend.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import {categoryUnknownCode,categoryFailureRequestId} from '../ai/category-knowledge.ts';
@@ -770,6 +771,7 @@ export class AutomaticListingService {
     if(value.version!==1||value.taskId!==task.id||!['continue','from-start'].includes(value.mode)||!Number.isFinite(Date.parse(value.startedAt))||!Number.isSafeInteger(value.taskRevision)||value.taskRevision<1)throw new UserFacingError('本轮记录身份无效，原费用及任务保留');
     const round={roundId:identifier(value.roundId),startedAt:String(value.startedAt),mode:value.mode as 'continue'|'from-start',taskRevision:Number(value.taskRevision)};this.rounds.set(task.id,round);return {...round};
   }
+  getRoundSummary(id:string):import('../../shared/automatic-listing-contracts.ts').AutomaticRoundSummary|null {const round=this.getCurrentRound(id);return round?{...round,fees:readRoundSpend(this.db,this.task(id),round)}:null;}
   async confirmStartOver(id:string,confirm:(task:AutomaticListingTask)=>Promise<boolean>):Promise<AutomaticListingTask|null>{
     const approved=this.prepareConfirmation(id);
     const scope:AutomaticResumeSelection={mode:'recheck',selections:approved.items.filter(row=>!['DONE','SCREENED'].includes(row.status)).map(row=>({key:row.key}))};

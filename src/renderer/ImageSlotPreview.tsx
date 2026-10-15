@@ -28,7 +28,7 @@ export function ImageSlotPreview({ draftId, slot, sku, title }: { draftId:string
     }).catch(() => { if (current) setUnavailable(true); });
     return () => { current = false; };
   }, [draftId, slot.index, candidateId, readRevision,requested]);
-  const url = approved ? `red-asset://image/${slot.approvedAssetId}` : candidate?.previewUrl;
+  const url = approved ? `red-asset://image/${slot.approvedAssetId}` : candidate?.candidateId===candidateId?candidate?.previewUrl:undefined;
   const previous = candidateAttempt && candidateAttempt.number !== slot.attempts.at(-1)?.number;
   const adoption = approved ? '已采用' : previous ? '上次生成候选 · 未采用' : '生成候选 · 未采用';
   const description = `${adoption}${candidate ? ` · ${candidate.width} × ${candidate.height} px` : ''}`;

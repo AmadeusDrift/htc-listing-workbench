@@ -36,10 +36,21 @@ export function validateApprovalReuse(raw:unknown,run:ImageWorkflowRun):NonNulla
     ||listingFingerprint({schema:schema.schema,metaSchema:schema.metaSchema})!==context.schemaSha256)throw new UserFacingError('图片审核复用快照与原审核范围不一致');
   return {sourceRunId,draftRevision,draftSnapshot,recipeSnapshot};
 }
+/** Structural history only. The action boundary still verifies calls, ledger and private bytes. */
+export function approvalReviewHistoryResolved(source:ImageWorkflowRun):boolean {
+  return !(source.reviewRequests??[]).some(request=>{
+    if(request.state==='RESULT_STORED')return false;
+    const slot=source.slots?.[request.slot-1],attempt=slot?.attempts[request.attempt-1];
+    const retired=request.version===2&&request.step==='ocr'&&request.state==='SENT_UNKNOWN'&&request.execution.providerId==='aliyun-ocr'&&source.retiredOcrDependencies?.some(r=>r.callId===request.requestId)
+      &&request.runId===source.id&&request.draftId===source.draftId&&request.productId===source.productId&&request.productRevision===source.productRevision&&request.variantId===source.variantId&&request.sku===source.sku
+      &&slot?.contextSha256===request.contextSha256&&attempt?.requestId===request.generationRequestId&&attempt.candidateId===request.candidate.id&&attempt.planResultId===request.planResultId&&attempt.state==='PASSED'&&!!attempt.reviewResultId&&slot.approvedSha256===request.candidate.sha256;
+    return !retired;
+  });
+}
 export function assertApprovalReuseSource(run:ImageWorkflowRun,source:ImageWorkflowRun|undefined):void {
   if(!source||source.approvalReuse||!hasSevenApprovedImages(source)||!run.approvalReuse||source.id!==run.approvalReuse.sourceRunId||source.updatedAt>run.createdAt)throw new UserFacingError('图片审核复用来源无效');
-  if(run.reviewRequests!==undefined||run.unitAdoptionReview!==undefined||source.reviewRequests?.some(r=>r.state!=='RESULT_STORED'))throw new UserFacingError('图片审核复用不能复制未决原请求身份');
-  const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,reviewRequests,unitAdoptionReview,...rest}=value;return rest;};
+  if(run.reviewRequests!==undefined||run.unitAdoptionReview!==undefined||!approvalReviewHistoryResolved(source))throw new UserFacingError('图片审核复用不能复制未决原请求身份');
+  const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,reviewRequests,retiredOcrDependencies,unitAdoptionReview,...rest}=value;return rest;};
   if(listingFingerprint(evidence(source))!==listingFingerprint(evidence(run)))throw new UserFacingError('图片审核复用记录与原审核证据不一致');
   validateApprovalReuse(run.approvalReuse,run);
 }

@@ -312,7 +312,7 @@ async function start() {
       updateWindowAppearance();
       return saved;
     },
-  }, imageGeneration, imageWorkflow, automatic, { labels, labelSettings, shipmentDocuments, procurement }, skuNaming, networkDiagnostics);
+  }, imageGeneration, imageWorkflow, automatic, { labels, labelSettings, shipmentDocuments, procurement }, skuNaming, networkDiagnostics, ruleStore);
   mainWindow.once('ready-to-show', () => { if (process.env.RED_E2E !== '1') mainWindow.show(); });
   await mainWindow.loadURL(expectedUrl);
   listingFollowup.start();

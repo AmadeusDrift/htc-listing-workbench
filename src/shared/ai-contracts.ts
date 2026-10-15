@@ -40,7 +40,7 @@ export interface AiUsageSummary {
 export interface AiCall {
   requestFingerprint?:string;
   requestScope?:import('./ai-request-identity-contracts.ts').AiRequestScope;
-  categoryContext?:{version:1;phase:'keywords'|'select'|'judge';requestSha256:string};
+  categoryContext?:import('./category-ai-contracts.ts').CategoryPhaseContext;
   purposeAssignments?:import('./ai-purpose-contracts.ts').FieldPurposeAssignment[];
   providerReceiptId?:string;
   purposeSnapshot?:import('./ai-purpose-contracts.ts').AiPurposeSnapshot;

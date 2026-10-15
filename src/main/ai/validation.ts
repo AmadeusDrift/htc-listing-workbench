@@ -25,6 +25,7 @@ import { assertCurrentListingReview, assertImagePlan, parseImagePlanResponse, pa
 import { MAX_VISION_REQUEST_BYTES } from './vision.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
 import { validateCategoryDecision } from './category-adapter.ts';
+import {validateCategoryPhaseContext} from './category-context.ts';
 import { assertSourceColorOutput, validateSourceColorContext, validateSourceColorOutput } from './source-color-validation.ts';
 
 export function validateAiCall(raw: unknown): AiCall {
@@ -51,7 +52,7 @@ export function validateAiCall(raw: unknown): AiCall {
   if(purposeAssignments&&(!purposeSnapshot||purposeAssignments.some(a=>a.purpose.model!==o.model||a.purpose.gateway!==purposeSnapshot.gateway||a.purpose.effectiveEffort!==purposeSnapshot.effectiveEffort)))invalid();
   if(purposeSnapshot&&(purposeSnapshot.model!==o.model||purposeSnapshot.gateway!==(id.startsWith('openrouter')?'openrouter':'deepseek')))invalid();
   let categoryContext:AiCall['categoryContext'];
-  if(o.categoryContext!==undefined){const c=keys(o.categoryContext,['version','phase','requestSha256']);if(c.version!==1||!['keywords','select','judge'].includes(String(c.phase))||!purposeSnapshot||purposeSnapshot.purposeId!==(c.phase==='select'?'category_decision':'category_analysis'))invalid();categoryContext={version:1,phase:c.phase as 'keywords'|'select'|'judge',requestSha256:sha256(c.requestSha256)};}
+  if(o.categoryContext!==undefined){categoryContext=validateCategoryPhaseContext(o.categoryContext,uuid(o.productId));if(!purposeSnapshot||purposeSnapshot.purposeId!==(categoryContext.phase==='select'?'category_decision':'category_analysis')||requestScope&&(requestScope.operation!=='category'||requestScope.phase!==categoryContext.phase)||categoryContext.version===2&&!requestScope)invalid();}
   return { ...(requestScope?{requestScope,requestFingerprint:sha256(o.requestFingerprint)}:{}), ...(categoryContext?{categoryContext}:{}), ...(purposeAssignments?{purposeAssignments}:{}), ...(o.providerReceiptId===undefined?{}:{providerReceiptId:sha256(o.providerReceiptId)}), ...(purposeSnapshot?{purposeSnapshot}:{}), ...(o.schemaResponseRetained?{schemaResponseRetained:true as const}:{}), ...(o.imagePlanRetryBlock?{imagePlanRetryBlock:o.imagePlanRetryBlock as AiCall['imagePlanRetryBlock']}:{}), ...(o.responseReceived?{responseReceived:true as const}:{}), ...(o.thinking===undefined?{}:{thinking:flag(o.thinking)}), ...(presentationContext?{presentationContext}:{}), ...(rejection?{rejection}:{}), id: uuid(o.id), providerId: id, productId: uuid(o.productId), productRevision: integer(o.productRevision, 1, Number.MAX_SAFE_INTEGER), status: o.status as AiCall['status'], errorCode: o.errorCode as AiCall['errorCode'], requestId: requestId(o.requestId), model: modelFor(id, o.model), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), startedAt, finishedAt, usage: validateUsage(o.usage), ...(sourceColorContext?{sourceColorContext}:{}), ...(sourceConsistencyContext?{sourceConsistencyContext}:{}) };
 }
 export function validateOutput(raw: unknown): AiOutput {

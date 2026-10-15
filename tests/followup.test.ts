@@ -13,6 +13,19 @@ const offsets = [30 * minute, 60 * minute, 120 * minute, 360 * minute, 1_440 * m
 const failure: ListingIssue = { code: 'INVALID_ATTRIBUTE', message: 'Please correct the product field', severity: 'ERROR', attributeNames: ['item_name'], category: 'field', source: 'amazon', autoFixable: false };
 const platformReview: ListingIssue = { code: '100521', message: 'We are reviewing this listing to determine if any additional information is required. Please allow up to 48 hours for this process to complete. You will be notified here if your action is needed, otherwise the listing will be published.', severity: 'ERROR', attributeNames: [], category: 'field', source: 'amazon', autoFixable: false };
 
+test('a main-only task boundary preserves unrelated legacy followups through construction, timers and manual actions', async t => {
+  const f=fixture(t);f.service.schedule(f.draft.id);await f.service.close();f.at(2*86_400_000);
+  const db=openDatabase(f.directory),before=db.prepare('SELECT * FROM listing_followups ORDER BY id').all();
+  const managed=new implementation!.FollowupService(f.directory,f.amazon,{now:()=>initial+2*86_400_000,canManageDraft:()=>false} as any);
+  try {
+    assert.deepEqual(managed.list().map(row=>JSON.stringify(row)),before.map(row=>String(row.record_json)));
+    managed.start();await managed.runDue();assert.equal(f.reads,0);
+    assert.throws(()=>managed.reschedule(f.draft.id),/受控/);
+    assert.throws(()=>managed.schedule(randomUUID()),/受控/);
+    assert.deepEqual(db.prepare('SELECT * FROM listing_followups ORDER BY id').all(),before);
+  } finally {await managed.close();db.close();}
+});
+
 function fixture(t: test.TestContext) {
   assert.ok(implementation?.FollowupService, 'persistent delayed follow-up service must exist');
   const parent = resolve('.test-data'); mkdirSync(parent, { recursive: true });

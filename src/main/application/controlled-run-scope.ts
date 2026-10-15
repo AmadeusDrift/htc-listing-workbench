@@ -7,13 +7,15 @@ import {AiError} from '../ai/errors.ts';
 import {transaction} from './transaction.ts';
 import {listingFingerprint} from '../json-fingerprint.ts';
 import {spendObject,spendInteger,spendUuid,spendText,spendDate,spendHash,spendInvalid} from '../ai/spend-records.ts';
-import {assertSpendTransaction} from '../ai/spend-budget.ts';
+import {AiSpendBudget,assertSpendTransaction} from '../ai/spend-budget.ts';
+import {validateFollowupRecord,followupDraftFingerprint} from '../followup/records.ts';
 import type {AutomaticResumeSelection} from '../../shared/automatic-resume.ts';
 
 export const CONTROLLED_RUN_ID='htc-250-controlled-live/v1';
 export const CONTROLLED_RUN_TABLES={controlled_run_scopes:['id','record_json']};
 export interface ControlledRunItem {itemKey:string;sku:string;productId:string;variantIds:string[];recipeKey:string|null;parentage:'NONE'}
-export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;authorityEpoch:number;authorityNonce?:string;createdAt:string;status:'PAUSED'|'ACTIVE'}
+export interface ControlledRunReview {version:1;sessionId:string;digest:string;initialTaskRevision:number;sourceStamps:{itemKey:string;stamp:string}[];candidate:{sourceCommit:string;sourceDigest:string;executableSha256:string;packageManifestSha256:string};secondReleased:boolean}
+export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;authorityEpoch:number;authorityNonce?:string;review?:ControlledRunReview;createdAt:string;status:'PAUSED'|'ACTIVE'}
 const authority=new AsyncLocalStorage<{scopeId:string;fingerprint:string;grant:object}>(),grants=new WeakSet<object>();
 export type ControlledRunGrant=<T>(work:()=>T)=>T;
 const grantObjects=new WeakMap<ControlledRunGrant,object>();
@@ -32,10 +34,14 @@ function workspaceIdentity(db:DatabaseSync):string{
  let id=memoryWorkspaces.get(db);if(!id){id=listingFingerprint(randomUUID());memoryWorkspaces.set(db,id);}return id;
 }
 export function validateControlledRunScope(raw:unknown):ControlledRunScope{
- const r=spendObject(raw,['version','id','workspaceId','taskId','expectedTaskRevision','targetId','sellerId','marketplaceId','items','activeItemKey','authorityEpoch','createdAt','status'],['authorityNonce']);if(r.version!==1||r.id!==CONTROLLED_RUN_ID||!['PAUSED','ACTIVE'].includes(r.status)||!Array.isArray(r.items)||r.items.length<1||r.items.length>2||spendInteger(r.expectedTaskRevision)<1)spendInvalid();spendHash(r.workspaceId);spendInteger(r.authorityEpoch);if(r.status==='ACTIVE'&&r.authorityEpoch<1)spendInvalid();if(r.authorityNonce!==undefined)spendUuid(r.authorityNonce);
+ const r=spendObject(raw,['version','id','workspaceId','taskId','expectedTaskRevision','targetId','sellerId','marketplaceId','items','activeItemKey','authorityEpoch','createdAt','status'],['authorityNonce','review']);if(r.version!==1||r.id!==CONTROLLED_RUN_ID||!['PAUSED','ACTIVE'].includes(r.status)||!Array.isArray(r.items)||r.items.length<1||r.items.length>2||spendInteger(r.expectedTaskRevision)<1)spendInvalid();spendHash(r.workspaceId);spendInteger(r.authorityEpoch);if(r.status==='ACTIVE'&&r.authorityEpoch<1)spendInvalid();if(r.authorityNonce!==undefined)spendUuid(r.authorityNonce);
+ if(r.review!==undefined){validateControlledRunReview(r.review);if(r.review.sourceStamps.length!==r.items.length||r.review.sourceStamps.some((v:{itemKey:string})=>!r.items.some((i:ControlledRunItem)=>i.itemKey===v.itemKey))||r.review.secondReleased&&r.items.length!==2||!r.review.secondReleased&&r.activeItemKey!==r.items[0].itemKey)spendInvalid();}
  spendUuid(r.taskId);spendText(r.targetId);spendText(r.sellerId);spendText(r.marketplaceId);spendDate(r.createdAt);
  for(const item of r.items){const i=spendObject(item,['itemKey','sku','productId','variantIds','recipeKey','parentage']);spendText(i.itemKey,150);spendText(i.sku);spendUuid(i.productId);if(i.parentage!=='NONE'||!Array.isArray(i.variantIds)||i.variantIds.length<1||i.variantIds.length>20||new Set(i.variantIds).size!==i.variantIds.length)spendInvalid();i.variantIds.forEach(spendUuid);if(i.recipeKey!==null)spendText(i.recipeKey);}
  if(new Set(r.items.map((i:ControlledRunItem)=>i.sku)).size!==r.items.length||new Set(r.items.map((i:ControlledRunItem)=>i.itemKey)).size!==r.items.length||!r.items.some((i:ControlledRunItem)=>i.itemKey===r.activeItemKey))spendInvalid();return r as ControlledRunScope;
+}
+export function validateControlledRunReview(raw:unknown):ControlledRunReview{
+ const r=spendObject(raw,['version','sessionId','digest','initialTaskRevision','sourceStamps','candidate','secondReleased']);if(r.version!==1||spendInteger(r.initialTaskRevision)<1||typeof r.secondReleased!=='boolean'||!Array.isArray(r.sourceStamps)||r.sourceStamps.length<1||r.sourceStamps.length>2)spendInvalid();spendUuid(r.sessionId);spendHash(r.digest);for(const raw of r.sourceStamps){const v=spendObject(raw,['itemKey','stamp']);spendText(v.itemKey,150);spendHash(v.stamp);}if(new Set(r.sourceStamps.map((v:{itemKey:string})=>v.itemKey)).size!==r.sourceStamps.length)spendInvalid();const c=spendObject(r.candidate,['sourceCommit','sourceDigest','executableSha256','packageManifestSha256']);if(typeof c.sourceCommit!=='string'||!/^([a-f0-9]{40})$/.test(c.sourceCommit))spendInvalid();spendHash(c.sourceDigest);spendHash(c.executableSha256);spendHash(c.packageManifestSha256);return r as ControlledRunReview;
 }
 export function initializeControlledRunScopes(db:DatabaseSync):void{if(!db.isTransaction)spendInvalid();db.exec('CREATE TABLE controlled_run_scopes(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}
 export function readControlledRunScope(db:DatabaseSync):ControlledRunScope|null{
@@ -56,6 +62,24 @@ export class ControlledRunScopes {
  }
  register(input:Pick<ControlledRunScope,'taskId'|'expectedTaskRevision'|'targetId'|'sellerId'|'marketplaceId'|'items'>):ControlledRunScope{
   return transaction(this.db,()=>{if(readControlledRunScope(this.db))blocked();const record=validateControlledRunScope({version:1,id:CONTROLLED_RUN_ID,...input,workspaceId:workspaceIdentity(this.db),activeItemKey:input.items[0]?.itemKey,authorityEpoch:0,createdAt:new Date().toISOString(),status:'PAUSED'});this.assertTask(record);writeScope(this.db,record);return record;});
+ }
+ /** Bind only a main-process reviewed file, preserving all original money and request rows. */
+ bindReviewInTransaction(db:DatabaseSync,raw:ControlledRunReview,expected:{digest:string|null;epoch:number;taskRevision:number}):void{
+  assertSpendTransaction(this.db,db);const review=validateControlledRunReview(raw),scope=readControlledRunScope(db);if(!scope||scope.status!=='PAUSED'||scope.authorityEpoch!==expected.epoch||scope.expectedTaskRevision!==expected.taskRevision||(scope.review?.digest??null)!==expected.digest)blocked();this.assertTask(scope,false,db);
+  const old=scope.review;if(old&&(review.sessionId!==old.sessionId||review.initialTaskRevision!==old.initialTaskRevision||listingFingerprint(review.sourceStamps)!==listingFingerprint(old.sourceStamps)||review.secondReleased!==old.secondReleased)||!old&&(review.initialTaskRevision!==scope.expectedTaskRevision||review.secondReleased))blocked();
+  writeScope(db,{...scope,review,status:'PAUSED',authorityEpoch:spendInteger(scope.authorityEpoch+1),authorityNonce:randomUUID()});
+ }
+ /** Explicit main review only, after reading the real first-item producers. An
+  * accepted HTTP response, file claim or UNKNOWN cannot authorize the next SKU. */
+ releaseSecondReviewedInTransaction(db:DatabaseSync,raw:ControlledRunReview,expected:{digest:string;epoch:number;taskRevision:number}):void{
+  assertSpendTransaction(this.db,db);const scope=readControlledRunScope(db);if(!scope?.review||scope.status!=='PAUSED'||scope.items.length!==2||scope.activeItemKey!==scope.items[0].itemKey||scope.review.secondReleased||scope.review.digest!==expected.digest||scope.authorityEpoch!==expected.epoch||scope.expectedTaskRevision!==expected.taskRevision)blocked();this.assertTask(scope,false,db);
+  const task=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(scope.taskId)!.record_json)),first=task.items.find((i:any)=>i.key===scope.items[0].itemKey);if(!['PAUSED','NEEDS_ATTENTION'].includes(task.status)||first?.status!=='DONE'||first.stage!=='COMPLETE'||!first.draftId||first.outcome?.kind==='UNKNOWN')blocked();
+  const saved=db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(first.draftId);if(!saved)blocked();const record=JSON.parse(String(saved.record_json)),draft=record.draft,item=scope.items[0];if(!draft||record.unresolvedWrite||draft.id!==first.draftId||draft.productId!==item.productId||draft.sku!==item.sku||draft.targetId!==scope.targetId||draft.sellerId!==scope.sellerId||draft.marketplaceId!==scope.marketplaceId||draft.mode!=='live'||draft.schema?.parentageLevel!=='NONE'||draft.salesPlan&&draft.salesPlan.parentage!=='NONE'||(draft.salesPlan?.recipe?.key??null)!==item.recipeKey||draft.state!=='BUYABLE'||!draft.statuses?.includes('BUYABLE')||!draft.submittedAt||!draft.checkedAt||Date.parse(draft.checkedAt)<Date.parse(draft.submittedAt)||draft.listingIssues?.some((i:any)=>i.severity==='ERROR'))blocked();
+  const observed=db.prepare('SELECT record_json FROM listing_followups WHERE id=?').get(draft.id);if(!observed)blocked();const followup=validateFollowupRecord(JSON.parse(String(observed.record_json)));if(followup.status!=='READY'||followup.draftId!==draft.id||followup.productId!==draft.productId||followup.sku!==draft.sku||followup.targetId!==draft.targetId||followup.sellerId!==draft.sellerId||followup.marketplaceId!==draft.marketplaceId||followup.draftFingerprint!==followupDraftFingerprint(draft)||followup.checkedAt!==draft.checkedAt||followup.listingState!=='BUYABLE'||!followup.statuses.includes('BUYABLE'))blocked();
+  const money=new AiSpendBudget(db),status=money.status('controlled-live-lifetime');if(status.anomaly||status.unknownCalls||status.pendingCalls||status.unboundedCalls||status.remainingUsdMicros===null||status.remainingUsdMicros<=0)blocked();
+  if(db.prepare("SELECT 1 FROM ai_usage_ledger u JOIN ai_calls c ON c.id=u.id WHERE json_extract(c.record_json,'$.productId')=? AND json_extract(u.record_json,'$.state') IN ('PENDING','UNKNOWN') LIMIT 1").get(item.productId))blocked();
+  for(const saved of db.prepare("SELECT record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=?").all(draft.id)){const run=JSON.parse(String(saved.record_json));if(run.status==='RUNNING'||run.slots?.some((s:any)=>s.status==='UNKNOWN'||s.attempts?.some((a:any)=>['UNKNOWN','GENERATING'].includes(a.state))))blocked();}
+  const review=validateControlledRunReview(raw);if(review.secondReleased!==true)blocked();this.bindReviewInTransaction(db,{...review,secondReleased:false},expected);const updated=readControlledRunScope(db)!;writeScope(db,{...updated,activeItemKey:scope.items[1].itemKey,review,authorityEpoch:spendInteger(updated.authorityEpoch+1),authorityNonce:randomUUID()});
  }
  private activateScope(id:string,allowedStatuses:string[]):ControlledRunGrant{
   const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(!allowedStatuses.includes(task.status))blocked();const active={...r,status:'ACTIVE' as const,authorityEpoch:spendInteger(r.authorityEpoch+1),authorityNonce:randomUUID()};writeScope(this.db,active);return active;});
@@ -101,6 +125,7 @@ export function pauseControlledRunScopes(db:DatabaseSync):void{transaction(db,()
 /** Preserve the original finite roster, never union it, and revoke dispatch authority on restore. */
 export function retainControlledRunHistory(current:DatabaseSync,snapshot:DatabaseSync):void{
  if(!snapshot.isTransaction)spendInvalid();const now=readControlledRunScope(current),old=readControlledRunScope(snapshot);if(!now&&!old)return;
- const identity=(r:ControlledRunScope)=>({...r,status:'PAUSED',expectedTaskRevision:0,authorityEpoch:0,authorityNonce:null});if(now&&old&&listingFingerprint(identity(now))!==listingFingerprint(identity(old)))blocked();
+ const identity=(r:ControlledRunScope)=>({...r,status:'PAUSED',expectedTaskRevision:0,authorityEpoch:0,authorityNonce:null,review:null,activeItemKey:null});if(now&&old&&listingFingerprint(identity(now))!==listingFingerprint(identity(old)))blocked();
+ if(now?.review&&old?.review&&(now.review.sessionId!==old.review.sessionId||now.review.initialTaskRevision!==old.review.initialTaskRevision||listingFingerprint(now.review.sourceStamps)!==listingFingerprint(old.review.sourceStamps)))blocked();
  const record=now??old!;writeScope(snapshot,{...record,status:'PAUSED',authorityEpoch:spendInteger(Math.max(now?.authorityEpoch??0,old?.authorityEpoch??0)+1)});
 }

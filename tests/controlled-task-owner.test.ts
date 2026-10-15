@@ -23,6 +23,26 @@ async function fixture(t:test.TestContext,ordinaryFirst=false){
  return{db,root,task,ordinary,scope,scopes,calls,products,dependencies,get owner(){return owner;},set callback(value:(p:ProductDetail)=>void|Promise<void>){callback=value;},async restart(){await owner.close();owner=new AutomaticListingService(root,dependencies);}};
 }
 
+test('restricted owner preserves unrelated WAITING and NEEDS_ATTENTION history without observation or shutdown writes',async t=>{
+ const f=await fixture(t);await f.owner.close();
+ const unrelated={...f.ordinary,status:'WAITING',items:f.ordinary.items.map(row=>({...row,status:'WAITING',stage:'READBACK',draftId:randomUUID()}))};
+ f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(unrelated),unrelated.id);
+ const before=f.db.prepare('SELECT * FROM automatic_listing_tasks WHERE id=?').get(unrelated.id),audit=f.db.prepare('SELECT * FROM audit_events ORDER BY rowid').all();
+ let observations=0;const restricted=new AutomaticListingService(f.root,{...f.dependencies,canManageTask:(id:string)=>id===f.task.id,procurement:{...f.dependencies.procurement,candidates:()=>{observations++;return[];}},batch:{stop:()=>{observations++;},reconcile:async()=>{observations++;}} as any} as any);
+ try {
+  assert.deepEqual(restricted.get(unrelated.id),unrelated);restricted.start();await restricted.refreshWaiting();
+  assert.throws(()=>restricted.prepareStart(unrelated.id),/受控/);assert.throws(()=>restricted.pause(unrelated.id),/受控/);assert.throws(()=>restricted.cancel(unrelated.id),/受控/);
+  assert.equal(observations,0);assert.equal(f.calls.length,0);
+ }finally{await restricted.close();}
+ assert.deepEqual(f.db.prepare('SELECT * FROM automatic_listing_tasks WHERE id=?').get(unrelated.id),before);assert.deepEqual(f.db.prepare('SELECT * FROM audit_events ORDER BY rowid').all(),audit);
+});
+
+test('main-only admission fails before the original owner can enqueue, activate or alter a task',async t=>{
+ const f=await fixture(t);await f.owner.close();const before=f.db.prepare('SELECT * FROM automatic_listing_tasks ORDER BY id').all(),scope=readControlledRunScope(f.db);let admissions=0;
+ const owner=new AutomaticListingService(f.root,{...f.dependencies,admitTask:()=>{admissions++;throw Error('synthetic no reliable billing upper');}} as any);
+ try{assert.throws(()=>owner.startAuthorized(owner.prepareStart(f.task.id)),/no reliable/);await owner.waitForIdle();assert.equal(admissions,1);assert.equal(f.calls.length,0);assert.deepEqual(f.db.prepare('SELECT * FROM automatic_listing_tasks ORDER BY id').all(),before);assert.deepEqual(readControlledRunScope(f.db),scope);}finally{await owner.close();}
+});
+
 test('actual TaskOwner advances the controlled revision atomically and schedules only the active first SKU',async t=>{
  const f=await fixture(t),observed:any[]=[];f.callback=product=>{if(product.id!==f.products[0].id)return;const scopeId=f.scopes.authorizeEffect({kind:'source',productId:product.id}),current=readControlledRunScope(f.db)!;observed.push({scopeId,scopeRevision:current.expectedTaskRevision,taskRevision:f.owner.get(f.task.id).revision});};
  f.owner.startAuthorized(f.owner.prepareStart(f.task.id));await f.owner.waitForIdle();assert.deepEqual(f.calls,[f.products[0].id]);assert.equal(observed.length,1);assert.equal(observed[0].scopeId,f.scope.id);assert.ok(observed[0].scopeRevision>1);assert.equal(observed[0].scopeRevision,observed[0].taskRevision);assert.equal(f.owner.get(f.task.id).items[1].status,'PENDING');assert.equal(readControlledRunScope(f.db)!.activeItemKey,f.task.items[0].key);

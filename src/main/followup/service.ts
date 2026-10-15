@@ -14,6 +14,8 @@ export interface FollowupAmazon {
   getListingObservation?(id: string): ListingObservation | null;
 }
 export interface FollowupDependencies {
+  /** Main-only admission boundary; excluded historical records remain strictly read-only. */
+  canManageDraft?: (draftId: string) => boolean;
   now?: () => number;
   setTimeout?: (callback: () => void, milliseconds: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
@@ -36,6 +38,7 @@ export class FollowupService {
   private setTimer: NonNullable<FollowupDependencies['setTimeout']>;
   private clearTimer: NonNullable<FollowupDependencies['clearTimeout']>;
   private getObservation: NonNullable<FollowupDependencies['getObservation']> | undefined;
+  private canManageDraft: (draftId: string) => boolean;
   private records = new Map<string, FollowupRecord>();
   private timer: unknown = undefined;
   private worker: Promise<void> | null = null;
@@ -50,11 +53,13 @@ export class FollowupService {
     this.setTimer = dependencies.setTimeout ?? ((callback, milliseconds) => { const timer = setTimeout(callback, milliseconds); timer.unref(); return timer; });
     this.clearTimer = dependencies.clearTimeout ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
     this.getObservation = dependencies.getObservation ?? (amazon.getListingObservation ? id => amazon.getListingObservation!(id) : undefined);
+    this.canManageDraft = dependencies.canManageDraft ?? (() => true);
     try {
       for (const row of this.db.prepare('SELECT id,record_json FROM listing_followups ORDER BY rowid').all()) {
         const record = validateFollowupRecord(JSON.parse(String(row.record_json)));
         if (record.id !== row.id || this.records.has(record.draftId)) throw new UserFacingError('延迟回读记录身份不一致');
         this.records.set(record.draftId, record);
+        if (!this.canManageDraft(record.draftId)) continue;
         // Migrate legacy 48h schedules and premature attempt-based expiry using the immutable submission clock.
         if (!record.requeryPending && record.submittedAt && (pending(record) || record.status === 'PROCESSING' || record.reason === 'EXPIRED')) {
           const deadline = Date.parse(record.submittedAt) + FOLLOWUP_OFFSETS.at(-1)!;
@@ -71,9 +76,11 @@ export class FollowupService {
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('延迟回读服务正在停止或已关闭'); }
   private find(draftId: string): FollowupRecord { this.ensureOpen(); const found = this.records.get(identifier(draftId)); if (!found) throw new UserFacingError('延迟回读记录不存在'); return found; }
   private save(record: FollowupRecord): void {
+    this.assertManaged(record.draftId);
     record.revision++; record.updatedAt = timestamp(this.now()); validateFollowupRecord(record);
     this.db.prepare('INSERT INTO listing_followups(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(record.id, JSON.stringify(record));
   }
+  private assertManaged(id: string): void { if (!this.canManageDraft(id)) throw new UserFacingError('受控验收窗口不能修改或调度其他草稿'); }
   private attention(record: FollowupRecord, reason: FollowupReason, error: string): void {
     delete record.requeryPending;
     record.status = 'NEEDS_ATTENTION'; record.reason = reason; record.error = error.slice(0, 500); record.nextDueAt = null; this.save(record);
@@ -104,6 +111,7 @@ export class FollowupService {
   }
   schedule(draftId: string): FollowupRecord {
     this.ensureOpen(); const id = identifier(draftId), existing = this.records.get(id); if (existing) return structuredClone(existing);
+    this.assertManaged(id);
     const draft = this.amazon.getDraft(id);
     if (draft.mode !== 'live') throw new UserFacingError('演示草稿不使用正式店铺延迟回读');
     if (!draft.submittedAt && !uncertain(draft)) throw new UserFacingError('只有已提交的草稿可以安排回读');
@@ -121,6 +129,7 @@ export class FollowupService {
   /** Explicit user action is required to refresh a generation; schedule() can never silently do so. */
   reschedule(draftId: string): FollowupRecord {
     const record = this.find(draftId); if (this.activeDraftId === record.draftId) throw new UserFacingError('此回读正在处理，请等待完成');
+    this.assertManaged(record.draftId);
     this.scope(record, true); record.targetGeneration = this.amazon.executionTargetScope(record.targetId).generation;
     record.status = record.attempts ? 'PROCESSING' : 'WAITING'; record.reason = null; record.error = null;
     record.requeryPending = true;
@@ -142,7 +151,7 @@ export class FollowupService {
   private cancelTimer(): void { if (this.timer !== undefined) { this.clearTimer(this.timer); this.timer = undefined; } }
   private arm(): void {
     this.cancelTimer(); if (!this.started || this.paused || this.closing || this.closed || this.worker) return;
-    const next = [...this.records.values()].filter(pending).map(record => Date.parse(record.nextDueAt!)).sort((a, b) => a - b)[0];
+    const next = [...this.records.values()].filter(record => this.canManageDraft(record.draftId) && pending(record)).map(record => Date.parse(record.nextDueAt!)).sort((a, b) => a - b)[0];
     if (next === undefined) return;
     this.timer = this.setTimer(() => {
       this.timer = undefined; if (this.paused || this.closing || this.closed || !this.started) return;
@@ -154,9 +163,10 @@ export class FollowupService {
     this.cancelTimer(); this.worker = this.processDue().finally(() => { this.worker = null; this.arm(); }); return this.worker;
   }
   private async processDue(): Promise<void> {
-    const due = [...this.records.values()].filter(record => pending(record) && Date.parse(record.nextDueAt!) <= this.now()).sort((a, b) => a.nextDueAt!.localeCompare(b.nextDueAt!));
+    const due = [...this.records.values()].filter(record => this.canManageDraft(record.draftId) && pending(record) && Date.parse(record.nextDueAt!) <= this.now()).sort((a, b) => a.nextDueAt!.localeCompare(b.nextDueAt!));
     for (const record of due) {
       if (this.paused || this.closing || this.closed) return;
+      if (!this.canManageDraft(record.draftId)) continue;
       this.activeDraftId = record.draftId;
       try { await this.read(record); } finally { this.activeDraftId = null; }
     }
@@ -175,6 +185,7 @@ export class FollowupService {
       const result = await this.amazon.readListing({ id: draft.id, revision: draft.revision }, () => {
         if (this.closing || this.closed) throw new UserFacingError('工作台正在停止，本次延迟回读尚未发送');
         if (this.paused) throw new UserFacingError('延迟回读已暂停，本次请求尚未发送');
+        this.assertManaged(record.draftId);
         this.scope(record);
       });
       this.scope(record);

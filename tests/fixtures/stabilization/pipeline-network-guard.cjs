@@ -29,7 +29,7 @@ function mapped(input,init={},transport='fetch'){
   const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
-    if(!['fetch','electron.net.fetch'].includes(transport)||transport==='electron.net.fetch'&&(route.protocol.kind!=='acs3'||route.protocol.action!=='RecognizeAllText')||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
+    if(!['fetch','electron.net.fetch'].includes(transport)||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');
     try{verifyProtocol(route,headers,wireBody(init.body));}catch{return deny('protocol-auth');}
     state.allowed++;return {url:origin.origin+route.path,method,headers,route};
@@ -95,7 +95,7 @@ function installElectron(electron){
     if(!request.route.protocol)return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:request.headers,redirect:'error'}));
     const capability=require('node:crypto').randomUUID();nativePending.set(capability,{request,bytes:wireBody(frozen.body),sent:false});
     const nativeHeaders={...Object.fromEntries(request.headers),'x-s10-native-capability':capability};delete nativeHeaders.host;
-    return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:nativeHeaders,redirect:frozen.redirect??'error'})).catch(error=>{state.nativeProtocolFailure={name:error.name??null,code:error.code??null,causeCode:error.cause?.code??null,headerRejected:/host|unsafe.?header|forbidden.?header/i.test(String(error.message))};throw error;}).finally(()=>nativePending.delete(capability));
+    return electronScope.run(request,()=>original(request.url,{...frozen,method:request.method,headers:nativeHeaders,redirect:frozen.redirect??'error'})).then(response=>{Object.defineProperty(response,'url',{value:request.route.publicUrl});return response;}).catch(error=>{state.nativeProtocolFailure={name:error.name??null,code:error.code??null,causeCode:error.cause?.code??null,headerRejected:/host|unsafe.?header|forbidden.?header/i.test(String(error.message))};throw error;}).finally(()=>nativePending.delete(capability));
   };}
   const nativeRequest=electron.net.request.bind(electron.net);electron.net.request=input=>{const expected=electronScope.getStore(),url=typeof input==='string'?input:input?.url;
     if(!expected||url!==expected.url||String(input?.method??'GET').toUpperCase()!==expected.method)return deny('electron.net.request');return nativeRequest(input);

@@ -1,4 +1,6 @@
 import {validateUnitImageReview} from './unit-review-checkpoint.ts';
+import {assertReceiptRecovery} from '../ai/receipt-recovery.ts';
+import {dirname} from 'node:path';
 import { assertRetryAllowanceRun, validateRetryAllowance } from './retry-allowance.ts';
 import {validateImageReviewRequests} from './review-checkpoint.ts';
 import {validateAppearanceCheckpoint} from './appearance-review.ts';
@@ -177,18 +179,21 @@ export function approvedWorkflowAssets(db:DatabaseSync,draft:AmazonDraft,product
   assertProductConsistency(db,product,draft.salesPlan?.recipe.components.map(c=>c.variantId)??[draft.variantId]);
   const run = workflowRuns(db, draft.id)[0];
   if (!run) return null;
+  const getResult=(id:string)=>{
+    const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
+    const result=validateStoredAiResult(JSON.parse(String(row.record_json)));if(result.id!==id)return undefined;
+    if(result.providerReceiptRecovery){const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId),file=String(db.prepare('PRAGMA database_list').all().find(r=>r.name==='main')?.file??'');if(!callRow||!file)throw new UserFacingError('图片原恢复回执归属缺失，保留原记录待核');assertReceiptRecovery(db,dirname(file),result,validateAiCall(JSON.parse(String(callRow.record_json))));}return result;
+  };
+  const currentReviews=run.slots?run.slots.flatMap(slot=>{const a=slot.attempts.at(-1);return [a?.ipReviewResultId,a?.ocrResultId,a?.reviewResultId];}):[run.ipReviewResultIds?.at(-1),run.ocrResultIds.at(-1),run.reviewResultIds.at(-1)];
+  for(const id of currentReviews)if(id)getResult(id);
   if (run.imagePolicyVersion !== PRODUCT_IMAGE_POLICY_VERSION) throw new UserFacingError('这张图片使用旧版流程，尚未完成侵权风险检测，请重新自动准备');
-  if(!riskPolicyCompatible(run,readImageRiskSettings(db),id=>{const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);const result=row?validateStoredAiResult(JSON.parse(String(row.record_json))):undefined;return result?.output.kind==='image-ip-review'?result.output:undefined;}))throw new UserFacingError('风险拦截已开启，这套图片的检测证据不满足当前风险阈值或曾跳过检测；原图片与历史保留');
+  if(!riskPolicyCompatible(run,readImageRiskSettings(db),id=>{const result=getResult(id);return result?.output.kind==='image-ip-review'?result.output:undefined;}))throw new UserFacingError('风险拦截已开启，这套图片的检测证据不满足当前风险阈值或曾跳过检测；原图片与历史保留');
   if(!copyReviewPolicyCompatible(run,readCopyReviewSettings(db).enabled))throw new UserFacingError('文案复核已开启，这套图片曾跳过文案复核，请先重新检查已有图片');
   const adapted=currentImageAdaptation(db,run,draft,product);
   if (run.status !== 'COMPLETED' || !adapted&&run.productRevision !== product.revision || run.productId !== product.id || run.variantId !== draft.variantId || run.sku !== draft.sku || (!adapted&&run.draftSha256 !== imageWorkflowDraftStamp(draft)&&!plainColorApprovalMatches(run,draft,product))) throw new UserFacingError('自动图片流程尚未通过或商品内容已变化，请重新完成自动准备');
   const current=buildListingContext(draft,product,run.imageContext?.listing.targetGeneration??0);
   // This projection lacks image-observed color citations. Limit it to current
   // deterministic conflicts; full review checks use the complete image snapshot.
-  const getResult=(id:string)=>{
-    const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
-    const result=validateStoredAiResult(JSON.parse(String(row.record_json)));return result.id===id?result:undefined;
-  };
   if(run.imageContext&&!isFullSchema(run.imageContext.listing)&&!imageActualInputsMatch(run.imageContext,draft,product,current,run.imageRecipeSha256)&&!adaptedImageInputsMatch(db,run,draft,product,current))throw new UserFacingError('来源规格、图片、店铺或站点已变化，原图片与付费请求已保留');
   const legacy=buildListingContext(draft,product,current.targetGeneration,true);
   for(const evidence of legacy.evidence)if(!current.evidence.some(item=>item.id===evidence.id))current.evidence.push(evidence);

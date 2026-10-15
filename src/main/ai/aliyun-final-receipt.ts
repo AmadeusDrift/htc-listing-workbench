@@ -2,7 +2,7 @@ import {safeResponse} from './adapters/openrouter-http.ts';
 import {AiError} from './errors.ts';
 import type {AdapterContext,AliyunFinalIdentity} from './transport.ts';
 import type {AiCredentials} from './primitives.ts';
-import {containsSecret} from './adapters.ts';
+import {containsSecret} from './secret-echo.ts';
 import {requestId} from './primitives.ts';
 import {opaqueResponse} from './opaque-response.ts';
 /** Final OCR/moderation only. Temporary upload credentials never enter this collector. */

@@ -1,4 +1,5 @@
 import {readUnitImageAuthority,assertUnitImageReviewHistory} from './unit-review.ts';
+import {assertListingHistory} from '../listing-ai/history.ts';
 import type {UnitImageRecheckInput} from './unit-review.ts';
 import {verifiedRecoveryReceipt} from '../ai/receipt-recovery.ts';
 import {imageReviewRepairAuthorization} from './review-authority.ts';
@@ -589,7 +590,15 @@ export class ImageWorkflowService {
     return {draft,aiCalls:0,previewAttempts:0,remaining:remaining(draft),workflow:run};
   }
   canResumeUnitRecheckDraft(input:UnitImageRecheckInput):boolean {
-    try{const draft=this.amazon.getDraft(input.draftId),{source,proof}=readUnitImageAuthority(this.db,draft,input),run=workflowRuns(this.db,draft.id).find(r=>r.unitAdoptionReview?.adoptionSha256===proof.adoptionSha256);if(!run)return false;assertUnitImageReviewHistory(this.db,run,source);const prep=run.contentPreparation;if(!prep?.operationId||prep.state!=='DONE'||prep.draftRevision!==draft.revision||prep.draftSha256!==imageWorkflowDraftStamp(draft))return false;const operation=new CompletionJournal(this.db,this.directory).get(prep.operationId);return operation.state==='DONE'&&operation.draftId===draft.id&&operation.draftRevision===draft.revision&&operation.draftStamp===completionDraftStamp(draft)&&operation.createdAt>=run.createdAt;
+    try{const draft=this.amazon.getDraft(input.draftId),{source,proof}=readUnitImageAuthority(this.db,draft,input),run=workflowRuns(this.db,draft.id).find(r=>r.unitAdoptionReview?.adoptionSha256===proof.adoptionSha256);if(!run)return false;assertUnitImageReviewHistory(this.db,run,source);const prep=run.contentPreparation;if(!prep?.operationId||prep.state!=='DONE')return false;const operation=new CompletionJournal(this.db,this.directory).get(prep.operationId);if(operation.state!=='DONE'||operation.draftId!==draft.id||operation.createdAt<run.createdAt||operation.draftRevision!==prep.draftRevision)return false;
+      if(prep.draftRevision===draft.revision&&prep.draftSha256===imageWorkflowDraftStamp(draft))return operation.draftStamp===completionDraftStamp(draft);
+      // Copy repair is another original listing-owner adoption, not permission
+      // for arbitrary draft saves. Reverse its verified adoption chain back to
+      // the exact DONE completion stamp before accepting the image checkpoint.
+      if(run.draftSha256!==imageWorkflowDraftStamp(draft)||!run.imageContext||run.copyReviewResultId!==run.imageContext.listingReviewResultId||!this.currentContextMatches(run,draft))return false;
+      const results=this.ai.listResults(run.productId),calls=results.flatMap(result=>{const call=this.ai.getCall(result.callId);return call?[[call.id,call] as const]:[];});assertListingHistory(draft,new Map(results.map(result=>[result.id,result])),new Map(calls),this.db);
+      const previous=structuredClone(draft);let count=0;while(previous.revision>operation.draftRevision){const adoptions=previous.fieldAdoptions?.filter(a=>a.toRevision===previous.revision&&a.at>=run.createdAt)??[];if(adoptions.length!==1||++count>(run.copyRepairAttempts??0))return false;const adoption=adoptions[0];for(const change of adoption.changes){if(listingFingerprint(previous.attributes[change.field]??null)!==listingFingerprint(change.after))return false;if(change.before===null)delete previous.attributes[change.field];else previous.attributes[change.field]=structuredClone(change.before);}previous.revision=adoption.fromRevision;}
+      return count>0&&completionDraftStamp(previous)===operation.draftStamp;
     }catch{return false;}
   }
   /** Main-only unit-adoption command. No renderer flag can grant partial reuse. */

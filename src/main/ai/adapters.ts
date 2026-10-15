@@ -1,4 +1,6 @@
 import {aliyunFinalContext} from './aliyun-final-receipt.ts';
+import {containsSecret} from './secret-echo.ts';
+export {containsSecret} from './secret-echo.ts';
 import {createHash} from 'node:crypto';
 import { requestOpenRouterJson } from './adapters/openrouter-chat.ts';
 import { openRouterMetadata } from './adapters/openrouter-http.ts';
@@ -22,10 +24,6 @@ export interface TextPayload {
   variant: { id: string; originalSpec: string; normalizedSpec: string };
   confirmedFacts: { id: string; name: string; value: string }[];
   unverifiedOcr: { resultId: string; assetId: string; assetSha256: string; text: string; verified: false }[];
-}
-export function containsSecret(value: unknown, credentials: AiCredentials): boolean {
-  const json = JSON.stringify(value);
-  return Object.values(credentials).some(secret => typeof secret === 'string' && (json.includes(secret) || json.includes(JSON.stringify(secret).slice(1,-1)) || json.includes(encodeURIComponent(secret))));
 }
 function metadata(body: Record<string, unknown>, usage: ProviderMetadata['usage'], credentials: AiCredentials, context: AdapterContext): ProviderMetadata {
   const result = { requestId: requestId(body.RequestId ?? body.id), usage: validateUsage(usage), usageKnown: true };

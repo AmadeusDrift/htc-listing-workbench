@@ -935,14 +935,14 @@ export class AutomaticListingService {
       && draft.sellerId === task.sellerId && draft.marketplaceId === task.marketplaceId && draft.mode === task.mode;
   }
   private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
-  /** A unit change can recheck existing pictures, never enter their generation path. */
+  /** Recheck original candidates; partial admission retains the original missing-slot budget. */
   private async finishUnitRecheck(task:AutomaticListingTask,row:AutomaticListingItem):Promise<AmazonDraft>{
     const proof=row.unitRecheck!,draft=this.deps.amazon.getDraft(row.draftId!),input={taskId:task.id,itemKey:row.key,draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId};
     if(!this.matching(task,row,draft)||submitted(draft)||(draft.revision!==proof.draftRevision||imageWorkflowDraftStamp(draft)!==proof.draftStamp)&&!this.deps.images.canResumeUnitRecheckDraft?.(input))throw new UserFacingError('计量采用后草稿检查点已变化，请核对原记录；未重新生图');
     const prior=this.deps.images.getProgress(draft.id);
     if(!prior||(!this.imageReady(prior)||prior.unitAdoptionReview)&&!this.deps.recheckUnitImage||this.imageReady(prior)&&!prior?.unitAdoptionReview&&!this.deps.recheckImage)throw new UserFacingError('计量变化需复核原成功图片；当前原七图或复核服务不完整，未重新生图');
     const signal=this.controller?.signal??new AbortController().signal,authorize=()=>{try{this.checkpoint(task,row);return true;}catch{return false;}};
-    const after=(!this.imageReady(prior)||prior?.unitAdoptionReview)?await this.deps.recheckUnitImage!(input,signal,authorize):await this.deps.recheckImage!({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId},signal);
+    const after=this.deps.recheckUnitImage?await this.deps.recheckUnitImage(input,signal,authorize):await this.deps.recheckImage!({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId},signal);
     const finalWorkflow=this.deps.images.getProgress(draft.id);if(!this.imageReady(finalWorkflow))throw new UserFacingError('计量复核尚未完成全部原图位；原标记与图片保留');
     this.checkpoint(task,row);
     if(!this.matching(task,row,after)||submitted(after))throw new UserFacingError('原图复核后的草稿身份变化');

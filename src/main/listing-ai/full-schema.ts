@@ -107,7 +107,7 @@ function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext,pol
     if(!unknown&&candidate.items.every(item=>item.evidenceIds.some(id=>c.evidence.some(e=>e.id===id&&(e.meaning===candidate.field||e.name===candidate.field||e.id===`${c.variantId}:spec`)))))continue;
     output.candidates=output.candidates.filter(item=>item!==candidate);
     (output.rejectedCandidates??=[]).push(candidate);
-    output.missing.push({field:candidate.field,reason:`[FIELD_REFERENCE] ${reason}；待补资料，已保留其他可用字段`});
+    output.missing.push({field:candidate.field,reason:`[FIELD_REFERENCE] ${reason}；输出引用错误，已保留其他可用字段及原候选`});
   }
 }
 /** Accept the previous text envelope as an input convenience; persist only native values. */
@@ -214,7 +214,19 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
       const humanIdentity=(value:string)=>identity(value)??`raw:${value.trim().replace(/\s+/g,' ').toLowerCase()}`;
       const human=colorEvidence.filter(e=>e.source==='human_confirmed'&&e.value.trim()).map(e=>humanIdentity(e.value));
       const humanConflict=human.length>0&&new Set(human).size===1&&actualText.some(value=>!human.includes(humanIdentity(value)));
-      const sourceConflict=expected.length>0&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value));
+      // A two-part visible color can retain the exact SKU hue while naming a
+      // secondary surface. Each part needs its own cited color observation on
+      // one already-authorized SKU image; finish/prose and uncertain images do not qualify.
+      const supportedComposite=(value:string)=>{
+        const parts=value.split(' / ');
+        if(parts.length!==2||expected.length===0||new Set(expected).size!==1||!parts.includes(expected[0]!))return false;
+        return c.sourceProduct?.observations?.some(source=>skuObservationImages(source,c.variantId).some(image=>{
+          const colors=image.colors.map(identity);
+          return parts.every(part=>colors.includes(part)&&image.observations?.some((observation,index)=>observation.visibility==='visible'&&/color|colour|颜色/i.test(observation.name)
+            &&observation.values.some(text=>identity(text)===part)&&candidate.items.some(item=>item.evidenceIds.includes(`${c.variantId}:observation:${image.assetId}:${index}`))));
+        }))??false;
+      };
+      const sourceConflict=expected.length>0&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value)&&!supportedComposite(value!));
       if(humanConflict||actual.length&&sourceConflict)issues.push({code:'SOURCE_VALUE_CONFLICT',message:humanConflict?'color：候选颜色与人工确认颜色矛盾，图片观察不能覆盖人工值':'color：候选颜色与当前 SKU 明确颜色矛盾，且没有清晰的绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
     }
     if(Object.hasOwn(c.businessValues??{},candidate.field))for(const path of changedBusinessLeaves(c.businessValues![candidate.field],candidate.nativeValue,`/${candidate.field}`))issues.push({code:'BUSINESS_VALUE_LOCKED',message:`${path}：不能覆盖已经确定的业务值`,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});

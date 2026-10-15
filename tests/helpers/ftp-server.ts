@@ -1,17 +1,19 @@
 import { createServer } from 'node:net';
 import type { Server, Socket } from 'node:net';
+import { createSecureContext, TLSSocket } from 'node:tls';
 import { once } from 'node:events';
 
 /** Loopback-only protocol fixture; no company credentials or remote infrastructure. */
-export async function createLocalFtpServer(options: { mode?: 'normal' | 'bounce' | 'auth-fail' | 'timeout' } = {}) {
+export async function createLocalFtpServer(options: { mode?: 'normal' | 'bounce' | 'auth-fail' | 'timeout'; tls?: { key: string; cert: string } } = {}) {
   const mode = options.mode ?? 'normal';
   const sockets = new Set<Socket>(), dataServers = new Set<Server>(), files = new Map<string, Buffer>(), commands: string[] = [];
   let connections = 0, closed = false;
+  const secureContext = options.tls ? createSecureContext(options.tls) : undefined;
   const server = createServer(control => {
     connections++; sockets.add(control); control.on('close', () => sockets.delete(control)); control.on('error', () => {});
     control.write('220 local integration fixture\r\n');
     let pending = '', data: Socket | undefined;
-    control.on('data', chunk => {
+    const consume = (chunk: Buffer) => {
       pending += chunk.toString();
       for (;;) {
         const end = pending.indexOf('\r\n'); if (end < 0) break;
@@ -21,9 +23,12 @@ export async function createLocalFtpServer(options: { mode?: 'normal' | 'bounce'
         commands.push(command);
         if (command === 'USER') control.write('331 Password required\r\n');
         else if (command === 'PASS') control.write(mode === 'auth-fail' ? '530 Login incorrect\r\n' : '230 Logged in\r\n');
-        else if (command === 'AUTH') control.write('502 TLS unavailable\r\n');
+        else if (command === 'AUTH') {
+          if (!secureContext) control.write('502 TLS unavailable\r\n');
+          else { control.write('234 TLS ready\r\n'); control.removeListener('data', consume); const secure = new TLSSocket(control, { isServer: true, secureContext }); control = secure; sockets.add(secure); secure.on('close', () => sockets.delete(secure)); secure.on('error', () => {}); secure.on('data', consume); }
+        }
         else if (command === 'FEAT') control.write('211-Features\r\n SIZE\r\n UTF8\r\n211 End\r\n');
-        else if (['TYPE', 'STRU', 'OPTS'].includes(command)) control.write('200 OK\r\n');
+        else if (['TYPE', 'STRU', 'OPTS', 'PBSZ', 'PROT'].includes(command)) control.write('200 OK\r\n');
         else if (command === 'PWD') control.write('257 "/"\r\n');
         else if (command === 'CWD') control.write('250 Directory changed\r\n');
         else if (command === 'MKD') control.write('257 Directory created\r\n');
@@ -31,7 +36,7 @@ export async function createLocalFtpServer(options: { mode?: 'normal' | 'bounce'
         else if (command === 'EPSV') {
           if (mode === 'bounce') control.write('502 EPSV unavailable\r\n');
           else {
-            const dataServer = createServer(socket => { data = socket; sockets.add(socket); socket.on('close', () => sockets.delete(socket)); socket.on('error', () => {}); });
+            const dataServer = createServer(raw => { const socket = secureContext ? new TLSSocket(raw, { isServer: true, secureContext }) : raw; data = socket; sockets.add(socket); socket.on('close', () => sockets.delete(socket)); socket.on('error', () => {}); });
             dataServers.add(dataServer);
             dataServer.listen(0, '127.0.0.1', () => { const address = dataServer.address(); if (address && typeof address !== 'string') control.write(`229 Entering Extended Passive Mode (|||${address.port}|)\r\n`); });
           }
@@ -45,7 +50,8 @@ export async function createLocalFtpServer(options: { mode?: 'normal' | 'bounce'
         } else if (command === 'QUIT') control.end('221 Goodbye\r\n');
         else control.write('502 Unsupported\r\n');
       }
-    });
+    };
+    control.on('data', consume);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('Local fixture failed to bind');

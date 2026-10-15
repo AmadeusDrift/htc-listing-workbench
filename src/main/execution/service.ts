@@ -1,3 +1,7 @@
+import { DIRECT_HOSTING_ROUTE, profileWithHostingRoute } from '../../shared/hosting-contracts.ts';
+import type { HostedAsset, HostingRoute } from '../../shared/hosting-contracts.ts';
+import { parseHostingRoute } from '../hosting/validation.ts';
+import { hostingFailureMessage } from '../hosting/errors.ts';
 import { plainColorValue } from '../listing-ai/plain-colors.ts';
 import { manualBrandIssues } from '../image-workflow/policy-reevaluation.ts';
 import { canSendToPreview, isPlatformFieldIssue } from '../amazon/preview-validation.ts';
@@ -23,11 +27,11 @@ import { validateAttributes } from '../amazon/schema.ts';
 import { isDeferredImageIssue } from '../image-workflow/deferred-fields.ts';
 import { isSameSalesFamily } from '../sales-plans/family-binding.ts';
 
-interface ProfileScope { id: string; generation: number; enabled: boolean; configured: boolean; host: string; port: number; secure: boolean; remoteRoot: string; publicBaseUrl: string }
-interface HostedImage { id: string; assetId: string; profileId: string; generation: number; sha256: string; publicUrl: string; status: string }
+interface ProfileScope { route?: HostingRoute; id: string; generation: number; enabled: boolean; configured: boolean; host: string; port: number; secure: boolean; remoteRoot: string; publicBaseUrl: string }
+interface HostedImage extends Partial<Pick<HostedAsset, 'attempts' | 'errorCode' | 'history'>> { id: string; assetId: string; profileId: string; generation: number; sha256: string; publicUrl: string; status: string }
 export interface ExecutionHosting {
   getProfile(id: string): ProfileScope;
-  upload(input: { assetId: string; profileId: string; generation: number; batchId: string }, signal?: AbortSignal): Promise<HostedImage>;
+  upload(input: { assetId: string; profileId: string; generation: number; batchId: string; route?: HostingRoute }, signal?: AbortSignal): Promise<HostedImage>;
   verify(uploadId: string, signal?: AbortSignal): Promise<HostedImage>;
 }
 export interface ExecutionDependencies {
@@ -96,9 +100,9 @@ export class ExecutionService {
       .sort((a,b) => (a.role === 'main' ? -1 : b.role === 'main' ? 1 : a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)))
       .map(a => ({id:a.id,role:a.role as 'main'|'gallery',sha256:this.store.getAssetRecord(a.id)!.sha256}));
   }
-  private profile(task: Pick<ExecutionTask, 'profileId'|'profileGeneration'|'profileStamp'>): void {
+  private profile(task: Pick<ExecutionTask, 'profileId'|'profileGeneration'|'profileStamp'|'hostingRoute'>): void {
     const profile = this.hosting.getProfile(task.profileId);
-    if (!profile.enabled || !profile.configured || profile.generation !== task.profileGeneration || fingerprint(profile) !== task.profileStamp) throw new UserFacingError('FTP 配置已停用或发生变化；原任务不能改投其他配置，请重新建任务');
+    if (!profile.enabled || !profile.configured || profile.generation !== task.profileGeneration || fingerprint(profileWithHostingRoute(profile, task.hostingRoute)) !== task.profileStamp) throw new UserFacingError('FTP 配置已停用或发生变化；原任务不能改投其他配置，请重新建任务');
   }
   private current(item: ExecutionItem, forWrite = true): AmazonDraft {
     const draft = this.amazon.getDraft(item.draftId);
@@ -119,7 +123,7 @@ export class ExecutionService {
     return draft;
   }
   create(raw: unknown): ExecutionTask {
-    this.ensureOpen(); const input = record(raw, '新建任务参数', ['draftIds','profileId','concurrency']);
+    this.ensureOpen(); const input = record(raw, '新建任务参数', ['draftIds','profileId','concurrency','hostingRoute']);
     const concurrency = Object.hasOwn(input, 'concurrency') ? input.concurrency : 1;
     if (concurrency !== 1 && concurrency !== 3 && concurrency !== 5) throw new UserFacingError('任务并发数必须为 1、3 或 5');
     if (!Array.isArray(input.draftIds) || input.draftIds.length < 1 || input.draftIds.length > 50) throw new UserFacingError('每个任务请选择 1–50 个 SKU 草稿');
@@ -127,6 +131,7 @@ export class ExecutionService {
     if ([...this.tasks.values()].some(task => !terminal(task) && task.items.some(item => ids.includes(item.draftId)))) throw new UserFacingError('所选草稿已在未结束任务中，请先处理原任务');
     const profileId = text(input.profileId, 'FTP 配置', 30, true), profile = this.hosting.getProfile(profileId);
     if (!profile.enabled || !profile.configured) throw new UserFacingError('请先配置并启用 FTP');
+    const hostingRoute = Object.hasOwn(input, 'hostingRoute') ? parseHostingRoute(input.hostingRoute) : profile.route ?? DIRECT_HOSTING_ROUTE;
     const items: ExecutionItem[] = ids.map(id => {
       const draft = this.amazon.getDraft(id), product = this.store.getProduct(draft.productId);
       if (submitted(draft)) throw new UserFacingError('所选草稿已经提交或结果未知，请先回读处理');
@@ -144,7 +149,7 @@ export class ExecutionService {
     const listings = items.map(i => `${i.sellerId}:${i.marketplaceId}:${i.sku}`);
     if (new Set(listings).size !== listings.length || [...this.tasks.values()].some(t => !terminal(t) && t.items.some(i => listings.includes(`${i.sellerId}:${i.marketplaceId}:${i.sku}`)))) throw new UserFacingError('同一店铺 SKU 已在任务中，不能重复排队');
     const now = new Date().toISOString();
-    const task: ExecutionTask = { id: randomUUID(), revision: 0, status: 'CREATED', concurrency, profileId, profileGeneration: profile.generation, profileStamp: fingerprint(profile), items, createdAt: now, updatedAt: now, error: null };
+    const task: ExecutionTask = { id: randomUUID(), revision: 0, status: 'CREATED', concurrency, profileId, profileGeneration: profile.generation, profileStamp: fingerprint(profileWithHostingRoute(profile, hostingRoute)), hostingRoute, items, createdAt: now, updatedAt: now, error: null };
     this.save(task); this.tasks.set(task.id, task); return structuredClone(task);
   }
   /** Used to build the native task-start dialog. The renderer cannot supply approval. */
@@ -272,7 +277,7 @@ export class ExecutionService {
     for (const upload of item.uploads) {
       const verified = await this.hosting.verify(upload.uploadId, this.controller?.signal);
       if (verified.status !== 'AVAILABLE' || verified.profileId !== task.profileId || verified.generation !== task.profileGeneration
-        || verified.assetId !== upload.assetId || verified.sha256 !== upload.sha256 || verified.publicUrl !== upload.publicUrl) throw new UserFacingError('图片外链验证失败，任务已转人工处理');
+        || verified.assetId !== upload.assetId || verified.sha256 !== upload.sha256 || verified.publicUrl !== upload.publicUrl) throw new UserFacingError(hostingFailureMessage({ ...verified, errorCode: verified.errorCode ?? 'PUBLIC_URL_UNAVAILABLE', attempts: verified.attempts ?? 0 }, item.assets.findIndex(asset => asset.id === upload.assetId) + 1));
     }
   }
   private async execute(task: ExecutionTask, item: ExecutionItem, step: ExecutionStep, draft: AmazonDraft): Promise<void> {
@@ -280,8 +285,8 @@ export class ExecutionService {
       for (const asset of item.assets) {
         if (!this.running(task)) throw new UserFacingError('任务已暂停或取消');
         this.current(item);
-        const hosted = await this.hosting.upload({ assetId: asset.id, profileId: task.profileId, generation: task.profileGeneration, batchId: task.id }, this.controller?.signal);
-        if (hosted.status !== 'AVAILABLE' || hosted.assetId !== asset.id || hosted.sha256 !== asset.sha256 || hosted.profileId !== task.profileId || hosted.generation !== task.profileGeneration) throw new UserFacingError('图片尚未完成托管验证');
+        const hosted = await this.hosting.upload({ assetId: asset.id, profileId: task.profileId, generation: task.profileGeneration, batchId: task.id, route: task.hostingRoute ?? DIRECT_HOSTING_ROUTE }, this.controller?.signal);
+        if (hosted.status !== 'AVAILABLE' || hosted.assetId !== asset.id || hosted.sha256 !== asset.sha256 || hosted.profileId !== task.profileId || hosted.generation !== task.profileGeneration) throw new UserFacingError(hostingFailureMessage({ ...hosted, errorCode: hosted.errorCode ?? 'UPLOAD_FAILED', attempts: hosted.attempts ?? 0 }, item.assets.indexOf(asset) + 1));
         item.uploads = item.uploads.filter(u => u.assetId !== asset.id);
         item.uploads.push({ assetId: asset.id, uploadId: hosted.id, sha256: hosted.sha256, publicUrl: hosted.publicUrl }); this.save(task);
       }

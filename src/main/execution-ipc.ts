@@ -13,6 +13,7 @@ import { writeFileAtomically } from './files.ts';
 export function installExecutionIpc(window: BrowserWindow, hosting: HostingService, execution: ExecutionService, store: WorkspaceStore, handle: IpcHandler): void {
   handle('red:hosting:profiles', 0, () => hosting.listProfiles());
   handle('red:hosting:uploads', 0, () => hosting.listUploads());
+  handle('red:hosting:route', 1, raw => hosting.setRoute(raw));
   handle('red:hosting:enable', 1, raw => hosting.setEnabled(raw));
   handle('red:hosting:import', 0, async () => {
     const result = await dialog.showOpenDialog(window, { title: '导入 FTP 配置（仅保存在本机加密凭据库）', properties: ['openFile'], filters: [{ name: 'FTP 配置', extensions: ['json'] }] });

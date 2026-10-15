@@ -4,8 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { open, realpath } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { HostedAsset, HostingProfile, HostingProfileId, HostingUploadInput } from '../../shared/hosting-contracts.ts';
-import { HOSTING_PROFILE_IDS } from '../../shared/hosting-contracts.ts';
+import type { HostedAsset, HostingProfile, HostingProfileId, HostingUploadInput, HostingRoute, HostingStage, HostingDelivery } from '../../shared/hosting-contracts.ts';
+import { DIRECT_HOSTING_ROUTE, HOSTING_PROFILE_IDS } from '../../shared/hosting-contracts.ts';
 import type { SecretStorage } from '../amazon/vault.ts';
 import { openDatabase } from '../database.ts';
 import { inspectRaster } from '../image-format.ts';
@@ -17,7 +17,7 @@ import { createPublicImageProbe } from './public-probe.ts';
 import type { PublicImageProbe } from './public-probe.ts';
 import { HostingError, abortable, classifyHostingError, isTransient, sleepWithSignal, throwIfAborted } from './errors.ts';
 import { HostingVault } from './vault.ts';
-import { MAX_IMAGE_BYTES, PROFILE_NAMES, objectKeys, parseProfileImport, parseUploadInput, profileId, uuid, validatePersistedProfile, validatePersistedUpload } from './validation.ts';
+import { MAX_IMAGE_BYTES, PROFILE_NAMES, objectKeys, parseHostingRoute, parseProfileImport, parseUploadInput, profileId, uuid, validatePersistedProfile, validatePersistedUpload } from './validation.ts';
 
 export interface HostingEffectIdentity {
  productId:string|null;assetId:string;variantIds:string[];skus:string[];sourceStamp:string|null;profile:Pick<HostingProfile,'id'|'generation'|'host'|'port'|'secure'|'remoteRoot'|'publicBaseUrl'>;uploadId:string|null;batchId:string|null;sha256:string;byteSize:number;mimeType:string;remotePath:string;publicUrl:string;mayUpload:boolean;
@@ -97,10 +97,17 @@ export class HostingService {
   importProfile(input: unknown): HostingProfile {
     this.ensureOpen(); const parsed = parseProfileImport(input), before = this.getProfile(parsed.id), generation = before.generation + 1;
     const rollback = this.vault.write(parsed.id, { username: parsed.username, password: parsed.password }, generation);
-    const next: HostingProfile = { id: parsed.id, name: before.name, host: parsed.host, port: parsed.port, secure: parsed.secure, remoteRoot: parsed.remoteRoot, publicBaseUrl: parsed.publicBaseUrl, configured: true, enabled: false, generation };
+    const next: HostingProfile = { id: parsed.id, name: before.name, host: parsed.host, port: parsed.port, secure: parsed.secure, remoteRoot: parsed.remoteRoot, publicBaseUrl: parsed.publicBaseUrl, configured: true, enabled: false, generation, ...(before.route ? { route: before.route } : {}) };
     try { this.saveProfile(next); } catch (error) { rollback(); throw error; }
     this.cancelProfile(parsed.id, new HostingError('PROFILE_CHANGED'));
     return this.getProfile(parsed.id);
+  }
+  setRoute(input: unknown): HostingProfile {
+    this.ensureOpen(); const o = objectKeys(input, ['id', 'route']), id = profileId(o.id), route = parseHostingRoute(o.route);
+    const before = this.storedProfile(id);
+    // Existing operations keep their captured route. Credentials and generation do not rotate.
+    this.saveProfile({ ...before, route });
+    return this.getProfile(id);
   }
   setEnabled(input: unknown): HostingProfile {
     this.ensureOpen(); const o = objectKeys(input, ['id', 'enabled']), id = profileId(o.id);
@@ -162,8 +169,8 @@ export class HostingService {
     return Object.freeze({productId:product?.id??null,assetId,variantIds:Object.freeze(variantIds) as unknown as string[],skus:Object.freeze(variantIds.map(id=>product!.variants.find(v=>v.id===id)!.sku)) as unknown as string[],sourceStamp:product?sourceStamp(product):null,profile:Object.freeze({id:profile.id,generation:profile.generation,host:profile.host,port:profile.port,secure:profile.secure,remoteRoot:profile.remoteRoot,publicBaseUrl:profile.publicBaseUrl}),uploadId,batchId,sha256,byteSize,mimeType,remotePath,publicUrl,mayUpload});
   }
   /** Internal M09 port for source/candidate references. It never adopts an asset for listing. */
-  async uploadReferenceVersion(profileId: string, generation: number, version: import('./reference-pins.ts').ReferenceVersion, bytes: Buffer, signal = new AbortController().signal): Promise<string> {
-    this.ensureOpen(); const profile = this.assertProfile(profileId, generation);
+  async uploadReferenceVersion(profileId: string, generation: number, version: import('./reference-pins.ts').ReferenceVersion, bytes: Buffer, signal = new AbortController().signal, route?: HostingRoute): Promise<string> {
+    this.ensureOpen(); const profile = { ...this.assertProfile(profileId, generation), ...(route ? { route: parseHostingRoute(route) } : {}) };
     if (bytes.length !== version.byteSize || createHash('sha256').update(bytes).digest('hex') !== version.sha256) throw new HostingError('LOCAL_FILE_CHANGED');
     const raster = inspectRaster(bytes); if (raster.mimeType !== version.mimeType) throw new HostingError('LOCAL_FILE_CHANGED');
     const relativePath = `references/${version.sha256}.${version.mimeType === 'image/png' ? 'png' : 'jpg'}`;
@@ -213,8 +220,9 @@ export class HostingService {
       const relativePath = `${directory}/${asset.id}-${asset.sha256.slice(0, 16)}.${asset.mimeType === 'image/png' ? 'png' : 'jpg'}`;
       record = { id: randomUUID(), assetId: asset.id, profileId: profile.id, batchId: input.batchId, generation: profile.generation, sha256: asset.sha256,
         byteSize: asset.byteSize, mimeType: asset.mimeType as HostedAsset['mimeType'], remotePath: `${profile.remoteRoot === '/' ? '' : profile.remoteRoot}/${relativePath}`, publicUrl: new URL(relativePath, profile.publicBaseUrl).href,
-        status: 'PENDING', attempts: 0, history: [], errorCode: null, createdAt: date, updatedAt: date };
+        status: 'PENDING', attempts: 0, history: [], route: input.route ?? profile.route ?? DIRECT_HOSTING_ROUTE, errorCode: null, createdAt: date, updatedAt: date };
     }
+    profile = { ...profile, route: record.route ?? DIRECT_HOSTING_ROUTE };
     // The persisted path and profile generation remain fixed for retries and restart recovery.
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
       const identity=this.effectIdentity(asset.id,profile,asset.sha256,asset.byteSize,asset.mimeType,record.remotePath,record.publicUrl,record.id,record.batchId,mayUpload),permit=await this.prepareUpload?.(identity,Buffer.from(bytes),signal);
@@ -222,6 +230,7 @@ export class HostingService {
       if(JSON.stringify(identity)!==JSON.stringify(this.effectIdentity(asset.id,profile,asset.sha256,asset.byteSize,asset.mimeType,record.remotePath,record.publicUrl,record.id,record.batchId,mayUpload)))throw new HostingError('LOCAL_FILE_CHANGED');
       const startedAt = this.timestamp();
       record=transaction(this.db,()=>{if(permit?.constructor.name==='AsyncFunction')throw new HostingError('INVALID_CONFIG');const permitted=permit?.(this.db) as unknown;if(permitted&&typeof(permitted as PromiseLike<unknown>).then==='function')throw new HostingError('INVALID_CONFIG');this.checkEffect(identity,'intent',this.db);return this.saveUpload({...record!,status:'UPLOADING',attempts:record!.attempts+1,errorCode:null,updatedAt:startedAt});});
+      let stage: HostingStage = 'size', delivery: HostingDelivery = 'not-sent';
       try {
         throwIfAborted(signal); this.assertProfile(profile.id, profile.generation);
         this.checkEffect(identity,'size');
@@ -229,10 +238,12 @@ export class HostingService {
         if (size !== bytes.length) {
           if (!mayUpload) throw new HostingError(size === null ? 'REMOTE_SIZE_UNAVAILABLE' : 'SIZE_MISMATCH');
           this.checkEffect(identity,'upload');
+          stage = 'upload'; delivery = 'unknown';
           size = await abortable(this.transport.upload(profile, credentials, record.remotePath, bytes, signal), signal);
         }
         if (size !== bytes.length) throw new HostingError('SIZE_MISMATCH');
         throwIfAborted(signal); this.assertProfile(profile.id, profile.generation);
+        delivery = 'confirmed'; stage = 'public-get';
         record = this.saveUpload({ ...record, status: 'VERIFYING', updatedAt: this.timestamp() });
         this.checkEffect(identity,'public-get');
         await abortable(this.probe({ url: record.publicUrl, sha256: record.sha256, byteSize: record.byteSize, mimeType: record.mimeType }, signal), signal);
@@ -243,13 +254,13 @@ export class HostingService {
         this.assertProfile(profile.id, profile.generation);
         const finishedAt = this.timestamp();
         return this.saveUpload({ ...record, status: 'AVAILABLE', errorCode: null, updatedAt: finishedAt,
-          history: [...record.history, { attempt: record.attempts, status: 'AVAILABLE', errorCode: null, startedAt, finishedAt }] });
+          history: [...record.history, { attempt: record.attempts, status: 'AVAILABLE', errorCode: null, startedAt, finishedAt, stage, delivery }] });
       } catch (error) {
         const safe = signal.aborted && signal.reason instanceof HostingError ? signal.reason : classifyHostingError(error);
         const status = safe.code === 'CANCELLED' || safe.code === 'SERVICE_CLOSED' ? 'CANCELLED' : 'FAILED';
         const finishedAt = this.timestamp();
         record = this.saveUpload({ ...record, status, errorCode: safe.code, updatedAt: finishedAt,
-          history: [...record.history, { attempt: record.attempts, status, errorCode: safe.code, startedAt, finishedAt }] });
+          history: [...record.history, { attempt: record.attempts, status, errorCode: safe.code, startedAt, finishedAt, stage: safe.stage ?? stage, delivery: safe.delivery ?? delivery }] });
         if (signal.aborted || !isTransient(safe) || attempt + 1 >= this.maxAttempts) return record;
         try { await abortable(this.sleep(this.retryBaseMs * 2 ** attempt + Math.floor(Math.max(0, Math.min(1, this.random())) * this.retryBaseMs), signal), signal); }
         catch (waitError) {

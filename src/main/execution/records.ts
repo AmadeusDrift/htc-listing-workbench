@@ -1,3 +1,4 @@
+import { parseHostingRoute } from '../hosting/validation.ts';
 import { createHash } from 'node:crypto';
 import { record, identifier } from '../../shared/validation.ts';
 import { UserFacingError } from '../../shared/errors.ts';
@@ -15,7 +16,8 @@ function exact(value: unknown, keys: string[]): Record<string, unknown> {
 export function validateExecutionTask(value: unknown): ExecutionTask {
   const raw = record(value, '任务记录');
   const keys = ['id','revision','status','profileId','profileGeneration','profileStamp','items','createdAt','updatedAt','error'];
-  const o = exact(raw, Object.hasOwn(raw, 'concurrency') ? [...keys, 'concurrency'] : keys);
+  const o = exact(raw, [...keys, ...(Object.hasOwn(raw, 'concurrency') ? ['concurrency'] : []), ...(Object.hasOwn(raw, 'hostingRoute') ? ['hostingRoute'] : [])]);
+  if (Object.hasOwn(raw, 'hostingRoute')) parseHostingRoute(raw.hostingRoute);
   const concurrency = Object.hasOwn(o, 'concurrency') ? o.concurrency : 1;
   if (concurrency !== 1 && concurrency !== 3 && concurrency !== 5) throw new UserFacingError('任务并发数必须为 1、3 或 5');
   identifier(o.id);

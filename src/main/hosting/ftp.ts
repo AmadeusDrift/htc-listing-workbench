@@ -1,6 +1,8 @@
 import { Client } from 'basic-ftp';
 import type { AccessOptions } from 'basic-ftp';
+import { SocksFtpClient } from './socks.ts';
 import { Readable } from 'node:stream';
+import { isIP } from 'node:net';
 import { posix } from 'node:path';
 import type { HostingProfile } from '../../shared/hosting-contracts.ts';
 import type { HostingCredentials } from './validation.ts';
@@ -22,7 +24,7 @@ export interface HostingTransport {
 }
 interface Lease { key: string; client: FtpClient; busy: boolean }
 export interface FtpEffect {kind:'connect'|'directory'|'cd'|'upload'|'size';profile:HostingProfile;remotePath:string|null}
-export interface FtpPoolOptions { beforeEffect?:(effect:Readonly<FtpEffect>)=>void; maxConnections?: number; connectionTimeoutMs?: number; createClient?: () => FtpClient }
+export interface FtpPoolOptions { beforeEffect?:(effect:Readonly<FtpEffect>)=>void; maxConnections?: number; connectionTimeoutMs?: number; createClient?: (profile: HostingProfile) => FtpClient }
 /** The single service-owned pool enforces a global cap across all five profiles. */
 export class FtpConnectionPool {
   private leases = new Set<Lease>();
@@ -30,16 +32,16 @@ export class FtpConnectionPool {
   private controllers = new Set<AbortController>();
   private closed = false;
   private max: number;
-  private createClient: () => FtpClient;private beforeEffect:FtpPoolOptions['beforeEffect'];
+  private createClient: (profile: HostingProfile) => FtpClient;private beforeEffect:FtpPoolOptions['beforeEffect'];
   constructor(options: FtpPoolOptions = {}) {
     this.beforeEffect=options.beforeEffect;
     this.max = options.maxConnections ?? 5;
     if (!Number.isInteger(this.max) || this.max < 1 || this.max > 5) throw new HostingError('INVALID_CONFIG');
-    this.createClient = options.createClient ?? (() => new Client(options.connectionTimeoutMs ?? 15000, { allowSeparateTransferHost: false }));
+    this.createClient = options.createClient ?? (profile => profile.route?.mode === 'socks5' ? new SocksFtpClient(options.connectionTimeoutMs ?? 15000, profile.route) : new Client(options.connectionTimeoutMs ?? 15000, { allowSeparateTransferHost: false }));
   }
   private wake(): void { for (const wake of this.waiters) wake(); this.waiters.clear(); }
   private discard(lease: Lease): void { lease.client.close(); this.leases.delete(lease); }
-  private async acquire(key: string, signal: AbortSignal): Promise<{ lease: Lease; fresh: boolean }> {
+  private async acquire(key: string, profile: HostingProfile, signal: AbortSignal): Promise<{ lease: Lease; fresh: boolean }> {
     for (;;) {
       throwIfAborted(signal); if (this.closed) throw new HostingError('SERVICE_CLOSED');
       for (const lease of this.leases) if (!lease.busy && lease.client.closed) this.discard(lease);
@@ -50,7 +52,7 @@ export class FtpConnectionPool {
         if (idle) this.discard(idle);
       }
       if (this.leases.size < this.max) {
-        const lease: Lease = { key, client: this.createClient(), busy: true }; this.leases.add(lease); return { lease, fresh: true };
+        const lease: Lease = { key, client: this.createClient(profile), busy: true }; this.leases.add(lease); return { lease, fresh: true };
       }
       let wake!: () => void;
       try { await abortable(new Promise<void>(resolve => { wake = resolve; this.waiters.add(wake); }), signal); }
@@ -74,11 +76,11 @@ export class FtpConnectionPool {
     this.controllers.add(controller); signal.addEventListener('abort', cancel, { once: true });
     let lease: Lease | undefined;
     try {
-      const acquired = await this.acquire(`${profile.id}:${profile.generation}`, controller.signal); lease = acquired.lease;
+      const acquired = await this.acquire(`${profile.id}:${profile.generation}:${JSON.stringify(profile.route ?? { mode: 'direct' })}`, profile, controller.signal); lease = acquired.lease;
       throwIfAborted(controller.signal);
       const connection = lease.client;
       return await abortable((async () => {
-        if (acquired.fresh) {this.check(profile,'connect',null);await connection.access({ host: profile.host, port: profile.port, user: credentials.username, password: credentials.password, secure: profile.secure, secureOptions: { rejectUnauthorized: true } });}
+        if (acquired.fresh) {this.check(profile,'connect',null);try { await connection.access({ host: profile.host, port: profile.port, user: credentials.username, password: credentials.password, secure: profile.secure, secureOptions: { rejectUnauthorized: true, host: profile.host, servername: isIP(profile.host) ? undefined : profile.host } }); } catch (error) { const safe = classifyHostingError(error); throw new HostingError(safe.code, 'connect', 'not-sent'); }}
         throwIfAborted(controller.signal);
         return operation(this.guarded(profile,connection));
       })(), controller.signal, () => connection.close());
@@ -109,14 +111,14 @@ export class BasicFtpTransport implements HostingTransport {
         const safe = classifyHostingError(error);
         const responseCode = error && typeof error === 'object' && 'code' in error ? Number(error.code) : NaN;
         // A rejected MKD/CWD is permanent; a reset/timeout during it still needs the bounded connection retry.
-        throw safe.code === 'UPLOAD_FAILED' && responseCode >= 500 && responseCode <= 599 ? new HostingError('REMOTE_DIRECTORY_FAILED') : safe;
+        throw new HostingError(safe.code === 'UPLOAD_FAILED' && responseCode >= 500 && responseCode <= 599 ? 'REMOTE_DIRECTORY_FAILED' : safe.code, 'directory', 'not-sent');
       }
       throwIfAborted(signal);
       // Always use an absolute system-generated path; ensureDir changes the pooled client's current directory.
-      await client.uploadFrom(Readable.from(bytes), remotePath);
+      try { await client.uploadFrom(Readable.from(bytes), remotePath); } catch (error) { const safe = classifyHostingError(error); throw new HostingError(safe.code, safe.stage ?? 'upload', safe.delivery ?? 'unknown'); }
       throwIfAborted(signal);
       try { return await client.size(remotePath); }
-      catch (error) { const safe = classifyHostingError(error); throw safe.code === 'UPLOAD_FAILED' ? new HostingError('REMOTE_SIZE_UNAVAILABLE') : safe; }
+      catch (error) { const safe = classifyHostingError(error); throw new HostingError(safe.code === 'UPLOAD_FAILED' ? 'REMOTE_SIZE_UNAVAILABLE' : safe.code, 'size', 'unknown'); }
     }, signal);
   }
   async close(): Promise<void> { await this.pool.close(); }

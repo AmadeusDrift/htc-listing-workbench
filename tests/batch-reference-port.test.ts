@@ -17,12 +17,13 @@ import {resolvePurpose} from '../src/main/ai/purpose-routing.ts';
 async function fixture(t:test.TestContext){
  mkdirSync(resolve('.test-data'),{recursive:true});const directory=mkdtempSync(resolve('.test-data/batch-reference-')),store=new WorkspaceStore(directory);let product=store.createProduct();product=addSourceOriginalFixture(directory,store,product.id,product.variants.map(v=>v.id));
  const taskId=randomUUID(),profile={id:'alpha',name:'Alpha',host:'fixture.invalid',port:21,secure:true,remoteRoot:'/',publicBaseUrl:'https://images.example.test/',enabled:true,configured:true,generation:1};let allowed=true,uploads=0,probes=0;
+ const routes: unknown[] = [];
  const task={id:taskId,profileId:'alpha',profileStamp:createHash('sha256').update(JSON.stringify(profile)).digest('hex')};
- const port=createBatchReferencePort({directory,store,generation:{readCandidate:async()=>{throw new Error('No candidate fixture');}},hosting:{getProfile:()=>profile as any,listUploads:()=>[],uploadReferenceVersion:async(_id,_gen,version)=>{uploads++;return `https://images.example.test/references/${version.sha256}.png`; }},task:()=>task as any,probe:async()=>{probes++;}});
+ const port=createBatchReferencePort({directory,store,generation:{readCandidate:async()=>{throw new Error('No candidate fixture');}},hosting:{getProfile:()=>profile as any,listUploads:()=>[],uploadReferenceVersion:async(_id,_gen,version,_bytes,_signal,route)=>{routes.push(route);uploads++;return `https://images.example.test/references/${version.sha256}.png`; }},task:()=>task as any,probe:async()=>{probes++;}});
  t.after(async()=>{await port.close();store.close();rmSync(directory,{recursive:true,force:true});});
  const owner={taskId,operationId:randomUUID(),productId:product.id,productRevision:product.revision},bytes=readFileSync(join(directory,store.getAssetRecord(product.assets[0].id)!.originalPath)),body={messages:[{role:'user',content:[{type:'text',text:'Observe this source'},{type:'image_url',image_url:{url:`data:image/png;base64,${bytes.toString('base64')}`}}]}],reasoning:{effort:'medium'},max_tokens:4096};
  const scope={taskId,rowKey:product.id+':'+product.variants[0].id,phase:'source',mode:'deferred_batch' as const,authorize:()=>allowed};
- return{directory,store,product,port,owner,body,scope,profile,task,counts:()=>({uploads,probes}),revoke:()=>{allowed=false;}};
+ return{directory,store,product,port,owner,body,scope,profile,task,routes,counts:()=>({uploads,probes}),revoke:()=>{allowed=false;}};
 }
 test('main reference port uses the selected hosting profile and reuses one immutable pin',async t=>{
  const f=await fixture(t),first=await taskAiContext.run(f.scope,()=>f.port.prepare(f.body,f.owner)),second=await taskAiContext.run(f.scope,()=>f.port.prepare(f.body,f.owner));
@@ -57,4 +58,14 @@ test('actual AiService visual step stages pinned references and adopts the origi
  const call=()=>ai.batchTasks.run(f.scope,()=>ai.observeSourceColor(context,()=>{}));await assert.rejects(call,{name:'BatchWaitingError'});assert.equal(posts,0);await ai.batchTasks.flush(f.owner.taskId);await ai.batchTasks.reconcile(f.owner.taskId);const result=await call();assert.equal(result.output.kind,'source-color');assert.equal(ai.listCalls().length,1);assert.equal(ai.getUsageSummary('openrouter').attempts,1);assert.equal(posts,1);
  const again=await call();assert.equal(again.id,result.id);assert.equal(posts,1);assert.equal(f.counts().uploads,1);
  }finally{await ai.close();await hosting.close();}
+});
+
+test('batch reference hosting keeps the task frozen direct route after defaults change', async t => {
+  const f = await fixture(t);
+  Object.assign(f.profile, { route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  const prepared = await taskAiContext.run(f.scope, () => f.port.prepare(f.body, f.owner));
+  assert.equal(prepared.references.length, 1); assert.equal(f.counts().uploads, 1); assert.deepEqual(f.routes, [{ mode: 'direct' }]);
+  f.profile.host = 'changed.fixture.invalid';
+  await assert.rejects(() => taskAiContext.run(f.scope, () => f.port.prepare(f.body, { ...f.owner, operationId: randomUUID() })), { code: 'CONFIG_CHANGED' });
+  assert.equal(f.counts().uploads, 1);
 });

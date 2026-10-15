@@ -18,16 +18,16 @@ export function ImageSlotPreview({ draftId, slot, sku, title }: { draftId:string
   const candidateAttempt = slot.attempts.findLast(attempt => Boolean(attempt.candidateId));
   const candidateId = approved ? null : candidateAttempt?.candidateId;
   const [candidate, setCandidate] = useState<AutomaticImageCandidatePreview | null>(null);
-  const [unavailable, setUnavailable] = useState(false), [imageError, setImageError] = useState(false), [opened, setOpened] = useState(false), [readRevision, setReadRevision] = useState(0);
+  const [unavailable, setUnavailable] = useState(false), [imageError, setImageError] = useState(false), [opened, setOpened] = useState(false), [readRevision, setReadRevision] = useState(0),[requested,setRequested]=useState(false);
   useEffect(() => {
-    if (!candidateId) return;
+    if (!candidateId||!requested) return;
     let current = true;
     setCandidate(null); setUnavailable(false); setImageError(false);
     window.red.getAutomaticImageCandidatePreview({ draftId, slot:slot.index, candidateId }).then(value => {
       if (current && value.candidateId === candidateId) setCandidate(value);
     }).catch(() => { if (current) setUnavailable(true); });
     return () => { current = false; };
-  }, [draftId, slot.index, candidateId, readRevision]);
+  }, [draftId, slot.index, candidateId, readRevision,requested]);
   const url = approved ? `red-asset://image/${slot.approvedAssetId}` : candidate?.previewUrl;
   const previous = candidateAttempt && candidateAttempt.number !== slot.attempts.at(-1)?.number;
   const adoption = approved ? '已采用' : previous ? '上次生成候选 · 未采用' : '生成候选 · 未采用';
@@ -35,7 +35,8 @@ export function ImageSlotPreview({ draftId, slot, sku, title }: { draftId:string
   return <>
     {url && !imageError ? <button type="button" className="image-slot-thumbnail" aria-label={`查看大图：${sku} · ${title} · ${adoption}`} onClick={() => setOpened(true)}>
       <img src={url} alt={`${sku} · ${title}`} onError={() => setImageError(true)}/><span><Maximize2 size={13}/>查看大图</span>
-    </button> : <div className="image-slot-placeholder"><ImageIcon size={24} aria-hidden="true"/><span>{imageError ? '本地图片预览暂不可读' : unavailable ? '本地候选预览暂不可读' : candidateId ? '正在读取本地预览…' : slot.status === 'RUNNING' ? '正在准备图片…' : '尚未生成图片'}</span>
+    </button> : <div className="image-slot-placeholder"><ImageIcon size={24} aria-hidden="true"/><span>{imageError ? '本地图片预览暂不可读' : unavailable ? '本地候选预览暂不可读' : candidateId ? requested?'正在读取本地预览…':'候选已保存，按需读取预览' : slot.status === 'RUNNING' ? '正在准备图片…' : '尚未生成图片'}</span>
+      {candidateId&&!requested&&<button type="button" className="image-slot-read-retry" onClick={()=>setRequested(true)}>读取候选预览</button>}
       {(unavailable || imageError) && <button type="button" className="image-slot-read-retry" onClick={() => { setImageError(false); setReadRevision(value => value + 1); }}>重新读取预览</button>}
     </div>}
     {(approved || candidateId) && <span className="image-slot-adoption" data-adopted={approved}>{adoption}</span>}

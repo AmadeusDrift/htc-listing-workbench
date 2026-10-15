@@ -6,7 +6,8 @@ import {replayReferenceCandidates} from '../src/main/listing-ai/candidate-recove
 import {listingProblems} from '../src/main/listing-ai/problems.ts';
 import {ListingAiService} from '../src/main/listing-ai/service.ts';
 import {suggestListingFields} from '../src/main/ai/listing-adapters.ts';
-const shape={type:'array',items:{type:'object',properties:{value:{anyOf:[{type:'string'},{type:'string',enum:['Wall Mount','Floor Mount']}]}}}};
+import type {JsonObject} from '../src/shared/amazon-contracts.ts';
+const shape:JsonObject={type:'array',items:{type:'object',properties:{value:{anyOf:[{type:'string'},{type:'string',enum:['Wall Mount','Floor Mount']}]}}}};
 test('reference replay requires surviving exact citations and never repairs an alien UUID',async t=>{
  const f=await fixture(t,{mounting_type:shape}),c=f.listing.currentContext(f.draft,f.product,0);
  const make=(ids:string[])=>parseFullGeneration({candidates:[{field:'mounting_type',nativeValue:[{value:'Clip-on'}],evidenceIds:ids}]},c);
@@ -30,6 +31,9 @@ test('composite color recovers only the same primary hue plus individually cited
  const raw={candidates:[{field:'color',nativeValue:[{value:'Green and Off-White'}],evidenceIds:c.evidence.map(e=>e.id)}]};
  const candidate=parseFullGeneration(raw,c),rejected={...candidate,candidates:[],rejectedCandidates:candidate.candidates,missing:[{field:'color',reason:'[SOURCE_VALUE_CONFLICT] legacy whole-value comparison'}]};
  assert.equal(replayReferenceCandidates(rejected,c).candidates.length,1);
+ const oldReference={...rejected,missing:[{field:'color',reason:'[FIELD_REFERENCE] original v1 parser rejection'}]};
+ assert.equal(replayReferenceCandidates(oldReference,c,true).candidates.length,0,'v1 stored replay retains the original whole-color guard');
+ assert.equal(replayReferenceCandidates(oldReference,c).candidates.length,1,'v2 uses the new exact observation guard');
  for(const [key,value] of [['lighting','uncertain'],['presentation','alternatives'],['visibility','occluded']] as const){
   const changed=structuredClone(c);(changed.sourceProduct!.observations![0].images[0] as any)[key]=value;
   assert.equal(retainValidNativeCandidates(parseFullGeneration(raw,changed),changed).candidates.length,0);
@@ -46,7 +50,7 @@ test('composite color recovers only the same primary hue plus individually cited
 test('full schema request explains open branches and keeps source primary color and compatibility boundaries',async t=>{
  const f=await fixture(t,{mounting_type:shape});
  let request:any;
- await suggestListingFields(f.listing.currentContext(f.draft,f.product,0),'deepseek-flash',{apiKey:'fixture'},new AbortController().signal,{fetch:async(_url,options)=>{request=JSON.parse(String(options?.body));return chat({kind:'amazon-fields',candidates:[],missing:[]});}});
+ await suggestListingFields(f.listing.currentContext(f.draft,f.product,0),'deepseek-flash',{apiKey:'fixture'},new AbortController().signal,{now:()=>new Date(),nonce:()=>'fixture',maxResponseBytes:100000,fetch:async(_url,options)=>{request=JSON.parse(String(options?.body));return chat({kind:'amazon-fields',candidates:[],missing:[]});}});
  const instructions=request.messages[0].content;
  assert.match(instructions,/anyOf.*unrestricted string/i);
  assert.match(instructions,/primary SKU color/i);
@@ -66,5 +70,5 @@ test('DONE retains unresolved output diagnostics without new calls or turning ex
  assert.ok(result.remaining.includes(op.remaining[0]),JSON.stringify(result.remaining));
  assert.equal(result.remaining.includes(op.remaining[1]),false);
  assert.equal(result.aiCalls,0);assert.equal(f.requests.length,0);
- assert.ok(result.issues.some(i=>i.kind==='system-failure'&&i.rawMessage===op.remaining[0]));
+ assert.ok(result.issues?.some(i=>i.kind==='system-failure'&&i.rawMessage===op.remaining[0]));
 });

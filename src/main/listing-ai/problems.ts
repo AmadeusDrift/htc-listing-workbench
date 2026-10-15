@@ -26,7 +26,8 @@ export function listingProblems(draft:AmazonDraft,remaining:string[],operation?:
 
 /** Keep the original diagnosis only while its exact field still has a current problem. */
 export function unresolvedCompletionReasons(draft:AmazonDraft,current:string[],previous:string[]):string[]{
-  const fields=(message:string)=>message.split('：',1)[0].split('、').filter(field=>Object.hasOwn(draft.schema.schema.properties??{},field));
+  const schemaFields=new Set(Object.keys(draft.schema.schema.properties??{}));
+  const fields=(message:string)=>message.split('：',1)[0].split('、').filter(field=>schemaFields.has(field));
   const unresolved=new Set(current.flatMap(fields));
   return [...new Set([...current,...previous.filter(message=>fields(message).some(field=>unresolved.has(field)))])].slice(0,100).map(value=>value.slice(0,2000));
 }

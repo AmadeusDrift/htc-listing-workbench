@@ -41,6 +41,19 @@ export class AutomaticTaskCheckpoints {
   revision(id:string):number|undefined{return this.previous.get(id)?.revision;}
   forget(id:string):void{this.previous.delete(id);}
   matches(task:AutomaticListingTask):boolean{const before=this.previous.get(task.id);return !!before&&isDeepStrictEqual(before,task);}
+  persistedIndices(task:AutomaticListingTask,keys:readonly string[]|undefined):number[]|null{
+    const prior=this.previous.get(task.id);
+    if(keys===undefined||!prior||prior.revision!==task.revision||header(prior)!==header(task)
+      ||prior.items.length!==task.items.length||prior.items.some((row,index)=>row.key!==task.items[index].key)
+      ||['COMPLETED','CANCELLED'].includes(task.status))return null;
+    const selected=new Set(keys),indices=prior.items.flatMap((row,index)=>selected.has(row.key)?[index]:[]);
+    return indices.length===selected.size&&indices.length<=100?indices:null;
+  }
+  matchesPersistedParts(id:string,metadata:unknown,indices:readonly number[],items:unknown[]):boolean{
+    const prior=this.previous.get(id);if(!prior)return false;
+    const {items:_items,...before}=prior;
+    return isDeepStrictEqual(before,metadata)&&indices.every((index,offset)=>isDeepStrictEqual(prior.items[index],items[offset]));
+  }
   prepare(task:AutomaticListingTask, forceFull=false, evidenceKeys:string[]=[],beforeValidate?:(items:AutomaticListingItem[])=>void, changedKeys?:readonly string[]):TaskCheckpointChange{
     const prior=this.previous.get(task.id);
     let full=forceFull||!prior||prior.revision!==task.revision-1||header(prior)!==header(task)

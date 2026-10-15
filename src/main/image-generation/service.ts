@@ -358,7 +358,7 @@ export class ImageGenerationService {
   }
   /** Main-process workflow entry point; never accepts or returns a caller-selected filesystem path. */
   async readCandidate(id: string): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
-    this.ensureOpen(); return readCandidateFiles(this.directory, id, this.decodePreview);
+    this.ensureOpen(); return readCandidateFiles(this.directory, id, this.processPreview);
   }
   private saveCandidate(candidate: GeneratedImageCandidate, bytes: Buffer, preview: Buffer, record:(error:unknown)=>void): void {
     let temporary: string | undefined;

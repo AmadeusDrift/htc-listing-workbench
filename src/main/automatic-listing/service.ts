@@ -2,6 +2,7 @@ import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import { readItemDiagnostic } from './item-diagnostic.ts';
 import {readRoundSpend} from './round-spend.ts';
+import {planCancelledTaskRecovery} from './cancelled-recovery.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import {categoryUnknownCode,categoryFailureRequestId} from '../ai/category-knowledge.ts';
@@ -203,6 +204,7 @@ export class AutomaticListingService {
     if(this.tasks.has(task.id))this.assertManaged(task.id);
     const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
     let savedChange:TaskCheckpointChange|undefined;
+    let partialPersistedCheck=false;
     try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
@@ -211,6 +213,17 @@ export class AutomaticListingService {
     // even when an invalid writer forgot to advance the task revision.
     const dataVersion=Number(this.db.prepare('PRAGMA data_version').get()!.data_version);
     if(persisted&&(db!==this.db||this.checkpointDataVersions.get(task.id)!==dataVersion)){
+      const scopedKeys=changedKeys===undefined?undefined:[...changedKeys,...completed.map(result=>result.key)];
+      const indices=this.checkpoints.persistedIndices(task,scopedKeys);
+      if(indices!==null){
+        const columns=indices.map((index,offset)=>`,json_extract(record_json,'$.items[${index}]') item_${offset}`).join('');
+        const saved=db.prepare(`SELECT json_remove(record_json,'$.items') metadata${columns} FROM automatic_listing_tasks WHERE id=?`).get(task.id)!;
+        const metadata=JSON.parse(String(saved.metadata)),items=indices.map((_index,offset)=>JSON.parse(String(saved[`item_${offset}`])));
+        if(!this.checkpoints.matchesPersistedParts(task.id,metadata,indices,items))throw new UserFacingError('任务检查点已变化，请重新读取原任务；未覆盖历史');
+        // Only these SKU slots were checked. Keep the task-wide data version
+        // dirty so another externally changed SKU is checked before its write.
+        partialPersistedCheck=true;
+      }else{
       const savedTask=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
       // Unrelated AI/hosting commits invalidate SQLite's connection-wide version,
       // not this already validated immutable task. Exact equality needs no second
@@ -222,6 +235,7 @@ export class AutomaticListingService {
         // transaction rolled back). Rebuild the whole proof, never incrementally
         // validate against the stale in-memory checkpoint.
         assertAutomaticRejectionHistory(db,durable);assertTaskAdaptationHistory(db,durable);this.checkpoints.remember(durable);
+      }
       }
     }
     task.revision++; task.updatedAt = at??new Date().toISOString();
@@ -240,7 +254,7 @@ export class AutomaticListingService {
         if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
       } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
     }
-    });this.checkpoints.remember(task,savedChange);this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
+    });this.checkpoints.remember(task,savedChange);if(!partialPersistedCheck)this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
     }catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
   }
   private saveItem(task:AutomaticListingTask,row:AutomaticListingItem,db:DatabaseSync=this.db):void{this.save(task,db,[],undefined,[row.key]);}
@@ -1620,6 +1634,18 @@ export class AutomaticListingService {
   pause(id: string): AutomaticListingTask {
     this.assertManaged(id);const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
     task.status = 'PAUSED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task,this.db,[],undefined,[]); return structuredClone(task);
+  }
+  restoreCancelledTask(raw:unknown):AutomaticListingTask {
+    const input=record(raw,'恢复已取消任务',['taskId','taskRevision']),id=identifier(input.taskId),task=this.task(id);
+    this.assertManaged(id);
+    const plan=planCancelledTaskRecovery(task,{taskId:id,expectedRevision:input.taskRevision as number},{workerActive:this.worker!==null||this.activeId!==null||this.grants.has(id),confirming:this.confirming.has(id),archiving:this.archiving,preparing:this.operationProgress!==null});
+    const next={...task,...plan.patch},at=new Date().toISOString();
+    try {transaction(this.db,()=>{
+      appendAuditEvent(this.db,randomUUID(),null,plan.audit.action,plan.audit.summary,JSON.stringify(plan.audit.detail),at);
+      this.save(next,this.db,[],at,[]);
+    });}catch(error){this.checkpoints.remember(task);throw error;}
+    this.tasks.set(id,next);
+    return structuredClone(next);
   }
   cancel(id: string): AutomaticListingTask {
     this.assertManaged(id);const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');

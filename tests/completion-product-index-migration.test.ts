@@ -8,7 +8,7 @@ import {createWorkspaceBackup,prepareWorkspaceRestore,discardPreparedRestore} fr
 
 test('schema38 preserves all nine sale predicates and records, and rolls back on journal failure',t=>{
  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/completion-index-')),db=openDatabase(dir);t.after(()=>{db.close();rmSync(dir,{recursive:true,force:true});});
- const downgrade=()=>db.exec('DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DROP INDEX record_completion_product;DELETE FROM module_migration_journal WHERE version>=38;PRAGMA user_version=37');downgrade();
+ const downgrade=()=>db.exec('DROP INDEX IF EXISTS record_completion_draft;DROP INDEX IF EXISTS record_completion_safety;DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DROP INDEX record_completion_product;DELETE FROM module_migration_journal WHERE version>=38;PRAGMA user_version=37');downgrade();
  const identity={mode:'demo',productId:'p',productRevision:1,variantId:'v',sku:'sku',sellerId:'s',marketplaceId:'m',listingProgram:'standard',recipeHash:'hash'};
  const fields=Object.keys(identity),args=Object.values(identity),sql='SELECT id,record_json FROM listing_completion_operations WHERE '+fields.map(name=>`json_extract(record_json,'$.safetyIdentity.${name}')=?`).join(' AND ');
  const insert=db.prepare('INSERT INTO listing_completion_operations VALUES(?,?)');for(let i=0;i<fields.length;i++)insert.run('different'+i,JSON.stringify({safetyIdentity:{...identity,[fields[i]]:'different'}}));insert.run('original',JSON.stringify({safetyIdentity:identity,unknown:true,attempts:3}));
@@ -19,7 +19,7 @@ test('schema38 preserves all nine sale predicates and records, and rolls back on
 });
 
 test('backup accepts exact schema38 product index and rejects its replacement',async t=>{
- mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/completion-index-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const dir=join(root,'data');let db=openDatabase(dir);db.exec('DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DELETE FROM module_migration_journal WHERE version=39;PRAGMA user_version=38');db.close();
+ mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/completion-index-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const dir=join(root,'data');let db=openDatabase(dir);db.exec('DROP INDEX IF EXISTS record_completion_draft;DROP INDEX IF EXISTS record_completion_safety;DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DELETE FROM module_migration_journal WHERE version>=39;PRAGMA user_version=38');db.close();
  const file=join(root,'schema38.htcbackup');await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(join(root,'target'),file,'synthetic passphrase');await discardPreparedRestore(join(root,'target'),prepared);
  db=openDatabase(dir);db.exec("DROP INDEX record_completion_product;CREATE INDEX record_completion_product ON listing_completion_operations(json_extract(record_json,'$.safetyIdentity.sku'))");db.close();await assert.rejects(createWorkspaceBackup(dir,join(root,'wrong.htcbackup'),'synthetic passphrase'),/索引/);
 });

@@ -14,6 +14,7 @@ const api: RedApi = {
   previewSkuNaming: input => invoke('red:sku-naming:preview', input),
   startAutomaticListing: input => invoke('red:automatic-listing:start', input),
   restartAutomaticListingTask:id=>invoke('red:automatic-listing:from-start',id),
+  restoreCancelledAutomaticTask:input=>invoke('red:automatic-listing:restore-cancelled',input),
   getAutomaticCurrentRound:id=>invoke('red:automatic-listing:round',id),
   getAutomaticOperationProgress:()=>invoke('red:automatic-listing:operation-progress'),
   onAutomaticOperationProgress:listener=>{const receive=(_event:Electron.IpcRendererEvent,progress:import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null)=>listener(progress);ipcRenderer.on('red:automatic-listing:operation-progress-changed',receive);return()=>ipcRenderer.removeListener('red:automatic-listing:operation-progress-changed',receive);},

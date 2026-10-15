@@ -8,7 +8,7 @@ import {createWorkspaceBackup,prepareWorkspaceRestore,discardPreparedRestore} fr
 
 test('schema39 preserves workflow scope rows and rowid order and rolls back both indexes atomically',t=>{
  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/workflow-index-')),db=openDatabase(dir);t.after(()=>{db.close();rmSync(dir,{recursive:true,force:true});});
- const downgrade=()=>db.exec('DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DELETE FROM module_migration_journal WHERE version=39;PRAGMA user_version=38');downgrade();
+ const downgrade=()=>db.exec('DROP INDEX IF EXISTS record_completion_draft;DROP INDEX IF EXISTS record_completion_safety;DROP INDEX record_workflow_product;DROP INDEX record_workflow_draft;DELETE FROM module_migration_journal WHERE version>=39;PRAGMA user_version=38');downgrade();
  const insert=db.prepare('INSERT INTO image_workflow_runs VALUES(?,?)');insert.run('old',JSON.stringify({productId:'p',draftId:'d',status:'UNKNOWN',attempts:3}));insert.run('other',JSON.stringify({productId:'other',draftId:'other'}));insert.run('new',JSON.stringify({productId:'p',draftId:'d',status:'COMPLETE'}));
  const original=db.prepare('SELECT * FROM image_workflow_runs ORDER BY rowid').all(),sqls=["SELECT record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? ORDER BY rowid DESC","SELECT id,record_json FROM image_workflow_runs WHERE json_extract(record_json,'$.draftId')=? ORDER BY rowid DESC"],ids=['p','d'];
  const before=sqls.map((sql,i)=>db.prepare(sql).all(ids[i]));for(let i=0;i<2;i++){assert.equal(before[i].length,2);assert.match(String(db.prepare('EXPLAIN QUERY PLAN '+sqls[i]).get(ids[i])!.detail),/SCAN/);}migrateModules(db);migrateModules(db);
@@ -17,7 +17,7 @@ test('schema39 preserves workflow scope rows and rowid order and rolls back both
 });
 
 test('backup accepts exact schema39 workflow indexes and rejects a replaced expression',async t=>{
- mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/workflow-index-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const dir=join(root,'data');let db=openDatabase(dir);db.close();
+ mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/workflow-index-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const dir=join(root,'data');let db=openDatabase(dir);db.exec('DROP INDEX record_completion_draft;DROP INDEX record_completion_safety;DELETE FROM module_migration_journal WHERE version=40;PRAGMA user_version=39');db.close();
  const file=join(root,'schema39.htcbackup');await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(join(root,'target'),file,'synthetic passphrase');await discardPreparedRestore(join(root,'target'),prepared);
  db=openDatabase(dir);db.exec("DROP INDEX record_workflow_draft;CREATE INDEX record_workflow_draft ON image_workflow_runs(json_extract(record_json,'$.productId'))");db.close();await assert.rejects(createWorkspaceBackup(dir,join(root,'wrong.htcbackup'),'synthetic passphrase'),/索引/);
 });

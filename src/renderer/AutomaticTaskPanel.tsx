@@ -132,11 +132,11 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
     catch(cause){if(mounted.current)setError(errorText(cause));}
     finally{actionPending.current=false;version.current++;if(mounted.current){setPending('');setRefresh(v=>v+1);}}
   }
-  async function act(action: 'pause' | 'resume' | 'cancel' | 'restart') {
+  async function act(action: 'pause' | 'resume' | 'cancel' | 'restart' | 'restore') {
     if (!task || busy || actionPending.current) return;
     actionPending.current = true; version.current++; setPending(action); setError('');
     try {
-      const value = await (action === 'pause' ? api.pauseAutomaticListingTask(task.id) : action === 'resume' ? api.resumeAutomaticListingTask(task.id) : action==='restart'?api.restartAutomaticListingTask?.(task.id):api.cancelAutomaticListingTask(task.id));
+      const value = await (action === 'pause' ? api.pauseAutomaticListingTask(task.id) : action === 'resume' ? api.resumeAutomaticListingTask(task.id) : action==='restart'?api.restartAutomaticListingTask?.(task.id):action==='restore'?api.restoreCancelledAutomaticTask?.({taskId:task.id,taskRevision:task.revision}):api.cancelAutomaticListingTask(task.id));
       if (mounted.current && value) { adopted(value); }
     } catch (cause) { if (mounted.current) setError((action==='resume'?'本次未启动，未发送新请求：':'')+errorText(cause)); }
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
@@ -163,6 +163,7 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
       <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="包装抛重限制" value={outcomes.packagingFiltered}/> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="已收无效输出" value={outcomes.invalidOutput}/> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="neutral" label="历史未分类" value={outcomes.unclassified} />；原始原因保留在各 SKU 中。</p>
       {error && <p className="workflow-notice" role="alert">任务操作未完成：{error}</p>}
       <div className="workflow-actions">
+        {task.status==='CANCELLED'&&api.restoreCancelledAutomaticTask&&<button type="button" className="button secondary" disabled={busy||Boolean(pending)} onClick={()=>void act('restore')}>{pending==='restore'?'正在恢复…':'恢复为暂停'}</button>}
         {api.restartAutomaticListingTask&&['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<button type="button" className="button secondary" disabled={busy||Boolean(pending)} onClick={()=>void act('restart')}>{pending==='restart'?'正在从头检查…':'从头检查并补齐'}</button>}
         {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}

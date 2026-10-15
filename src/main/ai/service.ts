@@ -31,7 +31,7 @@ import { isSchemaTransientError } from '../amazon/schema-retry.ts';
 import {validateListingContext} from '../listing-ai/validation.ts';
 import {replayReferenceCandidates,sameRecoverySource} from '../listing-ai/candidate-recovery.ts';
 import { parseImagePlanRecovery } from './image-validation.ts';
-import { parseFunctionSettings } from "./primitives.ts";
+import { parseFunctionSettings,sha256 } from "./primitives.ts";
 import { resultHasOwner } from './result-owner.ts';
 import { evidenceVersion, imageEvidenceVersion, isFullSchema } from "../listing-ai/native-values.ts";
 import { assertPresentationResultOwner } from './presentation-history.ts';
@@ -139,6 +139,8 @@ interface PreparedRequest {
   assertBeforeSend?(): void;
 }
 interface DurableFieldCall {
+  /** Private category receipt replay; never a renderer-selected call identity. */
+  categoryReplay?:{callId:string;requestSha256:string};
   id?:string;assignments?:FieldPurposeAssignment[];part?:NonNullable<AiResult['fieldGroupPart']>;
   sent?:(call:AiCall)=>void;result?:(result:AiResult)=>void;
 }
@@ -646,7 +648,7 @@ export class AiService {
     this.ensureOpen();
     const product = this.product(input.productId, input.productRevision), variant = product.variants[0];
     if (!variant || input.candidates.length > 50 || !['keywords','select','judge'].includes(input.phase)) throw new AiError('INVALID_INPUT');
-    const profile = this.activePurpose(input.phase==='select'?'category_decision':'category_analysis',true,input.phase==='judge');
+    const profile = this.purposeProfile(input.phase==='select'?'category_decision':'category_analysis',true,input.phase==='judge');
     const generated = new Set(this.db.prepare("SELECT json_extract(record_json,'$.approvedAssetId') AS assetId FROM image_workflow_runs WHERE json_extract(record_json,'$.productId')=? UNION SELECT json_extract(s.value,'$.approvedAssetId') AS assetId FROM image_workflow_runs w, json_each(w.record_json,'$.slots') s WHERE json_extract(w.record_json,'$.productId')=?").all(product.id,product.id).map(row => row.assetId));
     const references = product.assets.filter(asset => !generated.has(asset.id)).slice(0, 3);
     if (!references.length) throw new UserFacingError('商品分类需要至少一张可用来源图片');
@@ -655,7 +657,7 @@ export class AiService {
     const categoryContext={version:1 as const,phase:input.phase,requestSha256:listingFingerprint({payload,references:references.map(a=>({id:a.id,sha256:this.source({productId:product.id,productRevision:product.revision,assetId:a.id}).sha256})),model:profile.model,effort:profile.routing?.effectiveEffort})};
     const categoryScope=taskAiContext.getStore(),categoryBatch=categoryScope?.waitingOperationId?this.batchTasks.find(categoryScope.waitingOperationId):undefined;
     const originalBatchCallId=input.phase!=='select'&&categoryBatch&&categoryBatch.owner.productId===product.id&&categoryBatch.owner.productRevision===product.revision?categoryBatch.aiCallId:undefined;
-    const recovery=await recoverCategoryPhase({originalBatchCallId,db:this.db,directory:this.directory,calls:this.listCalls(),results:this.listResults(product.id),productId:product.id,productRevision:product.revision,model:profile.model,effort:profile.routing?.effectiveEffort??'',context:categoryContext,payloadHash:listingFingerprint(payload)});
+    const recovery=await recoverCategoryPhase({originalBatchCallId,db:this.db,directory:this.directory,calls:this.listCalls(),results:this.listResults(product.id),productId:product.id,productRevision:product.revision,model:profile.model,effort:profile.routing?.effectiveEffort??'',context:categoryContext,payloadHash:listingFingerprint(payload),payload});
     assertContextFresh();if(signal)throwIfAborted(signal);this.product(input.productId,input.productRevision);
     if(recovery.saved&&recovery.saved.output.kind==='category-decision')return {...recovery.saved,output:recovery.saved.output};
     const priorSnapshot=listingFingerprint(recovery.calls);
@@ -669,7 +671,7 @@ export class AiService {
       }
       return {categoryContext,categoryPriorSnapshot:priorSnapshot,categoryRepairPriors:recovery.priors,assertBeforeSend:()=>{if(listingFingerprint(categoryCalls(this.listCalls(),product.id,product.revision))!==priorSnapshot)throw new AiError('CONFIG_CHANGED');}, variantId:variant.id, assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(payload),assertFresh,
         invoke:(credentials, context)=>categoryDecision(payload,credentials as DeepSeekCredentials,activeSignal,context,images) };
-    }, signal);
+    }, signal,undefined,recovery.replayCall?{categoryReplay:{callId:recovery.replayCall.id,requestSha256:categoryContext.requestSha256}}:undefined);
     if (result.output.kind !== 'category-decision') throw new AiError('OUTPUT_INVALID');
     return { ...result, output:result.output };
   }
@@ -1001,6 +1003,13 @@ export class AiService {
       }
       // This guard precedes preparation, reference hosting and paid reservation.
       let replay:ReturnType<typeof readCallReceiptSync>|undefined,replayCall:AiCall|undefined;
+      if(durable?.categoryReplay){
+        const requested=durable.categoryReplay,original=this.getCall(uuid(requested.callId));
+        if(scope.operation!=='category'||!original)throw new AiError('INVALID_INPUT');
+        if(original.status!=='FAILED'||!original.requestScope||original.requestScope.operation!=='category'||!sameRequestBusiness(scope,original.requestScope)||!original.categoryContext||original.categoryContext.phase!==scope.phase||original.categoryContext.requestSha256!==sha256(requested.requestSha256)||original.requestFingerprint!==this.invocationFingerprint(this.originalProfile(original),input,source)||pending.some(call=>call.id!==original.id))throw this.unknownInvocation(original);
+        const saved=verifiedRecoveryReceipt(this.db,this.directory,original);if(!saved||openRouterFailure(saved.record.status,saved.capture.body))throw this.unknownInvocation(original);
+        replay=saved;replayCall=original;Object.assign(profile,this.originalProfile(original));
+      }
       if(pending.length){
         if(pending.length!==1)throw this.unknownInvocation(pending[0]);
         const original=pending[0],frozen=this.originalProfile(original);

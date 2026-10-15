@@ -5,6 +5,12 @@ import {AiError} from './errors.ts';
 import {taskAiContext} from './batch/task-context.ts';
 import {appendAuditEvent} from '../storage/audit.ts';
 import {readProviderReceipt} from './receipts.ts';
+import {resultHasOwner} from './result-owner.ts';
+import {assertReceiptRecovery} from './receipt-recovery.ts';
+import {localAiRequestResolved} from './request-certainty.ts';
+import {parseOriginalCategoryReceipt} from './category-receipt.ts';
+import type {CategoryDecision} from '../../shared/category-ai-contracts.ts';
+import type {ProductTypeOption} from '../../shared/amazon-contracts.ts';
 
 const ACTION='ai.category.detail-repair';
 const TOMBSTONE='ai.category.restored-request';
@@ -19,9 +25,21 @@ export function assertCategoryRepairAvailable(db:DatabaseSync,prior:AiCall,scope
  if(!scope?.explicitContinueAt||!Number.isFinite(Date.parse(scope.explicitContinueAt))||!scope.authorize()||Date.parse(scope.explicitContinueAt)<=Date.parse(prior.finishedAt??prior.startedAt))fail('类目接口参数历史失败：请在更新程序后手动继续原任务；本次未发送');
  if(db.prepare("SELECT 1 FROM audit_events WHERE action=? AND (id=? OR json_extract(detail_json,'$.priorCallId')=? OR json_extract(detail_json,'$.retryCallId')=?)").get(ACTION,claimId(scopeKey),prior.id,prior.id))fail('类目接口参数修复已尝试一次；请核对新回执，本次未重复发送');
 }
-export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:string;calls:AiCall[];results:AiResult[];productId:string;productRevision:number;model:string;effort:string;context:NonNullable<AiCall['categoryContext']>;payloadHash:string;originalBatchCallId?:string}){
+export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:string;calls:AiCall[];results:AiResult[];productId:string;productRevision:number;model:string;effort:string;context:NonNullable<AiCall['categoryContext']>;payloadHash:string;originalBatchCallId?:string;payload?:{phase:CategoryDecision['phase'];candidates:ProductTypeOption[];[key:string]:unknown}}){
  const {db,directory,results,context}=options, calls=categoryCalls(options.calls,options.productId,options.productRevision);
+ const owned=(result:AiResult,call:AiCall)=>{try{assertReceiptRecovery(db,directory,result,call);return result.output.kind==='category-decision'&&resultHasOwner(result,call);}catch{return false;}};
+ const exact=(call:AiCall)=>call.model===options.model&&call.purposeSnapshot?.effectiveEffort===options.effort&&(!call.categoryContext||call.categoryContext.requestSha256===context.requestSha256);
+ const saved=results.find(result=>result.output.kind==='category-decision'&&result.output.phase===context.phase&&result.productId===options.productId&&result.productRevision===options.productRevision&&result.sourceSha256===options.payloadHash&&calls.some(call=>call.id===result.callId&&exact(call)&&owned(result,call)));
+ // A failure in another phase must not hide an exact successful phase. A
+ // pending request in this same phase still outranks an older cached result.
+ if(saved&&!calls.some(call=>(!call.categoryContext||call.categoryContext.phase===context.phase)&&!localAiRequestResolved(db,directory,call.id,call)))return{saved,priors:[],calls,replayCall:undefined};
  if(db.prepare("SELECT 1 FROM audit_events WHERE action=? AND json_extract(detail_json,'$.productId')=? AND json_extract(detail_json,'$.productRevision')=?").get(TOMBSTONE,options.productId,options.productRevision))fail('恢复备份前存在类目请求记录，当前备份缺少完整请求结果；本次未重发，请核对历史记录');
+ // Hand a valid, exactly bound original response back to M07's original-call
+ // local replay. A legacy missing context or a null/invalid domain is not proof.
+ if(options.payload)for(const call of calls)if(call.status==='FAILED'&&call.requestScope&&call.requestFingerprint&&call.categoryContext?.phase===context.phase&&exact(call)&&await parseOriginalCategoryReceipt(db,directory,call,options.payload)){
+  const other=calls.find(other=>other.id!==call.id&&(!other.categoryContext||other.categoryContext.phase===context.phase)&&!localAiRequestResolved(db,directory,other.id,other));
+  if(!other)return{saved:undefined,priors:[],calls,replayCall:call};
+ }
  const priors:AiCall[]=[];
  for(const call of calls){
   if(call.id===options.originalBatchCallId)continue;
@@ -38,12 +56,7 @@ export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:st
    priors.push(call);assertCategoryRepairAvailable(db,call,`${call.productId}:${call.productRevision}:select`);
   }
  }
- const saved=results.find(r=>{
-  if(r.output.kind!=='category-decision'||r.output.phase!==context.phase||r.productId!==options.productId||r.productRevision!==options.productRevision||r.model!==options.model||r.sourceSha256!==options.payloadHash)return false;
-  const call=calls.find(c=>c.id===r.callId&&c.status==='SUCCEEDED'&&c.providerId===r.providerId&&c.model===r.model);
-  return !!call&&call.purposeSnapshot?.effectiveEffort===options.effort&&(!call.categoryContext||call.categoryContext.requestSha256===context.requestSha256);
- });
- return {saved,priors,calls};
+ return {saved,priors,calls,replayCall:undefined};
 }
 /** Called within usage reservation transaction: claim and new call succeed or roll back together. */
 export function claimCategoryRepair(db:DatabaseSync,priors:AiCall[],retry:AiCall):void{

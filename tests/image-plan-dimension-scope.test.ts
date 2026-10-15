@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { assertImageSetPlan, validateImageSetPlan } from '../src/main/ai/image-validation.ts';
+import { assertImageSetPlan as checkImageSetPlan, validateImageSetPlan } from '../src/main/ai/image-validation.ts';
+import type { ImageEvidenceOptions } from '../src/main/ai/image-validation.ts';
 import { imageEvidence, sourceDimensionEvidence } from '../src/main/image-workflow/image-facts.ts';
 import { sceneSet } from './fixtures/image-set.ts';
 import { planProductImage } from '../src/main/ai/image-adapters.ts';
 
 const variantId=randomUUID();
+// New-response checks opt in explicitly; saved/service checks retain their prior semantics.
+const assertImageSetPlan=(p:ReturnType<typeof sceneSet>,c:any,options:ImageEvidenceOptions={enforceDimensionScope:true})=>checkImageSetPlan(p,c,options);
 const body={id:'body',name:'Product length',value:'10 cm',meaning:'general',source:'source_confirmed'};
 const packageSize={id:`measurement:${variantId}:package.length`,name:'包装长度',value:'12 cm',variantId,sourceSha256:'a'.repeat(64)};
 const context=():any=>({setPolicy:'seven-product-v2',listing:{variantId,evidence:[]},sourceMeasurements:[packageSize],referenceMeasurements:[]});
@@ -22,6 +25,12 @@ test('seven includes the dimension slot; eight or absent slots give a bounded co
 test('only package dimensions leave the dimension slot optional and keep the source evidence intact',()=>{
  const c=context(),before=structuredClone(c);assert.deepEqual(sourceDimensionEvidence(c),[]);
  assert.ok(imageEvidence(c).some(v=>v.id===packageSize.id));assert.doesNotThrow(()=>assertImageSetPlan(sceneSet(),c));assert.deepEqual(c,before);
+});
+test('stored approved plans keep their original scope semantics while numeric and evidence guards remain',()=>{
+ const c=context(),p=sceneSet();c.listing.evidence.push(body);dimensions(p,packageSize.id,'Product length 12 cm');
+ const before=structuredClone(p);assert.doesNotThrow(()=>assertImageSetPlan(p,c,{storedVersion:'listing-evidence/v5'}));assert.doesNotThrow(()=>checkImageSetPlan(p,c));assert.deepEqual(p,before);
+ assert.throws(()=>assertImageSetPlan(p,c));p.slots[6].expectedText[0].text='Product length 99 cm';assert.throws(()=>assertImageSetPlan(p,c,{storedVersion:'listing-evidence/v5'}));
+ p.slots[6].expectedText[0].text='Product length 12 cm';p.slots[6].expectedText[0].evidenceIds=['missing'];assert.throws(()=>assertImageSetPlan(p,c,{storedVersion:'listing-evidence/v5'}));
 });
 test('an optional package diagram must identify packaging in every measured caption',()=>{
  const c=context(),p=sceneSet();dimensions(p,packageSize.id,'Package length 12 cm');assert.doesNotThrow(()=>assertImageSetPlan(p,c));

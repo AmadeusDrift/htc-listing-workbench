@@ -65,7 +65,7 @@ export async function readBounded(response: Response, max: number, signal: Abort
     }
   } catch (error) {
     cancel(); throwIfAborted(signal);
-    if (error instanceof AiError) throw error;
+    if (error instanceof AiError) { error.responseDiagnostic ??= {status:response.status,byteCount:size}; throw error; }
     throw invalid('RESPONSE_READ_FAILED');
   } finally { reader.releaseLock(); }
 }

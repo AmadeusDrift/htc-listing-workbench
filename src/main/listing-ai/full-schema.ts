@@ -88,7 +88,7 @@ export function fullReference(context:Pick<ListingAiContext,'evidence'> & Partia
 }
 /** Resolve explicit current-SKU aliases only; never match another variant by text. */
 export type FullGenerationReferencePolicy='text-evidence/v1'|'selected-image/v2';
-function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext,policy:FullGenerationReferencePolicy):void {
+function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext,policy:FullGenerationReferencePolicy,legacyDiagnostics=false):void {
   const ids=new Set(c.evidence.map(e=>e.id));
   for(const candidate of [...output.candidates]){
     const bad:string[]=[];
@@ -107,11 +107,11 @@ function normalizeFullEvidence(output:ListingFieldsOutput,c:ListingAiContext,pol
     if(!unknown&&candidate.items.every(item=>item.evidenceIds.some(id=>c.evidence.some(e=>e.id===id&&(e.meaning===candidate.field||e.name===candidate.field||e.id===`${c.variantId}:spec`)))))continue;
     output.candidates=output.candidates.filter(item=>item!==candidate);
     (output.rejectedCandidates??=[]).push(candidate);
-    output.missing.push({field:candidate.field,reason:`[FIELD_REFERENCE] ${reason}；待补资料，已保留其他可用字段`});
+    output.missing.push({field:candidate.field,reason:`[FIELD_REFERENCE] ${reason}；${legacyDiagnostics?'待补资料，已保留其他可用字段':'输出引用错误，已保留其他可用字段及原候选'}`});
   }
 }
 /** Accept the previous text envelope as an input convenience; persist only native values. */
-export function parseFullGeneration(raw:unknown,c:ListingAiContext,referencePolicy:FullGenerationReferencePolicy='selected-image/v2'):ListingFieldsOutput {
+export function parseFullGeneration(raw:unknown,c:ListingAiContext,referencePolicy:FullGenerationReferencePolicy='selected-image/v2',legacyDiagnostics=false):ListingFieldsOutput {
   if(!object(raw))fail('字段响应不是 JSON 对象');
   const root=raw as Record<string,unknown>;
   const candidates=Array.isArray(root.candidates)?root.candidates.map(value=>{
@@ -130,7 +130,7 @@ export function parseFullGeneration(raw:unknown,c:ListingAiContext,referencePoli
     const values=nativeText('color',candidate.nativeValue);
     candidate.items=candidate.items.map((item,index)=>({...item,value:values[index]??item.value}));
   }
-  normalizeFullEvidence(output,c,referencePolicy);assertFullEvidence(output,c);return output;
+  normalizeFullEvidence(output,c,referencePolicy,legacyDiagnostics);assertFullEvidence(output,c);return output;
 }
 export function validateFullContext(raw:unknown):ListingAiContext {
   if(!object(raw)||raw.contract!==FULL_SCHEMA_CONTRACT||!object(raw.fullSchema)||!object(raw.fullSchema.schema)||!object(raw.fullSchema.metaSchema)||!object(raw.currentAttributes)||!object(raw.businessValues)||!object(raw.sourceProduct)||!Array.isArray(raw.fields)||!Array.isArray(raw.evidence))fail('完整 Schema 上下文不完整');
@@ -196,7 +196,7 @@ function compositionFields(error:ErrorObject,schema:unknown):string[]|undefined 
   };
   visit(node);return [...fields];
 }
-export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiContext):ListingIssue[]{
+export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiContext,legacyColors=false):ListingIssue[]{
   const candidates=output.candidates.filter(candidate=>!haulUnsupportedField(c.listingProgram,candidate.field));
   const attributes={...c.currentAttributes},names=new Set(candidates.map(c=>c.field)),issues:ListingIssue[]=[];
   for(const candidate of candidates){
@@ -214,7 +214,20 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
       const humanIdentity=(value:string)=>identity(value)??`raw:${value.trim().replace(/\s+/g,' ').toLowerCase()}`;
       const human=colorEvidence.filter(e=>e.source==='human_confirmed'&&e.value.trim()).map(e=>humanIdentity(e.value));
       const humanConflict=human.length>0&&new Set(human).size===1&&actualText.some(value=>!human.includes(humanIdentity(value)));
-      const sourceConflict=expected.length>0&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value));
+      // A two-part visible color can retain the exact SKU hue while naming a
+      // secondary surface. Each part needs its own cited color observation on
+      // one already-authorized SKU image; finish/prose and uncertain images do not qualify.
+      const supportedComposite=(value:string)=>{
+        if(legacyColors)return false;
+        const parts=value.split(' / ');
+        if(parts.length!==2||expected.length===0||new Set(expected).size!==1||!parts.includes(expected[0]!))return false;
+        return c.sourceProduct?.observations?.some(source=>skuObservationImages(source,c.variantId).some(image=>{
+          const colors=image.colors.map(identity);
+          return parts.every(part=>colors.includes(part)&&image.observations?.some((observation,index)=>observation.visibility==='visible'&&/color|colour|颜色/i.test(observation.name)
+            &&observation.values.some(text=>identity(text)===part)&&candidate.items.some(item=>item.evidenceIds.includes(`${c.variantId}:observation:${image.assetId}:${index}`))));
+        }))??false;
+      };
+      const sourceConflict=expected.length>0&&new Set(expected).size===1&&actual.every(value=>!expected.includes(value)&&!observed.includes(value)&&!supportedComposite(value!));
       if(humanConflict||actual.length&&sourceConflict)issues.push({code:'SOURCE_VALUE_CONFLICT',message:humanConflict?'color：候选颜色与人工确认颜色矛盾，图片观察不能覆盖人工值':'color：候选颜色与当前 SKU 明确颜色矛盾，且没有清晰的绑定图片观察支持此修正',severity:'ERROR',category:'field',attributeNames:['color'],source:'local',autoFixable:false});
     }
     if(Object.hasOwn(c.businessValues??{},candidate.field))for(const path of changedBusinessLeaves(c.businessValues![candidate.field],candidate.nativeValue,`/${candidate.field}`))issues.push({code:'BUSINESS_VALUE_LOCKED',message:`${path}：不能覆盖已经确定的业务值`,severity:'ERROR',category:'field',attributeNames:[candidate.field],source:'local',autoFixable:false});
@@ -230,10 +243,10 @@ export function nativeCandidateIssues(output:ListingFieldsOutput,c:ListingAiCont
   return issues;
 }
 /** Keep independent valid fields; dependency failures are recomputed after each removal. */
-export function retainValidNativeCandidates(output:ListingFieldsOutput,c:ListingAiContext):ListingFieldsOutput {
+export function retainValidNativeCandidates(output:ListingFieldsOutput,c:ListingAiContext,legacyColors=false):ListingFieldsOutput {
   const result=structuredClone(output);
   for(;;){
-    const errors=[...nativeCandidateIssues(result,c),...fullCopyPolicyIssues(result)];
+    const errors=[...nativeCandidateIssues(result,c,legacyColors),...fullCopyPolicyIssues(result)];
     if(!errors.length||!result.candidates.length)return markOptionalOmissions(result,c);
     const fields=new Set(errors.flatMap(e=>e.attributeNames)),affected=result.candidates.filter(item=>fields.has(item.field));
     if(!affected.length)return markOptionalOmissions(result,c);

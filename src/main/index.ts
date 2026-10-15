@@ -1,7 +1,8 @@
+import {BasicFtpTransport,FtpConnectionPool} from './hosting/ftp.ts';
 import {ControlledAcceptanceSession,CONTROLLED_ACCEPTANCE_FLAG} from './application/controlled-acceptance.ts';
 import {verifyControlledCandidate} from './application/controlled-candidate.ts';
 import {preflightControlledAcceptance} from './application/controlled-startup.ts';
-import {ControlledRunError,type ControlledEffect} from './application/controlled-run-scope.ts';
+import {CONTROLLED_RUN_ID,ControlledRunError,type ControlledEffect} from './application/controlled-run-scope.ts';
 import {createSystemProxyFetch, createAiNetworkDiagnostics} from './ai-network.ts';
 import {createBatchReferencePort} from './hosting/batch-references.ts';
 import { assertConsistencyView } from './source-image-consistency/proof.ts';
@@ -63,6 +64,7 @@ const productionCsp = "default-src 'self'; script-src 'self'; style-src 'self' '
 const controlledAcceptanceMode=process.argv.includes(CONTROLLED_ACCEPTANCE_FLAG);
 let controlledAcceptance:ControlledAcceptanceSession|undefined;
 const guardExternal=(effect:ControlledEffect,transactionDb?:import('node:sqlite').DatabaseSync)=>{if(controlledAcceptanceMode){if(!controlledAcceptance)throw new ControlledRunError();try{controlledAcceptance.assertExternal(effect,transactionDb);}catch(error){if(error instanceof Error&&!(error as {certainty?:string}).certainty)Object.assign(error,{certainty:'NOT_SENT',notSent:true});throw error;}}};
+const guardWire=(effect:ControlledEffect)=>{guardExternal(effect);if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();};
 let store: WorkspaceStore | undefined;
 let amazon: AmazonService | undefined;
 let followup: FollowupService | undefined;
@@ -98,21 +100,22 @@ async function start() {
   if(verifiedCandidate)controlledAcceptance=new ControlledAcceptanceSession(dataRoot,verifiedCandidate,id=>db.getProductSnapshot(id));
   if (recovered) db.recordWorkspaceEvent('workspace.restore.recovered', recovered === 'rolled-back' ? '启动时已回滚中断的备份恢复，保留原始工作区' : '启动时已完成中断的备份恢复清理');
   amazon = new AmazonService(dataRoot, id => db.getProductSnapshot(id), safeStorage, {
-    ...(controlledAcceptanceMode?{preserveHistoricalRecords:true,beforeEffect:(effect:import('./amazon/service.ts').AmazonEffectIdentity,transactionDb?:import('node:sqlite').DatabaseSync)=>{const {kind,operation:_operation,phase:_phase,draftId:_draftId,...scope}=effect;guardExternal({...scope,kind:kind==='target'?'platform-write':kind},transactionDb);}}:{}),
-    schemaFetch: (url, init) => {guardExternal({kind:'schema'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
-    dataFetch: (url, init) => {guardExternal({kind:String(url).includes('/auth/o2/token')?'lwa':init?.method&&['PUT','POST','PATCH','DELETE'].includes(init.method.toUpperCase())?'platform-write':'platform-read'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
+    ...(controlledAcceptanceMode?{preserveHistoricalRecords:true,beforeEffect:(effect:import('./amazon/service.ts').AmazonEffectIdentity,transactionDb?:import('node:sqlite').DatabaseSync)=>{const {kind,operation:_operation,phase:_phase,draftId:_draftId,...scope}=effect;guardExternal({...scope,kind:kind==='target'?'platform-write':kind},transactionDb);if(kind!=='target'&&['schema','platform-read','platform-write'].includes(kind)&&!['createDraft','prepareDrafts','rebindFamily'].includes(effect.operation))controlledAcceptance!.assertBillingPlanAvailable();}}:{}),
+    schemaFetch: (url, init) => {guardWire({kind:'schema'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
+    dataFetch: (url, init) => {guardWire({kind:String(url).includes('/auth/o2/token')?'lwa':init?.method&&['PUT','POST','PATCH','DELETE'].includes(init.method.toUpperCase())?'platform-write':'platform-read'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
   });
-  hosting = new HostingService(dataRoot, db, safeStorage, { ...(controlledAcceptanceMode?{prepareUpload:async (identity:import('./hosting/service.ts').HostingEffectIdentity)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})});return controlledAcceptance!.assertBillingPlanAvailable();},beforeEffect:(identity:import('./hosting/service.ts').HostingEffectIdentity,_kind:unknown,transactionDb?:import('node:sqlite').DatabaseSync)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})},transactionDb);controlledAcceptance!.assertBillingPlanAvailable();}}:{}), probe: createPublicImageProbe({ nativeFetch: (url, init) => {guardExternal({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }) });
+  hosting = new HostingService(dataRoot, db, safeStorage, { ...(controlledAcceptanceMode?{transport:new BasicFtpTransport(new FtpConnectionPool({beforeEffect:()=>guardWire({kind:'hosting'})})),prepareUpload:async (identity:import('./hosting/service.ts').HostingEffectIdentity)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})});return controlledAcceptance!.assertBillingPlanAvailable();},beforeEffect:(identity:import('./hosting/service.ts').HostingEffectIdentity,_kind:unknown,transactionDb?:import('node:sqlite').DatabaseSync)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})},transactionDb);controlledAcceptance!.assertBillingPlanAvailable();}}:{}), probe: createPublicImageProbe({ nativeFetch: (url, init) => {guardWire({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }) });
   const aiFetch = createSystemProxyFetch((url, init) => {guardExternal({kind:'ai'});if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();return net.fetch(url, init);});
   const networkDiagnostics = createAiNetworkDiagnostics({fetch:aiFetch,resolveProxy:url=>session.defaultSession.resolveProxy(url)});
   imageGeneration = new ImageGenerationService(dataRoot, db, safeStorage, {
     normalizeImage: normalizeGeneratedImage,
     fetch: aiFetch, decodePreview,
-    downloadDependencies: { nativeFetch: (url, init) => {guardExternal({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} },
+    downloadDependencies: { nativeFetch: (url, init) => {guardWire({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} },
   });
   const generationService = imageGeneration;
-  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>{guardExternal({kind:'hosting'});return net.fetch(url,{...init,bypassCustomProtocolHandlers:true});}})});
-  ai = new AiService(dataRoot, db, hosting, safeStorage, { fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
+  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>{guardWire({kind:'hosting'});return net.fetch(url,{...init,bypassCustomProtocolHandlers:true});}})});
+  const controlledRecoveryIds=controlledAcceptance?.recoveryCallIds();
+  ai = new AiService(dataRoot, db, hosting, safeStorage, { ...(controlledAcceptanceMode?{requiredSpendScopeId:CONTROLLED_RUN_ID,canManageRecovery:(id:string)=>controlledRecoveryIds?.has(id)===true}:{}), fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
@@ -134,7 +137,7 @@ async function start() {
   const miaoshouService = miaoshou;
   miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreview, {
     demoImage: miaoshouDemoImage, getSourceUpdate: id => miaoshouService.getSourceUpdate(id),
-    download: createSourceImageDownloader({ nativeFetch: (url, init) => {guardExternal({kind:'source'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }),
+    download: createSourceImageDownloader({ nativeFetch: (url, init) => {guardWire({kind:'source'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }),
   });
   imageWorkflow = new ImageWorkflowService(dataRoot, db, amazon, ai, imageGeneration, { sources: { getReceipt: id => miaoshouService.getReceipt(id), images: miaoshouImages } });
   labels = new ItemLabelService(dataRoot, amazon, procurement,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true});

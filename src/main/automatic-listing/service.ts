@@ -1416,7 +1416,7 @@ export class AutomaticListingService {
     if (this.observing) return this.observing;
     this.observing = Promise.resolve().then(async () => {
       if(this.deps.batch)for(const task of this.managedTasks())if(task.items.some(row=>row.batchWait)){
-        try{await this.deps.batch.reconcile(task.id);}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
+        try{const row=task.items.find(row=>row.batchWait)!;await this.controlledRuns.runTask(task.id,row.key,row.productId,this.controlledGrants.get(task.id),()=>this.deps.batch!.reconcile(task.id));}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
       }
       // Global scan failures must stay outside per-SKU error classification.
       // Only observable submitted work can need this expensive view.

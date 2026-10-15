@@ -185,7 +185,7 @@ export class AmazonService {
     if(this.beforeEffect.constructor.name==='AsyncFunction')throw new UserFacingError('平台外发权限检查必须同步完成');const result=this.beforeEffect(identity,db) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new UserFacingError('平台外发权限检查必须同步完成');
   }
   private api(...args:Parameters<AmazonTransport['api']>):ReturnType<AmazonTransport['api']>{
-    const [target,operation,path,,,,]=args,prior=args[5],parts=/^\/listings\/2021-08-01\/items\/([^/]+)\/(.+)$/.exec(path),extra=parts?{sellerId:decodeURIComponent(parts[1]),sku:decodeURIComponent(parts[2])}:{},kind:AmazonEffectIdentity['kind']=operation.includes('Definitions')?'schema':operation==='getListingsItem'?'platform-read':'platform-write';
+    const [target,operation,path,,,,]=args,prior=args[5],parts=path.match(/^\/listings\/2021-08-01\/items\/([^/]+)\/(.+)$/),extra=parts?{sellerId:decodeURIComponent(parts[1]),sku:decodeURIComponent(parts[2])}:{},kind:AmazonEffectIdentity['kind']=operation.includes('Definitions')?'schema':operation==='getListingsItem'?'platform-read':'platform-write';
     this.effect(operation,kind,target,undefined,'preflight',extra);args[5]=()=>{this.effect(operation,kind,target,undefined,'before-send',extra);prior?.();};return this.transport.api(...args);
   }
   private at(): string { return new Date(this.now()).toISOString(); }

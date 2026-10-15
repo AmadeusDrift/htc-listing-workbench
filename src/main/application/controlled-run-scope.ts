@@ -1,3 +1,4 @@
+import {assertVerifiedControlledCandidate,type VerifiedControlledCandidate} from './controlled-candidate.ts';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {realpathSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
@@ -21,10 +22,17 @@ export type ControlledRunGrant=<T>(work:()=>T)=>T;
 const grantObjects=new WeakMap<ControlledRunGrant,object>();
 /** Revoke the actual in-flight process capability before attempting durable pause. */
 export function revokeControlledRunGrant(grant:ControlledRunGrant|undefined):void{const token=grant&&grantObjects.get(grant);if(token)grants.delete(token);}
-export interface ControlledEffect {kind:'source'|'schema'|'classification'|'planning'|'ai'|'image'|'hosting'|'platform-write'|'platform-read'|'lwa'|'task-stage';taskId?:string;itemKey?:string;productId?:string;sku?:string;targetId?:string;sellerId?:string;marketplaceId?:string;variantIds?:string[];recipeKey?:string|null;parentage?:string}
+export interface ControlledEffect {kind:'source'|'schema'|'classification'|'planning'|'ai'|'ai-batch-read'|'image'|'hosting'|'platform-write'|'platform-read'|'lwa'|'task-stage';taskId?:string;itemKey?:string;productId?:string;sku?:string;targetId?:string;sellerId?:string;marketplaceId?:string;variantIds?:string[];recipeKey?:string|null;parentage?:string}
 // Only the original TaskOwner may advance the expected revision in its active
 // physical transaction. That progress is separate from revocable dispatch authority.
 const grantFingerprint=(scope:ControlledRunScope)=>listingFingerprint({...scope,expectedTaskRevision:0});
+const reviewedProcesses=new Map<string,{digest:string;candidate:VerifiedControlledCandidate;nonce:string}>();
+function assertReviewedProcess(scope:ControlledRunScope):void{if(!scope.review)return;const process=reviewedProcesses.get(scope.workspaceId);if(!process||process.digest!==scope.review.digest||listingFingerprint(process.candidate.identity)!==listingFingerprint(scope.review.candidate))blocked();}
+/** An actual verified main-process session is required in addition to persisted
+ * review JSON. Restarting normally or reading the file never recreates a grant. */
+export function permitReviewedScopeActivation(db:DatabaseSync,candidate:VerifiedControlledCandidate):()=>void{
+ if(db.isTransaction)blocked();assertVerifiedControlledCandidate(candidate);const scope=readControlledRunScope(db);if(!scope?.review||scope.status!=='PAUSED'||scope.workspaceId!==workspaceIdentity(db)||listingFingerprint(scope.review.candidate)!==listingFingerprint(candidate.identity))blocked();const lease={digest:scope.review.digest,candidate,nonce:randomUUID()};reviewedProcesses.set(scope.workspaceId,lease);return()=>{if(reviewedProcesses.get(scope.workspaceId)===lease)reviewedProcesses.delete(scope.workspaceId);};
+}
 export class ControlledRunError extends AiError {constructor(){super('INVALID_INPUT');this.diagnosticReason='CONTROLLED_RUN_SCOPE_BLOCKED';this.message='受控验收任务、卖家、站点、SKU或当前授权不匹配；未发送';}}
 function blocked():never{throw new ControlledRunError();}
 const memoryWorkspaces=new WeakMap<DatabaseSync,string>();
@@ -82,7 +90,7 @@ export class ControlledRunScopes {
   const review=validateControlledRunReview(raw);if(review.secondReleased!==true)blocked();this.bindReviewInTransaction(db,{...review,secondReleased:false},expected);const updated=readControlledRunScope(db)!;writeScope(db,{...updated,activeItemKey:scope.items[1].itemKey,review,authorityEpoch:spendInteger(updated.authorityEpoch+1),authorityNonce:randomUUID()});
  }
  private activateScope(id:string,allowedStatuses:string[]):ControlledRunGrant{
-  const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(!allowedStatuses.includes(task.status))blocked();const active={...r,status:'ACTIVE' as const,authorityEpoch:spendInteger(r.authorityEpoch+1),authorityNonce:randomUUID()};writeScope(this.db,active);return active;});
+  const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);assertReviewedProcess(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(!allowedStatuses.includes(task.status))blocked();const active={...r,status:'ACTIVE' as const,authorityEpoch:spendInteger(r.authorityEpoch+1),authorityNonce:randomUUID()};writeScope(this.db,active);return active;});
   const grant={};grants.add(grant);const context={scopeId:scope.id,fingerprint:grantFingerprint(scope),grant},run:ControlledRunGrant=<T>(work:()=>T):T=>authority.run(context,work);grantObjects.set(run,grant);return run;
  }
  activate(id:string):ControlledRunGrant{return this.activateScope(id,['RUNNING']);}
@@ -101,8 +109,8 @@ export class ControlledRunScopes {
  authorizeEffect(effect:ControlledEffect):string|null{
   const ctx=authority.getStore(),scope=readControlledRunScope(this.db);
   if(!ctx){if(scope&&(effect.taskId===scope.taskId||scope.items.some(i=>i.productId===effect.productId)))blocked();return null;}
-  if(!scope||ctx.scopeId!==scope.id||!grants.has(ctx.grant)||scope.status!=='ACTIVE'||ctx.fingerprint!==grantFingerprint(scope))blocked();this.assertTask(scope);
-  const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(scope.taskId)!,task=JSON.parse(String(saved.record_json));if(task.status!=='RUNNING'&&!(task.status==='WAITING'&&['schema','platform-read','lwa','task-stage'].includes(effect.kind)))blocked();
+  if(!scope||ctx.scopeId!==scope.id||!grants.has(ctx.grant)||scope.status!=='ACTIVE'||ctx.fingerprint!==grantFingerprint(scope))blocked();assertReviewedProcess(scope);this.assertTask(scope);
+  const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(scope.taskId)!,task=JSON.parse(String(saved.record_json));if(task.status!=='RUNNING'&&!(task.status==='WAITING'&&['schema','platform-read','lwa','task-stage','ai-batch-read'].includes(effect.kind)))blocked();
   const item=scope.items.find(i=>i.itemKey===scope.activeItemKey)!;
   if(effect.taskId!==undefined&&effect.taskId!==scope.taskId||effect.itemKey!==undefined&&effect.itemKey!==item.itemKey||effect.productId!==undefined&&effect.productId!==item.productId||effect.sku!==undefined&&effect.sku!==item.sku||effect.targetId!==undefined&&effect.targetId!==scope.targetId||effect.sellerId!==undefined&&effect.sellerId!==scope.sellerId||effect.marketplaceId!==undefined&&effect.marketplaceId!==scope.marketplaceId||effect.parentage!==undefined&&effect.parentage!=='NONE'||effect.recipeKey!==undefined&&effect.recipeKey!==item.recipeKey||effect.variantIds!==undefined&&listingFingerprint([...effect.variantIds].sort())!==listingFingerprint([...item.variantIds].sort()))blocked();return scope.id;
  }
@@ -113,7 +121,7 @@ export class ControlledRunScopes {
   const ctx=authority.getStore(),scope=readControlledRunScope(this.db);
   // An authority miss never downgrades a controlled request to ordinary unlimited mode.
   if(!ctx){if(scope?.items.some(i=>i.productId===effect.productId))blocked();return null;}
-  if(!scope||ctx.scopeId!==scope.id||!grants.has(ctx.grant)||scope.status!=='ACTIVE'||ctx.fingerprint!==grantFingerprint(scope))blocked();this.assertTask(scope,true);
+  if(!scope||ctx.scopeId!==scope.id||!grants.has(ctx.grant)||scope.status!=='ACTIVE'||ctx.fingerprint!==grantFingerprint(scope))blocked();assertReviewedProcess(scope);this.assertTask(scope,true);
   if(!effect.draftId)blocked();const saved=this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(effect.draftId);if(!saved)blocked();const draft=JSON.parse(String(saved.record_json)).draft;
   if(!draft||draft.id!==effect.draftId||draft.productId!==effect.productId||draft.sku!==effect.sku||draft.targetId!==scope.targetId||draft.sellerId!==scope.sellerId||draft.marketplaceId!==scope.marketplaceId||draft.mode!=='live'||draft.schema?.parentageLevel!=='NONE'||draft.salesPlan&&draft.salesPlan.parentage!=='NONE')blocked();
   const draftVariants=draft.salesPlan?.recipe?.components?.map((c:any)=>c.variantId)??[draft.variantId];if(listingFingerprint([...new Set(draftVariants)].sort())!==listingFingerprint([...(effect.variantIds??[])].sort()))blocked();

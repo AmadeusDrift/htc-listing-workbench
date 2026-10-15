@@ -27,7 +27,7 @@ async function fixture(t:test.TestContext){
 }
 test('explicit acceptance cannot fall back to ordinary without a manifest, scope or correct original task; unsupported billing plan stops before first effect',async t=>{
  const f=await fixture(t);assert.equal(f.session.canManageTask(f.task.id),false);assert.throws(()=>f.session.assertExternal({kind:'ai',productId:f.products[0].id}));f.write(f.manifest);assert.equal(f.session.canManageTask(f.task.id),true);assert.throws(()=>f.session.admitTask({...f.task,id:randomUUID()}));
- assert.throws(()=>f.session.admitTask(f.task),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE'&&e.certainty==='NOT_SENT');const scope=readControlledRunScope(f.db)!;assert.equal(scope.status,'PAUSED');assert.equal(scope.activeItemKey,f.task.items[0].key);assert.equal(scope.review?.sessionId,f.manifest.sessionId);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_spend_reservations').get()!.n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,0);
+ f.session.admitTask(f.task);assert.throws(()=>f.session.assertBillingPlanAvailable(),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE'&&e.certainty==='NOT_SENT');const scope=readControlledRunScope(f.db)!;assert.equal(scope.status,'PAUSED');assert.equal(scope.activeItemKey,f.task.items[0].key);assert.equal(scope.review?.sessionId,f.manifest.sessionId);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_spend_reservations').get()!.n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,0);
  f.db.prepare('DELETE FROM controlled_run_scopes').run();assert.throws(()=>f.session.assertExternal({kind:'ai',productId:f.products[0].id}));
 });
 
@@ -51,6 +51,12 @@ test('a reviewed repair candidate uses CAS on original paused scope and cannot c
 test('manifest is exact and cannot claim prices, success or duplicate JSON authority; generation-only asset changes preserve original source stamp',async t=>{
  const f=await fixture(t);f.write({...f.manifest,upperUsd:'0.01'});assert.throws(()=>readReviewedAcceptanceManifest(f.dir));f.write({...f.manifest,firstSucceeded:true});assert.throws(()=>readReviewedAcceptanceManifest(f.dir));f.write(f.manifest);writeFileSync(join(f.dir,'controlled-acceptance/reviewed.json'),JSON.stringify(f.manifest).replace('"sessionId":','"sessionId":"'+randomUUID()+'","sessionId":'));assert.throws(()=>readReviewedAcceptanceManifest(f.dir));
  f.write(f.manifest);f.session.applyReviewedFile();f.products[0].revision++;f.products[0].assets.push({id:randomUUID()} as any);f.session.applyReviewedFile();const scopes=new ControlledRunScopes(f.db);assert.throws(()=>scopes.authorizeEffect({kind:'platform-write',taskId:f.task.id,productId:f.products[0].id}));
+});
+
+test('persisted reviewed scope cannot reactivate through a normal process or revive a capability after its reviewed session closes',async t=>{
+ const f=await fixture(t);f.write(f.manifest);f.session.applyReviewedFile();const scopes=new ControlledRunScopes(f.db),scope=readControlledRunScope(f.db)!;f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify({...f.task,status:'RUNNING'}),f.task.id);
+ assert.throws(()=>scopes.activate(scope.id),(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');
+ f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(f.task),f.task.id);f.session.admitTask(f.task);f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify({...f.task,status:'RUNNING'}),f.task.id);const grant=scopes.activate(scope.id),effect={kind:'source' as const,productId:f.products[0].id};assert.equal(grant(()=>scopes.authorizeEffect(effect)),scope.id);f.session.close();assert.throws(()=>grant(()=>scopes.authorizeEffect(effect)),(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');
 });
 
 for(const prior of ['submitted','unknown','other-task'] as const)test(`initial reviewed registration refuses an already controlled or submitted sample: ${prior}`,async t=>{

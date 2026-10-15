@@ -150,8 +150,9 @@ export class AiUsageLedger {
     const record = validateAiUsageRecord(JSON.parse(String(row.record_json))); if (record.id !== callId) throw new AiError('INVALID_CONFIG');
     saveRecord(this.db, { ...record, reservedTokens:known&&record.reservedTokens===null?0:record.reservedTokens, state: known ? 'REPORTED' : 'UNKNOWN', usage: known ? usage : zeroUsage(), finishedAt });
   }
-  recoverPending(): void {
+  recoverPending(canManage:(callId:string)=>boolean=()=>true): void {
     for (const record of readRows(this.db, 'ai_usage_ledger', validateAiUsageRecord, { state: 'PENDING' })) {
+      if(canManage(record.id)!==true)continue;
       let at: string; try { at = this.timestamp(); } catch { at = record.startedAt; }
       saveRecord(this.db, { ...record, state: 'UNKNOWN', finishedAt: at < record.startedAt ? record.startedAt : at });
     }

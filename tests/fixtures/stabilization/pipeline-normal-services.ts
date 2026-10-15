@@ -30,7 +30,7 @@ import { resolveSalesFamily, ensureFamilyParent } from '../../../src/main/automa
 import { classifyProduct } from '../../../src/main/catalog/classification.ts';
 import { assertConsistencyView } from '../../../src/main/source-image-consistency/proof.ts';
 
-export function createNormalServices(dataRoot:string,storage:SecretStorage,fetcher:typeof fetch,now:()=>Date){
+export function createNormalServices(dataRoot:string,storage:SecretStorage,fetcher:typeof fetch,now:()=>Date,followupNow:()=>number=Date.now){
   const resolve=async(host:string)=>{assert.ok(['cbu01.alicdn.com','htc.185858.xyz','selling-partner-definitions-prod-iad.s3.amazonaws.com'].includes(host),'S10_UNREGISTERED_DNS');return ['198.18.0.1'];};
   const lookup=async(host:string)=>(await resolve(host)).map(address=>({address,family:4}));
   const store=new WorkspaceStore(dataRoot),db=store;
@@ -45,7 +45,7 @@ export function createNormalServices(dataRoot:string,storage:SecretStorage,fetch
   const sourceImages=new MiaoshouImageService(dataRoot,store,id=>source.getReceipt(id),decodePreview,{getSourceUpdate:id=>source.getSourceUpdate(id),download:createSourceImageDownloader({nativeFetch:fetcher,lookup})});
   const images=new ImageWorkflowService(dataRoot,store,amazon,ai,generation,{sources:{getReceipt:id=>source.getReceipt(id),images:sourceImages}}),workflowService=images,imageWorkflow=images;
   const listing=new ListingAiService(store,amazon,ai,()=>images.getCopyReviewSettings().enabled),listingService=listing,amazonService=amazon,aiService=ai;
-  const followup=new FollowupService(dataRoot,amazon),listingFollowup=followup,catalog=new CatalogService(dataRoot,amazon),catalogService=catalog,procurement=new ProcurementService(dataRoot,store,amazon);
+  const followup=new FollowupService(dataRoot,amazon,{now:followupNow}),listingFollowup=followup,catalog=new CatalogService(dataRoot,amazon),catalogService=catalog,procurement=new ProcurementService(dataRoot,store,amazon);
   const execution=new ExecutionService(dataRoot,store,amazon,hosting,{scheduleFollowup:id=>followup.schedule(id)}),executionService=execution,labels=new ItemLabelService(dataRoot,amazon,procurement);
   const labelSettings=new ItemLabelSettings(dataRoot),formatSettings=labelSettings,naming=new SkuNamingService(dataRoot),namingService=naming,rules=new ListingRuleStore(dataRoot),ruleStore=rules;
   automatic = new AutomaticListingService(dataRoot, {

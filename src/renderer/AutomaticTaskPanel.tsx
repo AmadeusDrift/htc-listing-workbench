@@ -4,7 +4,7 @@ import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-
 import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PauseCircle, Play, RefreshCw, XCircle } from 'lucide-react';
+import { PauseCircle, Play, RefreshCw, XCircle, Search } from 'lucide-react';
 import type { AutomaticAdaptationPreview, AutomaticListingStatus, AutomaticListingTask } from '../shared/automatic-listing-contracts';
 import { SettingsStatusBadge as Badge } from './SettingsStatusBadge';
 import type { SettingsStatusTone } from './SettingsStatusBadge';
@@ -174,7 +174,7 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
         <button type="button" className="button secondary" disabled={busy||Boolean(pending)||!adaptation.canApply||!adaptation.changes.some(c=>!['PRESERVED','BLOCKED'].includes(c.kind))} onClick={()=>{void applyAdaptation();}}>{pending==='adaptation'?'正在适配…':'适配当前规则'}</button><p>适配只保存本地调整。完成后请自行点击继续任务。</p></>}
       </details>
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
-      <label className="automatic-group-search">搜索任务商品或 SKU<input type="search" aria-label="搜索任务商品或 SKU" value={search} onChange={event=>{setSearch(event.target.value);setGroupPage(1);}}/></label>
+      <label className="automatic-group-search"><Search size={16}/><input type="search" aria-label="搜索任务商品或 SKU" placeholder="搜索商品、颜色、来源或销售 SKU" value={search} onChange={event=>{setSearch(event.target.value);setGroupPage(1);}}/></label>
       {view&&view.task.id===task.id&&view.task.revision===task.revision&&<AutomaticTaskGroups view={view} search={search} onClearSearch={()=>setSearch('')} products={products} sources={sourceProducts} sourceErrors={sourceErrors} loadingSources={loadingSources} busy={busy} pending={Boolean(pending)} onUpdated={value=>{version.current++;adopted(value);}} onManual={(id,draftId,context)=>{setSelectedId(task.id);onManual(id,draftId,{...context,taskId:task.id});}} onShipping={onShipping}/>}
       <nav aria-label="任务来源商品分页"><PageSizeSelect label="任务商品每页数量" value={groupSize} onChange={value=>{setGroupSize(value);setGroupPage(1);}}/><button type="button" disabled={!view||view.page<=1} onClick={()=>setGroupPage((view?.page??1)-1)}>上一页</button><span>第 {view?.page??1} / {Math.max(1,Math.ceil((view?.total??0)/groupSize))} 页 · 共 {view?.total??0} 个来源商品链接</span><button type="button" disabled={!view||view.page>=Math.ceil(view.total/groupSize)} onClick={()=>setGroupPage((view?.page??1)+1)}>下一页</button></nav>
     </div>}

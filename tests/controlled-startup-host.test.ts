@@ -8,7 +8,10 @@ for(const mode of ['controlled','ordinary']as const)test(`actual main startup ${
  mkdirSync(resolve('.test-data'),{recursive:true});const out=mkdtempSync(resolve('.test-data/s08-startup-host-report-')),reportPath=join(out,'report.json'),env={...process.env,HTC_STABILIZATION_DATA_DIR:out};
  const child=spawnSync(process.execPath,['--require',resolve('tests/fixtures/stabilization/network-guard.cjs'),'tests/fixtures/controlled-startup-host.mjs',mode,reportPath],{cwd:resolve('.'),env,windowsHide:true,encoding:'utf8',timeout:25000});
  assert.ifError(child.error);assert.equal(child.status,0,child.stderr);const report=JSON.parse(readFileSync(reportPath,'utf8'));
- assert.equal(report.windowReached,true,'must reach real index after the housekeeping boundary');assert.equal(report.external,0);assert.equal(report.controlled,mode==='controlled');assert.ok(report.messages.some((message:string)=>message.includes('ISOLATED_STOP_AFTER_STARTUP_HOUSEKEEPING')));
+ assert.equal(report.windowReached,true,'must reach real index after the housekeeping boundary');assert.equal(report.closeReached,true,'must drain the actual will-quit owner shutdown and snapshot');assert.equal(report.external,0);assert.equal(report.controlled,mode==='controlled');assert.ok(report.messages.some((message:string)=>message.includes('ISOLATED_STOP_AFTER_STARTUP_HOUSEKEEPING')));
+ assert.equal(Object.keys(report.before.snapshots).length,11);
+ if(mode==='controlled'){for(const[name,hash]of Object.entries(report.before.snapshots)){assert.equal(report.after.startupSnapshots[name],hash);assert.equal(report.after.closeSnapshots[name],hash);}assert.equal(Object.keys(report.after.startupSnapshots).length,12);assert.equal(Object.keys(report.after.closeSnapshots).length,13);}
+ else{assert.equal(Object.keys(report.after.startupSnapshots).length,10);assert.equal(Object.keys(report.after.closeSnapshots).length,10);}
  if(mode==='controlled'){assert.equal(report.after.backupPresent,true);assert.equal(report.after.backupSha256,report.before.backupSha256);assert.equal(report.after.registry,report.before.registry);}
  else{assert.equal(report.after.backupPresent,false);assert.equal(report.after.backupSha256,null);assert.deepEqual(JSON.parse(report.after.registry),{version:1,backups:[]});}
 });

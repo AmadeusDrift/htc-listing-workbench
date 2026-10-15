@@ -1,8 +1,8 @@
 // Real bundled main/startup owners; only Electron APIs are stubbed. Not an EXE/UI acceptance.
 import {build} from 'esbuild';
-import {readFileSync,writeFileSync,mkdtempSync,existsSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,existsSync,mkdirSync,readdirSync} from 'node:fs';
 import {resolve,join} from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {EventEmitter} from 'node:events';
 import {execFileSync} from 'node:child_process';
@@ -16,6 +16,9 @@ if(!['controlled','ordinary'].includes(process.argv[2]))throw Error('Expected is
 const source=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',windowsHide:true}).trim();
 const pkg=candidateFixture(),dataRoot=mkdtempSync(resolve('.test-data/s08-backup-startup-')),storage={isEncryptionAvailable:()=>false,encryptString:()=>Buffer.alloc(0),decryptString:()=>''},store=new WorkspaceStore(dataRoot),amazon=new AmazonService(dataRoot,id=>store.getProductSnapshot(id),storage,{preserveHistoricalRecords:true});
 amazon.saveDataPolicy({retentionDays:30});amazon.close();store.close();
+const snapshotRoot=join(dataRoot,'database-snapshots');mkdirSync(snapshotRoot);const databaseBytes=readFileSync(join(dataRoot,'red.sqlite'));
+for(let day=1;day<=11;day++)writeFileSync(join(snapshotRoot,`2026-01-${String(day).padStart(2,'0')}T00-00-00.000Z-${randomUUID()}.sqlite`),databaseBytes);
+const snapshots=()=>Object.fromEntries(readdirSync(snapshotRoot).filter(name=>name.endsWith('.sqlite')).map(name=>[name,hash(readFileSync(join(snapshotRoot,name)))])),beforeSnapshots=snapshots();
 const backup=join(dataRoot,'old-unrelated.htcbackup'),bytes=Buffer.concat([Buffer.from('HTC-BACKUP-1\n'),Buffer.alloc(100,71)]);writeFileSync(backup,bytes);
 await registerManagedBackup(dataRoot,{path:backup,sha256:hash(bytes),byteSize:bytes.length,createdAt:'2026-01-02T00:00:00.000Z',retention:{amazonDays:30,logDays:365,dataOldestAt:'2026-01-01T00:00:00.000Z',expiresAt:'2026-01-31T00:00:00.000Z'}});
 preflightControlledAcceptance(dataRoot);const registryPath=join(dataRoot,'.backup-registry.json'),beforeRegistry=readFileSync(registryPath,'utf8');
@@ -30,7 +33,9 @@ const require=createRequire(import.meta.url),Module=require('node:module'),origi
 Module._load=function(name,...args){return name==='electron'?electron:originalLoad.call(this,name,...args);};
 process.env.RED_DATA_DIR=dataRoot;process.env.RED_E2E='1';if(controlled)process.argv.push('--htc-controlled-acceptance');process.execPath=pkg.exe;
 const messages=[],oldError=console.error;console.error=(...args)=>{messages.push(args.map(String).join(' '));};
-try{require(join(pkg.app,'dist-electron/main.cjs'));await Promise.race([finished,new Promise((_,reject)=>setTimeout(()=>reject(Error('ISOLATED_STARTUP_TIMEOUT')),15000))]);}
+let afterStartupSnapshots,afterCloseSnapshots,closeReached=false;
+try{require(join(pkg.app,'dist-electron/main.cjs'));await Promise.race([finished,new Promise((_,reject)=>setTimeout(()=>reject(Error('ISOLATED_STARTUP_TIMEOUT')),15000))]);afterStartupSnapshots=snapshots();
+ let finishClose;const closed=new Promise(resolve=>finishClose=resolve);app.quit=()=>{closeReached=true;finishClose();};app.exit=code=>finishClose({code});app.emit('will-quit',{preventDefault(){}});await Promise.race([closed,new Promise((_,reject)=>setTimeout(()=>reject(Error('ISOLATED_CLOSE_TIMEOUT')),15000))]);afterCloseSnapshots=snapshots();}
 finally{Module._load=originalLoad;process.execPath=originalExe;console.error=oldError;}
-const report={source,testSurface:'Actual bundled index Node host with stubbed Electron APIs; real candidate verifier/cold preflight/constructors/backup owner; not actual EXE or UI acceptance',dataRoot,controlled,before:{backupPresent:true,backupSha256:hash(bytes),registry:beforeRegistry},after:{backupPresent:existsSync(backup),backupSha256:existsSync(backup)?hash(readFileSync(backup)):null,registry:readFileSync(registryPath,'utf8')},windowReached,external,messages};
-writeFileSync(output,JSON.stringify(report,null,2));process.exit(windowReached&&external===0?0:1);
+const report={source,testSurface:'Actual bundled index Node host with stubbed Electron APIs; real candidate verifier/cold preflight/constructors/backup owner/startup and will-quit safety snapshots; not actual EXE or UI acceptance',dataRoot,controlled,before:{backupPresent:true,backupSha256:hash(bytes),registry:beforeRegistry,snapshots:beforeSnapshots},after:{backupPresent:existsSync(backup),backupSha256:existsSync(backup)?hash(readFileSync(backup)):null,registry:readFileSync(registryPath,'utf8'),startupSnapshots:afterStartupSnapshots,closeSnapshots:afterCloseSnapshots},windowReached,closeReached,external,messages};
+writeFileSync(output,JSON.stringify(report,null,2));process.exit(windowReached&&closeReached&&external===0?0:1);

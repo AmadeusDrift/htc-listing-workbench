@@ -94,7 +94,7 @@ async function start() {
   if(controlledAcceptanceMode)preflightControlledAcceptance(dataRoot);
   const verifiedCandidate=controlledAcceptanceMode?await verifyControlledCandidate(app.getAppPath(),process.execPath):null;
   const recovered = await recoverInterruptedRestore(dataRoot);
-  await snapshotWorkspaceDatabase(dataRoot);
+  await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
   store = new WorkspaceStore(dataRoot);
   const db = store;
   if(verifiedCandidate)controlledAcceptance=new ControlledAcceptanceSession(dataRoot,verifiedCandidate,id=>db.getProductSnapshot(id));
@@ -336,7 +336,7 @@ else {
       try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
       finally {
         await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; controlledAcceptance?.close();controlledAcceptance=undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
-        try { await snapshotWorkspaceDatabase(dataRoot); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }
+        try { await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode}); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }
         drained = true; setImmediate(() => app.quit());
       }
     })().catch(() => { app.exit(1); });

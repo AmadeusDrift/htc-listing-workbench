@@ -1,4 +1,7 @@
 import {retainSalesUnitAdoptions} from './sales-plans/unit-restore-history.ts';
+import {SPEND_TABLES,assertSpendHistory,retainSpendHistory} from './ai/spend-budget.ts';
+import {assertRecordTable} from './storage/record-table.ts';
+import {CONTROLLED_RUN_TABLES,assertControlledRunHistory,retainControlledRunHistory,pauseControlledRunScopes} from './application/controlled-run-scope.ts';
 import {retainCategoryRepairs} from './ai/category-recovery.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
@@ -198,6 +201,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
       assertUnambiguousRecordJson(database,'listing_drafts');
       for(const index of SALES_IDENTITY_INDEXES){const actual=database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?").get(index.name,index.table);if(actual?.sql!==index.sql)throw new UserFacingError('备份销售身份索引不正确');}
     }
+    if(version>=34){Object.assign(approved,SPEND_TABLES,CONTROLLED_RUN_TABLES);for(const name of [...Object.keys(SPEND_TABLES),...Object.keys(CONTROLLED_RUN_TABLES)]){assertRecordTable(database,name);assertUnambiguousRecordJson(database,name);}assertSpendHistory(database,receiptRoot);assertControlledRunHistory(database);}
     if(version>=32){Object.assign(approved,WORK_BATCH_TABLES);assertWorkBatches(database);}
     if(version>=30){Object.assign(approved,PRODUCT_FACT_MODEL_TABLES);assertProductFactModels(database);}
     if(version>=23){Object.assign(approved,SOURCE_TABLES);assertSourceAdoptionHistory(database);}
@@ -383,6 +387,7 @@ function disconnectSnapshot(path: string): boolean {
   try{migratedWorkBatches=Number(original.prepare('PRAGMA user_version').get()!.user_version)<32;}finally{original.close();}
   const database = openDatabase(dirname(path));
   try {
+    pauseControlledRunScopes(database);
     revokeSchemaInFlight(database);
     pauseBatchHistory(database);
     database.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE;');
@@ -441,6 +446,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainConfirmedForbiddenRetries(current,snapshot);
     retainCategoryRepairs(current,snapshot);
     retainProviderReceipts(current,snapshot,dirname(currentPath),dirname(snapshotPath));
+    if(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_spend_reservations'").get()){retainSpendHistory(current,snapshot);retainControlledRunHistory(current,snapshot);}
     retainBatchHistory(current,snapshot);
     retainReferencePinHistory(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainFieldGroupHistory(current,snapshot);

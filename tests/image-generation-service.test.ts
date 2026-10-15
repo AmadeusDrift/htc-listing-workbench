@@ -391,3 +391,16 @@ test('failed local background preview recovers the original raw result without a
   assert.equal(candidate?.id,id);assert.equal(candidate?.previewUrl,'data:image/png;base64,'+png.toString('base64'));
   assert.equal(previews,2);assert.equal(f.calls.length,1);
 });
+
+test('candidate workflow read uses asynchronous background decode and keeps original artifact identity',async t=>{
+ let asyncDecodes=0,syncDecodes=0;
+ const f=await fixture(t,{decodePreview:()=>{syncDecodes++;throw Error('native decode must stay off owner thread for async candidate reads');},processPreview:async bytes=>{asyncDecodes++;await new Promise<void>(resolve=>setImmediate(resolve));return bytes;}});f.enable();
+ const original=await f.service.generate(f.input),before=asyncDecodes;
+ const saved=await f.service.readCandidate(original.id);
+ assert.equal(saved.candidate.id,original.id);assert.equal(saved.candidate.sha256,original.sha256);assert.deepEqual(saved.bytes,png);assert.equal(syncDecodes,0);assert.equal(asyncDecodes-before,2);assert.equal(f.calls.length,1);
+});
+test('background candidate decode failure preserves paid files and sends no new request',async t=>{
+ let fail=false;const f=await fixture(t,{processPreview:async bytes=>{if(fail)throw Error('local decode failed');return bytes;}});f.enable();const original=await f.service.generate(f.input);
+ fail=true;await assert.rejects(f.service.readCandidate(original.id),code('OUTPUT_INVALID'));assert.equal(f.calls.length,1);
+ fail=false;assert.equal((await f.service.readCandidate(original.id)).candidate.sha256,original.sha256);assert.equal(f.calls.length,1);
+});

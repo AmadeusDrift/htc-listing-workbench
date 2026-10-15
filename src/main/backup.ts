@@ -45,7 +45,7 @@ import { promisify } from 'node:util';
 import { UserFacingError } from '../shared/errors.ts';
 import { parseListingRules } from '../shared/listing-rules.ts';
 import { openDatabase, SCHEMA_VERSION } from './database.ts';
-import { RECORD_INDEXES, SALES_IDENTITY_INDEXES } from './record-indexes.ts';
+import { RECORD_INDEXES, SALES_IDENTITY_INDEXES, RESULT_CALL_INDEXES } from './record-indexes.ts';
 import { assertUnambiguousRecordJson } from './record-json.ts';
 import { managedAssetPath } from './security.ts';
 import { writeFileAtomically } from './files.ts';
@@ -228,7 +228,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
         const table = database.prepare("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?").get(name);
         if (!table || table.wr !== 0) throw new UserFacingError('备份任务或 FTP 表必须保留标准行标识');
         const columns = database.prepare(`PRAGMA table_xinfo(${name})`).all(), indexes = database.prepare(`PRAGMA index_list(${name})`).all();
-        const primary = indexes.filter(index => index.origin === 'pk'), allowedIndexes = [...(version >= 9 ? RECORD_INDEXES.filter(index => index.table === name) : []), ...(version >= 10 ? COLLECTION_INDEXES.filter(index => index.table === name) : []), ...(version >= 11 ? MIAOSHOU_INDEXES.filter(index => index.table === name) : []), ...(version >= 13 ? MIAOSHOU_SYNC_INDEXES.filter(index => index.table === name) : [])];
+        const primary = indexes.filter(index => index.origin === 'pk'), allowedIndexes = [...(version >= 9 ? RECORD_INDEXES.filter(index => index.table === name) : []), ...(version >= 37 ? RESULT_CALL_INDEXES.filter(index => index.table === name) : []), ...(version >= 10 ? COLLECTION_INDEXES.filter(index => index.table === name) : []), ...(version >= 11 ? MIAOSHOU_INDEXES.filter(index => index.table === name) : []), ...(version >= 13 ? MIAOSHOU_SYNC_INDEXES.filter(index => index.table === name) : [])];
         if (columns.some(c => c.type !== 'TEXT' || c.notnull !== 1 || c.pk !== (c.name === 'id' ? 1 : 0) || c.dflt_value !== null)
           || indexes.length !== 1 + allowedIndexes.length || primary.length !== 1 || primary[0].unique !== 1 || primary[0].partial !== 0
           || database.prepare(`PRAGMA foreign_key_list(${name})`).all().length) throw new UserFacingError('备份任务或 FTP 表结构不正确');

@@ -98,6 +98,7 @@ export interface AutomaticOperationProgress {taskId:string|null;phase:'PREPARING
 export interface AutomaticRoundSummary {roundId:string;startedAt:string;mode:'continue'|'from-start';taskRevision:number;fees?:{reportedUsdMicros:number;pendingCalls:number;unknownCostCalls:number;coverage:'EXPLICIT_TASK_AND_DRAFT_LINKS'}}
 export interface AutomaticListingApi extends AutomaticTaskQueryApi {
   restartAutomaticListingTask?(id:string):Promise<AutomaticListingTask|null>;
+  restoreCancelledAutomaticTask?(input:{taskId:string;taskRevision:number}):Promise<AutomaticListingTask|null>;
   getAutomaticCurrentRound?(id:string):Promise<AutomaticRoundSummary|null>;
   getAutomaticOperationProgress?():Promise<AutomaticOperationProgress|null>;
   onAutomaticOperationProgress?(listener:(progress:AutomaticOperationProgress|null)=>void):()=>void;

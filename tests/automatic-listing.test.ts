@@ -2238,3 +2238,22 @@ test('light targeted preview reports saved scope without source, field or image 
   const preview=await f.service.previewResume({taskId:task.id,scope:{mode:'targeted',selections:[{key:task.items[0].key}]}});
   assert.match(preview.lines[0],/到该SKU时核对/);assert.equal(preview.taskRevision,task.revision);
 });
+
+test('cancelled original task restores to paused with identical items and no scheduler authorization',async t=>{
+  const f=fixture(t),task=await f.create();f.service.cancel(task.id);
+  const before=f.service.get(task.id),round=f.service.getCurrentRound(task.id),calls={...f.calls};
+  const restored=f.service.restoreCancelledTask({taskId:task.id,taskRevision:before.revision});
+  assert.equal(restored.id,before.id);assert.equal(restored.status,'PAUSED');assert.equal(restored.revision,before.revision+1);
+  assert.deepEqual(restored.items,before.items);assert.equal(restored.error,before.error);assert.deepEqual(f.service.getCurrentRound(task.id),round);
+  await f.service.waitForIdle();assert.deepEqual(f.calls,calls);assert.equal((f.service as any).grants.has(task.id),false);
+  assert.throws(()=>f.service.restoreCancelledTask({taskId:task.id,taskRevision:before.revision}),/版本|已取消/);
+});
+
+test('cancelled recovery audit failure rolls back header and leaves the next recovery safe',async t=>{
+  const f=fixture(t),task=await f.create();f.service.cancel(task.id);const before=f.service.get(task.id),db=(f.service as any).db;
+  db.exec("CREATE TRIGGER deny_cancel_recovery BEFORE INSERT ON audit_events WHEN NEW.action='automatic-listing.cancelled-restored' BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END");
+  assert.throws(()=>f.service.restoreCancelledTask({taskId:task.id,taskRevision:before.revision}),/synthetic audit failure/);
+  assert.deepEqual(f.service.get(task.id),before);assert.equal(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json)).status,'CANCELLED');
+  db.exec('DROP TRIGGER deny_cancel_recovery');
+  assert.equal(f.service.restoreCancelledTask({taskId:task.id,taskRevision:before.revision}).status,'PAUSED');
+});

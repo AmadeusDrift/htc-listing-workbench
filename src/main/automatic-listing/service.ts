@@ -2,6 +2,7 @@ import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import { readItemDiagnostic } from './item-diagnostic.ts';
 import {readRoundSpend} from './round-spend.ts';
+import {planCancelledTaskRecovery} from './cancelled-recovery.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import {categoryUnknownCode,categoryFailureRequestId} from '../ai/category-knowledge.ts';
@@ -1620,6 +1621,18 @@ export class AutomaticListingService {
   pause(id: string): AutomaticListingTask {
     this.assertManaged(id);const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
     task.status = 'PAUSED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task,this.db,[],undefined,[]); return structuredClone(task);
+  }
+  restoreCancelledTask(raw:unknown):AutomaticListingTask {
+    const input=record(raw,'恢复已取消任务',['taskId','taskRevision']),id=identifier(input.taskId),task=this.task(id);
+    this.assertManaged(id);
+    const plan=planCancelledTaskRecovery(task,{taskId:id,expectedRevision:input.taskRevision as number},{workerActive:this.worker!==null||this.activeId!==null||this.grants.has(id),confirming:this.confirming.has(id),archiving:this.archiving,preparing:this.operationProgress!==null});
+    const next={...task,...plan.patch},at=new Date().toISOString();
+    try {transaction(this.db,()=>{
+      appendAuditEvent(this.db,randomUUID(),null,plan.audit.action,plan.audit.summary,JSON.stringify(plan.audit.detail),at);
+      this.save(next,this.db,[],at,[]);
+    });}catch(error){this.checkpoints.remember(task);throw error;}
+    this.tasks.set(id,next);
+    return structuredClone(next);
   }
   cancel(id: string): AutomaticListingTask {
     this.assertManaged(id);const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');

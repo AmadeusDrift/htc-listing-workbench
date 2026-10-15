@@ -68,7 +68,7 @@ export function listConsistencyAttempts(db:DatabaseSync,context:SourceConsistenc
 }
 export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyAttempt|undefined {return listConsistencyAttempts(db,context).at(-1);}
 /** OUTPUT_INVALID is also used for empty/interrupted HTTP bodies: the code alone proves nothing. */
-export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAttempt):boolean {
+export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAttempt,assessments?:readonly ConsistencyAssessment[]):boolean {
  const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
  if(!call||call.id!==attempt.callId||call.productId!==attempt.context.productId||call.productRevision!==attempt.context.productRevision||call.startedAt!==attempt.sentAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(attempt.context))return true;
  for(const resultRow of db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(call.id)){
@@ -80,7 +80,7 @@ export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAtt
  if(call.responseReceived===true)return false;
  // Legacy diagnostics may predate responseReceived. Only a validated local recovery
  // establishes usable original content; missing/null metadata never clears the guard.
- return !rows(db,'source_consistency_assessments',validateConsistencyAssessment).some(a=>a.callId===call.id&&a.recovery&&listingFingerprint(a.context)===listingFingerprint(call.sourceConsistencyContext));
+ return !(assessments??rows(db,'source_consistency_assessments',validateConsistencyAssessment)).some(a=>a.callId===call.id&&a.recovery&&listingFingerprint(a.context)===listingFingerprint(call.sourceConsistencyContext));
 }
 /** Model changes alone do not authorize a new request. Credentials must have been explicitly saved. */
 export function canRetryConsistencyAuthentication(db:DatabaseSync,prior:AiCall,current:{providerId:string;generation:number}):boolean {
@@ -124,6 +124,43 @@ export function recordRecoveredConsistency(db:DatabaseSync,call:AiCall,rawOutput
 }
 function rows<T>(db:DatabaseSync,table:string,validate:(raw:unknown)=>T & {id:string}):(T & {id:string})[]{
   assertUnambiguousRecordJson(db,table);return db.prepare(`SELECT id,record_json FROM ${table}`).all().map(row=>{const record=validate(JSON.parse(String(row.record_json)));if(record.id!==row.id)invalid();return record;});
+}
+export interface ConsistencyHistoryRecords {
+  attempts:ConsistencyAttempt[];
+  assessments:ConsistencyAssessment[];
+  decisions:ConsistencyDecision[];
+  bindings:ReturnType<typeof validateConsistencyBinding>[];
+}
+/** Select identity members before parsing full records. json_each sees duplicate/escaped
+ * keys, unlike a first-value json_extract filter which could hide a related record. */
+function scopedRows<T extends {id:string}>(db:DatabaseSync,table:keyof typeof CONSISTENCY_TABLES,context:SourceConsistencyContext,validate:(raw:unknown)=>T):T[]{
+  const members=table==='source_consistency_bindings'?'json_each(records.record_json) AS scope':`json_each(records.record_json) AS root,
+    json_each(CASE WHEN root.key='context' AND root.type='object' THEN root.value ELSE '{}' END) AS scope`;
+  return db.prepare(`SELECT id,record_json,EXISTS (
+      SELECT 1 FROM json_tree(records.record_json) AS member WHERE member.parent IS NOT NULL
+      GROUP BY member.parent,member.key COLLATE BINARY HAVING COUNT(*)>1
+    ) AS ambiguous FROM ${table} AS records WHERE EXISTS (
+      SELECT 1 FROM ${members} WHERE (scope.key='productId' AND scope.value=?) OR (scope.key='variantId' AND scope.value=?)
+    ) ORDER BY rowid DESC`).all(context.productId,context.variantId).map(row=>{
+      if(row.ambiguous)invalid();
+      const record=validate(JSON.parse(String(row.record_json)));
+      if(record.id!==row.id)invalid();
+      const owner='context' in record?(record as T & {context:SourceConsistencyContext}).context:record as T & {productId:string};
+      if(owner.productId!==context.productId)invalid();
+      return record;
+    });
+}
+/** No cache: validate every related historical chain once in this synchronous read.
+ * Product siblings are retained, as are old scopes/revisions and UNKNOWN tombstones. */
+export function readScopedConsistencyHistory(db:DatabaseSync,context:SourceConsistencyContext):ConsistencyHistoryRecords {
+  const records:ConsistencyHistoryRecords={
+    attempts:scopedRows(db,'source_consistency_attempts',context,validateConsistencyAttempt),
+    assessments:scopedRows(db,'source_consistency_assessments',context,validateConsistencyAssessment),
+    decisions:scopedRows(db,'source_consistency_decisions',context,validateConsistencyDecision),
+    bindings:scopedRows(db,'source_consistency_bindings',context,validateConsistencyBinding),
+  };
+  assertConsistencyRecords(db,records);
+  return records;
 }
 /** Tombstones deliberately need no product, anchor, result or positive assessment after older restores. */
 export function retainConsistencyAttempts(current:DatabaseSync,snapshot:DatabaseSync):void {
@@ -175,9 +212,16 @@ export function assertConsistencyHistory(db:DatabaseSync,directory?:string,recei
     if(index.length!==2||index[0].cid!==0||index[0].name!=='id'||index[0].desc!==0||index[0].coll!=='BINARY'||index[0].key!==1||index[1].cid!==-1||index[1].key!==0)invalid();
     if(columns.length!==2||columns.some(c=>!['id','record_json'].includes(String(c.name))||c.type!=='TEXT'||c.notnull!==1||c.pk!==(c.name==='id'?1:0)||c.hidden!==0||c.dflt_value!==null)||indexes.length!==1||indexes[0].origin!=='pk'||indexes[0].unique!==1||db.prepare(`PRAGMA foreign_key_list(${table})`).all().length)invalid();
   }
-  const attempts=rows(db,'source_consistency_attempts',validateConsistencyAttempt),assessments=rows(db,'source_consistency_assessments',validateConsistencyAssessment),decisions=rows(db,'source_consistency_decisions',validateConsistencyDecision);
+  return assertConsistencyRecords(db,{
+    attempts:rows(db,'source_consistency_attempts',validateConsistencyAttempt),
+    assessments:rows(db,'source_consistency_assessments',validateConsistencyAssessment),
+    decisions:rows(db,'source_consistency_decisions',validateConsistencyDecision),
+    bindings:rows(db,'source_consistency_bindings',validateConsistencyBinding),
+  },directory,receiptDirectory);
+}
+function assertConsistencyRecords(db:DatabaseSync,{attempts,assessments,decisions,bindings}:ConsistencyHistoryRecords,directory?:string,receiptDirectory=directory):{relativePath:string;sha256:string;byteSize:number}[]{
   for(const a of attempts){const n=a.attemptNumber??1;if(n>1&&!attempts.some(prior=>consistencyScopeKey(prior.context)===consistencyScopeKey(a.context)&&(prior.attemptNumber??1)===n-1))invalid();}
-  for(const binding of rows(db,'source_consistency_bindings',validateConsistencyBinding)){
+  for(const binding of bindings){
     const asset=db.prepare('SELECT product_id FROM assets WHERE id=?').get(binding.assetId),variant=db.prepare('SELECT product_id FROM variants WHERE id=?').get(binding.variantId);
     if(!asset||asset.product_id!==binding.productId||variant&&variant.product_id!==binding.productId)invalid();
   }

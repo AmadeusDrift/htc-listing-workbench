@@ -26,7 +26,7 @@ async function readPrivateFile(directory: string, name: string, limit: number): 
 }
 
 /** Reopens only immutable managed candidate files and verifies their manifest, PNG bytes and native decode. */
-export async function readCandidateFiles(directory: string, rawId: string, decodePreview?: (bytes: Buffer) => Buffer): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
+export async function readCandidateFiles(directory: string, rawId: string, decodePreview?: (bytes: Buffer) => Buffer | Promise<Buffer>): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {
   const id = uuid(rawId);
   try {
     const root = await realpath(directory), candidateDirectory = privateDirectory(privateDirectory(privateDirectory(root, 'image-generation'), 'candidates'), id);
@@ -34,7 +34,13 @@ export async function readCandidateFiles(directory: string, rawId: string, decod
     const [manifest, bytes, preview] = await Promise.all([
       readPrivateFile(candidateDirectory, 'candidate.json', 32768), readPrivateFile(candidateDirectory, 'image.png', 20 * 1024 * 1024), readPrivateFile(candidateDirectory, 'preview.png', 4 * 1024 * 1024),
     ]);
-    const result=parseCandidateData(id,manifest,bytes,preview,decodePreview);
+    const result=parseCandidateData(id,manifest,bytes,preview);
+    // Native decoding is supplied by the existing serial background image process.
+    // Keep manifest/hash and managed-file checks; a local decode failure never sends.
+    if(decodePreview)for(const image of [bytes,preview]){
+      const decoded=await decodePreview(image);
+      if(inspectRaster(decoded).mimeType!=='image/png'||decoded.length>4*1024*1024)throw new Error();
+    }
     // Check the complete directory chain again after reads so substituted links cannot escape the candidate root.
     const current = privateDirectory(privateDirectory(privateDirectory(root, 'image-generation'), 'candidates'), id);
     if (await realpath(current) !== candidateDirectory) throw new Error();
@@ -62,7 +68,7 @@ function parseCandidateData(id:string,manifest:Buffer,bytes:Buffer,preview:Buffe
     let editSource:GeneratedImageCandidate['editSource'];if(raw.editSource!==undefined){const value=keys(raw.editSource,['id','sha256']);if(typeof value.sha256!=='string'||!/^[a-f0-9]{64}$/.test(value.sha256))throw new Error();editSource={id:uuid(value.id),sha256:value.sha256};if(editSource.id===id||raw.mode!=='edit')throw new Error();}
     const candidate: GeneratedImageCandidate = { id, provider, model, mode: raw.mode as GeneratedImageCandidate['mode'], productId: uuid(raw.productId), productRevision: Number(raw.productRevision),
       createdAt: raw.createdAt, requestId: raw.requestId as string | null, sourceAssets, reviewState: 'unreviewed', mimeType: 'image/png', width: shape.width, height: shape.height,
-      byteSize: bytes.length, sha256: digest(bytes), previewUrl: `data:image/png;base64,${preview.toString('base64')}`,...(editSource?{editSource}:{}) };
+      byteSize: bytes.length, sha256: String(raw.sha256), previewUrl: `data:image/png;base64,${preview.toString('base64')}`,...(editSource?{editSource}:{}) };
     return { candidate, bytes, preview };
 }
 

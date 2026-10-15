@@ -75,7 +75,9 @@ export interface ImageTextCheck {
   verdict: 'SUPPORTED' | 'UNSUPPORTED' | 'CONTRADICTED'; evidenceIds: string[]; reason: string;
 }
 export interface ImageTextReviewOutput {
-  kind: 'image-text-review'; candidate: CandidateImageIdentity; planResultId: string; ocrResultId: string;
+  kind: 'image-text-review'; candidate: CandidateImageIdentity; planResultId: string; ocrResultId: string | null;
+  /** Absent on immutable historical OCR reviews. */
+  method?: 'candidate-vision/v1';
   verdict: 'PASS' | 'NEEDS_CHANGES' | 'BLOCKED'; checks: ImageTextCheck[];
   expectedTextChecks: { index: number; present: boolean; reason: string }[];
   noTextVerified: boolean; issues: string[];

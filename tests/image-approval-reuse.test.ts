@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
-import {compatibleApprovalRecipe} from '../src/main/image-workflow/approval-reuse.ts';
+import {compatibleApprovalRecipe,approvalReviewHistoryResolved} from '../src/main/image-workflow/approval-reuse.ts';
 import {listingFingerprint} from '../src/main/listing-ai/validation.ts';
 import type {ImageWorkflowRun} from '../src/shared/image-workflow-contracts.ts';
 
@@ -23,4 +23,21 @@ test('new persisted recipe fingerprints distinguish multi-component quantities e
   assert.equal(compatibleApprovalRecipe(run,original),true);
   const changed=structuredClone(original);changed.components[0].quantity=2;changed.components[1].quantity=1;changed.key=createHash('sha256').update(JSON.stringify(changed.components.map(c=>[c.sourceKey,c.quantity]))).digest('hex');
   assert.equal(compatibleApprovalRecipe(run,changed),false);
+});
+
+test('retired OCR approval history needs exact original owner and never exempts unknown text or generation',()=>{
+ const runId=randomUUID(),draftId=randomUUID(),productId=randomUUID(),callId=randomUUID(),candidateId=randomUUID(),planId=randomUUID(),at='2026-10-15T00:00:00.000Z';
+ const request={version:2,requestId:callId,step:'ocr',state:'SENT_UNKNOWN',execution:{providerId:'aliyun-ocr'},runId,draftId,productId,productRevision:1,variantId,sku:'SALE-A',slot:1,attempt:1,generationRequestId:candidateId,candidate:{id:candidateId,sha256:'a'.repeat(64),width:256,height:256},planResultId:planId,contextSha256:'b'.repeat(64)};
+ const source={id:runId,draftId,productId,productRevision:1,variantId,sku:'SALE-A',reviewRequests:[request],retiredOcrDependencies:[{callId,at}],slots:[{contextSha256:request.contextSha256,approvedSha256:request.candidate.sha256,attempts:[{requestId:candidateId,candidateId,planResultId:planId,state:'PASSED',reviewResultId:randomUUID()}]}]} as unknown as ImageWorkflowRun;
+ assert.equal(approvalReviewHistoryResolved(source),true);
+ for(const mutation of ['marker','candidate','context','plan','sku','step','generation'] as const){const changed=structuredClone(source);
+  if(mutation==='marker')delete changed.retiredOcrDependencies;
+  if(mutation==='candidate')changed.reviewRequests![0].candidate.id=randomUUID();
+  if(mutation==='context')changed.reviewRequests![0].contextSha256='c'.repeat(64);
+  if(mutation==='plan')changed.reviewRequests![0].planResultId=randomUUID();
+  if(mutation==='sku')changed.reviewRequests![0].sku='OTHER';
+  if(mutation==='step')changed.reviewRequests![0].step='text';
+  if(mutation==='generation')changed.slots![0].attempts[0].state='UNKNOWN';
+  assert.equal(approvalReviewHistoryResolved(changed),false,mutation);
+ }
 });

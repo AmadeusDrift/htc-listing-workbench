@@ -934,6 +934,37 @@
       "statements": {
         "restoreSalesUnitTask|5662832c0de1a0c1c0cceeb6dd590d159bb58a3660cab89226af859f6981555b": 1
       }
+    },
+    "main/ai/spend-budget.ts": {
+      "role": "ai",
+      "review": "S08 exact owner statements only. initialize* is migration 34 only; reservation and retained history borrow the active synchronous owner/staging transaction; no network or grants in SQL callbacks.",
+      "commands": [
+        "initializeSpendBudget|CREATE|ai_spend_policies",
+        "initializeSpendBudget|CREATE|ai_spend_reservations",
+        "reserveInTransaction|INSERT|ai_spend_policies",
+        "retainSpendHistory|INSERT|ai_spend_policies",
+        "setImagePolicy|INSERT|ai_spend_policies",
+        "writeReservation|INSERT|ai_spend_reservations"
+      ],
+      "statements": {
+        "initializeSpendBudget|df9ba835e1bac14fbcfa2b2afd1225c5fe28532536f6bb146dc49b9e2d83e926": 1,
+        "writeReservation|9fb3c447994dee0a7a199e84f811f2cbbe171d27c69f18f30f9cfa27bb6dae5a": 1,
+        "setImagePolicy|2294157a8089c10ba1edfcb9eb5b14797caaa4a6cd6f81c786709f523de31205": 1,
+        "reserveInTransaction|69b2977d8a362c0a132c1796553aec2fab1aefd46c6673a410bef5aa39350844": 1,
+        "retainSpendHistory|2294157a8089c10ba1edfcb9eb5b14797caaa4a6cd6f81c786709f523de31205": 1
+      }
+    },
+    "main/application/controlled-run-scope.ts": {
+      "role": "tasks",
+      "review": "S08 exact owner statements only. initialize* is migration 34 only; reservation and retained history borrow the active synchronous owner/staging transaction; no network or grants in SQL callbacks.",
+      "commands": [
+        "initializeControlledRunScopes|CREATE|controlled_run_scopes",
+        "writeScope|INSERT|controlled_run_scopes"
+      ],
+      "statements": {
+        "initializeControlledRunScopes|478007f42294db7110da579ec15c94c3a2268c60615bc4e70da7ff2f795bccea": 1,
+        "writeScope|74265e91df7d1d1bb1b20365990d8cc4f65ab095a76c578190a16f394487390c": 1
+      }
     }
   },
   "opaque": [
@@ -1140,6 +1171,12 @@
       "command": "sanitizeProxyRoute",
       "expression": "entry",
       "review": "Reviewed RegExp.exec on a proxy-rule token; literal regexp receiver, no database access or SQL execution."
+    },
+    {
+      "file": "main/ai/spend-records.ts",
+      "command": "usdMicrosCeil",
+      "expression": "value",
+      "review": "RegExp.exec(value) decimal parser; not a DatabaseSync SQL sink."
     }
   ],
   "tableSets": [

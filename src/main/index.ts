@@ -184,7 +184,7 @@ async function start() {
     existingSale:(productId,plan,targetId)=>amazonService.findSalesDraft(productId,plan,targetId),
     resolveFamily: (input,signal) => resolveSalesFamily(amazonService,input,signal),
     rebindFamily: (input,signal) => amazonService.rebindUnsubmittedFamily(input,signal),
-    ensureParent: (child,profileId,signal) => ensureFamilyParent({amazon:amazonService,listing:listingService,execution:executionService,followup:listingFollowup},child,profileId,signal),
+    ensureParent: (child,profileId,signal,hostingRoute) => ensureFamilyParent({amazon:amazonService,listing:listingService,execution:executionService,followup:listingFollowup},child,profileId,signal,hostingRoute),
     classify: async (input, signal) => {
       if (!catalogService.get(input.targetId)) await catalogService.sync(input.targetId);
       const scope = JSON.stringify(amazonService.executionTargetScope(input.targetId));

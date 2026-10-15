@@ -15,7 +15,7 @@ export async function resolveSalesFamily(amazon:Pick<AmazonService,'getSchema'>,
   return input.plans.map(plan=>({...plan,familyResolved:true,parentage:theme?'CHILD':'NONE',parentSku:theme?plan.baseSku:null,variationTheme:theme,
     relationReason:theme?`同款同规格；当前类目允许 ${theme} 变体`:'当前类目没有适用且未弃用的变体主题，按独立商品上架'}));
 }
-export async function ensureFamilyParent(deps:{amazon:AmazonService;listing:ListingAiService;execution:ExecutionService;followup:FollowupService},child:AmazonDraft,profileId:string,signal:AbortSignal):Promise<{draftId:string;ready:boolean}> {
+export async function ensureFamilyParent(deps:{amazon:AmazonService;listing:ListingAiService;execution:ExecutionService;followup:FollowupService},child:AmazonDraft,profileId:string,signal:AbortSignal,hostingRoute?:import('../../shared/hosting-contracts.ts').HostingRoute):Promise<{draftId:string;ready:boolean}> {
   const check=()=>{if(signal.aborted)throw new UserFacingError('自动任务已暂停');};check();
   const plan=child.salesPlan;if(plan?.parentage!=='CHILD')throw new UserFacingError('当前商品没有父体关系');
   const parentPlan=deps.amazon.familyParentPlan(child);
@@ -45,7 +45,7 @@ export async function ensureFamilyParent(deps:{amazon:AmazonService;listing:List
     if(!task){
       parent=deps.amazon.useFamilyImage(parent.id,child.id);
       parent=(await deps.listing.complete({draftId:parent.id,draftRevision:parent.revision},signal)).draft;
-      check();task=deps.execution.create({draftIds:[parent.id],profileId,concurrency:1});
+      check();task=deps.execution.create({draftIds:[parent.id],profileId,concurrency:1,...(hostingRoute?{hostingRoute}:{})});
     }
     for(;;){
       const previous=deps.execution.get(task.id),item=previous.items[0],step=item?.steps.find(s=>s.status==='FAILED');
@@ -53,7 +53,7 @@ export async function ensureFamilyParent(deps:{amazon:AmazonService;listing:List
         const priorFailures=deps.execution.list().filter(t=>t.items.length===1&&t.items[0].draftId===parent!.id&&t.items[0].steps.some(s=>s.status==='FAILED'&&['validate','preview','submit'].includes(s.name))).length;
         if(item.submitStarted||!['validate','preview','submit'].includes(step.name)||priorFailures>=3)throw new UserFacingError(step.error||previous.error||'父体尚未建档，保留子体进度');
         parent=(await deps.listing.complete({draftId:parent.id,draftRevision:parent.revision},signal)).draft;
-        check();deps.execution.cancel(task.id);task=deps.execution.create({draftIds:[parent.id],profileId,concurrency:1});
+        check();deps.execution.cancel(task.id);task=deps.execution.create({draftIds:[parent.id],profileId,concurrency:1,...(hostingRoute?{hostingRoute}:{})});
       }
       const stop=()=>deps.execution.pause(task!.id);signal.addEventListener('abort',stop,{once:true});
       try{check();deps.execution.startAuthorized(deps.execution.prepareStart(task.id));await deps.execution.waitForIdle();}

@@ -9,7 +9,7 @@ import {createWorkspaceBackup,prepareWorkspaceRestore,discardPreparedRestore} fr
 
 test('schema37 indexes the exact original call lookup without changing records, and rolls back on journal failure',t=>{
  mkdirSync(resolve('.test-data'),{recursive:true});const dir=mkdtempSync(resolve('.test-data/result-index-')),db=openDatabase(dir);t.after(()=>{db.close();rmSync(dir,{recursive:true,force:true});});
- const downgrade=()=>db.exec('DROP INDEX record_ai_results_call;DELETE FROM module_migration_journal WHERE version=37;PRAGMA user_version=36');downgrade();
+ const downgrade=()=>db.exec('DROP INDEX record_completion_product;DROP INDEX record_ai_results_call;DELETE FROM module_migration_journal WHERE version>=37;PRAGMA user_version=36');downgrade();
  const raw='{ "callId": "original", "productId": "retained", "unknown": true }';db.prepare('INSERT INTO ai_results VALUES(?,?)').run('result',raw);
  const sql="SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?",before=db.prepare(sql).all('original');
  assert.match(String(db.prepare('EXPLAIN QUERY PLAN '+sql).get('original')!.detail),/SCAN/);migrateModules(db);migrateModules(db);
@@ -22,8 +22,8 @@ test('schema37 indexes the exact original call lookup without changing records, 
 
 test('backup accepts original schema36 and exact schema37 index, rejecting a replaced index',async t=>{
  mkdirSync(resolve('.test-data'),{recursive:true});const root=mkdtempSync(resolve('.test-data/result-index-backup-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const dir=join(root,'data');let db=openDatabase(dir);db.exec('DROP INDEX record_ai_results_call;DELETE FROM module_migration_journal WHERE version=37;PRAGMA user_version=36');db.close();
- for(const version of [36,37]){if(version===37){db=openDatabase(dir);db.close();}const file=join(root,`schema${version}.htcbackup`);await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(join(root,'target'+version),file,'synthetic passphrase');await discardPreparedRestore(join(root,'target'+version),prepared);}
+ const dir=join(root,'data');let db=openDatabase(dir);db.exec('DROP INDEX record_completion_product;DROP INDEX record_ai_results_call;DELETE FROM module_migration_journal WHERE version>=37;PRAGMA user_version=36');db.close();
+ for(const version of [36,37]){if(version===37){db=openDatabase(dir);db.exec('DROP INDEX record_completion_product;DELETE FROM module_migration_journal WHERE version=38;PRAGMA user_version=37');db.close();}const file=join(root,`schema${version}.htcbackup`);await createWorkspaceBackup(dir,file,'synthetic passphrase');const prepared=await prepareWorkspaceRestore(join(root,'target'+version),file,'synthetic passphrase');await discardPreparedRestore(join(root,'target'+version),prepared);}
  db=openDatabase(dir);db.exec("DROP INDEX record_ai_results_call;CREATE INDEX record_ai_results_call ON ai_results(json_extract(record_json,'$.productId'))");db.close();
  await assert.rejects(createWorkspaceBackup(dir,join(root,'wrong.htcbackup'),'synthetic passphrase'),/索引/);
 });

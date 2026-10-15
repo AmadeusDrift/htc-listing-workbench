@@ -1,5 +1,6 @@
 import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
+import {ControlledRunScopes,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
@@ -132,6 +133,8 @@ export class AutomaticListingService {
   private deps: AutomaticListingDependencies;
   private tasks = new Map<string, AutomaticListingTask>();
   private grants = new Set<string>();
+  private controlledRuns:ControlledRunScopes;
+  private controlledGrants=new Map<string,ControlledRunGrant>();
   private confirming = new Set<string>();
   private worker: Promise<void> | null = null;
   private observing: Promise<void> | null = null;
@@ -145,7 +148,9 @@ export class AutomaticListingService {
   private archiving = false;
   constructor(directory: string, dependencies: AutomaticListingDependencies) {
     this.deps = dependencies; this.db = openDatabase(directory);
+    this.controlledRuns=new ControlledRunScopes(this.db);
     try {
+      pauseControlledRunScopes(this.db);
       for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
         const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
         for(const row of task.items)if(row.schemaRetry){const operation=readSchemaOperation(this.db,task.id,row.key,row.schemaRetry.scope);if(operation)Object.assign(row.schemaRetry,operation.budget);}
@@ -163,13 +168,15 @@ export class AutomaticListingService {
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = [], at?:string): void {
-    transaction(db,()=>{
+    const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
+    try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
     const priorStages = new Map(db.prepare("SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.status') status FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?").all(task.id).map(row => [String(row.key), { stage: String(row.stage), status: String(row.status) }]));
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
     for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
     task.revision++; task.updatedAt = at??new Date().toISOString();
     validateAutomaticListingTask(task);
+    this.controlledRuns.advanceTaskInTransaction(db,task,persisted?Number(persisted.revision):null);
     assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
     db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
     for (const row of task.items) {
@@ -183,7 +190,7 @@ export class AutomaticListingService {
         if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
       } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
     }
-    });
+    });}catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
   }
   listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
   addWorkBatchProducts(raw:unknown) {
@@ -703,6 +710,7 @@ export class AutomaticListingService {
   startAuthorized(approved: AutomaticListingTask, scope?:AutomaticResumeSelection): AutomaticListingTask {
     const task = this.task(approved.id);
     if (fingerprint(task) !== fingerprint(approved)) throw new UserFacingError('确认期间任务范围发生变化');
+    scope=this.controlledRuns.taskSelection(task.id,scope);
     this.prepareStart(task.id,scope);
     const previous=structuredClone(task);
     try {
@@ -770,7 +778,8 @@ export class AutomaticListingService {
         if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
       }
       this.reconcileSelection(task);
-      task.status = 'QUEUED'; task.error = null; this.save(task);
+      task.status = 'QUEUED'; task.error = null;
+      const controlledGrant=transaction(this.db,()=>{this.save(task);return this.controlledRuns.activateQueuedTask(task.id);});if(controlledGrant)this.controlledGrants.set(task.id,controlledGrant);
     } catch(error) {
       // Preparation can commit an atomic pricing checkpoint before a later
       // admission failure. Restore the latest durable record, not the queued
@@ -780,7 +789,7 @@ export class AutomaticListingService {
         const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
         if(saved)restored=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
       } catch { /* Keep the last known valid pre-start state if storage is unreadable. */ }
-      this.tasks.set(task.id,restored);this.grants.delete(task.id);
+      this.tasks.set(task.id,restored);this.grants.delete(task.id);revokeControlledRunGrant(this.controlledGrants.get(task.id));this.controlledGrants.delete(task.id);
       throw error;
     }
     this.deps.batch?.resume(task.id);this.grants.add(task.id);this.pump();return structuredClone(task);
@@ -887,7 +896,7 @@ export class AutomaticListingService {
       if(reserved.kind!=='ready'){if(reserved.kind==='exhausted'){row.status='FAILED';row.error='Schema 有限重试已用尽，原进度和次数保留';this.save(task);}return false;}
       this.save(task);
       const revision=task.revision;
-      try {await this.deps.amazon.getSchema!(retry.selection);}
+      try {await this.runTaskAiScope(task,row,()=>this.deps.amazon.getSchema!(retry.selection));}
       catch(error){
         if(!eligible()||task.revision!==revision){retry.state='WAITING';this.save(task);return false;}
         this.assertScope(task,row);
@@ -909,7 +918,7 @@ export class AutomaticListingService {
       get phase(){return row.stage.toLowerCase();},mode:task.executionMode??'immediate',
       get waitingOperationId(){return row.batchWait?.operationId;},credentialScope:task.batchPlan?.credentialScope,purposes:task.batchPlan?.purposes,
       authorize:()=>rowSelected(task.resumeScope,row.key)&&this.batchAuthorized(task)&&!['FAILED','DONE','SCREENED'].includes(row.status)};
-    return this.deps.batch?this.deps.batch.run(scope,action):taskAiContext.run(scope,action);
+    return this.controlledRuns.runTask(task.id,row.key,row.productId,this.controlledGrants.get(task.id),()=>this.deps.batch?this.deps.batch.run(scope,action):taskAiContext.run(scope,action));
   }
   private batchAuthorized(task:AutomaticListingTask):boolean{
     if(!this.running(task))return false;
@@ -1461,11 +1470,11 @@ export class AutomaticListingService {
   }
   pause(id: string): AutomaticListingTask {
     const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
-    task.status = 'PAUSED'; this.grants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
+    task.status = 'PAUSED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
   }
   cancel(id: string): AutomaticListingTask {
     const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
-    task.status = 'CANCELLED'; this.grants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
+    task.status = 'CANCELLED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
   }
   private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
     if (this.activeId === task.id) this.controller?.abort();
@@ -1482,8 +1491,10 @@ export class AutomaticListingService {
   close(): Promise<void> {
     if (this.closing) return this.closing; if (this.closed) return Promise.resolve();
     if (this.timer) clearTimeout(this.timer); this.timer = null;
+    for(const grant of this.controlledGrants.values())revokeControlledRunGrant(grant);
     for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
     this.grants.clear();
+    this.controlledGrants.clear();pauseControlledRunScopes(this.db);
     this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });
     return this.closing;
   }

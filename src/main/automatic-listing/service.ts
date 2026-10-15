@@ -204,6 +204,7 @@ export class AutomaticListingService {
     if(this.tasks.has(task.id))this.assertManaged(task.id);
     const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
     let savedChange:TaskCheckpointChange|undefined;
+    let partialPersistedCheck=false;
     try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
@@ -212,6 +213,17 @@ export class AutomaticListingService {
     // even when an invalid writer forgot to advance the task revision.
     const dataVersion=Number(this.db.prepare('PRAGMA data_version').get()!.data_version);
     if(persisted&&(db!==this.db||this.checkpointDataVersions.get(task.id)!==dataVersion)){
+      const scopedKeys=changedKeys===undefined?undefined:[...changedKeys,...completed.map(result=>result.key)];
+      const indices=this.checkpoints.persistedIndices(task,scopedKeys);
+      if(indices!==null){
+        const columns=indices.map((index,offset)=>`,json_extract(record_json,'$.items[${index}]') item_${offset}`).join('');
+        const saved=db.prepare(`SELECT json_remove(record_json,'$.items') metadata${columns} FROM automatic_listing_tasks WHERE id=?`).get(task.id)!;
+        const metadata=JSON.parse(String(saved.metadata)),items=indices.map((_index,offset)=>JSON.parse(String(saved[`item_${offset}`])));
+        if(!this.checkpoints.matchesPersistedParts(task.id,metadata,indices,items))throw new UserFacingError('任务检查点已变化，请重新读取原任务；未覆盖历史');
+        // Only these SKU slots were checked. Keep the task-wide data version
+        // dirty so another externally changed SKU is checked before its write.
+        partialPersistedCheck=true;
+      }else{
       const savedTask=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
       // Unrelated AI/hosting commits invalidate SQLite's connection-wide version,
       // not this already validated immutable task. Exact equality needs no second
@@ -223,6 +235,7 @@ export class AutomaticListingService {
         // transaction rolled back). Rebuild the whole proof, never incrementally
         // validate against the stale in-memory checkpoint.
         assertAutomaticRejectionHistory(db,durable);assertTaskAdaptationHistory(db,durable);this.checkpoints.remember(durable);
+      }
       }
     }
     task.revision++; task.updatedAt = at??new Date().toISOString();
@@ -241,7 +254,7 @@ export class AutomaticListingService {
         if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
       } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
     }
-    });this.checkpoints.remember(task,savedChange);this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
+    });this.checkpoints.remember(task,savedChange);if(!partialPersistedCheck)this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
     }catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
   }
   private saveItem(task:AutomaticListingTask,row:AutomaticListingItem,db:DatabaseSync=this.db):void{this.save(task,db,[],undefined,[row.key]);}

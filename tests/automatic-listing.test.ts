@@ -2175,7 +2175,7 @@ test('checkpoint rejects same-revision external edits instead of covering anothe
   const saved=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
   saved.items[0].stockSets=99;
   db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(saved),task.id);
-  try{assert.throws(()=>f.service.pause(task.id),/检查点已变化/);assert.equal(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json)).items[0].stockSets,99);}finally{db.close();}
+  try{assert.throws(()=>(f.service as any).save((f.service as any).tasks.get(task.id)),/检查点已变化/);assert.equal(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json)).items[0].stockSets,99);}finally{db.close();}
 });
 
 test('start progress yields before dispatch and a pause revokes the entire preparation',async t=>{
@@ -2256,4 +2256,30 @@ test('cancelled recovery audit failure rolls back header and leaves the next rec
   assert.deepEqual(f.service.get(task.id),before);assert.equal(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json)).status,'CANCELLED');
   db.exec('DROP TRIGGER deny_cancel_recovery');
   assert.equal(f.service.restoreCancelledTask({taskId:task.id,taskRevision:before.revision}).status,'PAUSED');
+});
+
+test('scoped checkpoint avoids whole-task parse and comparison after unrelated connection writes',async t=>{
+ const f=fixture(t),created=await f.create(),service=f.service as any,task=service.tasks.get(created.id),other=openDatabase(f.directory);f.cleanups.push(async()=>other.close());
+ other.prepare("INSERT INTO amazon_settings(key,value_json) VALUES('unrelated-scoped-checkpoint','{}')").run();
+ const raw=String(service.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id).record_json),parse=JSON.parse,matches=service.checkpoints.matches;
+ service.checkpoints.matches=()=>{throw Error('whole task comparison');};
+ JSON.parse=(text,...args)=>{if(text===raw)throw Error('whole task parse');return parse(text,...args);};
+ try{task.items[0].error='local checkpoint';service.save(task,service.db,[],undefined,[task.items[0].key]);}
+ finally{JSON.parse=parse;service.checkpoints.matches=matches;}
+ assert.equal(f.service.get(task.id).items[0].error,'local checkpoint');assert.equal(task.revision,created.revision+1);
+});
+test('scoped checkpoint rejects a same-revision change to its current SKU',async t=>{
+ const f=fixture(t),created=await f.create(),service=f.service as any,task=service.tasks.get(created.id),other=openDatabase(f.directory);f.cleanups.push(async()=>other.close());
+ other.prepare("UPDATE automatic_listing_tasks SET record_json=json_set(record_json,'$.items[0].stockSets',99) WHERE id=?").run(task.id);
+ assert.throws(()=>service.save(task,service.db,[],undefined,[task.items[0].key]),/检查点已变化/);
+ assert.equal(task.revision,created.revision);assert.equal(JSON.parse(String(other.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json)).items[0].stockSets,99);
+});
+test('scoped checkpoint preserves another externally changed SKU and refuses it when that SKU is later written',async t=>{
+ const f=fixture(t);f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SECOND-SCOPED-SKU'});
+ const created=await f.create(),service=f.service as any,task=service.tasks.get(created.id),other=openDatabase(f.directory);f.cleanups.push(async()=>other.close());
+ other.prepare("UPDATE automatic_listing_tasks SET record_json=json_set(record_json,'$.items[1].stockSets',99) WHERE id=?").run(task.id);
+ task.items[0].error='only first SKU changed';service.save(task,service.db,[],undefined,[task.items[0].key]);
+ let stored=JSON.parse(String(other.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.equal(stored.items[0].error,'only first SKU changed');assert.equal(stored.items[1].stockSets,99);
+ const revision=task.revision;assert.throws(()=>service.save(task,service.db,[],undefined,[task.items[1].key]),/检查点已变化/);assert.equal(task.revision,revision);
+ stored=JSON.parse(String(other.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));assert.equal(stored.items[1].stockSets,99);
 });

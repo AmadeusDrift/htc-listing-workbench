@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {createFakeProvider} from './fake-http-provider.mjs';
 import {materializeFixtures} from './pipeline-runtime.mjs';
 import {sourceFixture,schemaFixture} from './pipeline-normal-draft.mjs';
-import {normalChatResponse} from './pipeline-normal-responses.mjs';
+import {normalChatResponse,normalDecisionResponse} from './pipeline-normal-responses.mjs';
 export async function createNormalProvider({directory,fixtureDirectory}){
   const fixtures=await materializeFixtures(fixtureDirectory),source=sourceFixture(),schema=await schemaFixture('drink-coaster-us'),clock=new Date().toISOString();
   const keys={openrouter:'s10-normal-openrouter',deepseek:'s10-normal-deepseek',accessKeyId:'s10-normal-acs-id',accessKeySecret:'s10-normal-acs-secret',appKey:'s10-normal-mia-key',appSecret:'s10-normal-mia-secret'};
@@ -14,6 +14,7 @@ export async function createNormalProvider({directory,fixtureDirectory}){
   const routes=[
     {id:'normal-openrouter-chat',method:'POST',path:'/normal/openrouter-chat',publicUrl:'https://openrouter.ai/api/v1/chat/completions',credential:{header:'authorization',value:'Bearer '+keys.openrouter}},
     {id:'normal-deepseek-chat',method:'POST',path:'/normal/deepseek-chat',publicUrl:'https://api.deepseek.com/chat/completions',credential:{header:'authorization',value:'Bearer '+keys.deepseek}},
+    {id:'normal-decisions',method:'POST',path:'/normal/decisions',publicUrl:'https://openrouter.ai/api/alpha/decisions',credential:{header:'authorization',value:'Bearer '+keys.openrouter}},
     {id:'normal-source-list',method:'POST',path:'/normal/source-list',publicUrl:'https://openapi-erp.91miaoshou.com/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_list',protocol:mia,response:{json:source.list}},
     {id:'normal-source-detail',method:'POST',path:'/normal/source-detail',publicUrl:'https://openapi-erp.91miaoshou.com/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_detail',protocol:mia,response:{json:source.detail}},
     {id:'normal-source-image',method:'GET',path:'/normal/source-image',publicUrl:'https://cbu01.alicdn.com/s10/blue-coaster.png',protocol:{kind:'public-source'},response:{bytes:await readFile(fixtures[0].absolutePath),contentType:'image/png'}},
@@ -23,6 +24,7 @@ export async function createNormalProvider({directory,fixtureDirectory}){
     ...[['schema',schema.schema],['meta-schema',schema.metaSchema]].map(([id,item])=>({id:'normal-'+id,method:'GET',path:'/normal/'+id,publicUrl:item.url,protocol:{kind:'public-bytes'},response:{bytes:item.bytes,contentType:'application/json'}})),
   ];
   const responders=Object.fromEntries(['normal-openrouter-chat','normal-deepseek-chat'].map(id=>[id,({body,requestId})=>normalChatResponse(body,requestId)]));
+  responders['normal-decisions']=({body,requestId})=>normalDecisionResponse(body,requestId);
   const provider=await createFakeProvider({directory,routes,responders,ftp:true,maxRequestBytes:32*1024*1024});
   return Object.assign(provider,{normalConfig:{version:1,clock,nonce:'s10-normal-nonce',keys,remoteId:source.remoteId,ftp:provider.ftp,amazon:{name:'S10 synthetic U2',sellerId,marketplaceId,region:'na',locale,clientId:'s10-normal-client',clientSecret:'s10-normal-client-secret',refreshToken:'s10-normal-refresh'}}});
 }

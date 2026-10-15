@@ -16,6 +16,7 @@ export interface FollowupAmazon {
 export interface FollowupDependencies {
   /** Main-only admission boundary; excluded historical records remain strictly read-only. */
   canManageDraft?: (draftId: string) => boolean;
+  runDraftScope?: <T>(draftId:string,work:()=>T)=>T;
   now?: () => number;
   setTimeout?: (callback: () => void, milliseconds: number) => unknown;
   clearTimeout?: (timer: unknown) => void;
@@ -39,6 +40,7 @@ export class FollowupService {
   private clearTimer: NonNullable<FollowupDependencies['clearTimeout']>;
   private getObservation: NonNullable<FollowupDependencies['getObservation']> | undefined;
   private canManageDraft: (draftId: string) => boolean;
+  private runDraftScope:NonNullable<FollowupDependencies['runDraftScope']>;
   private records = new Map<string, FollowupRecord>();
   private timer: unknown = undefined;
   private worker: Promise<void> | null = null;
@@ -54,6 +56,7 @@ export class FollowupService {
     this.clearTimer = dependencies.clearTimeout ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
     this.getObservation = dependencies.getObservation ?? (amazon.getListingObservation ? id => amazon.getListingObservation!(id) : undefined);
     this.canManageDraft = dependencies.canManageDraft ?? (() => true);
+    this.runDraftScope=dependencies.runDraftScope??((_id,work)=>work());
     try {
       for (const row of this.db.prepare('SELECT id,record_json FROM listing_followups ORDER BY rowid').all()) {
         const record = validateFollowupRecord(JSON.parse(String(row.record_json)));
@@ -168,7 +171,7 @@ export class FollowupService {
       if (this.paused || this.closing || this.closed) return;
       if (!this.canManageDraft(record.draftId)) continue;
       this.activeDraftId = record.draftId;
-      try { await this.read(record); } finally { this.activeDraftId = null; }
+      try { await this.runDraftScope(record.draftId,()=>this.read(record)); } finally { this.activeDraftId = null; }
     }
   }
   private async read(record: FollowupRecord): Promise<void> {

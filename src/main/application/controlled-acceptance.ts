@@ -1,3 +1,4 @@
+import {validateRunEvidence} from '../diagnostics/run-evidence.ts';
 import {lstatSync,readFileSync,realpathSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import type {DatabaseSync} from 'node:sqlite';
@@ -8,7 +9,7 @@ import {listingFingerprint} from '../json-fingerprint.ts';
 import {sourceStamp,validateAutomaticListingTask} from '../automatic-listing/records.ts';
 import {parseUnambiguousJson} from '../collection/validation.ts';
 import {spendObject,spendHash,spendUuid,spendInteger,spendDate,spendText,SpendBudgetError} from '../ai/spend-records.ts';
-import {CONTROLLED_RUN_ID,ControlledRunError,ControlledRunScopes,readControlledRunScope,type ControlledEffect,type ControlledRunItem,type ControlledRunReview,validateControlledRunReview} from './controlled-run-scope.ts';
+import {CONTROLLED_RUN_ID,ControlledRunError,ControlledRunScopes,readControlledRunScope,permitReviewedScopeActivation,type ControlledEffect,type ControlledRunItem,type ControlledRunReview,validateControlledRunReview} from './controlled-run-scope.ts';
 import {assertVerifiedControlledCandidate,type VerifiedControlledCandidate} from './controlled-candidate.ts';
 import {assertSpendTransaction} from '../ai/spend-budget.ts';
 import {transaction} from './transaction.ts';
@@ -33,12 +34,20 @@ export function readReviewedAcceptanceManifest(directory:string):{manifest:Revie
 /** Explicit-mode process authority. Its existence (not a UI selection) makes every
  * dispatch fail closed, including a wrong task for which no stored scope matches. */
 export class ControlledAcceptanceSession {
- private db:DatabaseSync;private scopes:ControlledRunScopes;private directory:string;private candidate:VerifiedControlledCandidate;private product:(id:string)=>ProductDetail;private preparedReview:ReturnType<typeof readReviewedAcceptanceManifest>=null;
+ private db:DatabaseSync;private scopes:ControlledRunScopes;private directory:string;private candidate:VerifiedControlledCandidate;private product:(id:string)=>ProductDetail;private closed=false;private revokeReviewedProcess:(()=>void)|undefined;private preparedReview:ReturnType<typeof readReviewedAcceptanceManifest>=null;
  constructor(directory:string,candidate:VerifiedControlledCandidate,product:(id:string)=>ProductDetail){this.directory=directory;this.candidate=candidate;this.product=product;assertVerifiedControlledCandidate(candidate);this.db=openDatabase(directory);this.scopes=new ControlledRunScopes(this.db);}
  private reviewed(){assertVerifiedControlledCandidate(this.candidate);const file=readReviewedAcceptanceManifest(this.directory);if(!file||listingFingerprint(file.manifest.candidate)!==listingFingerprint(this.candidate.identity))blocked();this.preparedReview=file;return file;}
  canManageTask(id:string):boolean{const file=readReviewedAcceptanceManifest(this.directory);if(!file||file.manifest.taskId!==id)return false;const scope=readControlledRunScope(this.db);if(scope&&(scope.taskId!==id||scope.review&&scope.review.sessionId!==file.manifest.sessionId))return false;this.task(file.manifest);return true;}
  canManageDraft(id:string):boolean{
-  const file=readReviewedAcceptanceManifest(this.directory);if(!file||!this.canManageTask(file.manifest.taskId))return false;const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(file.manifest.taskId);if(!saved)return false;const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));return task.items.some(row=>row.draftId===id&&file.manifest.items.some(i=>i.itemKey===row.key));
+  const file=readReviewedAcceptanceManifest(this.directory);if(!file||!this.canManageTask(file.manifest.taskId))return false;const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(file.manifest.taskId);if(!saved)return false;const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));const active=readControlledRunScope(this.db)?.activeItemKey??file.manifest.items[0].itemKey;return task.items.some(row=>row.draftId===id&&row.key===active&&file.manifest.items.some(i=>i.itemKey===row.key));
+ }
+ /** One finite startup snapshot. Bare PENDING rows and calls without their
+  * original same-TX task reservation evidence are never claimed by lookup. */
+ recoveryCallIds():ReadonlySet<string>{
+  const file=readReviewedAcceptanceManifest(this.directory),ids=new Set<string>();if(!file)return ids;this.task(file.manifest);
+  for(const row of this.db.prepare("SELECT product_id,detail_json FROM audit_events WHERE action='run.evidence' AND json_extract(detail_json,'$.event')='REQUEST_RESERVED' AND json_extract(detail_json,'$.taskId')=?").all(file.manifest.taskId)){
+   try{const evidence=validateRunEvidence(JSON.parse(String(row.detail_json))),item=file.manifest.items.find(i=>i.itemKey===evidence.itemKey);if(!item||row.product_id!==item.productId||!evidence.callId)continue;const saved=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(evidence.callId);if(!saved)continue;const call=JSON.parse(String(saved.record_json));if(call.id===evidence.callId&&call.productId===item.productId&&call.startedAt===evidence.at)ids.add(call.id);}catch{/* Missing original ownership remains read-only, never an implicit authorization. */}
+  }return ids;
  }
  private task(m:ReviewedAcceptanceManifest):AutomaticListingTask{
   const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(m.taskId);if(!saved)blocked();const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
@@ -46,13 +55,17 @@ export class ControlledAcceptanceSession {
   for(const i of m.items){const row=task.items.find(r=>r.key===i.itemKey);if(!row||row.sku!==i.sku||row.productId!==i.productId||row.sourceStamp!==i.sourceStamp||sourceStamp(this.product(row.productId))!==i.sourceStamp||(row.salesPlan?.parentage??'NONE')!=='NONE'||(row.salesPlan?.recipe.key??null)!==i.recipeKey||listingFingerprint([...(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])].sort())!==listingFingerprint([...i.variantIds].sort()))blocked();}
   return task;
  }
+ private assertFreshRegistration(m:ReviewedAcceptanceManifest):void{
+  for(const saved of this.db.prepare('SELECT record_json FROM listing_drafts WHERE record_json IS NOT NULL').all()){const r=JSON.parse(String(saved.record_json)),d=r.draft;if(d&&d.mode==='live'&&d.sellerId===m.sellerId&&d.marketplaceId===m.marketplaceId&&m.items.some(i=>i.sku===d.sku)&&(r.unresolvedWrite||d.submittedAt||['SUBMITTING','SUBMITTED','UNKNOWN','PROCESSING','BUYABLE','DISCOVERABLE'].includes(d.state)))blocked();}
+  for(const saved of this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id<>?').all(m.taskId)){const task=JSON.parse(String(saved.record_json));if(task.mode==='live'&&task.sellerId===m.sellerId&&task.marketplaceId===m.marketplaceId&&!['COMPLETED','CANCELLED'].includes(task.status)&&task.items?.some((row:{sku:string})=>m.items.some(i=>i.sku===row.sku||i.productId===(row as {productId?:string}).productId)))blocked();}
+ }
  /** Called by main on explicit start, never from renderer registration. Initial
   * review revision is only the anchor; subsequent owner progress uses durable CAS. */
  applyReviewedFile():void{
   const {manifest:m,digest}=this.reviewed(),task=this.task(m),current=readControlledRunScope(this.db);if(current?.review?.digest===digest){if(current.review.sessionId!==m.sessionId)blocked();return;}
   preflightControlledAcceptance(this.directory);if(!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)||task.revision!==m.action.expectedTaskRevision)blocked();
   transaction(this.db,()=>{
-   let scope=readControlledRunScope(this.db);if(m.action.kind==='register'){if(scope||task.revision!==m.reviewTaskRevision)blocked();scope=this.scopes.register({taskId:m.taskId,expectedTaskRevision:task.revision,targetId:m.targetId,sellerId:m.sellerId,marketplaceId:m.marketplaceId,items:m.items.map(({sourceStamp:_stamp,...item})=>item)});}else if(!scope||scope.review?.sessionId!==m.sessionId)blocked();
+   let scope=readControlledRunScope(this.db);if(m.action.kind==='register'){if(scope||task.revision!==m.reviewTaskRevision)blocked();this.assertFreshRegistration(m);scope=this.scopes.register({taskId:m.taskId,expectedTaskRevision:task.revision,targetId:m.targetId,sellerId:m.sellerId,marketplaceId:m.marketplaceId,items:m.items.map(({sourceStamp:_stamp,...item})=>item)});}else if(!scope||scope.review?.sessionId!==m.sessionId)blocked();
    const review:ControlledRunReview={version:1,sessionId:m.sessionId,digest,initialTaskRevision:m.reviewTaskRevision,sourceStamps:m.items.map(i=>({itemKey:i.itemKey,stamp:i.sourceStamp})),candidate:m.candidate,secondReleased:scope!.review?.secondReleased??false};
    const expected={digest:m.action.previousDigest,epoch:m.action.expectedEpoch,taskRevision:m.action.expectedTaskRevision};
    if(m.action.kind==='release-second'){if(expected.digest===null)blocked();this.scopes.releaseSecondReviewedInTransaction(this.db,{...review,secondReleased:true},{...expected,digest:expected.digest});}
@@ -62,9 +75,9 @@ export class ControlledAcceptanceSession {
  /** No provider in the current full listing plan has a verified exhaustive hard
   * upper for every required effect. Stop before spending on the first AI stage. */
  assertBillingPlanAvailable():never{throw Object.assign(new SpendBudgetError('SPEND_BOUND_UNAVAILABLE'),{certainty:'NOT_SENT' as const,notSent:true});}
- admitTask(task:AutomaticListingTask):void{if(!this.canManageTask(task.id))blocked();this.applyReviewedFile();const file=this.reviewed();this.task(file.manifest);if(readControlledRunScope(this.db)?.review?.digest!==file.digest)blocked();this.assertBillingPlanAvailable();}
+ admitTask(task:AutomaticListingTask):void{if(!this.canManageTask(task.id))blocked();this.applyReviewedFile();const file=this.reviewed();this.task(file.manifest);if(readControlledRunScope(this.db)?.review?.digest!==file.digest)blocked();this.revokeReviewedProcess?.();this.revokeReviewedProcess=permitReviewedScopeActivation(this.db,this.candidate);}
  assertExternal(effect:ControlledEffect,borrowed?:DatabaseSync):void{
   if(borrowed)assertSpendTransaction(this.db,borrowed);const file=borrowed?this.preparedReview:this.reviewed();if(!file)blocked();this.task(file.manifest);const scope=readControlledRunScope(borrowed??this.db);if(!scope||scope.review?.digest!==file.digest||scope.review.sessionId!==file.manifest.sessionId)blocked();if((borrowed?new ControlledRunScopes(borrowed):this.scopes).authorizeEffect(effect)!==CONTROLLED_RUN_ID)blocked();
  }
- close():void{this.db.close();}
+ close():void{if(this.closed)return;this.closed=true;this.revokeReviewedProcess?.();this.db.close();}
 }

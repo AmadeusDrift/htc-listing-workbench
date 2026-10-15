@@ -1,6 +1,6 @@
 import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
-import {ControlledRunScopes,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
@@ -865,6 +865,11 @@ export class AutomaticListingService {
     if(!fields.length)return;
     row.repairPolicyMigration={version:FIELD_REPAIR_POLICY_VERSION,previousAttempts:2,grantedAttempts:1,grantedAt:new Date().toISOString(),fields};
   }
+  /** Main-only relay for a delayed first/second-item readback; never serialized or
+   * recreated after restart, and never grants a draft by lookup alone. */
+  runControlledDraft<T>(draftId:string,work:()=>T):T{
+    this.ensureOpen();const matches=this.managedTasks().flatMap(task=>task.items.filter(row=>row.draftId===draftId).map(row=>({task,row})));if(matches.length!==1)throw new ControlledRunError();const {task,row}=matches[0],grant=this.controlledGrants.get(task.id);if(!grant)throw new ControlledRunError();return this.controlledRuns.runTask(task.id,row.key,row.productId,grant,work);
+  }
   private pump(): void {
     if (this.worker || this.closed || this.closing) return;
     this.worker = Promise.resolve().then(async () => {
@@ -1411,7 +1416,7 @@ export class AutomaticListingService {
     if (this.observing) return this.observing;
     this.observing = Promise.resolve().then(async () => {
       if(this.deps.batch)for(const task of this.managedTasks())if(task.items.some(row=>row.batchWait)){
-        try{await this.deps.batch.reconcile(task.id);}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
+        try{const row=task.items.find(row=>row.batchWait)!;await this.controlledRuns.runTask(task.id,row.key,row.productId,this.controlledGrants.get(task.id),()=>this.deps.batch!.reconcile(task.id));}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
       }
       // Global scan failures must stay outside per-SKU error classification.
       // Only observable submitted work can need this expensive view.

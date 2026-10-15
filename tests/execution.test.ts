@@ -351,3 +351,37 @@ test('combined Haul and color cleanup has one owned revision and keeps later exe
  f.amazon.validateDraft=async input=>{const result=await validate(input);if(first){first=false;assert.equal(result.revision,r.draft.revision+1);assert.equal(result.attributes.merchant_suggested_asin,undefined);assert.equal((result.attributes.color as any)[0].value,'Pink');}return result;};
  f.start(task.id);await f.service.waitForIdle();assert.equal(f.service.get(task.id).status,'COMPLETED',f.service.get(task.id).error??'');assert.equal(f.uploadCalls,1);
 });
+
+test('execution retains a frozen direct route when hosting defaults change and exposes upload failure details', async t => {
+  const f = await fixture(t), before = f.hosting.getProfile();
+  const task = f.create();
+  assert.deepEqual(task.hostingRoute, { mode: 'direct' });
+  f.hosting.getProfile = () => ({ ...before, route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  let route: unknown;
+  f.hosting.upload = async input => { route = (input as { route?: unknown }).route; return { ...before, id: randomUUID(), assetId: input.assetId, profileId: 'alpha', generation: 1, sha256: f.store.getAssetRecord(input.assetId)!.sha256, publicUrl: 'https://images.example.com/test/image.png', status: 'FAILED', attempts: 3, errorCode: 'CONNECT_TIMEOUT', history: [{ stage: 'connect', delivery: 'not-sent' }] } as never; };
+  f.start(task.id); await f.service.waitForIdle();
+  assert.deepEqual(route, { mode: 'direct' });
+  const failed = f.service.get(task.id), error = failed.items[0].steps.find(s => s.name === 'upload')!.error!;
+  assert.match(error, /CONNECT_TIMEOUT/); assert.match(error, /第1张/); assert.match(error, /3次/); assert.match(error, /连接/);
+  assert.equal(f.amazon.listCalls().filter(call => call.operation === 'putListingsItem').length, 0);
+});
+
+test('execution legacy missing-route snapshot remains direct after a default change and still blocks changed host', async t => {
+  const f = await fixture(t), task = f.create(), original = f.hosting.getProfile();
+  const { hostingRoute: _frozen, ...legacy } = task;
+  legacy.profileStamp = (await import('../src/main/execution/records.ts')).fingerprint(original);
+  const db = new DatabaseSync(join(f.directory, 'red.sqlite'));
+  db.prepare('UPDATE execution_tasks SET record_json=? WHERE id=?').run(JSON.stringify(legacy), task.id); db.close();
+  await f.reopen();
+  f.hosting.getProfile = () => ({ ...original, route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  assert.equal(f.service.prepareStart(task.id).id, task.id);
+  f.hosting.getProfile = () => ({ ...original, host: 'changed.example.test', route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  assert.throws(() => f.service.prepareStart(task.id), /FTP/);
+});
+
+test('new execution takes an explicitly frozen SOCKS route instead of mutable default', async t => {
+  const f = await fixture(t), route = { mode: 'socks5' as const, host: '127.0.0.1' as const, port: 1080, dns: 'proxy' as const };
+  const task = f.service.create({ draftIds: [f.draft.id], profileId: 'alpha', hostingRoute: route });
+  await f.reopen(); assert.deepEqual(f.service.get(task.id).hostingRoute, route);
+  f.start(task.id); await f.service.waitForIdle(); assert.equal(f.service.get(task.id).status, 'COMPLETED');
+});

@@ -1,7 +1,9 @@
 import { UserFacingError } from '../../shared/errors.ts';
-import type { HostingErrorCode } from '../../shared/hosting-contracts.ts';
+import type { HostedAsset, HostingStage, HostingDelivery, HostingErrorCode } from '../../shared/hosting-contracts.ts';
 
 const MESSAGES: Record<HostingErrorCode, string> = {
+  PROXY_PASSIVE_UNSUPPORTED: '代理转发需要 FTP 服务器支持 EPSV，未回退到其他数据主机',
+  PROXY_FAILED: 'SOCKS5 代理转发失败（未改走直连）', PROXY_AUTH_REQUIRED: '本地 SOCKS5 代理不接受免认证连接', TLS_FAILED: 'FTP 证书或 TLS 握手失败', DNS_FAILED: 'FTP 主机解析失败',
   INVALID_CONFIG: 'FTP 配置格式无效，请检查配置文件', INVALID_INPUT: '图片托管参数无效', PROFILE_DISABLED: 'FTP 配置尚未启用',
   PROFILE_CHANGED: 'FTP 配置已变更，请重新创建任务', CREDENTIAL_NOT_FOUND: 'FTP 凭据不可用，请重新导入配置',
   ENCRYPTION_UNAVAILABLE: '系统安全加密不可用，无法保存 FTP 配置', AUTH_FAILED: 'FTP 登录失败，请检查账号配置',
@@ -15,12 +17,15 @@ const MESSAGES: Record<HostingErrorCode, string> = {
 };
 export class HostingError extends UserFacingError {
   readonly code: HostingErrorCode;
-  constructor(code: HostingErrorCode) { super(MESSAGES[code]); this.code = code; }
+  readonly stage?: HostingStage; readonly delivery?: HostingDelivery;
+  constructor(code: HostingErrorCode, stage?: HostingStage, delivery?: HostingDelivery) { super(MESSAGES[code]); this.code = code; this.stage = stage; this.delivery = delivery; }
 }
 /** Never include server error messages, file paths or request options in a persisted error. */
 export function classifyHostingError(error: unknown): HostingError {
   if (error instanceof HostingError) return error;
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  if (['ENOTFOUND', 'EAI_AGAIN'].includes(code)) return new HostingError('DNS_FAILED');
+  if (/CERT|TLS|SSL/.test(code)) return new HostingError('TLS_FAILED');
   if (['530', '532', '331'].includes(code)) return new HostingError('AUTH_FAILED');
   if (code === '421') return new HostingError('CONNECTION_LIMIT');
   if (['ETIMEDOUT', 'ESOCKETTIMEDOUT'].includes(code)) return new HostingError('CONNECT_TIMEOUT');
@@ -53,4 +58,12 @@ export async function sleepWithSignal(ms: number, signal: AbortSignal): Promise<
   let timer: ReturnType<typeof setTimeout>;
   try { await abortable(new Promise<void>(resolve => { timer = setTimeout(resolve, ms); }), signal, () => clearTimeout(timer)); }
   finally { clearTimeout(timer!); }
+}
+
+/** Safe projection only: never persist raw FTP messages, paths or credentials. */
+export function hostingFailureMessage(record: Pick<HostedAsset, 'errorCode' | 'attempts'> & Partial<Pick<HostedAsset, 'history'>>, slot?: number): string {
+  const last = record.history?.at(-1), stages: Record<HostingStage, string> = { connect: '连接/登录', directory: '远程目录', size: '查大小', upload: '上传', 'public-get': '外链验证' };
+  const delivery = last?.delivery === 'not-sent' ? '本次尚未发送图片' : last?.delivery === 'confirmed' ? '远端大小已确认，外链待核验' : '远端结果未知，下次先核对原路径';
+  const code = record.errorCode && Object.hasOwn(MESSAGES, record.errorCode) ? record.errorCode : 'UPLOAD_FAILED';
+  return `图片${slot ? `第${slot}张` : ''}托管失败：${MESSAGES[code]} [${code}]；阶段：${last?.stage ? stages[last.stage] : '历史记录未细分'}；已尝试${record.attempts ?? 0}次；${delivery}。保留原图与托管检查点`;
 }

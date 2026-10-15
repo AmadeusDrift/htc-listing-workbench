@@ -1,5 +1,5 @@
 import { HOSTING_ERROR_CODES, HOSTING_PROFILE_IDS } from '../../shared/hosting-contracts.ts';
-import type { HostedAsset, HostingProfile, HostingProfileId, HostingUploadInput } from '../../shared/hosting-contracts.ts';
+import type { HostedAsset, HostingProfile, HostingProfileId, HostingUploadInput, HostingRoute } from '../../shared/hosting-contracts.ts';
 import { HostingError } from './errors.ts';
 import { validatePublicUrl } from './public-probe.ts';
 
@@ -13,6 +13,17 @@ export function objectKeys(raw: unknown, keys: readonly string[]): Record<string
   const o = raw as Record<string, unknown>;
   if (Object.keys(o).length !== keys.length || Object.keys(o).some(key => !keys.includes(key))) invalid();
   return o;
+}
+function optionalKeys(raw: unknown, keys: readonly string[], optional: readonly string[]): Record<string, unknown> {
+  const value = raw as Record<string, unknown>;
+  return objectKeys(raw, [...keys, ...optional.filter(key => value && Object.hasOwn(value, key))]);
+}
+export function parseHostingRoute(raw: unknown): HostingRoute {
+  if (raw && typeof raw === 'object' && 'mode' in raw && raw.mode === 'direct') { objectKeys(raw, ['mode']); return { mode: 'direct' }; }
+  const o = objectKeys(raw, ['mode', 'host', 'port', 'dns']);
+  // Local SOCKS5 only, with no proxy credentials in renderer or persisted profiles.
+  if (o.mode !== 'socks5' || o.host !== '127.0.0.1' || o.dns !== 'proxy') invalid();
+  return { mode: 'socks5', host: '127.0.0.1', port: integer(o.port, 1, 65535), dns: 'proxy' };
 }
 export function profileId(value: unknown): HostingProfileId {
   if (typeof value !== 'string' || !HOSTING_PROFILE_IDS.includes(value as HostingProfileId)) invalid();
@@ -52,19 +63,19 @@ export function parseProfileImport(raw: unknown): ProfileImport {
   return parsed;
 }
 export function validatePersistedProfile(raw: unknown): HostingProfile {
-  const o = objectKeys(raw, ['id', 'name', 'host', 'port', 'secure', 'remoteRoot', 'publicBaseUrl', 'enabled', 'configured', 'generation']);
+  const o = optionalKeys(raw, ['id', 'name', 'host', 'port', 'secure', 'remoteRoot', 'publicBaseUrl', 'enabled', 'configured', 'generation'], ['route']);
   const id = profileId(o.id), name = PROFILE_NAMES[HOSTING_PROFILE_IDS.indexOf(id)];
   if (o.name !== name) invalid();
-  return { id, name, host: host(o.host, true), port: integer(o.port, 1, 65535), secure: flag(o.secure), remoteRoot: remoteRoot(o.remoteRoot), publicBaseUrl: baseUrl(o.publicBaseUrl), enabled: flag(o.enabled), configured: flag(o.configured), generation: integer(o.generation, 0, Number.MAX_SAFE_INTEGER - 1) };
+  return { id, name, host: host(o.host, true), port: integer(o.port, 1, 65535), secure: flag(o.secure), remoteRoot: remoteRoot(o.remoteRoot), publicBaseUrl: baseUrl(o.publicBaseUrl), enabled: flag(o.enabled), configured: flag(o.configured), generation: integer(o.generation, 0, Number.MAX_SAFE_INTEGER - 1), ...(Object.hasOwn(o, 'route') ? { route: parseHostingRoute(o.route) } : {}) };
 }
 export function parseUploadInput(raw: unknown): HostingUploadInput {
-  const o = objectKeys(raw, ['assetId', 'profileId', 'generation', 'batchId']);
-  return { assetId: uuid(o.assetId), profileId: profileId(o.profileId), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), batchId: uuid(o.batchId) };
+  const o = optionalKeys(raw, ['assetId', 'profileId', 'generation', 'batchId'], ['route']);
+  return { assetId: uuid(o.assetId), profileId: profileId(o.profileId), generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), batchId: uuid(o.batchId), ...(Object.hasOwn(o, 'route') ? { route: parseHostingRoute(o.route) } : {}) };
 }
 function date(value: unknown): string { const s = text(value, 30); if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(s) || !Number.isFinite(Date.parse(s))) invalid(); return s; }
 function errorCode(value: unknown): HostedAsset['errorCode'] { if (value === null) return null; if (!HOSTING_ERROR_CODES.includes(value as never)) invalid(); return value as HostedAsset['errorCode']; }
 export function validatePersistedUpload(raw: unknown): HostedAsset {
-  const o = objectKeys(raw, ['id', 'assetId', 'profileId', 'batchId', 'generation', 'sha256', 'byteSize', 'mimeType', 'remotePath', 'publicUrl', 'status', 'attempts', 'history', 'errorCode', 'createdAt', 'updatedAt']);
+  const o = optionalKeys(raw, ['id', 'assetId', 'profileId', 'batchId', 'generation', 'sha256', 'byteSize', 'mimeType', 'remotePath', 'publicUrl', 'status', 'attempts', 'history', 'errorCode', 'createdAt', 'updatedAt'], ['route']);
   const id = uuid(o.id), assetId = uuid(o.assetId), batchId = uuid(o.batchId), sha256 = text(o.sha256, 64);
   if (!HASH.test(sha256) || !['image/png', 'image/jpeg'].includes(String(o.mimeType)) || !['PENDING', 'UPLOADING', 'VERIFYING', 'AVAILABLE', 'FAILED', 'CANCELLED'].includes(String(o.status))) invalid();
   const path = text(o.remotePath, 800), ext = o.mimeType === 'image/png' ? 'png' : 'jpg';
@@ -74,10 +85,11 @@ export function validatePersistedUpload(raw: unknown): HostedAsset {
   const attempts = integer(o.attempts, 0, 100000);
   if (!Array.isArray(o.history) || o.history.length > attempts || o.history.length > 100000) invalid();
   const history = o.history.map(entry => {
-    const a = objectKeys(entry, ['attempt', 'status', 'errorCode', 'startedAt', 'finishedAt']);
+    const a = optionalKeys(entry, ['attempt', 'status', 'errorCode', 'startedAt', 'finishedAt'], ['stage', 'delivery']);
+    if (a.stage !== undefined && !['connect','directory','size','upload','public-get'].includes(String(a.stage)) || a.delivery !== undefined && !['not-sent','unknown','confirmed'].includes(String(a.delivery))) invalid();
     if (!['AVAILABLE', 'FAILED', 'CANCELLED'].includes(String(a.status))) invalid();
-    return { attempt: integer(a.attempt, 1, attempts), status: a.status as 'AVAILABLE' | 'FAILED' | 'CANCELLED', errorCode: errorCode(a.errorCode), startedAt: date(a.startedAt), finishedAt: date(a.finishedAt) };
+    return { attempt: integer(a.attempt, 1, attempts), status: a.status as 'AVAILABLE' | 'FAILED' | 'CANCELLED', errorCode: errorCode(a.errorCode), startedAt: date(a.startedAt), finishedAt: date(a.finishedAt), ...(a.stage !== undefined ? { stage: a.stage as NonNullable<HostedAsset['history'][number]['stage']> } : {}), ...(a.delivery !== undefined ? { delivery: a.delivery as NonNullable<HostedAsset['history'][number]['delivery']> } : {}) };
   });
   if (new Set(history.map(h => h.attempt)).size !== history.length) invalid();
-  return { id, assetId, profileId: profileId(o.profileId), batchId, generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), sha256, byteSize: integer(o.byteSize, 1, MAX_IMAGE_BYTES), mimeType: o.mimeType as HostedAsset['mimeType'], remotePath: path, publicUrl: publicUrl.href, status: o.status as HostedAsset['status'], attempts, history, errorCode: errorCode(o.errorCode), createdAt: date(o.createdAt), updatedAt: date(o.updatedAt) };
+  return { id, assetId, profileId: profileId(o.profileId), batchId, generation: integer(o.generation, 1, Number.MAX_SAFE_INTEGER - 1), sha256, byteSize: integer(o.byteSize, 1, MAX_IMAGE_BYTES), mimeType: o.mimeType as HostedAsset['mimeType'], remotePath: path, publicUrl: publicUrl.href, status: o.status as HostedAsset['status'], attempts, history, errorCode: errorCode(o.errorCode), createdAt: date(o.createdAt), updatedAt: date(o.updatedAt), ...(Object.hasOwn(o, 'route') ? { route: parseHostingRoute(o.route) } : {}) };
 }

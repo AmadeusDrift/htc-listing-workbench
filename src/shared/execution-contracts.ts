@@ -1,3 +1,4 @@
+import type { HostingRoute } from './hosting-contracts.ts';
 export type ExecutionStatus = 'CREATED' | 'QUEUED' | 'RUNNING' | 'PAUSED' | 'NEEDS_ATTENTION' | 'COMPLETED' | 'CANCELLED';
 export type ExecutionConcurrency = 1 | 3 | 5;
 export type StepName = 'upload' | 'images' | 'validate' | 'preview' | 'submit' | 'readback';
@@ -12,9 +13,10 @@ export interface ExecutionItem {
 }
 export interface ExecutionTask {
   id: string; revision: number; status: ExecutionStatus; concurrency: ExecutionConcurrency; profileId: string; profileGeneration: number; profileStamp: string;
+  hostingRoute?: HostingRoute;
   items: ExecutionItem[]; createdAt: string; updatedAt: string; error: string | null;
 }
-export interface CreateExecutionTaskInput { draftIds: string[]; profileId: string; concurrency?: ExecutionConcurrency }
+export interface CreateExecutionTaskInput { draftIds: string[]; profileId: string; concurrency?: ExecutionConcurrency; hostingRoute?: HostingRoute }
 export interface ExecutionApi {
   listExecutionTasks(): Promise<ExecutionTask[]>;
   getExecutionTask(id: string): Promise<ExecutionTask>;

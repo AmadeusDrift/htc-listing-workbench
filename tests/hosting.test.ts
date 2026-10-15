@@ -273,3 +273,51 @@ test('W07 M09 managed source reader and pin use fake FTP without listing adoptio
  const before=f.store.getProduct(f.product.id),pin=await pins.prepare({operationId:randomUUID(),assetId:asset.id,sha256:asset.sha256,purpose:'source-reference'});assert.equal(pins.validateReference(pins.reference(pin.id)),true);assert.equal(f.service.listUploads().length,0);assert.deepEqual(f.store.getProduct(f.product.id),before);assert.equal(f.calls.upload,1);
  }finally{db.close();}
 });
+
+test('hosting freezes upload route across settings changes and preserves safe stage diagnostics', async t => {
+  const routes: unknown[] = [];
+  let failing = true;
+  const f = await fixture(t, { maxAttempts: 1, transport: {
+    async size(profile) { routes.push(profile.route ?? { mode: 'direct' }); if (failing) throw new HostingError('CONNECT_TIMEOUT', 'connect', 'not-sent'); return 33; },
+    async upload() { assert.fail('must reuse size checkpoint'); }, async close() {},
+  } });
+  const first = await f.service.upload(f.input);
+  assert.equal(first.history[0].stage, 'connect');
+  assert.equal(first.history[0].delivery, 'not-sent');
+  f.service.setRoute({ id: 'alpha', route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  failing = false;
+  const resumed = await f.service.upload({ ...f.input, batchId: randomUUID() });
+  assert.equal(resumed.id, first.id); assert.equal(resumed.remotePath, first.remotePath);
+  assert.deepEqual(routes, [{ mode: 'direct' }, { mode: 'direct' }]);
+  assert.equal(resumed.attempts, 2);
+});
+
+test('legacy profiles retain exact shape and invalid proxy routes are rejected', async t => {
+  const f = await fixture(t), before = f.service.getProfile('alpha');
+  assert.equal(Object.hasOwn(before, 'route'), false);
+  assert.throws(() => f.service.setRoute({ id: 'alpha', route: { mode: 'socks5', host: 'evil.test', port: 1080, dns: 'proxy' } }));
+  const changed = f.service.setRoute({ id: 'alpha', route: { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' } });
+  assert.equal(changed.generation, before.generation); assert.equal(changed.configured, true);
+  assert.deepEqual(changed.route, { mode: 'socks5', host: '127.0.0.1', port: 1080, dns: 'proxy' });
+});
+
+test('public probe failure records confirmed FTP size and reuses bytes and path on retry', async t => {
+  let fail = true;
+  const f = await fixture(t, { maxAttempts: 1, probe: async () => { if (fail) throw new HostingError('PUBLIC_URL_TIMEOUT'); } });
+  const first = await f.service.upload(f.input);
+  assert.equal(first.errorCode, 'PUBLIC_URL_TIMEOUT'); assert.equal(first.history[0].stage, 'public-get'); assert.equal(first.history[0].delivery, 'confirmed');
+  fail = false; const resumed = await f.service.upload(f.input);
+  assert.equal(resumed.status, 'AVAILABLE'); assert.equal(f.calls.upload, 1); assert.equal(resumed.remotePath, first.remotePath); assert.equal(resumed.id, first.id);
+});
+
+test('new upload can use explicit frozen route while legacy records always retain direct', async t => {
+  const used: unknown[] = [], route = { mode: 'socks5' as const, host: '127.0.0.1' as const, port: 1080, dns: 'proxy' as const };
+  const f = await fixture(t, { transport: { async size(profile) { used.push(profile.route); return 33; }, async upload() { assert.fail('size already matches'); }, close() {} } });
+  const uploaded = await f.service.upload({ ...f.input, route }); assert.deepEqual(used[0], route);
+  await f.service.close(); const db = openDatabase(f.directory), { route: _route, ...legacy } = uploaded;
+  db.prepare('UPDATE hosting_uploads SET record_json=? WHERE id=?').run(JSON.stringify(legacy), uploaded.id); db.close();
+  const restarted = new HostingService(f.directory, f.store, storage, f.dependencies);
+  try { restarted.setRoute({ id: 'alpha', route }); await restarted.upload({ ...f.input, route });
+    assert.deepEqual(used[1], { mode: 'direct' }); assert.equal(Object.hasOwn(restarted.listUploads()[0], 'route'), false);
+  } finally { await restarted.close(); }
+});

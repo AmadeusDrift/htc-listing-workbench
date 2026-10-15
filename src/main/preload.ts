@@ -188,6 +188,7 @@ const api: RedApi = {
   listFtpProfiles: () => invoke('red:hosting:profiles'),
   importFtpProfile: () => invoke('red:hosting:import'),
   exportFtpProfileTemplate: id => invoke('red:hosting:template', id),
+  setFtpProfileRoute: input => invoke('red:hosting:route', input),
   setFtpProfileEnabled: input => invoke('red:hosting:enable', input),
   listHostedAssets: () => invoke('red:hosting:uploads'),
   listExecutionTasks: () => invoke('red:execution:list'),

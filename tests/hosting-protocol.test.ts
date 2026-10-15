@@ -59,3 +59,81 @@ for (const action of ['abort', 'close'] as const) test(`immediate FTP ${action} 
   await new Promise<void>(resolve => setTimeout(resolve, 20));
   assert.deepEqual(unhandled, []); assert.equal(fixture.connections(), 0);
 });
+
+import { localSocks } from './helpers/socks-server.ts';
+test('SOCKS5 forwards both FTP control and passive bytes with proxy DNS and no direct fallback', async t => {
+  const fixture = await localFtp(t), proxy = await localSocks(); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 500 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  const bytes = Buffer.from('via two distinct SOCKS tunnels');
+  assert.equal(await transport.upload(profile, { username: 'synthetic-user', password: 'synthetic-password' }, '/test/a.png', bytes, new AbortController().signal), bytes.length);
+  assert.deepEqual(fixture.files.get('/test/a.png'), bytes);
+  assert.equal(proxy.targets.length, 2); assert.equal(proxy.targets[0].port, fixture.port);
+  assert.ok(proxy.targets.every(target => target.host === profile.host));
+});
+
+test('SOCKS authentication rejection and FTPS rejection never fall back to direct or plaintext login', async t => {
+  const fixture = await localFtp(t), proxy = await localSocks({ refuse: true }); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 500 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  await assert.rejects(transport.size(profile, { username: 'synthetic', password: 'synthetic' }, '/a.png', new AbortController().signal));
+  assert.equal(fixture.connections(), 0); assert.equal(proxy.targets.length, 0);
+  const tlsProxy = await localSocks(); t.after(() => tlsProxy.close());
+  await assert.rejects(transport.size({ ...profile, secure: true, route: { ...profile.route as Extract<NonNullable<HostingProfile['route']>, { mode: 'socks5' }>, port: tlsProxy.port } }, { username: 'synthetic', password: 'synthetic' }, '/a.png', new AbortController().signal));
+  assert.ok(fixture.commands.includes('AUTH')); assert.equal(fixture.commands.includes('USER'), false);
+});
+
+import { cert, key } from './fixtures/hosting-tls.ts';
+import { SocksFtpClient } from '../src/main/hosting/socks.ts';
+import { Readable } from 'node:stream';
+test('SOCKS FTPS verifies original hostname and protects both TLS channels', async t => {
+  const ftp = await createLocalFtpServer({ tls: { cert, key } }); t.after(() => ftp.close());
+  const proxy = await localSocks(); t.after(() => proxy.close());
+  const client = new SocksFtpClient(1000, { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' }); t.after(() => client.close());
+  await client.access({ host: 'ftp.fixture.invalid', port: ftp.port, user: 'synthetic', password: 'synthetic', secure: true, secureOptions: { ca: cert, rejectUnauthorized: true, host: 'ftp.fixture.invalid', servername: 'ftp.fixture.invalid' } });
+  const bytes = Buffer.from('TLS control and data must work through same route');
+  await client.uploadFrom(Readable.from(bytes), '/test/tls.png');
+  assert.deepEqual(ftp.files.get('/test/tls.png'), bytes); assert.equal(proxy.targets.length, 2);
+  assert.equal(client.ftp.hasTLS, true); assert.equal(client.ftp.tlsOptions.host, 'ftp.fixture.invalid');
+});
+
+test('SOCKS FTPS certificate mismatch rejects before credentials without disabling validation', async t => {
+  const ftp = await createLocalFtpServer({ tls: { cert, key } }); t.after(() => ftp.close());
+  const proxy = await localSocks(); t.after(() => proxy.close());
+  const client = new SocksFtpClient(500, { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' }); t.after(() => client.close());
+  await assert.rejects(client.access({ host: 'ftp.fixture.invalid', port: ftp.port, user: 'synthetic', password: 'synthetic', secure: true, secureOptions: { ca: cert, rejectUnauthorized: true, host: 'different.fixture.invalid', servername: 'different.fixture.invalid' } }), (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === 'ERR_TLS_CERT_ALTNAME_INVALID');
+  assert.equal(ftp.commands.includes('USER'), false); assert.equal(ftp.commands.includes('PASS'), false);
+});
+
+test('SOCKS destination DNS rejection has a safe code and never connects FTP directly', async t => {
+  const fixture = await localFtp(t), proxy = await localSocks({ destinationFailure: 4 }); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 500 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  await assert.rejects(transport.size(profile, { username: 'synthetic', password: 'synthetic' }, '/a.png', new AbortController().signal), { code: 'DNS_FAILED', stage: 'connect', delivery: 'not-sent' });
+  assert.equal(fixture.connections(), 0); assert.equal(proxy.targets.length, 1);
+});
+
+test('pause cancellation destroys a pending SOCKS handshake without unhandled errors', { timeout: 2000 }, async t => {
+  const fixture = await localFtp(t), proxy = await localSocks({ stall: true }); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 500 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  const controller = new AbortController(), pending = transport.size(profile, { username: 'synthetic', password: 'synthetic' }, '/a.png', controller.signal);
+  await proxy.connected; controller.abort(); await assert.rejects(pending, { code: 'CANCELLED' }); await proxy.closedConnection;
+  assert.equal(fixture.connections(), 0);
+});
+
+test('a stalled SOCKS handshake obeys the existing connection timeout without route fallback', async t => {
+  const fixture = await localFtp(t), proxy = await localSocks({ stall: true }); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 20 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  await assert.rejects(transport.size(profile, { username: 'synthetic', password: 'synthetic' }, '/a.png', new AbortController().signal), { code: 'CONNECT_TIMEOUT', stage: 'connect', delivery: 'not-sent' });
+  assert.equal(fixture.connections(), 0);
+});
+
+test('proxy FTP refuses unsafe PASV fallback when EPSV is unsupported', async t => {
+  const fixture = await localFtp(t, 'bounce'), proxy = await localSocks(); t.after(() => proxy.close());
+  const transport = new BasicFtpTransport(new FtpConnectionPool({ connectionTimeoutMs: 500 })); t.after(() => transport.close());
+  const profile: HostingProfile = { ...fixture.profile, host: 'ftp.fixture.invalid', route: { mode: 'socks5', host: '127.0.0.1', port: proxy.port, dns: 'proxy' } };
+  await assert.rejects(transport.upload(profile, { username: 'synthetic', password: 'synthetic' }, '/a.png', Buffer.from('test'), new AbortController().signal), { code: 'PROXY_PASSIVE_UNSUPPORTED', stage: 'upload', delivery: 'not-sent' });
+  assert.equal(fixture.commands.includes('STOR'), false); assert.equal(fixture.commands.includes('PASV'), false); assert.equal(proxy.targets.length, 1);
+});

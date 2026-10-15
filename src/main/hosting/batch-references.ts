@@ -1,3 +1,5 @@
+import { DIRECT_HOSTING_ROUTE, profileWithHostingRoute } from '../../shared/hosting-contracts.ts';
+import type { HostingRoute } from '../../shared/hosting-contracts.ts';
 import {createHash} from 'node:crypto';
 import {readdir,readFile,lstat} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -48,10 +50,10 @@ export function createBatchReferencePort(deps:Deps):NonNullable<AiDependencies['
   const run=async()=>{
    const db=openDatabase(deps.directory);
    try{
-    const task=deps.task(owner.taskId),profile=deps.hosting.getProfile(task.profileId),profileStamp=JSON.stringify(profile);
-    const assertFresh=()=>{throwIfAborted(controller.signal);if(closed||scope?.taskId!==owner.taskId||!scope.authorize())throw new AiError('CANCELLED');if(deps.store.getProduct(owner.productId).revision!==owner.productRevision)throw new AiError('SOURCE_CHANGED');const current=deps.task(owner.taskId);if(current.profileId!==task.profileId||current.profileStamp!==task.profileStamp||JSON.stringify(deps.hosting.getProfile(task.profileId))!==profileStamp)throw new AiError('CONFIG_CHANGED');};
+    const task=deps.task(owner.taskId) as AutomaticListingTask & {hostingRoute?:HostingRoute},profile=profileWithHostingRoute(deps.hosting.getProfile(task.profileId),task.hostingRoute),profileStamp=JSON.stringify(profile);
+    const assertFresh=()=>{throwIfAborted(controller.signal);if(closed||scope?.taskId!==owner.taskId||!scope.authorize())throw new AiError('CANCELLED');if(deps.store.getProduct(owner.productId).revision!==owner.productRevision)throw new AiError('SOURCE_CHANGED');const current=deps.task(owner.taskId);if(current.profileId!==task.profileId||current.profileStamp!==task.profileStamp||JSON.stringify(profileWithHostingRoute(deps.hosting.getProfile(task.profileId),task.hostingRoute))!==profileStamp)throw new AiError('CONFIG_CHANGED');};
     assertFresh();if(createHash('sha256').update(profileStamp).digest('hex')!==task.profileStamp)throw new AiError('CONFIG_CHANGED');if(!profile.configured||!profile.enabled)throw new UserFacingError('视觉Batch需要任务所选图床的有效连接');
-    const pins=new ReferencePinService(db,{readVersion,probe:deps.probe,uploadVersion:async(version,bytes,activeSignal)=>{assertFresh();const url=await deps.hosting.uploadReferenceVersion(profile.id,profile.generation,version,bytes,activeSignal);assertFresh();return url;}});
+    const pins=new ReferencePinService(db,{readVersion,probe:deps.probe,uploadVersion:async(version,bytes,activeSignal)=>{assertFresh();const url=await deps.hosting.uploadReferenceVersion(profile.id,profile.generation,version,bytes,activeSignal,task.hostingRoute??DIRECT_HOSTING_ROUTE);assertFresh();return url;}});
     const copy=structuredClone(body),references:Awaited<ReturnType<NonNullable<AiDependencies['batchReferences']>['prepare']>>['references']=[];
     if(!Array.isArray(copy.messages))throw new AiError('INVALID_INPUT');
     for(const message of copy.messages){if(!message||!Array.isArray(message.content))continue;for(const part of message.content){if(part?.type!=='image_url')continue;if(typeof part.image_url?.url!=='string')throw new AiError('IMAGE_INVALID');assertFresh();const version=await resolveImage(part.image_url.url,owner);assertFresh();const pin=await pins.prepare({operationId:owner.operationId,...version},controller.signal);assertFresh();const reference=pins.reference(pin.id);if(!pins.validateReference(reference))throw new AiError('IMAGE_INVALID');part.image_url={...part.image_url,url:reference.url};if(!references.some(ref=>ref.pinId===reference.pinId))references.push(reference);}}

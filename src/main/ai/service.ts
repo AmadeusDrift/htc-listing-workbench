@@ -1031,14 +1031,14 @@ export class AiService {
     }else if(previousResultId&&(!same(previous)||previous.output.policyVersion||previous.output.verdict!=='UNCERTAIN'||previous.output.previousResultId!==null))throw new AiError('SOURCE_CHANGED');
     const image=Buffer.from(bytes),raster=inspectRaster(image);if(createHash('sha256').update(image).digest('hex')!==candidate.sha256||raster.width!==candidate.width||raster.height!==candidate.height)throw new AiError('IMAGE_INVALID');
     const source={operation:'image-appearance-review',context,plan,candidate,previousResultId:previous?.id??null,...(policy?{reviewPolicy:policy}:{})};
-    if(policy){
+    if(policy||previousResultId){
       // The retained M07 call consumes this exact policy/parent allowance even
-      // if its complete response was invalid and an older checkpoint returns.
+      // if its complete response was invalid or an old upgrade pointer is lost.
       const original=this.matchingInvocations(requestScope(profile,context.listing,source)).find(call=>call.requestFingerprint===this.invocationFingerprint(this.originalProfile(call),context.listing,source));
       if(original){
         const saved=this.listResults(context.listing.productId).find(result=>result.callId===original.id&&resultHasOwner(result,original));
         if(saved){await this.assertImageFresh(context,assertContextFresh,signal??new AbortController().signal);return saved;}
-        const error=new AiError('INTERRUPTED');error.callId=original.id;error.certainty=localAiRequestResolved(this.db,this.directory,original.id,original)?'RECEIVED_INVALID':'SENT_UNKNOWN';error.message='原新版外观复核已有调用但尚无可安全采用结果；原回执、费用与一次审核许可保留，未重复发送';throw error;
+        const resolved=localAiRequestResolved(this.db,this.directory,original.id,original),error=new AiError('INTERRUPTED');error.callId=original.id;error.certainty=resolved?'RECEIVED_INVALID':'SENT_UNKNOWN';error.message=resolved?'原外观复核已收回执但未形成有效结果；原回执、费用与一次审核许可保留，未重复发送':'原外观复核结果未知；原请求、费用与一次审核许可保留，未重复发送';throw error;
       }
     }
     return this.start(profile,context.listing,source,async activeSignal=>{

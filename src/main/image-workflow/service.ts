@@ -929,7 +929,11 @@ export class ImageWorkflowService {
           if(oldIp?.output.kind==='image-ip-review'&&evaluateImageRisk(oldIp.output,this.getRiskSettings()).verdict==='PASS'&&oldIp.output.planResultId===attempt.planResultId&&oldIp.output.candidate.id===attempt.candidateId&&oldReview?.output.kind==='image-text-review'&&oldReview.output.planResultId===attempt.planResultId&&listingFingerprint(oldReview.output.candidate)===listingFingerprint(oldIp.output.candidate)){attempt.state='GENERATED';attempt.error=null;this.save(run);}
         }
         const textReviewOnly=run.slotPolicy===IMAGE_SET_POLICY&&imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&this.canRecheckTextPolicy(attempt);
-        const appearanceReviewOnly=!!attempt?.appearanceReview?.previousPolicy,reviewOnly=textReviewOnly||appearanceReviewOnly;
+        const appearance=attempt?.appearanceReview,priorAppearance=appearance?.resultIds.length?this.ai.getResult(appearance.resultIds.at(-1)!):undefined;
+        // Restore a paid legacy upgrade before choosing a new-policy review or
+        // another generation attempt, including a restored retryable mismatch.
+        const legacyUpgrade=continueAppearance&&!appearance?.policyVersion&&appearance?.state==='DONE'&&appearance.resultIds.length===1&&!!appearance.snapshot?.upgrade&&priorAppearance?.output.kind==='image-appearance-review'&&priorAppearance.output.verdict==='UNCERTAIN';
+        const appearanceReviewOnly=!!appearance?.previousPolicy||legacyUpgrade,reviewOnly=textReviewOnly||appearanceReviewOnly;
         if(attempt?.state==='RETRYABLE_FAILURE'&&imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&!reviewOnly&&!restoringUnitCandidate()){slot.status='FAILED';this.save(run);continue;}
         for(;;){
           throwIfAborted(signal);await fresh();

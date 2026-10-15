@@ -977,6 +977,34 @@
         "initializeImageReviewLedger|28bd763048e3c722e4521a83e7ce66f4628c52c3877cef9a6594dff00599b4ad": 1,
         "writeImageReviewLedger|b1b859961f4b5b5473e7ea63b3222e984deecd7dcfa091aafa2d7ef785358cba": 1
       }
+    },
+    "main/ai/category-operations.ts": {
+      "role": "ai",
+      "review": "S03 M07 category owner: schema36 only initializer; immutable CAS and insert borrow the existing physical reservation transaction; no network in transaction.",
+      "commands": [
+        "initializeCategoryOperations|CREATE|ai_category_operations",
+        "write|UPDATE|ai_category_operations",
+        "write|INSERT|ai_category_operations"
+      ],
+      "statements": {
+        "initializeCategoryOperations|3170719bd45270f6ae23774b30ec8ad4f9a7271b86b26c8cced6d71825923c3b": 1,
+        "write|633dfb93a9fa38ac01b70469289c96c82f8ade293b1117e936436a35b80b71a3": 1,
+        "write|21e6868cbc365b4b6b560b9ad6cb94b2ce28129914666f533c0707cc79120f2e": 1
+      }
+    },
+    "main/ai/category-retention.ts": {
+      "role": "ai",
+      "review": "S03 M07 staged restore only: preserve strict original category call/result and verified private receipt identity; no products, new calls, fees or dispatch permits.",
+      "commands": [
+        "retainCategoryPhaseHistory|INSERT|ai_calls",
+        "retainCategoryPhaseHistory|INSERT|ai_provider_receipts",
+        "retainCategoryPhaseHistory|INSERT|ai_results"
+      ],
+      "statements": {
+        "retainCategoryPhaseHistory|4633a1c6198502e2494f8ab97e07b767fd848e2882d738726659358c919fa214": 1,
+        "retainCategoryPhaseHistory|a9456050e74f18bc08d762c949cfd54eb5cd44a923b793dc2db00f32f6238eac": 1,
+        "retainCategoryPhaseHistory|69d42ce27c3df1bcb0dfcf497a5743d4f6dc12273f218db6cb34d927cb65012b": 1
+      }
     }
   },
   "opaque": [

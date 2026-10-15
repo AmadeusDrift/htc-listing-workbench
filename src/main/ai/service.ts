@@ -591,7 +591,7 @@ export class AiService {
         const output=retainValidNativeCandidates(parseFullGeneration(rawOutput,context),context);
         if([...output.candidates,...output.missing].some(f=>!fields.includes(f.field)))continue;
         const recoveredAt=this.finishedAt(call.finishedAt);
-        result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:context,sourceSha256:operation.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',fieldGroupPart:{operationId:operation.id,fields},localRecovery:{parserVersion:'full-schema-recovery/v2',operationId:operation.id,contextSha256:operation.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
+        result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call.model,createdAt:recoveredAt,reviewState:'unreviewed',output,listingContext:context,sourceSha256:operation.contextHash,listingEvidenceContractVersion:'listing-evidence/v4',fieldGroupPart:{operationId:operation.id,fields},localRecovery:{parserVersion:'full-schema-recovery/v3',operationId:operation.id,contextSha256:operation.contextHash,rawSha256:listingFingerprint(rawOutput),rawOutput,recoveredAt}});
       }catch{continue;}
       return transaction(this.db,()=>{
         const current=readFieldGroup(this.db,operation.id)!;if(current.members[index].resultId)return true;

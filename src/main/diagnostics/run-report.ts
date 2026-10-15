@@ -5,6 +5,7 @@ import type { RunEvidence } from '../../shared/run-evidence-contracts.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { evidenceCode, evidenceId, evidenceItemKey, evidenceSku, evidenceTime, validateRunEvidence } from './run-evidence.ts';
 import { readErrorEvidence } from '../error-evidence.ts';
+import { classificationReferences } from './classification-references.ts';
 
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const fail = (code = 'RUN_REPORT_INVALID_RECORD'): never => { throw new UserFacingError(code); };
@@ -62,13 +63,15 @@ export class RunReportReader {
   private snapshot(q: RunReportQuery & { pageSize: number }, scope: string, cursor: { after: number; signature: string } | null, full: boolean, context: RunReportContext): RunDiagnosticReport {
     const task = this.db.prepare(`SELECT ${projection('id')} id,${projection('revision')} revision FROM automatic_listing_tasks WHERE id=?`).get(q.taskId);
     if (!task || task.id !== q.taskId) return fail('RUN_REPORT_TASK_MISSING');
-    const rawItems = this.db.prepare(`SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.productId') productId,json_extract(i.value,'$.sku') sku,json_extract(i.value,'$.draftId') draftId
+    const rawItems = this.db.prepare(`SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.productId') productId,json_extract(i.value,'$.sku') sku,json_extract(i.value,'$.draftId') draftId,json_extract(i.value,'$.productRevision') productRevision,json_extract(i.value,'$.classification') classification
       FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?`).all(q.taskId);
     const items: ScopeItem[] = rawItems.filter(row => q.sku === undefined || row.sku === q.sku).map(row => {
       if (!evidenceItemKey(row.key) || !evidenceId(row.productId) || !evidenceSku(row.sku) || row.draftId !== null && !evidenceId(row.draftId)) return fail();
       return { key: row.key, productId: row.productId, sku: row.sku, draftId: id(row.draftId) };
     });
     if (q.sku !== undefined && !items.length) return fail('RUN_REPORT_SKU_MISSING');
+    const classification = classificationReferences(this.db,rawItems.filter(row=>q.sku===undefined||row.sku===q.sku).map(row=>({key:String(row.key),productId:String(row.productId),sku:String(row.sku),productRevision:row.productRevision,classification:row.classification})));
+    const classifiedCalls = new Map(classification.map(ref=>[ref.callId,ref]));
     const drafts = new Set(items.flatMap(i => i.draftId ? [i.draftId] : [])), keys = new Set(items.map(i => i.key)), products = new Set(items.map(i => i.productId));
     const events: RunEvidence[] = this.db.prepare(`SELECT detail_json FROM audit_events WHERE action='run.evidence' AND ${projection('taskId','detail_json')}=? ORDER BY rowid`).all(q.taskId).map(row => {
       if (typeof row.detail_json !== 'string' || row.detail_json.length > 4096) return fail();
@@ -84,7 +87,7 @@ export class RunReportReader {
     }
     const allCalls = this.db.prepare(`SELECT rowid,id,${projection('id')} identity,${projection('productId')} productId,${projection('presentationContext.draftId')} draftId,
       ${projection('startedAt')} startedAt,${projection('status')} status,${projection('errorCode')} errorCode,${projection('responseReceived')} responseReceived FROM ai_calls ORDER BY rowid`).all();
-    const selected = allCalls.filter(c => byCall.has(String(c.id)) || journalCalls.has(String(c.id)) || typeof c.draftId === 'string' && drafts.has(c.draftId));
+    const selected = allCalls.filter(c => classifiedCalls.has(String(c.id)) || byCall.has(String(c.id)) || journalCalls.has(String(c.id)) || typeof c.draftId === 'string' && drafts.has(c.draftId));
     // Image calls also carry durable IDs in workflow attempts; inspect only the selected drafts.
     const imageIds = new Set<string>();
     const imageInfo = new Map<string, { draftId: string; candidateId: string | null; adopted: boolean }>();
@@ -99,7 +102,7 @@ export class RunReportReader {
       const row = this.db.prepare(`SELECT rowid,id,${projection('id')} identity,${projection('productId')} productId,${projection('createdAt')} startedAt FROM ai_image_requests WHERE id=?`).get(callId);
       if (row) selected.push({ ...row, draftId: null, status: null, errorCode: null, responseReceived: null });
     }
-    const adoptedIds = new Set<string>();
+    const adoptedIds = new Set(classification.map(ref=>ref.resultId));
     let submittedSkus = 0, buyableSkus = 0, demoSubmittedSkus = 0;
     for (const draftId of drafts) {
       const d = this.db.prepare(`SELECT ${projection('draft.id')} id,${projection('draft.sku')} sku,${projection('draft.mode')} mode,${projection('draft.submittedAt')} submittedAt,
@@ -133,15 +136,15 @@ export class RunReportReader {
       // bytes. OUTPUT_INVALID/HTTP status cannot replace explicit transport
       // certainty or prove an omitted, empty or incomplete response resolved.
       else if (!certainty) certainty = 'SENT_UNKNOWN';
-      const operation = journalCalls.get(c.id), draftId = latest('draftId') ?? id(c.draftId) ?? operation?.draftId ?? image?.draftId ?? null, item = items.find(i => latest('itemKey') === i.key) ?? items.find(i => draftId === i.draftId);
+      const operation = journalCalls.get(c.id), classified = classifiedCalls.get(c.id), draftId = latest('draftId') ?? id(c.draftId) ?? operation?.draftId ?? image?.draftId ?? null, item = items.find(i => latest('itemKey') === i.key) ?? (draftId ? items.find(i => draftId === i.draftId) : undefined) ?? classified?.item;
       if (c.productId && item && c.productId !== item.productId || latest('itemKey') && !keys.has(latest('itemKey')!)) return fail();
-      calls.push({ callId: c.id, operationId: latest('operationId') ?? operation?.operationId ?? null, receiptId: retainedReceipt ? String(retainedReceipt.id) : null, draftId,
-        itemKey: item?.key ?? null, sku: item?.sku ?? null, stage: latest('stage') ?? (image ? 'image-generation' : null), association: evidence.length ? 'TASK_EVENT' : 'DRAFT_REFERENCE',
+      calls.push({ callId: c.id, operationId: latest('operationId') ?? operation?.operationId ?? classified?.operationId ?? null, receiptId: retainedReceipt ? String(retainedReceipt.id) : null, draftId,
+        itemKey: item?.key ?? null, sku: item?.sku ?? null, stage: latest('stage') ?? (classified ? 'CLASSIFY' : image ? 'image-generation' : null), association: evidence.length ? 'TASK_EVENT' : classified ? 'CLASSIFICATION_REFERENCE' : 'DRAFT_REFERENCE',
         startedAt: time(c.startedAt), receivedAt: retainedReceipt ? time(retainedReceipt.receivedAt) : null, certainty,
         abortSource: latest('abortSource') ?? null, errorCode: latest('errorCode') ?? (evidenceCode(c.errorCode) ? c.errorCode : null),
         httpStatus: retainedReceipt ? http(retainedReceipt.status) : latest('httpStatus') ?? null, receivedBytes: latest('receivedBytes') ?? null, resultIds, adopted,
         nextAction: adopted ? 'CONTINUE_FROM_ADOPTED_RESULT' : certainty === 'SENT_UNKNOWN' ? 'VERIFY_ORIGINAL_REQUEST' : certainty === 'RECEIVED_VALID' ? 'INSPECT_SAVED_RESULT' : ['RECEIVED_INVALID','DEFINITIVE_REJECTION'].includes(certainty ?? '') ? 'INSPECT_REJECTION_AND_BUDGET' : 'INSPECT_LEGACY_EVIDENCE',
-        missing: [...(!evidence.length ? ['LEGACY_TASK_CALL_LINK','LEGACY_STAGE'] : []), ...(!latest('operationId') && !operation?.operationId ? ['LEGACY_OPERATION_ID'] : []), ...(!time(c.startedAt) ? ['LEGACY_REQUEST_TIME'] : [])], evidence });
+        missing: [...(!evidence.length && !classified ? ['LEGACY_TASK_CALL_LINK','LEGACY_STAGE'] : []), ...(!latest('operationId') && !operation?.operationId && !classified?.operationId ? ['LEGACY_OPERATION_ID'] : []), ...(!time(c.startedAt) ? ['LEGACY_REQUEST_TIME'] : [])], evidence });
     }
     const platform: RunDiagnosticReport['platform'] = [];
     for (const draftId of drafts) for (const row of this.db.prepare(`SELECT id,${projection('operation','exchange_json')} operation,${projection('at','exchange_json')} at,${projection('status','exchange_json')} status,${projection('requestId','exchange_json')} requestId FROM amazon_exchanges WHERE draft_id=? ORDER BY rowid`).all(draftId)) {

@@ -1,0 +1,27 @@
+import {spawn,execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {createWriteStream} from 'node:fs';
+import {mkdir,readFile,writeFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {createRequire} from 'node:module';
+const files=['tests/run-report-classification.test.ts','tests/run-report.test.ts','tests/run-report-certainty.test.ts','tests/run-evidence.test.ts','tests/error-stage-evidence.test.ts','tests/diagnostics.test.ts','tests/openrouter-call-identity.test.ts','tests/automatic-classification.test.ts','tests/category-ai-service.test.ts','tests/release-api-surface.test.ts'];
+const mode=process.argv[2],label=process.argv[3]??'classification';
+if(!['related','typecheck','boundaries'].includes(mode)||!/^[a-z0-9-]+$/.test(label))throw Error('Use related/typecheck/boundaries and a safe label');
+const git=(...args)=>execFileSync('git',['-c','safe.directory='+process.cwd(),...args],{encoding:'utf8',windowsHide:true}).trim();
+const sourceCommit=git('rev-parse','HEAD'),worktreeStatus=git('status','--short');if(worktreeStatus)throw Error('S01 final verification requires clean committed source');
+const require=createRequire(import.meta.url),{worktreeRoot,assertTrustedWithin}=require(resolve('tests/fixtures/stabilization/trusted-path.cjs'));
+const dataRoot=resolve('.test-data/s01-report-final'),output=resolve('artifacts/stabilization/s01-report-final');
+for(const path of [dataRoot,output]){assertTrustedWithin(worktreeRoot,path);await mkdir(path,{recursive:true});assertTrustedWithin(worktreeRoot,path);}
+process.env.HTC_STABILIZATION_DATA_DIR=dataRoot;require(resolve('tests/fixtures/stabilization/network-guard.cjs'));
+const inventory=async()=>Object.fromEntries(await Promise.all(git('ls-files','--','src','tests','scripts','package.json','package-lock.json').split('\n').filter(Boolean).map(async file=>[file,createHash('sha256').update(await readFile(file)).digest('hex')])));
+const hashes=await inventory(),args=mode==='related'?['--test','--test-concurrency=1',...files]:mode==='typecheck'?[require.resolve('typescript/bin/tsc'),'--noEmit']:['scripts/check-module-boundaries.mjs','--strict'];
+const startedAt=new Date().toISOString(),stem=resolve(output,mode+'-'+label+'-'+startedAt.replaceAll(':','-'));
+const env={...process.env,NODE_OPTIONS:`--require="${resolve('tests/fixtures/stabilization/network-guard.cjs').replaceAll('\\','/')}"`};delete env.ELECTRON_RUN_AS_NODE;
+const log=createWriteStream(stem+'.log'),child=spawn(process.execPath,args,{cwd:process.cwd(),env,windowsHide:true,stdio:['ignore','pipe','pipe']});
+child.stdout.pipe(log,{end:false});child.stderr.pipe(log,{end:false});
+const evidence={version:1,sourceCommit,worktreeStatus,sourceTrees:{src:git('rev-parse','HEAD:src'),tests:git('rev-parse','HEAD:tests'),scripts:git('rev-parse','HEAD:scripts')},hashes,mode,label,args,startedAt,node:process.version,dataRoot,logPath:stem+'.log',runnerPid:process.pid,childPid:child.pid,networkPolicy:'Original S00 network/trusted-path guard, synthetic own-tree data only, inherited credentials removed, no real app or workspace'};
+await writeFile(stem+'.json',JSON.stringify({...evidence,status:'running'},null,2));
+const exitCode=await new Promise((done,reject)=>{child.once('error',reject);child.once('close',done);});await new Promise(done=>log.end(done));
+const postHashes=await inventory(),postSourceCommit=git('rev-parse','HEAD'),postWorktreeStatus=git('status','--short'),sourceUnchanged=sourceCommit===postSourceCommit&&!postWorktreeStatus&&JSON.stringify(hashes)===JSON.stringify(postHashes);
+await writeFile(stem+'.json',JSON.stringify({...evidence,status:'completed',finishedAt:new Date().toISOString(),exitCode,postHashes,postSourceCommit,postWorktreeStatus,sourceUnchanged},null,2));
+console.log(JSON.stringify({mode,sourceCommit,exitCode,sourceUnchanged,files:Object.keys(hashes).length,proof:stem+'.json'}));process.exitCode=sourceUnchanged?(exitCode??1):1;

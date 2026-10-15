@@ -3,7 +3,7 @@ export interface RunReportQuery { taskId: string; sku?: string; pageSize?: numbe
 export interface RunCallReport {
   callId: string; operationId: string | null; receiptId: string | null; draftId: string | null;
   itemKey: string | null; sku: string | null; stage: string | null;
-  association: 'TASK_EVENT' | 'DRAFT_REFERENCE'; startedAt: string | null; receivedAt: string | null;
+  association: 'TASK_EVENT' | 'DRAFT_REFERENCE' | 'CLASSIFICATION_REFERENCE'; startedAt: string | null; receivedAt: string | null;
   certainty: RequestCertainty | null; abortSource: AbortSource | null; errorCode: string | null;
   httpStatus: number | null; receivedBytes: number | null; resultIds: string[]; adopted: boolean;
   nextAction: 'VERIFY_ORIGINAL_REQUEST' | 'INSPECT_SAVED_RESULT' | 'INSPECT_REJECTION_AND_BUDGET' | 'CONTINUE_FROM_ADOPTED_RESULT' | 'INSPECT_LEGACY_EVIDENCE';

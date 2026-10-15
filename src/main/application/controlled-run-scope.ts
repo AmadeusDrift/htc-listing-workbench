@@ -11,7 +11,7 @@ import {spendObject,spendInteger,spendUuid,spendText,spendDate,spendHash,spendIn
 export const CONTROLLED_RUN_ID='htc-250-controlled-live/v1';
 export const CONTROLLED_RUN_TABLES={controlled_run_scopes:['id','record_json']};
 export interface ControlledRunItem {itemKey:string;sku:string;productId:string;variantIds:string[];recipeKey:string|null;parentage:'NONE'}
-export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;createdAt:string;status:'PAUSED'|'ACTIVE'}
+export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;authorityEpoch:number;createdAt:string;status:'PAUSED'|'ACTIVE'}
 const authority=new AsyncLocalStorage<{scopeId:string;fingerprint:string;grant:object}>(),grants=new WeakSet<object>();
 export class ControlledRunError extends AiError {constructor(){super('INVALID_INPUT');this.diagnosticReason='CONTROLLED_RUN_SCOPE_BLOCKED';this.message='受控验收任务、卖家、站点、SKU或当前授权不匹配；未发送';}}
 function blocked():never{throw new ControlledRunError();}
@@ -22,7 +22,7 @@ function workspaceIdentity(db:DatabaseSync):string{
  let id=memoryWorkspaces.get(db);if(!id){id=listingFingerprint(randomUUID());memoryWorkspaces.set(db,id);}return id;
 }
 export function validateControlledRunScope(raw:unknown):ControlledRunScope{
- const r=spendObject(raw,['version','id','workspaceId','taskId','expectedTaskRevision','targetId','sellerId','marketplaceId','items','activeItemKey','createdAt','status']);if(r.version!==1||r.id!==CONTROLLED_RUN_ID||!['PAUSED','ACTIVE'].includes(r.status)||!Array.isArray(r.items)||r.items.length<1||r.items.length>2||spendInteger(r.expectedTaskRevision)<1)spendInvalid();spendHash(r.workspaceId);
+ const r=spendObject(raw,['version','id','workspaceId','taskId','expectedTaskRevision','targetId','sellerId','marketplaceId','items','activeItemKey','authorityEpoch','createdAt','status']);if(r.version!==1||r.id!==CONTROLLED_RUN_ID||!['PAUSED','ACTIVE'].includes(r.status)||!Array.isArray(r.items)||r.items.length<1||r.items.length>2||spendInteger(r.expectedTaskRevision)<1)spendInvalid();spendHash(r.workspaceId);spendInteger(r.authorityEpoch);if(r.status==='ACTIVE'&&r.authorityEpoch<1)spendInvalid();
  spendUuid(r.taskId);spendText(r.targetId);spendText(r.sellerId);spendText(r.marketplaceId);spendDate(r.createdAt);
  for(const item of r.items){const i=spendObject(item,['itemKey','sku','productId','variantIds','recipeKey','parentage']);spendText(i.itemKey,150);spendText(i.sku);spendUuid(i.productId);if(i.parentage!=='NONE'||!Array.isArray(i.variantIds)||i.variantIds.length<1||i.variantIds.length>20||new Set(i.variantIds).size!==i.variantIds.length)spendInvalid();i.variantIds.forEach(spendUuid);if(i.recipeKey!==null)spendText(i.recipeKey);}
  if(new Set(r.items.map((i:ControlledRunItem)=>i.sku)).size!==r.items.length||new Set(r.items.map((i:ControlledRunItem)=>i.itemKey)).size!==r.items.length||!r.items.some((i:ControlledRunItem)=>i.itemKey===r.activeItemKey))spendInvalid();return r as ControlledRunScope;
@@ -42,10 +42,10 @@ export class ControlledRunScopes {
   for(const expected of scope.items){const item=task.items.find((i:any)=>i.key===expected.itemKey);if(!item||item.sku!==expected.sku||item.productId!==expected.productId||(item.salesPlan?.parentage??'NONE')!=='NONE'||(item.salesPlan?.recipe?.key??null)!==expected.recipeKey)blocked();const ids=item.salesPlan?.recipe?.components?.map((c:any)=>c.variantId)??[item.variantId];if(listingFingerprint([...new Set(ids)].sort())!==listingFingerprint([...expected.variantIds].sort()))blocked();}
  }
  register(input:Pick<ControlledRunScope,'taskId'|'expectedTaskRevision'|'targetId'|'sellerId'|'marketplaceId'|'items'>):ControlledRunScope{
-  return transaction(this.db,()=>{if(readControlledRunScope(this.db))blocked();const record=validateControlledRunScope({version:1,id:CONTROLLED_RUN_ID,...input,workspaceId:workspaceIdentity(this.db),activeItemKey:input.items[0]?.itemKey,createdAt:new Date().toISOString(),status:'PAUSED'});this.assertTask(record);writeScope(this.db,record);return record;});
+  return transaction(this.db,()=>{if(readControlledRunScope(this.db))blocked();const record=validateControlledRunScope({version:1,id:CONTROLLED_RUN_ID,...input,workspaceId:workspaceIdentity(this.db),activeItemKey:input.items[0]?.itemKey,authorityEpoch:0,createdAt:new Date().toISOString(),status:'PAUSED'});this.assertTask(record);writeScope(this.db,record);return record;});
  }
  activate(id:string):<T>(work:()=>T)=>T{
-  const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(task.status!=='RUNNING')blocked();const active={...r,status:'ACTIVE' as const};writeScope(this.db,active);return active;});
+  const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(task.status!=='RUNNING')blocked();const active={...r,status:'ACTIVE' as const,authorityEpoch:spendInteger(r.authorityEpoch+1)};writeScope(this.db,active);return active;});
   const grant={};grants.add(grant);const context={scopeId:scope.id,fingerprint:listingFingerprint(scope),grant};return <T>(work:()=>T):T=>authority.run(context,work);
  }
  authorizeImage(effect:AiRequestScope):string|null{
@@ -60,10 +60,10 @@ export class ControlledRunScopes {
  }
 }
 export function assertControlledRunHistory(db:DatabaseSync):void{readControlledRunScope(db);}
-export function pauseControlledRunScopes(db:DatabaseSync):void{transaction(db,()=>{const scope=readControlledRunScope(db);if(scope?.status==='ACTIVE')writeScope(db,{...scope,status:'PAUSED'});});}
+export function pauseControlledRunScopes(db:DatabaseSync):void{transaction(db,()=>{const scope=readControlledRunScope(db);if(scope?.status==='ACTIVE')writeScope(db,{...scope,status:'PAUSED',authorityEpoch:spendInteger(scope.authorityEpoch+1)});});}
 /** Preserve the original finite roster, never union it, and revoke dispatch authority on restore. */
 export function retainControlledRunHistory(current:DatabaseSync,snapshot:DatabaseSync):void{
  if(!snapshot.isTransaction)spendInvalid();const now=readControlledRunScope(current),old=readControlledRunScope(snapshot);if(!now&&!old)return;
- const identity=(r:ControlledRunScope)=>({...r,status:'PAUSED',expectedTaskRevision:0});if(now&&old&&listingFingerprint(identity(now))!==listingFingerprint(identity(old)))blocked();
- const record=now??old!;writeScope(snapshot,{...record,status:'PAUSED'});
+ const identity=(r:ControlledRunScope)=>({...r,status:'PAUSED',expectedTaskRevision:0,authorityEpoch:0});if(now&&old&&listingFingerprint(identity(now))!==listingFingerprint(identity(old)))blocked();
+ const record=now??old!;writeScope(snapshot,{...record,status:'PAUSED',authorityEpoch:spendInteger(Math.max(now?.authorityEpoch??0,old?.authorityEpoch??0)+1)});
 }

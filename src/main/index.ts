@@ -62,7 +62,7 @@ protocol.registerSchemesAsPrivileged([
 const productionCsp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' red-asset: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
 const controlledAcceptanceMode=process.argv.includes(CONTROLLED_ACCEPTANCE_FLAG);
 let controlledAcceptance:ControlledAcceptanceSession|undefined;
-const guardExternal=(effect:ControlledEffect,transactionDb?:import('node:sqlite').DatabaseSync)=>{if(controlledAcceptanceMode){if(!controlledAcceptance)throw new ControlledRunError();controlledAcceptance.assertExternal(effect,transactionDb);}};
+const guardExternal=(effect:ControlledEffect,transactionDb?:import('node:sqlite').DatabaseSync)=>{if(controlledAcceptanceMode){if(!controlledAcceptance)throw new ControlledRunError();try{controlledAcceptance.assertExternal(effect,transactionDb);}catch(error){if(error instanceof Error&&!(error as {certainty?:string}).certainty)Object.assign(error,{certainty:'NOT_SENT',notSent:true});throw error;}}};
 let store: WorkspaceStore | undefined;
 let amazon: AmazonService | undefined;
 let followup: FollowupService | undefined;
@@ -117,7 +117,7 @@ async function start() {
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
   content = new ReviewedContentService(dataRoot, db, ai);
-  followup = new FollowupService(dataRoot, amazon,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true});
+  followup = new FollowupService(dataRoot, amazon,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true,runDraftScope:(id,work)=>{if(!controlledAcceptanceMode)return work();if(!automatic)throw new ControlledRunError();return automatic.runControlledDraft(id,work);}});
   catalog = new CatalogService(dataRoot, amazon);
   procurement = new ProcurementService(dataRoot, db, amazon);
   productData = new ProductDataService(dataRoot, db, amazon);

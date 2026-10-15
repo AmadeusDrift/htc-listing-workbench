@@ -38,7 +38,7 @@ export class ControlledAcceptanceSession {
  private reviewed(){assertVerifiedControlledCandidate(this.candidate);const file=readReviewedAcceptanceManifest(this.directory);if(!file||listingFingerprint(file.manifest.candidate)!==listingFingerprint(this.candidate.identity))blocked();this.preparedReview=file;return file;}
  canManageTask(id:string):boolean{const file=readReviewedAcceptanceManifest(this.directory);if(!file||file.manifest.taskId!==id)return false;const scope=readControlledRunScope(this.db);if(scope&&(scope.taskId!==id||scope.review&&scope.review.sessionId!==file.manifest.sessionId))return false;this.task(file.manifest);return true;}
  canManageDraft(id:string):boolean{
-  const file=readReviewedAcceptanceManifest(this.directory);if(!file||!this.canManageTask(file.manifest.taskId))return false;const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(file.manifest.taskId);if(!saved)return false;const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));return task.items.some(row=>row.draftId===id&&file.manifest.items.some(i=>i.itemKey===row.key));
+  const file=readReviewedAcceptanceManifest(this.directory);if(!file||!this.canManageTask(file.manifest.taskId))return false;const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(file.manifest.taskId);if(!saved)return false;const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));const active=readControlledRunScope(this.db)?.activeItemKey??file.manifest.items[0].itemKey;return task.items.some(row=>row.draftId===id&&row.key===active&&file.manifest.items.some(i=>i.itemKey===row.key));
  }
  private task(m:ReviewedAcceptanceManifest):AutomaticListingTask{
   const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(m.taskId);if(!saved)blocked();const task=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
@@ -46,13 +46,17 @@ export class ControlledAcceptanceSession {
   for(const i of m.items){const row=task.items.find(r=>r.key===i.itemKey);if(!row||row.sku!==i.sku||row.productId!==i.productId||row.sourceStamp!==i.sourceStamp||sourceStamp(this.product(row.productId))!==i.sourceStamp||(row.salesPlan?.parentage??'NONE')!=='NONE'||(row.salesPlan?.recipe.key??null)!==i.recipeKey||listingFingerprint([...(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])].sort())!==listingFingerprint([...i.variantIds].sort()))blocked();}
   return task;
  }
+ private assertFreshRegistration(m:ReviewedAcceptanceManifest):void{
+  for(const saved of this.db.prepare('SELECT record_json FROM listing_drafts WHERE record_json IS NOT NULL').all()){const r=JSON.parse(String(saved.record_json)),d=r.draft;if(d&&d.mode==='live'&&d.sellerId===m.sellerId&&d.marketplaceId===m.marketplaceId&&m.items.some(i=>i.sku===d.sku)&&(r.unresolvedWrite||d.submittedAt||['SUBMITTING','SUBMITTED','UNKNOWN','PROCESSING','BUYABLE','DISCOVERABLE'].includes(d.state)))blocked();}
+  for(const saved of this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id<>?').all(m.taskId)){const task=JSON.parse(String(saved.record_json));if(task.mode==='live'&&task.sellerId===m.sellerId&&task.marketplaceId===m.marketplaceId&&!['COMPLETED','CANCELLED'].includes(task.status)&&task.items?.some((row:{sku:string})=>m.items.some(i=>i.sku===row.sku)))blocked();}
+ }
  /** Called by main on explicit start, never from renderer registration. Initial
   * review revision is only the anchor; subsequent owner progress uses durable CAS. */
  applyReviewedFile():void{
   const {manifest:m,digest}=this.reviewed(),task=this.task(m),current=readControlledRunScope(this.db);if(current?.review?.digest===digest){if(current.review.sessionId!==m.sessionId)blocked();return;}
   preflightControlledAcceptance(this.directory);if(!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)||task.revision!==m.action.expectedTaskRevision)blocked();
   transaction(this.db,()=>{
-   let scope=readControlledRunScope(this.db);if(m.action.kind==='register'){if(scope||task.revision!==m.reviewTaskRevision)blocked();scope=this.scopes.register({taskId:m.taskId,expectedTaskRevision:task.revision,targetId:m.targetId,sellerId:m.sellerId,marketplaceId:m.marketplaceId,items:m.items.map(({sourceStamp:_stamp,...item})=>item)});}else if(!scope||scope.review?.sessionId!==m.sessionId)blocked();
+   let scope=readControlledRunScope(this.db);if(m.action.kind==='register'){if(scope||task.revision!==m.reviewTaskRevision)blocked();this.assertFreshRegistration(m);scope=this.scopes.register({taskId:m.taskId,expectedTaskRevision:task.revision,targetId:m.targetId,sellerId:m.sellerId,marketplaceId:m.marketplaceId,items:m.items.map(({sourceStamp:_stamp,...item})=>item)});}else if(!scope||scope.review?.sessionId!==m.sessionId)blocked();
    const review:ControlledRunReview={version:1,sessionId:m.sessionId,digest,initialTaskRevision:m.reviewTaskRevision,sourceStamps:m.items.map(i=>({itemKey:i.itemKey,stamp:i.sourceStamp})),candidate:m.candidate,secondReleased:scope!.review?.secondReleased??false};
    const expected={digest:m.action.previousDigest,epoch:m.action.expectedEpoch,taskRevision:m.action.expectedTaskRevision};
    if(m.action.kind==='release-second'){if(expected.digest===null)blocked();this.scopes.releaseSecondReviewedInTransaction(this.db,{...review,secondReleased:true},{...expected,digest:expected.digest});}

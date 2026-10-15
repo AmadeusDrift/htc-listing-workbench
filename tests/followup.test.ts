@@ -26,6 +26,12 @@ test('a main-only task boundary preserves unrelated legacy followups through con
   } finally {await managed.close();db.close();}
 });
 
+test('a delayed followup cannot persist an attempt before its original main-only task authority is restored',async t=>{
+ const f=fixture(t);f.service.schedule(f.draft.id);await f.service.close();const db=openDatabase(f.directory),before=db.prepare('SELECT * FROM listing_followups').all();let relays=0;
+ const ownerBound=new implementation!.FollowupService(f.directory,f.amazon,{now:()=>initial+offsets[0],runDraftScope:()=>{relays++;throw Error('original task grant unavailable');}} as any);
+ try{await assert.rejects(ownerBound.runDue(),/grant unavailable/);assert.equal(relays,1);assert.equal(f.reads,0);assert.deepEqual(db.prepare('SELECT * FROM listing_followups').all(),before);}finally{await ownerBound.close();db.close();}
+});
+
 function fixture(t: test.TestContext) {
   assert.ok(implementation?.FollowupService, 'persistent delayed follow-up service must exist');
   const parent = resolve('.test-data'); mkdirSync(parent, { recursive: true });

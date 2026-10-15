@@ -43,6 +43,12 @@ test('main-only admission fails before the original owner can enqueue, activate 
  try{assert.throws(()=>owner.startAuthorized(owner.prepareStart(f.task.id)),/no reliable/);await owner.waitForIdle();assert.equal(admissions,1);assert.equal(f.calls.length,0);assert.deepEqual(f.db.prepare('SELECT * FROM automatic_listing_tasks ORDER BY id').all(),before);assert.deepEqual(readControlledRunScope(f.db),scope);}finally{await owner.close();}
 });
 
+test('a delayed draft worker may borrow only its original still-active task grant and pause revokes it before work',async t=>{
+ const f=await fixture(t);let release!:()=>void,entered!:()=>void;const began=new Promise<void>(done=>entered=done),hold=new Promise<void>(done=>release=done),draftId=randomUUID();
+ f.callback=async()=>{const row=(f.owner as any).tasks.get(f.task.id).items[0];row.draftId=draftId;delete row.outcome;entered();await hold;};f.owner.startAuthorized(f.owner.prepareStart(f.task.id));await began;
+ try{const relay=(f.owner as any).runControlledDraft;assert.equal(typeof relay,'function');assert.equal(relay.call(f.owner,draftId,()=>f.scopes.authorizeEffect({kind:'platform-read',productId:f.products[0].id})),f.scope.id);assert.throws(()=>relay.call(f.owner,randomUUID(),()=>{}));f.owner.pause(f.task.id);let work=0;assert.throws(()=>relay.call(f.owner,draftId,()=>work++));assert.equal(work,0);}finally{const row=(f.owner as any).tasks.get(f.task.id).items[0];row.draftId=null;delete row.outcome;release();await f.owner.waitForIdle();}
+});
+
 test('actual TaskOwner advances the controlled revision atomically and schedules only the active first SKU',async t=>{
  const f=await fixture(t),observed:any[]=[];f.callback=product=>{if(product.id!==f.products[0].id)return;const scopeId=f.scopes.authorizeEffect({kind:'source',productId:product.id}),current=readControlledRunScope(f.db)!;observed.push({scopeId,scopeRevision:current.expectedTaskRevision,taskRevision:f.owner.get(f.task.id).revision});};
  f.owner.startAuthorized(f.owner.prepareStart(f.task.id));await f.owner.waitForIdle();assert.deepEqual(f.calls,[f.products[0].id]);assert.equal(observed.length,1);assert.equal(observed[0].scopeId,f.scope.id);assert.ok(observed[0].scopeRevision>1);assert.equal(observed[0].scopeRevision,observed[0].taskRevision);assert.equal(f.owner.get(f.task.id).items[1].status,'PENDING');assert.equal(readControlledRunScope(f.db)!.activeItemKey,f.task.items[0].key);

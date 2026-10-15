@@ -10,6 +10,8 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { listingFingerprint } from "../json-fingerprint.ts";
 import { assertCurrentListingReview, assertImagePlan, assertImageTextReview, validateProductImageContext } from '../ai/image-validation.ts';
 import { workflowRuns } from './records.ts';
+import { ownsLegacyPlanningCall } from './planning-unknown.ts';
+import { validateAiCall } from '../ai/validation.ts';
 import { referenceMeasurementEvidence } from './image-facts.ts';
 import { assertApprovalReuseSource } from './approval-reuse.ts';
 
@@ -31,6 +33,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
   };
   const runs=workflowRuns(db,draftId), byId=new Map(runs.map(run=>[run.id,run]));
   for(const run of runs) {
+    if(run.planningUnknown){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(run.planningUnknown.callId),call=calls.get(run.planningUnknown.callId)??(row?validateAiCall(JSON.parse(String(row.record_json))):undefined);if(!call||!ownsLegacyPlanningCall(run,call))invalid();}
     if(run.approvalReuse){assertApprovalReuseSource(run,byId.get(run.approvalReuse.sourceRunId));continue;}
     if(run.slots){
       const source=run.sourceReuse?byId.get(run.sourceReuse.sourceRunId):run.unitAdoptionReview?byId.get(run.unitAdoptionReview.sourceRunId):undefined;if(run.sourceReuse)assertPartialSourceReuse(run,source,db);if(run.unitAdoptionReview)assertUnitImageReviewHistory(db,run,source);

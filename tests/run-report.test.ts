@@ -45,6 +45,19 @@ test('current-connection report separates received valid but unadopted output fr
   await mkdir(resolve('artifacts/stabilization'), { recursive: true });
   await writeFile(resolve('artifacts/stabilization/s01-run-report-example.json'), JSON.stringify(report, null, 2)+'\n');
 });
+test('current error summary uses saved selected-task rows without rechecking or writing', async t => {
+  const f = await fixture(t), anotherProduct = randomUUID(), unrelatedTask = randomUUID();
+  const row = { ...f.item, error: 'color 缺少有效依据', outcome: { kind: 'NEEDS_INPUT', code: 'FIELD_REQUIRED' } };
+  const items = [row, { ...row, key: f.product.id+':'+randomUUID(), sku: 'HTC-合成-19' }, { ...row, productId: anotherProduct, key: anotherProduct+':'+randomUUID(), sku: 'HTC-合成-20' }, { ...row, status: 'PENDING', sku: 'HTC-合成-21' }, { ...row, status: 'SCREENED', sku: 'HTC-合成-22' }];
+  f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify({ id:f.taskId, revision:8, items }), f.taskId);
+  f.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(unrelatedTask, JSON.stringify({ id:unrelatedTask, items:[row] }));
+  const before = f.db.prepare('SELECT total_changes() n').get()!.n;
+  const reader = new implementation!.RunReportReader(f.db), report = reader.query({ taskId:f.taskId });
+  assert.equal(report.currentFailures.affectedProducts, 2); assert.equal(report.currentFailures.failedSalesItems, 3);
+  assert.equal(report.currentFailures.groups[0].productCount, 2);
+  assert.equal(reader.export({ taskId:f.taskId, sku:row.sku }).currentFailures.affectedProducts, 1);
+  assert.equal(f.db.prepare('SELECT total_changes() n').get()!.n, before);
+});
 test('pagination counts the whole scope, binds filters and rejects changed snapshots', async t => {
   const f = await fixture(t, 121);
   assert.ok(implementation?.RunReportReader, 'run report pagination missing');
@@ -150,3 +163,5 @@ test('packaged build provenance comes from the matching package manifest and nev
   manifest.build.sourceCommit = 'f'.repeat(40); await writeFile(join(packageRoot, '版本与摘要.json'), JSON.stringify(manifest));
   assert.equal(readRunReportBuildContext('2.5.0', appPath).buildDigest, undefined);
 });
+
+

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
-import { readFileSync,writeFileSync } from 'node:fs';
+import { join,dirname } from 'node:path';
+import { mkdirSync,readFileSync,writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { AutomaticListingService } from '../src/main/automatic-listing/service.ts';
@@ -30,7 +30,8 @@ test('actual source HTTP empty EOF is invalid output while original dispatch gua
  await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));t.after(()=>new Promise<void>((done,reject)=>server.close(error=>error?reject(error):done())));
  const port=(server.address() as {port:number}).port;f.respond(()=>fetch('http://127.0.0.1:'+port+'/',{method:'POST',body:'synthetic source response boundary probe'}));
  const error=await f.observe().catch(error=>error),call=f.ai.listCalls()[0],before=JSON.stringify(call),view=readConsistencyView(f.db,f.context()),receipt=await f.ai.readProviderReceipt(call.id);
- writeFileSync(join(process.cwd(),'artifacts/stabilization/s09-semantics/source-empty-eof-actual.json'),JSON.stringify({call,receipt,view,usage:f.db.prepare('SELECT record_json FROM ai_usage_ledger').all(),posts},null,2)); t.diagnostic(JSON.stringify({errorName:error.name,errorCode:error.code,certainty:error.certainty,posts,callId:call.id,receiptPresent:!!receipt,viewStatus:view.status,viewReasons:view.reasons}));
+ const output=join(process.cwd(),'artifacts/stabilization/s09-semantics/source-empty-eof-actual.json');mkdirSync(dirname(output),{recursive:true});
+ writeFileSync(output,JSON.stringify({call,receipt,view,usage:f.db.prepare('SELECT record_json FROM ai_usage_ledger').all(),posts},null,2)); t.diagnostic(JSON.stringify({errorName:error.name,errorCode:error.code,certainty:error.certainty,posts,callId:call.id,receiptPresent:!!receipt,viewStatus:view.status,viewReasons:view.reasons}));
  assert.ok(error instanceof AiError);assert.equal(error.certainty,'RECEIVED_INVALID');assert.equal(posts,1);await assert.rejects(f.observe());assert.equal(posts,1);assert.equal(JSON.stringify(f.ai.listCalls()[0]),before);assert.equal(consistencyAttemptUnknown(f.db,latestConsistencyAttempt(f.db,f.context())!),true,'display correction must not unlock dispatch');assert.equal(view.status,'SYSTEM_REPAIR');assert.deepEqual(view.reasons,['SOURCE_CONSISTENCY_INVALID_OUTPUT']);
  const snapshot=JSON.stringify(f.db.prepare('SELECT record_json FROM ai_usage_ledger').all());
  for(let i=0;i<100;i++)assert.equal(readConsistencyView(f.db,f.context()).status,'SYSTEM_REPAIR');

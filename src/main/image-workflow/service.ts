@@ -1,4 +1,5 @@
 import {readUnitImageAuthority,assertUnitImageReviewHistory} from './unit-review.ts';
+import { derivedAssetIdsForProduct } from './derived-assets.ts';
 import {assertListingHistory} from '../listing-ai/history.ts';
 import type {UnitImageRecheckInput} from './unit-review.ts';
 import {verifiedRecoveryReceipt} from '../ai/receipt-recovery.ts';
@@ -554,7 +555,7 @@ export class ImageWorkflowService {
     };
     if(!compatible())return undefined;
     const confirmed=(id:string,variant:string)=>!!this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(id,variant);
-    const derived=new Set(workflowRuns(this.db).flatMap(run=>run.slots?.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[])??(run.approvedAssetId?[run.approvedAssetId]:[])));
+    const derived=derivedAssetIdsForProduct(this.db,product.id);
     const sourceVariants=[...new Set(draft.salesPlan?.recipe.components.map(component=>component.variantId)??[prior.variantId])];
     if(listingFingerprint(sourceVariants)!==listingFingerprint(base.sourceVariantIds??[prior.variantId]))return undefined;
     const references=selectImageReferences(product,prior.variantId,derived,confirmed,allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)),sourceVariants,prior.slotPolicy===IMAGE_SET_POLICY?10:undefined);
@@ -718,7 +719,7 @@ export class ImageWorkflowService {
       const profileIds=['deepseek','deepseek-review','aliyun-ocr',...(riskEnabled?['aliyun-image-risk']:[])];
       for(const id of profileIds){const profile=this.workflowProfile(id);if(!profile.configured||!profile.enabled)throw new UserFacingError('请在设置中配置并启用文案、图片侵权检测和 OCR 接口');}
       const profileStamp=listingFingerprint(profileIds.map(id=>this.workflowProfile(id))),product=this.store.getProduct(run.productId);
-      const derived=new Set(workflowRuns(this.db).flatMap(record=>record.slots?record.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):record.approvedAssetId?[record.approvedAssetId]:[]));
+      const derived=derivedAssetIdsForProduct(this.db,product.id);
       const variantIds=[...new Set(initial.salesPlan?.recipe.components.map(component=>component.variantId)??[run.variantId])];
       const confirmed=(assetId:string,variantId:string)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId));
       const referenceProduct=productReferenceImages(product,variantIds.flatMap(variantId=>this.ai.sourceObservationEvidence?.({productId:product.id,productRevision:product.revision,variantId})??[]));
@@ -1058,7 +1059,7 @@ export class ImageWorkflowService {
       }
       const profileIds=['deepseek','deepseek-review','aliyun-ocr','aliyun-image-risk'];
       const profileStamp=listingFingerprint(profileIds.map(id=>this.workflowProfile(id)));
-      const derived = new Set(workflowRuns(this.db).flatMap(r => r.approvedAssetId ? [r.approvedAssetId] : []));
+      const derived = derivedAssetIdsForProduct(this.db,run.productId);
       const product = this.store.getProduct(run.productId);
       const referenceProduct=productReferenceImages(product,[run.variantId].flatMap(variantId=>this.ai.sourceObservationEvidence?.({productId:product.id,productRevision:product.revision,variantId})??[]));
       const refs = selectImageReferences(referenceProduct,run.variantId,derived,(assetId,variantId)=>Boolean(this.db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,variantId)),allowSourceUnbound(product,readSourceImageReceipt(this.db,product.id)));

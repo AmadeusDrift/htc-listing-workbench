@@ -99,7 +99,7 @@ export interface AiResult {
   providerReceiptRecovery?:import('./ai-request-identity-contracts.ts').ProviderReceiptRecovery;
   fieldGroupPart?:{operationId:string;fields:string[]};
   fieldGroupAssembly?:{version:1;operationId:string;sources:AiResult[];assembledAt:string};
-  fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1';originalResult:unknown;originalSha256:string;recoveredAt:string};
+  fieldCandidateRecovery?: {parserVersion:'field-reference-recovery/v1'|'field-reference-recovery/v2';originalResult:unknown;originalSha256:string;recoveredAt:string};
   imagePlanRecovery?: { repair?:{previousPlanId:string;issues:string[]}; parserVersion:'image-plan-recovery/v1'|'image-plan-recovery/v2'; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   localRecovery?: { parserVersion:'full-schema-recovery/v1'|'full-schema-recovery/v2'; operationId:string; contextSha256:string; rawSha256:string; rawOutput:unknown; recoveredAt:string };
   fieldRejections?: import('./rejection-presentation.ts').FieldRejections;

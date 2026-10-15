@@ -115,11 +115,11 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
   let fieldCandidateRecovery:AiResult['fieldCandidateRecovery'];
   if(o.fieldCandidateRecovery!==undefined){
     const r=keys(o.fieldCandidateRecovery,['parserVersion','originalResult','originalSha256','recoveredAt']);
-    if(r.parserVersion!=='field-reference-recovery/v1'||o.localRecovery||o.imagePlanRecovery||!listingContext||output.kind!=='amazon-fields'||!r.originalResult||typeof r.originalResult!=='object'||Object.hasOwn(r.originalResult,'fieldCandidateRecovery')||Buffer.byteLength(JSON.stringify(r.originalResult),'utf8')>2*1024*1024||listingFingerprint(r.originalResult)!==r.originalSha256)invalid();
+    if(!['field-reference-recovery/v1','field-reference-recovery/v2'].includes(String(r.parserVersion))||o.localRecovery||o.imagePlanRecovery||!listingContext||output.kind!=='amazon-fields'||!r.originalResult||typeof r.originalResult!=='object'||Object.hasOwn(r.originalResult,'fieldCandidateRecovery')||Buffer.byteLength(JSON.stringify(r.originalResult),'utf8')>2*1024*1024||listingFingerprint(r.originalResult)!==r.originalSha256)invalid();
     const original=validateStoredAiResult(r.originalResult);
     if(original.localRecovery||original.imagePlanRecovery||original.output.kind!=='amazon-fields'||!original.listingContext||!sameRecoverySource(original.listingContext,listingContext)||sourceResultIds.length!==1||sourceResultIds[0]!==original.id||original.id===o.id||original.callId!==o.callId||original.createdAt!==o.createdAt||date(r.recoveredAt)<original.createdAt||original.productId!==o.productId||original.productRevision!==o.productRevision||original.variantId!==o.variantId||original.providerId!==id||original.model!==o.model)invalid();
-    if(listingFingerprint(replayReferenceCandidates(original.output,listingContext))!==listingFingerprint(output))invalid();
-    fieldCandidateRecovery={parserVersion:r.parserVersion,originalResult:r.originalResult,originalSha256:sha256(r.originalSha256),recoveredAt:date(r.recoveredAt)};
+    if(listingFingerprint(replayReferenceCandidates(original.output,listingContext,r.parserVersion==='field-reference-recovery/v1'))!==listingFingerprint(output))invalid();
+    fieldCandidateRecovery={parserVersion:r.parserVersion as 'field-reference-recovery/v1'|'field-reference-recovery/v2',originalResult:r.originalResult,originalSha256:sha256(r.originalSha256),recoveredAt:date(r.recoveredAt)};
   }
   let localRecovery:AiResult['localRecovery'];
   if(o.localRecovery!==undefined){

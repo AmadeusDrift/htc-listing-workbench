@@ -378,7 +378,7 @@ export class AiService {
     const sourceSha256=listingFingerprint(context),originalSha256=listingFingerprint(original);
     const prior=this.listResults(original.productId).find(r=>r.fieldCandidateRecovery?.originalSha256===originalSha256&&r.sourceSha256===sourceSha256);if(prior)return prior;
     const {fieldRejections:_r,fieldGroupAssembly:_assembly,...base}=original;
-    const result=validateStoredAiResult({...base,id:randomUUID(),sourceResultIds:[original.id],output,listingContext:context,sourceSha256,fieldCandidateRecovery:{parserVersion:'field-reference-recovery/v1',originalResult:original,originalSha256,recoveredAt:new Date().toISOString()}});
+    const result=validateStoredAiResult({...base,id:randomUUID(),sourceResultIds:[original.id],output,listingContext:context,sourceSha256,fieldCandidateRecovery:{parserVersion:'field-reference-recovery/v2',originalResult:original,originalSha256,recoveredAt:new Date().toISOString()}});
     this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));return result;
   }
   getResult(id: string): AiResult | undefined { this.ensureOpen(); return this.records.get('ai_results', id, this.readPresentationResult); }

@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useEffect, useRef, useState } from 'react';
 import { Download, ExternalLink, RefreshCw } from 'lucide-react';
@@ -12,6 +13,7 @@ const statusLabels: Record<ItemLabelStatus, string> = { NOT_REQUESTED:'尚未请
 function labelTone(status: ItemLabelStatus): SettingsStatusTone { return status === 'READY' ? 'success' : status === 'FAILED' ? 'danger' : status === 'STALE' ? 'warning' : 'neutral'; }
 
 export function ItemLabelsPanel({ batch, busy, dirty }: { batch: ProcurementBatch; busy: boolean; dirty: boolean }) {
+  const readElement = useRef<HTMLElement>(null);
   const [pageSize, setPageSize] = useListPageSize('item-labels');
   const api = window.red;
   const [labels, setLabels] = useState<ItemLabelRecord[]>([]);
@@ -23,14 +25,15 @@ export function ItemLabelsPanel({ batch, busy, dirty }: { batch: ProcurementBatc
   const mounted = useRef(true), version = useRef(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    let active = true, timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
     const poll = async () => {
       const request = version.current;
       try { const values = await api.listItemLabels({ batchId:batch.id }); if (active && request === version.current) { setLabels(values); setReadError(''); } }
       catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
-      finally { if (active) { setLoading(false); timer = setTimeout(() => { void poll(); }, 2000); } }
+      finally { if (active) setLoading(false); }
+      return 4000;
     };
-    void poll(); return () => { active = false; if (timer) clearTimeout(timer); };
+    const stop = startVisiblePolling(poll, { element: () => readElement.current }); return () => { active = false; stop(); };
   }, [api, batch.id, batch.revision, refresh]);
   async function action(work: () => Promise<string | void>) {
     if (busy || dirty || pending) return;
@@ -43,7 +46,7 @@ export function ItemLabelsPanel({ batch, busy, dirty }: { batch: ProcurementBatc
   const ready = current.filter(value => value.status === 'READY'), failed = current.filter(value => value.status === 'FAILED');
   const allReady = batch.lines.length > 0 && batch.lines.every(line => current.filter(value => value.lineId === line.id && value.status === 'READY' && value.files.length && value.quantity === line.stockQuantity).length === 1);
   const disabled = busy || dirty || pending || loading;
-  return <section className="ops-panel" aria-label="本批次商品标签">
+  return <section ref={readElement} className="ops-panel" aria-label="本批次商品标签">
     <div className="ops-actions"><div className="ops-grow"><h2>商品标签</h2><p>已就绪 {ready.length} / {batch.lines.length} 个 SKU。数量按销售单位计算，与供应商采购件数分别保存。</p></div><button type="button" className="button secondary" disabled={busy || pending} onClick={() => setRefresh(value => value + 1)}><RefreshCw size={15} />刷新标签</button><button type="button" className="button secondary" disabled={disabled} onClick={() => { void action(async () => { await api.prepareItemLabels(batch.id); return '已准备本批次标签；已有就绪文件直接复用，失败项目请单独重试'; }); }}>准备本批次标签</button><button type="button" className="button primary" disabled={disabled || !allReady} onClick={() => { void action(async () => { const value = await api.exportItemLabels(batch.id); return value.cancelled ? undefined : '本批次商品标签已导出'; }); }}><Download size={15} />导出本批次标签</button>{!!failed.length && <button type="button" className="button secondary" disabled={disabled} onClick={() => { void action(async () => { const results = await Promise.allSettled(failed.map(value => api.retryItemLabel(value.id))); const errors = results.flatMap(value => value.status === 'rejected' ? [errorText(value.reason)] : []); if (errors.length) throw new Error(`${results.length-errors.length} 个已安排重试；${errors.join('；')}`); return `已安排 ${failed.length} 个失败标签重试`; }); }}>重试失败标签（{failed.length}）</button>}</div>
     <p className="ops-hint">打开标签 PDF 后，在系统阅读器中选择打印机。工作台不会自动向实体打印机发送任务。完整批次标签就绪后可统一导出。</p>
     {dirty && <p className="workflow-warning" role="status">备货单有未保存修改，请先保存后再准备、打开、导出或重试标签。</p>}

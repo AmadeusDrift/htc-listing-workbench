@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Pause, Play, RefreshCw } from 'lucide-react';
@@ -7,6 +8,7 @@ import { errorText } from './utils';
 
 const itemLabels: Record<MiaoshouSyncItemState, string> = { pending: '待读取', ready: '已暂存', unchanged: '未变更', failed: '读取失败' };
 export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPreview: (preview: MiaoshouPreview) => void }) {
+  const readElement = useRef<HTMLElement>(null);
   const [displaySize, setDisplaySize] = useListPageSize('miaoshou-sync-records');
   const [status, setStatus] = useState<MiaoshouSyncStatus | null>(null), [items, setItems] = useState<MiaoshouSyncPage | null>(null);
   const [page, setPage] = useState(1), [filter, setFilter] = useState<MiaoshouSyncPageInput['filter']>('all'), [pageSize, setPageSize] = useState(500);
@@ -14,16 +16,16 @@ export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPre
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    let active = true, timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
     async function load() {
       try {
         const [state, rows] = await Promise.all([window.red.getMiaoshouSyncStatus(), window.red.listMiaoshouSyncItems({ page, pageSize: displaySize, filter })]);
         if (!active) return; setStatus(state); setItems(rows);
         if (page > 1 && rows.total <= (page - 1) * rows.pageSize) { setPage(Math.max(1, Math.ceil(rows.total / rows.pageSize))); return; }
-        timer = setTimeout(() => void load(), state.status === 'running' ? 1000 : 5000);
-      } catch (cause) { if (active) { setError(errorText(cause)); timer = setTimeout(() => void load(), 5000); } }
+        return state.status === 'running' ? 2000 : 5000;
+      } catch (cause) { if (active) { setError(errorText(cause)); return 5000; } }
     }
-    void load(); return () => { active = false; clearTimeout(timer); };
+    const stop = startVisiblePolling(load, { element: () => readElement.current }); return () => { active = false; stop(); };
   }, [page, displaySize, filter, refresh]);
   async function action(operation: () => Promise<unknown>) {
     if (working || disabled) return; setWorking(true); setError('');
@@ -32,7 +34,7 @@ export function MiaoshouSync({ disabled, onPreview }: { disabled: boolean; onPre
   }
   const busy = disabled || working, running = status?.status === 'running';
   const stateText = !status || status.status === 'idle' ? '尚未同步' : status.status === 'paused' ? '已暂停，可继续' : status.status === 'completed' ? status.failed ? '已结束，部分商品读取失败' : '同步完成' : status.stage === 'listing' ? `正在收集第 ${status.nextPage} 页` : '正在读取商品详情';
-  return <section className="miaoshou-sync" aria-label="妙手批量同步" aria-busy={working}>
+  return <section ref={readElement} className="miaoshou-sync" aria-label="妙手批量同步" aria-busy={working}>
     <div className="section-heading"><div><h3>批量同步到暂存区</h3><p>收集全部商品与 SKU，核对后再导入采集箱。再次扫描会跳过未变更的商品。</p></div><span className={`quiet-pill ${status?.failed || status?.lastError ? 'attention' : ''}`} role="status">{stateText}</span></div>
     <div className="workflow-actions">
       <label className="miaoshou-sync-page-size">每页商品数<select aria-label="同步每页商品数" value={pageSize} disabled={busy || running} onChange={event => setPageSize(Number(event.target.value))}>{[20, 50, 100, 500].map(size => <option key={size} value={size}>{size}</option>)}</select></label>

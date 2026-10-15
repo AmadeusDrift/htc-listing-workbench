@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, FileInput, LoaderCircle, MoreHorizontal, PackageOpen, Pause, Play, RefreshCw, Settings2, X } from 'lucide-react';
@@ -13,6 +14,7 @@ interface Props {
 const itemLabels = { pending: '待读取', ready: '已读取', unchanged: '未变更', failed: '读取失败' };
 
 export function InboxSyncBar({ busy, onChanged, onOpenSettings, onImport, onExamples }: Props) {
+  const readElement = useRef<HTMLElement>(null);
   const [connection, setConnection] = useState<MiaoshouStatus | null>(null), [autoSync, setAutoSync] = useState<boolean | null>(null);
   const [status, setStatus] = useState<MiaoshouSyncStatus | null>(null), [error, setError] = useState('');
   const [working, setWorking] = useState(false), [detailsOpen, setDetailsOpen] = useState(false);
@@ -45,18 +47,18 @@ export function InboxSyncBar({ busy, onChanged, onOpenSettings, onImport, onExam
   }, [observe]);
   useEffect(() => {
     if (status?.status !== 'running') return;
-    let active = true, timer: ReturnType<typeof setTimeout>;
+    let active = true;
     async function poll() {
       try {
         const value = await window.red.getMiaoshouSyncStatus();
         if (!active) return;
         setError('');
         observe(value);
-        if (value.status === 'running') timer = setTimeout(() => void poll(), 1200);
-      } catch (cause) { if (active) { setError(errorText(cause)); timer = setTimeout(() => void poll(), 3000); } }
+        return value.status === 'running' ? 2400 : null;
+      } catch (cause) { if (active) { setError(errorText(cause)); return 5000; } }
     }
-    timer = setTimeout(() => void poll(), 700);
-    return () => { active = false; clearTimeout(timer); };
+    const stop = startVisiblePolling(poll, { element: () => readElement.current, initialDelay: 700 });
+    return () => { active = false; stop(); };
   }, [status?.status, observe]);
   useEffect(() => {
     const close = (event: PointerEvent) => { if (more.current?.open && !more.current.contains(event.target as Node)) more.current.open = false; };
@@ -75,7 +77,7 @@ export function InboxSyncBar({ busy, onChanged, onOpenSettings, onImport, onExam
     : status.status === 'paused' ? '同步已暂停，可在详情中继续' : status.status === 'completed' ? `同步完成 · 新增 ${status.imported ?? 0} 件 · 已有 ${status.existing ?? 0} 件${status.failed ? ` · 失败 ${status.failed} 件` : ''}`
       : status.stage === 'listing' ? `正在检查第 ${status.nextPage} 页 · 已发现 ${status.discovered} 件` : `正在导入 · 新增 ${status.imported ?? 0} 件 · 剩余 ${status.pending} 件`;
   return <>
-    <section className="inbox-sync-bar" aria-label="妙手采集箱同步">
+    <section ref={readElement} className="inbox-sync-bar" aria-label="妙手采集箱同步">
       <span className="inbox-sync-symbol" aria-hidden="true"><RefreshCw size={19} className={running ? 'spin' : undefined} /></span>
       <div className="inbox-sync-summary"><strong>妙手采集箱</strong><span role="status">{stateText}</span>{error && <button type="button" className="text-button inbox-sync-error-link" onClick={() => setDetailsOpen(true)}>同步遇到问题，查看详情</button>}</div>
       <div className="inbox-sync-controls">{onOpenSettings && <button type="button" className="text-button inbox-auto-status" onClick={onOpenSettings}><Settings2 size={14} />{autoSync === null ? '同步设置' : autoSync ? '自动检查已开启' : '自动检查已关闭'}</button>}

@@ -298,3 +298,13 @@ test('a late progress response cannot replace the final adopted workflow', async
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(rows[0].workflow?.stage, 'complete'); assert.deepEqual(observed, ['complete']);
 });
+
+
+test('hidden progress observation leaves the business completion promise running', async () => {
+  const source = product('hidden-progress', 1), f = fixture([source]), complete = f.api.completeAutomaticProduct;
+  let polls = 0, completed = false;
+  f.api.getAutomaticProductProgress = async () => { polls++; return null; };
+  f.api.completeAutomaticProduct = async input => { const result = await complete(input); completed = true; return result; };
+  const rows = await runAutomaticPreparation(f.api, f.input, { isProgressVisible: () => false });
+  assert.equal(polls, 0); assert.equal(completed, true); assert.equal(rows[0].state, 'done');
+});

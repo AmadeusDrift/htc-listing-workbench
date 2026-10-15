@@ -1,3 +1,4 @@
+import { startVisiblePolling, isReadVisible } from './visible-polling.ts';
 import { AutomaticResumePanel } from './AutomaticResumePanel';
 import { AutomaticBatchStatus } from './AutomaticBatchStatus';
 import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-contracts';
@@ -57,38 +58,37 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
     }
   }, [startedTask]);
   useEffect(() => {
-    let active = true, reading=false, timer: ReturnType<typeof setTimeout> | undefined;
-    const visible = () => document.visibilityState !== 'hidden';
+    let active = true, reading=false;
+    const visible = () => isReadVisible(panel.current);
     const poll = async () => {
       if (!active || reading || !visible() || readScope.current.taskPage!==taskPage || readScope.current.selectedId!==selectedId) return;
       reading=true;
       if(readFlight.current){await readFlight.current.catch(()=>{});if(!active||!visible()){reading=false;return;}}
       const request = version.current;
-      let pollDelay = 30_000;
+      let pollDelay = 60_000;
       const flight=(async()=>{try {
         const allValues = await api.queryAutomaticTaskSummaries({...(workBatchId?{workBatchId}:{taskIds:taskIds?[...new Set([...taskIds,...(startedTask?[startedTask.id]:[])])]:undefined}),page:taskPage,pageSize:20});
-        if(!active||request!==version.current||actionPending.current)return;
+        if(!active||!visible()||request!==version.current||actionPending.current)return;
         const values=allValues.rows;
-        if(allValues.active)pollDelay=10_000;
+        if(allValues.active)pollDelay=20_000;
         const id = values.some(value=>value.id===selectedId)?selectedId:values[0]?.id;
         // Lifecycle transitions invalidate the queue; per-SKU progress stays in this panel.
         const summary=values.find(value=>value.id===id);
         let detail=summary?await api.queryAutomaticTaskGroups({taskId:summary.id,revision:summary.revision,search,page:groupPage,pageSize:groupSize as 20|50|100}):null;
         if(detail?.kind==='revision-conflict')detail=await api.queryAutomaticTaskGroups({taskId:detail.taskId,revision:detail.revision,search,page:groupPage,pageSize:groupSize as 20|50|100});
         if(detail?.kind==='revision-conflict')throw Error('任务持续变化，请刷新读取当前版本。');
-        if(!active||request!==version.current||actionPending.current)return;
+        if(!active||!visible()||request!==version.current||actionPending.current)return;
         let batch:TaskBatchSummary|null=null,batchFailure='';
         if(id)try{batch=await api.getAutomaticBatchSummary(id);}catch(cause){batchFailure=errorText(cause);}
         if (active && request === version.current && !actionPending.current) { setQueueLifecycleSignature(allValues.lifecycleSignature);setTasks(values);setTaskTotal(allValues.total);setTaskPage(allValues.page);setView(detail); setTask(detail?.task??null); setReadError(''); setBatchSummary(batch);setBatchError(batchFailure); }
       } catch (cause) { if (active && request === version.current) setReadError(errorText(cause)); }
-      finally { reading=false;if (active) { setLoading(false); if (visible()) timer = setTimeout(() => { void poll(); }, pollDelay); } }})();
+      finally { reading=false;if (active) setLoading(false); }})();
       readFlight.current=flight;try{await flight;}finally{if(readFlight.current===flight)readFlight.current=null;}
+      return pollDelay;
     };
-    const onVisibility = () => { if (timer) clearTimeout(timer); timer = undefined; if (visible()) void poll(); };
-    document.addEventListener('visibilitychange', onVisibility);
-    void poll();
+    const stop = startVisiblePolling(poll, { element: () => panel.current });
     // Navigation only stops reads. Task lifetime belongs to the main process.
-    return () => { active = false; if (timer) clearTimeout(timer); document.removeEventListener('visibilitychange', onVisibility); };
+    return () => { active = false; stop(); };
   }, [api, selectedId, refresh, startedTask?.id,JSON.stringify(taskIds),workBatchId,taskPage,groupPage,groupSize,search]);
 
   // Full evidence validation is explicit. A changed snapshot invalidates its proof

@@ -446,3 +446,6 @@ details[open] > summary .disclosure-chevron { transform: rotate(180deg); }
 /* Keep every workspace entry reachable on shorter windows. */
 .htc-workspaces .sidebar > * { flex-shrink: 0; }
 .htc-workspaces .sidebar-bottom { padding-top: 20px; }
+
+/* Keep the workspace sidebar flat on integrated graphics. */
+.htc-workspaces .sidebar { background: var(--panel); backdrop-filter: none; }

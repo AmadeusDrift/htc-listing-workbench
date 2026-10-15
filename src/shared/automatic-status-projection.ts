@@ -21,6 +21,7 @@ function itemReason(item: AutomaticListingItem): string {
   if(legacyItemSourceServiceFailure(item))return legacySourceServiceReason;
   const code = item.outcome?.kind === 'RULE_FILTERED' ? item.outcome.code : item.rejection?.detail.code ?? item.outcome?.code;
   if(item.outcome?.kind==='UNKNOWN'&&item.outcome.code==='EVIDENCE_READ_FAILED')return '原请求或依赖记录暂不可读，结果仍未知；请核对原调用与草稿记录。本次页面读取未发送新请求，原发送保护保留。';
+  if(code==='CATEGORY_NO_SUITABLE'||code==='CATEGORY_RESULT_UNKNOWN')return presentRejection(code);
   const reasons: Record<string, string> = {
     FIELD_RESULT_UNKNOWN: '字段请求结果未知，请查看已保存的字段调用记录与恢复进度。',
     IMAGE_RESULT_UNKNOWN: '图片请求结果未知，请查看已保存的图片调用记录与恢复进度；已完成图片保留。',

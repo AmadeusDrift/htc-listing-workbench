@@ -8,6 +8,7 @@ import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import { slowHttp } from './fixtures/stabilization/slow-http.ts';
 import { materializeSourceSnapshot, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import type { AmazonTarget } from '../src/shared/amazon-contracts.ts';
+import {automaticItemReason} from '../src/shared/automatic-status-projection.ts';
 
 for(const scenario of ['none','manual'] as const)test(`actual automatic coordinator preserves ${scenario==='none'?'valid none before Schema/draft/images':'the explicitly selected manual product type'}`,async t=>{
  const http=await slowHttp({body:JSON.stringify({id:'s04-decisions',answers:{category:{type:'choice',choice:'$NO_SUITABLE',probabilities:{$NO_SUITABLE:.95,CLEANING_CLOTH:.05}},review:{type:'choice',choice:'clear'}},usage:{input_tokens:2,output_tokens:3,cost:.001}})});t.after(()=>http.close());
@@ -33,6 +34,7 @@ for(const scenario of ['none','manual'] as const)test(`actual automatic coordina
   assert.equal(counts.select,0);assert.equal(counts.drafts,1);assert.equal(http.posts,0);assert.equal(f.requests.length,0);assert.equal(f.service.listCalls().length,0);assert.equal(automatic.get(task.id).items[0].classification,undefined);return;
  }
  const saved=automatic.get(task.id);assert.equal(saved.status,'NEEDS_ATTENTION');assert.equal(saved.items[0].stage,'CLASSIFY');assert.equal(saved.items[0].draftId,null);assert.match(saved.items[0].error??'',/无适用.*人工/);
+ assert.equal(saved.items[0].outcome?.kind,'NEEDS_INPUT');assert.equal(saved.items[0].outcome?.code,'CATEGORY_NO_SUITABLE');assert.match(automaticItemReason(saved.items[0]),/人工确认类目/);
  assert.deepEqual(counts,{schema:0,drafts:0,images:0,submissions:0,select:1});assert.equal(http.posts,1);assert.equal(f.requests.length,1);
  const calls=f.service.listCalls();assert.equal(calls.length,1);assert.equal(calls[0].status,'SUCCEEDED');assert.equal(f.service.listResults(product.id)[0].output.kind,'category-decision');
  assert.equal((await f.service.readProviderReceipt(calls[0].id) as {costUsd:number}).costUsd,.001);

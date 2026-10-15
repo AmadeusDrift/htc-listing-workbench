@@ -17,10 +17,10 @@ export function aliyunFinalOutcome(call:import('../../shared/ai-contracts.ts').A
 }
 /** Result certainty is independent of reported usage and current adoption permission.
  * This query does not settle costs, repair records or grant another provider request. */
-export function localAiRequestResolved(db:DatabaseSync,directory:string,id:string,raw:unknown):boolean {
+export function localAiRequestResolved(db:DatabaseSync,directory:string,id:string,raw:unknown,resultRows?:readonly Record<string,unknown>[]):boolean {
   try{
     const call=validateAiCall(raw);if(call.id!==id||call.status==='RUNNING')return false;
-    for(const row of db.prepare("SELECT id,record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(call.id)){
+    for(const row of resultRows??db.prepare("SELECT id,record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(call.id)){
       try{const result=validateStoredAiResult(JSON.parse(String(row.record_json)));assertReceiptRecovery(db,directory,result,call);if(result.id===row.id&&resultHasOwner(result,call))return true;}catch{/* An unrelated/damaged result does not prove completion. */}
     }
     const saved=readCallReceiptSync(db,directory,call);if(!saved)return false;

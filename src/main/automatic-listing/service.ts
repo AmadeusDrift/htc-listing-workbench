@@ -2,6 +2,8 @@ import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import {ControlledRunScopes,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
+import {categoryUnknownCode} from '../ai/category-knowledge.ts';
+import {CategoryNoSuitableError} from '../catalog/classification.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
 import { listWorkBatches, currentWorkBatch, archiveWorkBatch, addWorkBatchProducts, bindWorkBatchTask } from './work-batches.ts';
@@ -109,7 +111,7 @@ export interface AutomaticListingDependencies {
   ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
-const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
+const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','CATEGORY_RESULT_UNKNOWN'].includes(code);
 const adaptationBlocked=(task:AutomaticListingTask,key:string):boolean=>!!task.adaptation?.blockedKeys.includes(key)&&!task.adaptation.unitResolvedKeys?.includes(key);
 const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
 const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
@@ -130,6 +132,7 @@ const needsSourceColor = (draft: AmazonDraft, remaining: string[] = []): boolean
 
 /** Main-process state machine. Approval is volatile, while every costly/write intent is durable. */
 export class AutomaticListingService {
+  private directory:string;
   private db: DatabaseSync;
   private deps: AutomaticListingDependencies;
   private tasks = new Map<string, AutomaticListingTask>();
@@ -148,7 +151,7 @@ export class AutomaticListingService {
   private closing: Promise<void> | null = null;
   private archiving = false;
   constructor(directory: string, dependencies: AutomaticListingDependencies) {
-    this.deps = dependencies; this.db = openDatabase(directory);
+    this.directory=directory;this.deps = dependencies; this.db = openDatabase(directory);
     this.controlledRuns=new ControlledRunScopes(this.db);
     try {
       pauseControlledRunScopes(this.db);
@@ -405,14 +408,14 @@ export class AutomaticListingService {
     const identity=completionSafetyIdentity(draft??{mode:task.mode,productId:row.productId,productRevision:row.productRevision,variantId:row.variantId,sku:row.sku,sellerId:task.sellerId,marketplaceId:task.marketplaceId,listingProgram:task.mode==='live'?'haul':'standard',salesPlan:row.salesPlan});
     if(journal.saleOperations(identity).some(op=>journal.unknown(op.id)))return 'FIELD_RESULT_UNKNOWN';
     if(row.repair?.phase==='FIELDS_STARTED'&&(!row.repair.operationId||journal.unknown(row.repair.operationId)))return 'FIELD_RESULT_UNKNOWN';
-    if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':null;
+    if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':categoryUnknownCode(this.db,this.directory,row.productId);
     if(!draft)throw new UserFacingError('字段草稿记录缺失');
     if(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))return 'SUBMISSION_UNKNOWN';
     const run=this.deps.images.getProgress(row.draftId);
     if(run?.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||journal.unknown(run.contentPreparation.operationId)))return 'FIELD_RESULT_UNKNOWN';
     if(run?.pendingRequest||run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
-    return null;
+    return categoryUnknownCode(this.db,this.directory,row.productId);
   }
   /** Only failure presentation uses receipt certainty; send/admit/archive guards
    * continue to use unknownCode and the original source reservation guard. */
@@ -422,15 +425,16 @@ export class AutomaticListingService {
     return this.nonSourceUnknownCode(row,task);
   }
   private displayItem(row:AutomaticListingItem,task:AutomaticListingTask):AutomaticListingItem {
-    if(row.status!=='FAILED'||row.outcome?.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
+    if(row.status!=='FAILED'||!row.outcome)return row;
     try{
+      const unknown=this.displayUnknownCode(row,task);if(unknown)return row.outcome.kind==='UNKNOWN'&&row.outcome.code===unknown?row:{...row,outcome:{...row.outcome,kind:'UNKNOWN',code:unknown}};
+      if(row.outcome.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
       if(sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return row;
-      const unknown=this.nonSourceUnknownCode(row,task);if(unknown)return {...row,outcome:{...row.outcome,code:unknown}};
       return {...row,outcome:{...row.outcome,kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'}};
     }catch{
       // Historical missing dependencies cannot prove the other safety states.
       // Preserve UNKNOWN in this read-only view, without changing the task/guard.
-      return {...row,outcome:{...row.outcome,code:'EVIDENCE_READ_FAILED'}};
+      return row.outcome.kind==='UNKNOWN'?{...row,outcome:{...row.outcome,code:'EVIDENCE_READ_FAILED'}}:row;
     }
   }
   private displayPresenter(){
@@ -451,6 +455,7 @@ export class AutomaticListingService {
       }
       const unknown=this.displayUnknownCode(row,task)??(failure instanceof AiError&&failure.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'?'IMAGE_RESULT_UNKNOWN':null);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
+      else if(row.stage==='CLASSIFY'&&failure instanceof CategoryNoSuitableError)classification={kind:'NEEDS_INPUT',code:failure.code};
       else if(this.unknownCode(row,task)==='SOURCE_CONSISTENCY_SENT_UNKNOWN'&&sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'};
       else if(failure instanceof AiError&&failure.certainty==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'AI_RECEIVED_INVALID_OUTPUT'};
       else if(protectedCode)classification={kind:'SYSTEM_REPAIR',code:protectedCode};

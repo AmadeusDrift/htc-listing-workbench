@@ -868,6 +868,10 @@ export class ImageWorkflowService {
         if(slot.status==='PASSED')continue;run.activeSlot=slot.index;
         const context=validateProductImageContext({...base,...(run.setPlan?{setPlan:run.setPlan}:{}),purpose:slot.purpose,slot:{index:slot.index,total:7,provisional:true}});if(!run.sourceReuse||slot.attempts.length!==run.sourceReuse.slotAttempts[slot.index-1]||!slot.attempts.length)slot.contextSha256=listingFingerprint(context);
         let attempt=slot.attempts.at(-1);
+        const unitSource=run.unitAdoptionReview?.sourceRunId===reuse?.id?reuse?.slots?.[slot.index-1]:undefined;
+        // Reattach the original successful final attempt after its immutable
+        // failure prefix. This restores an existing candidate, not new quota.
+        const restoringUnitCandidate=()=>!!unitSource&&unitSource.status==='PASSED'&&!!unitSource.approvedAssetId&&!!unitSource.approvedSha256&&unitSource.attempts.at(-1)?.state==='PASSED'&&!!unitSource.attempts.at(-1)?.candidateId&&slot.attempts.length===run.unitAdoptionReview!.sourceSlotAttempts[slot.index-1]-1&&unitSource.attempts.at(-1)!.number===slot.attempts.length+1;
         if(!riskEnabled&&attempt?.state==='BLOCKED'){attempt.state=attempt.candidateId?'GENERATED':'READY';attempt.error=null;slot.status='PENDING';slot.error=null;this.save(run);}
         // An old detail-text rejection is no longer a reason to regenerate the same image.
         if(slot.index>1&&attempt?.state==='RETRYABLE_FAILURE'&&attempt.candidateId&&attempt.ipReviewResultId&&attempt.reviewResultId){
@@ -875,11 +879,11 @@ export class ImageWorkflowService {
           if(oldIp?.output.kind==='image-ip-review'&&evaluateImageRisk(oldIp.output,this.getRiskSettings()).verdict==='PASS'&&oldIp.output.planResultId===attempt.planResultId&&oldIp.output.candidate.id===attempt.candidateId&&oldReview?.output.kind==='image-text-review'&&oldReview.output.planResultId===attempt.planResultId&&listingFingerprint(oldReview.output.candidate)===listingFingerprint(oldIp.output.candidate)){attempt.state='GENERATED';attempt.error=null;this.save(run);}
         }
         const reviewOnly=run.slotPolicy===IMAGE_SET_POLICY&&imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&this.canRecheckTextPolicy(attempt);
-        if(attempt?.state==='RETRYABLE_FAILURE'&&imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&!reviewOnly){slot.status='FAILED';this.save(run);continue;}
+        if(attempt?.state==='RETRYABLE_FAILURE'&&imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&!reviewOnly&&!restoringUnitCandidate()){slot.status='FAILED';this.save(run);continue;}
         for(;;){
           throwIfAborted(signal);await fresh();
           if(!attempt||attempt.state==='RETRYABLE_FAILURE'&&!reviewOnly){
-            if(imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)){slot.status='FAILED';this.save(run);break;}
+            if(imageSlotConsumedAttempts(run,slot.index)>=imageSlotAttemptLimit(run,slot.index)&&!restoringUnitCandidate()){slot.status='FAILED';this.save(run);break;}
             const previous=attempt;
             attempt={number:slot.attempts.length+1,requestId:reuse?.slots?.[slot.index-1]?.attempts.at(-1)&&(!run.unitAdoptionReview||slot.attempts.length===run.unitAdoptionReview.sourceSlotAttempts[slot.index-1]-1)?reuse.slots[slot.index-1].attempts.at(-1)!.requestId:randomUUID(),state:'PLANNING',planResultId:null,candidateId:null,ipReviewResultId:null,ocrResultId:null,reviewResultId:null,error:null};if(!run.unitAdoptionReview&&previous?.planResultId&&!previous.candidateId&&slot.attempts.length>=run.maxAttempts&&(!run.sourceReuse||slot.attempts.length>run.sourceReuse.slotAttempts[slot.index-1])){attempt.planResultId=previous.planResultId;attempt.planReuse={version:1,fromRequestId:previous.requestId};}
             slot.attempts.push(attempt);slot.contextSha256=listingFingerprint(context);

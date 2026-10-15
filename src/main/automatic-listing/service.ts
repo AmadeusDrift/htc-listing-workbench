@@ -1280,7 +1280,7 @@ export class AutomaticListingService {
           for(const slot of selected){const before=prior?.slots?.find(old=>old.index===slot.index);if(slot.status!=='PASSED'&&fingerprint(slot)!==fingerprint(before??null)){const snapshot={...row,error:slot.error??result.workflow.error??'所选图位处理未完成'};rememberFailure(snapshot,new Date().toISOString(),slot.index,'local-check');row.failureHistory=snapshot.failureHistory;}}
           this.saveItem(task,row);return;
         }
-        if (!this.imageReady(result.workflow)){const pending=result.workflow.pendingRequest;const legacy=result.workflow.planningUnknown;if(pending||legacy){const error=new AiError('INTERRUPTED');error.callId=(pending??legacy)!.callId;error.certainty=(pending??legacy)!.certainty;error.diagnosticReason=legacy||pending?.step==='planning'?'IMAGE_PLAN_RESULT_UNKNOWN':'IMAGE_REVIEW_RESULT_UNKNOWN';error.message=result.workflow.error||'原图片操作结果待核对，未发送新请求';throw error;}throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');}
+        if (!this.imageReady(result.workflow)){const pending=result.workflow.pendingRequest;const legacy=result.workflow.planningUnknown;if(pending||legacy){const error=new AiError('INTERRUPTED');error.callId=(pending??legacy)!.callId;error.certainty=(pending??legacy)!.certainty;error.diagnosticReason=legacy||pending?.step==='planning'?'IMAGE_PLAN_RESULT_UNKNOWN':'IMAGE_REVIEW_RESULT_UNKNOWN';error.message=result.workflow.error||'原图片操作结果待核对，未发送新请求';throw error;}throw new UserFacingError(result.workflow.error || '侵权检测或文字视觉复核未通过，尚无可用图片');}
         draft = result.draft;
       }
       this.checkpoint(task, row);

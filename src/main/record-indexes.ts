@@ -1,4 +1,7 @@
 /** Exact declarations shared by migration and the backup schema allowlist. Never infer trust from a name alone. */
+export const COMPLETION_PRODUCT_INDEXES = [
+  { table: 'listing_completion_operations', name: 'record_completion_product', expressions: 1, sql: "CREATE INDEX record_completion_product ON listing_completion_operations(json_extract(record_json,'$.safetyIdentity.productId'))" },
+] as const;
 export const RESULT_CALL_INDEXES = [
   { table: 'ai_results', name: 'record_ai_results_call', expressions: 1, sql: "CREATE INDEX record_ai_results_call ON ai_results(json_extract(record_json,'$.callId'))" },
 ] as const;

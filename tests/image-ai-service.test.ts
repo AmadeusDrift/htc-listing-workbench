@@ -1990,6 +1990,28 @@ for(const oldVerdict of ['UNCERTAIN','MISMATCH'] as const)test(`appearance polic
   assert.deepEqual(f.ai.getCall(paidCall.id),paidCall);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),fees);
  }finally{db.close();}
 });
+test('appearance policy v2 independent invalid upgrade remains spent after restoring an old checkpoint',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});
+ for(const purposeId of ['source_understanding','copy_review','image_text_review'] as const){const profile=f.ai.purposeProfile(purposeId).routing!;f.ai.savePurposeProfile({purposeId,expectedRevision:profile.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
+ let legacy=true,reviews=0,stopped=false;
+ f.respond((op,payload)=>{if(op==='ip-upload')return new Response(null,{status:200});if(op==='image-appearance-review'){reviews++;return !legacy&&reviews>=4?chat({verdict:'UNCERTAIN',checks:[]}):appearanceReply(payload,'UNCERTAIN');}return undefined;});
+ const save=(workflow as any).save.bind(workflow);(workflow as any).save=(run:any)=>{if(legacy)for(const slot of run.slots??[]){const cp=slot.attempts.at(-1)?.appearanceReview;if(cp)delete cp.policyVersion;}save(run);if(legacy&&!stopped&&run.slots?.[0]?.attempts[0]?.appearanceReview?.resultIds.length===2){stopped=true;workflow.cancel(f.draft.id);}};
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(posts(),1);assert.equal(reviews,2);legacy=false;
+ const db=openDatabase(f.directory);try{
+  const old=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json);
+  const pending=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});
+  assert.equal(reviews,4);assert.equal(posts(),1);assert.equal(pending.workflow.slots![0].attempts[0].appearanceReview!.state,'PENDING');
+  const firstV2=pending.workflow.slots![0].attempts[0].appearanceReview!.resultIds[0],original=f.ai.listCalls().filter(call=>call.requestScope?.operation==='image-appearance-review').at(-1)!;
+  assert.equal(original.errorCode,'OUTPUT_INVALID');assert.equal(original.purposeSnapshot?.purposeId,'appearance_review_difficult');
+  const fees=db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),count=f.requests.length;
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(old,first.workflow.id);
+  const restored=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});
+  assert.equal(f.requests.length,count);assert.equal(reviews,4);assert.equal(posts(),1);
+  assert.equal(restored.workflow.slots![0].attempts[0].appearanceReview!.resultIds[0],firstV2);
+  assert.equal(restored.workflow.slots![0].attempts.length,1);assert.equal(restored.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].candidateId);
+  assert.deepEqual(f.ai.getCall(original.id),original);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),fees);
+ }finally{db.close();}
+});
 
 test('W07 appearance sends actual source plus candidate and preserves raw receipt with independent purpose',async t=>{
  const f=await fixture(t);enableAppearance(f);f.respond((operation,payload)=>operation==='image-appearance-review'?appearanceReply(payload):undefined);

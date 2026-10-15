@@ -1,3 +1,4 @@
+import {assertImageReviewLedgerReceipts,IMAGE_REVIEW_TABLES,validateImageReviewLedger,reviewLedgerFiles,retainImageReviewLedger} from './image-workflow/review-ledger.ts';
 import {retainSalesUnitAdoptions} from './sales-plans/unit-restore-history.ts';
 import {SPEND_TABLES,assertSpendHistory,retainSpendHistory} from './ai/spend-budget.ts';
 import {assertRecordTable} from './storage/record-table.ts';
@@ -210,6 +211,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     if(version>=26){Object.assign(approved,BATCH_TABLES);assertBatchHistory(database);}
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
     if(version>=28){Object.assign(approved,{image_reference_pins:['id','record_json']});referencePinHistory(database);}
+    if(version>=35)Object.assign(approved,IMAGE_REVIEW_TABLES);
     if(version>=31){Object.assign(approved,IMAGE_RETRY_TABLES);assertImageRetryHistory(database);}
     if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
@@ -218,7 +220,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
       if (!expected || actual.length !== expected.length || actual.some(column => column.hidden !== 0 || !expected.includes(String(column.name)))) throw new UserFacingError('备份含有不支持的数据库结构，未更改工作区');
     }
     if (version >= 4) {
-      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {}), ...Object.keys(version >= 20 ? CONSISTENCY_TABLES : {})]) {
+      for (const name of [...Object.keys(versionFourTables), ...Object.keys(version >= 5 ? versionFiveTables : {}), ...Object.keys(version >= 6 ? versionSixTables : {}), ...Object.keys(version >= 7 ? versionSevenTables : {}), ...Object.keys(version >= 8 ? versionEightTables : {}), ...Object.keys(version >= 10 ? versionTenTables : {}), ...Object.keys(version >= 11 ? versionElevenTables : {}), ...Object.keys(version >= 13 ? versionThirteenTables : {}), ...Object.keys(version >= 14 ? versionFourteenTables : {}), ...Object.keys(version >= 15 ? versionFifteenTables : {}), ...Object.keys(version >= 16 ? versionSixteenTables : {}), ...Object.keys(version >= 18 ? versionEighteenTables : {}), ...Object.keys(version >= 19 ? versionNineteenTables : {}), ...Object.keys(version >= 20 ? CONSISTENCY_TABLES : {}),...Object.keys(version>=35?IMAGE_REVIEW_TABLES:{})]) {
         const table = database.prepare("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?").get(name);
         if (!table || table.wr !== 0) throw new UserFacingError('备份任务或 FTP 表必须保留标准行标识');
         const columns = database.prepare(`PRAGMA table_xinfo(${name})`).all(), indexes = database.prepare(`PRAGMA index_list(${name})`).all();
@@ -244,7 +246,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
             image_versions: validateImageVersion, image_selections: validateImageSelection, content_versions: validateContentVersion, image_write_operations: validateImageWriteOperation,
             collection_receipts: validateCollectionReceipt, collection_captures: validateCollectionCapture, miaoshou_receipts: validateMiaoshouReceipt,
             miaoshou_sync_runs: validateSyncRun, miaoshou_sync_items: validateSyncItem,
-            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateStoredImageWorkflowRun,
+            listing_followups: validateFollowupRecord, category_libraries: validateCategoryLibrary, procurement_batches: validateProcurementBatch, image_workflow_runs: validateStoredImageWorkflowRun,image_review_journal:validateImageReviewLedger,
             automatic_listing_tasks: validateAutomaticListingTask, item_labels: validateItemLabelRecord, shipment_documents: validateShipmentDocument };
           const validated = validators[name as keyof typeof validators](value);
           if (validated.id !== row.id) throw new UserFacingError('备份任务或 FTP 记录身份不一致');
@@ -304,6 +306,8 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
+    if(version>=35)assertImageReviewLedgerReceipts(database,receiptRoot);
+    if(version>=35)for(const f of reviewLedgerFiles(database)){const old=artifactChecks.get(f.path);if(old&&(old.sha256!==f.sha256||old.byteSize!==f.byteSize))throw new UserFacingError('图片审核安全账文件版本冲突');paths.add(f.path);artifactChecks.set(f.path,f);}
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
@@ -459,6 +463,7 @@ function retainSafetyHistory(currentPath: string, snapshotPath: string, migrated
     retainSourceColorAttempts(current, snapshot);
     retainImagePlanningAttempts(current, snapshot);
     retainImageRetryHistory(current,snapshot);
+    retainImageReviewLedger(current,snapshot,dirname(currentPath),dirname(snapshotPath));
     retainCompletionOperations(current, snapshot);
     retainSkuNamingHistory(current, snapshot);
     retainWorkBatches(current,snapshot,migratedWorkBatches);

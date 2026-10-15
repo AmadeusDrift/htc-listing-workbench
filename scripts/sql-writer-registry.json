@@ -6,10 +6,12 @@
       "role": "images",
       "review": "S05 image owner CAS only, borrowing an already active reservation transaction on the same physical workspace; no AI table writes or network wait.",
       "commands": [
-        "reserveImageReviewRequest|UPDATE|image_workflow_runs"
+        "reserveImageReviewRequest|UPDATE|image_workflow_runs",
+        "writeReviewRun|UPDATE|image_workflow_runs"
       ],
       "statements": {
-        "reserveImageReviewRequest|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1
+        "reserveImageReviewRequest|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1,
+        "writeReviewRun|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1
       }
     },
     "main/ai/batch/records.ts": {
@@ -962,6 +964,18 @@
       "statements": {
         "initializeControlledRunScopes|478007f42294db7110da579ec15c94c3a2268c60615bc4e70da7ff2f795bccea": 1,
         "writeScope|74265e91df7d1d1bb1b20365990d8cc4f65ab095a76c578190a16f394487390c": 1
+      }
+    },
+    "main/image-workflow/review-ledger.ts": {
+      "role": "images",
+      "review": "S05 exact image-review safety ledger migration35 and borrowed transaction persistence. Restore retains original identities and evidence without adopting a workflow.",
+      "commands": [
+        "initializeImageReviewLedger|CREATE|image_review_journal",
+        "writeImageReviewLedger|INSERT|image_review_journal"
+      ],
+      "statements": {
+        "initializeImageReviewLedger|28bd763048e3c722e4521a83e7ce66f4628c52c3877cef9a6594dff00599b4ad": 1,
+        "writeImageReviewLedger|b1b859961f4b5b5473e7ea63b3222e984deecd7dcfa091aafa2d7ef785358cba": 1
       }
     }
   },

@@ -191,6 +191,7 @@ async function start() {
       const current = amazonService.getDraft(id);
       return await listingService.complete({ draftId: id, draftRevision: current.revision }, signal, operationId);
     },
+    recheckUnitImage:async(input,signal,authorize)=>{const result=await workflowService.recheckUnitAdoption(input,signal,authorize);if(result.workflow.status!=='COMPLETED')throw new UserFacingError(result.workflow.error||'计量复核的部分图片尚未通过；原标记保留');return result.draft;},
     recheckImage: async (input, signal) => {
       if (signal.aborted) throw new UserFacingError('自动任务已暂停');
       const draft = amazonService.getDraft(input.draftId), prior = workflowService.getProgress(input.draftId);

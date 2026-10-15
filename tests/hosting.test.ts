@@ -13,6 +13,8 @@ import { HostingError } from '../src/main/hosting/errors.ts';
 import { BasicFtpTransport, FtpConnectionPool } from '../src/main/hosting/ftp.ts';
 import type { FtpClient } from '../src/main/hosting/ftp.ts';
 import { validatePersistedProfile, validatePersistedUpload } from '../src/main/hosting/validation.ts';
+import {SpendBudgetError} from '../src/main/ai/spend-records.ts';
+import {ControlledRunScopes,pauseControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
 
 const secretKey = randomBytes(32);
 const storage: SecretStorage = {
@@ -43,6 +45,23 @@ async function fixture(t: test.TestContext, overrides: HostingDependencies = {})
   const input = { assetId: product.assets[0].id, profileId: profile.id, generation: profile.generation, batchId: randomUUID() };
   return { directory, store, service, dependencies, calls, bytes, product, input };
 }
+
+test('actual hosting budget denial is before a new upload identity or attempt and preserves a saved uncertain path',async t=>{
+ let denied=true,prepared:any;const f=await fixture(t,{prepareUpload:async(context:any)=>{prepared=context;if(denied)throw new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');return (db:any)=>assert.equal(db.isTransaction,true);}} as any),before=f.service.listUploads();
+ await assert.rejects(f.service.upload(f.input),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE');assert.deepEqual(f.service.listUploads(),before);assert.deepEqual([f.calls.size,f.calls.upload,f.calls.probe],[0,0,0]);assert.equal(prepared.productId,f.product.id);assert.deepEqual(prepared.variantIds,[f.product.variants[0].id]);assert.deepEqual(prepared.skus,[f.product.variants[0].sku]);assert.equal(prepared.sha256,f.store.getAssetRecord(f.input.assetId)!.sha256);assert.equal(prepared.profile.host,'ftp.example.test');assert.ok(prepared.remotePath.endsWith('.png'));
+ denied=false;const first=await f.service.upload(f.input),db=openDatabase(f.directory),uncertain={...first,status:'FAILED',errorCode:'CONNECT_TIMEOUT'};db.prepare('UPDATE hosting_uploads SET record_json=? WHERE id=?').run(JSON.stringify(uncertain),first.id);denied=true;const counts=[f.calls.size,f.calls.upload,f.calls.probe],saved=db.prepare('SELECT * FROM hosting_uploads').all();await assert.rejects(f.service.upload({...f.input,batchId:randomUUID()}),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE');assert.deepEqual(db.prepare('SELECT * FROM hosting_uploads').all(),saved);assert.deepEqual([f.calls.size,f.calls.upload,f.calls.probe],counts);assert.equal(prepared.uploadId,first.id);assert.equal(prepared.remotePath,first.remotePath);db.close();
+});
+
+test('actual hosting rechecks the original controlled capability in its physical intent transaction after async quote preparation',async t=>{
+ let scopes!:ControlledRunScopes,entered!:()=>void,release!:()=>void;const began=new Promise<void>(done=>entered=done),hold=new Promise<void>(done=>release=done);
+ const f=await fixture(t,{prepareUpload:async(context:any)=>{scopes.authorizeEffect({kind:'hosting',productId:context.productId});entered();await hold;return (db:any)=>{assert.equal(db.isTransaction,true);new ControlledRunScopes(db).authorizeEffect({kind:'hosting',productId:context.productId});};}} as any),db=openDatabase(f.directory),task={id:randomUUID(),revision:1,status:'RUNNING',mode:'live',targetId:'synthetic',sellerId:'seller',marketplaceId:'US',items:[{key:'first',sku:f.product.variants[0].sku,productId:f.product.id,variantId:f.product.variants[0].id}]};db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(task.id,JSON.stringify(task));scopes=new ControlledRunScopes(db);const scope=scopes.register({taskId:task.id,expectedTaskRevision:1,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,items:[{itemKey:'first',sku:task.items[0].sku,productId:f.product.id,variantIds:[task.items[0].variantId],recipeKey:null,parentage:'NONE'}]}),grant=scopes.activate(scope.id),pending=grant(()=>f.service.upload(f.input));await began;pauseControlledRunScopes(db);release();await assert.rejects(pending,(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');assert.equal(f.service.listUploads().length,0);assert.deepEqual([f.calls.size,f.calls.upload,f.calls.probe],[0,0,0]);db.close();
+});
+
+test('actual FTP pool rechecks every command, including a capability revoked after directory creation',async t=>{
+ const f=await fixture(t),wire:string[]=[],checks:string[]=[];let revoked=false;const client={closed:false,async access(){wire.push('connect');},close(){this.closed=true;},async ensureDir(){wire.push('directory');revoked=true;},async cd(){wire.push('cd');},async uploadFrom(){wire.push('upload');},async size(){wire.push('size');return f.bytes.length;}};
+ const pool=new FtpConnectionPool({createClient:()=>client,beforeEffect:(effect:any)=>{checks.push(effect.kind);assert.equal(effect.profile.host,'ftp.example.test');if(revoked)throw new SpendBudgetError('SPEND_BOUND_UNAVAILABLE');}} as any),transport=new BasicFtpTransport(pool);
+ try{await assert.rejects(transport.upload(f.service.getProfile('alpha'),{username:'synthetic',password:'synthetic'},'/fixed/asset.png',f.bytes,new AbortController().signal));assert.deepEqual(wire,['connect','directory']);assert.deepEqual(checks,['connect','directory','upload']);}finally{await transport.close();}
+});
 
 test('five fixed profiles start disabled without credentials and reject arbitrary config fields', async t => {
   const f = await fixture(t);

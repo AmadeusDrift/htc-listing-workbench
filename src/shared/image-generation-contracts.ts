@@ -48,6 +48,8 @@ export interface GeneratedImageCandidate {
   editSource?: { id:string; sha256:string };
 }
 export interface ImageGenerationApi {
+  getImageGenerationSpendStatus():Promise<import('./ai-spend-contracts.ts').ImageGenerationSpendStatus>;
+  setImageGenerationDailySpendLimit(input:import('./ai-spend-contracts.ts').SetImageDailySpendLimit):Promise<import('./ai-spend-contracts.ts').ImageGenerationSpendStatus>;
   getImageGenerationModels(): Promise<ImageModelCatalog>;
   refreshImageGenerationModels(): Promise<ImageModelCatalog>;
   getImageGenerationConnection(provider?: ImageGenerationProvider): Promise<ImageGenerationConnection>;

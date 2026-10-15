@@ -33,6 +33,8 @@ import { LISTING_REVIEW_OUTPUT_RULES } from '../src/main/listing-ai/review-cover
 import { assertImageWorkflowHistory } from '../src/main/image-workflow/history.ts';
 import type { AiCall } from '../src/shared/ai-contracts.ts';
 import {DatabaseSync} from 'node:sqlite';
+import {ControlledRunScopes,CONTROLLED_RUN_ID} from '../src/main/application/controlled-run-scope.ts';
+import {SpendBudgetError} from '../src/main/ai/spend-records.ts';
 
 // Literal pre-presentation history has no new call sidecar; keep original result bytes below unchanged.
 function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiResult) {
@@ -114,6 +116,25 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
 
 // Historical records must contain the original limited-field context, not a v4 context with an old version stamp.
 const legacyFixture=(t:test.TestContext,extraReference=false,withAge=false)=>fixture(t,extraReference,withAge,true);
+
+test('controlled actual Ali risk has no token, upload, moderation, call or durable permit when fee bounds are unavailable',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),db=openDatabase(f.directory),grant=controlledReviewGrant(f,db),count=f.requests.length,callCount=f.ai.listCalls().length,usage=db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all();let permits=0;
+ try{await assert.rejects(grant(()=>f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,{fileId:randomUUID(),reserve:()=>{permits++;},resultStored:()=>{},effect:()=>{permits++;}})),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE'&&e.certainty==='NOT_SENT');assert.equal(permits,0);assert.equal(f.requests.length,count);assert.equal(f.ai.listCalls().length,callCount);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.equal(db.prepare('SELECT count(*) n FROM ai_spend_reservations').get()!.n,0);}finally{db.close();}
+});
+
+test('controlled original Ali final receipt recovers locally without a key, new quote, token or upload',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),fileId=randomUUID();let reserve=0,links=0;const owner={fileId,reserve:()=>{reserve++;},resultStored:()=>{links++;if(links===1)throw Error('synthetic original association failed');}};
+ await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));const original=f.ai.getCall(fileId)!;assert.ok(original.providerReceiptId);const db=openDatabase(f.directory);controlledReviewGrant(f,db);f.ai.disconnect('aliyun-image-risk');await f.ai.close();let requests=0,quotes=0;const local=new AiService(f.directory,f.store,f.hosting,mockStorage,{requiredSpendScopeId:CONTROLLED_RUN_ID,fetch:async()=>{requests++;throw Error('must recover locally');}});f.cleanup(()=>local.close());const budget=(local as any).spendEffects,check=budget.assertAvailable.bind(budget);budget.assertAvailable=(...args:unknown[])=>{quotes++;return check(...args);};const usage=db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),money=db.prepare('SELECT * FROM ai_spend_reservations ORDER BY id').all(),oldRequests=f.requests.length;
+ try{const result=await local.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);assert.equal(result.callId,fileId);assert.ok(result.providerReceiptRecovery);assert.equal(requests,0);assert.equal(quotes,0);assert.equal(f.requests.length,oldRequests);assert.equal(reserve,1);assert.deepEqual(local.getCall(fileId),original);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.deepEqual(db.prepare('SELECT * FROM ai_spend_reservations ORDER BY id').all(),money);}finally{db.close();}
+});
+
+test('a later Ali effect denied before its wire cannot relabel the already reserved original logical call as NOT_SENT',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),budget=(f.ai as any).spendEffects,check=budget.assertAvailable.bind(budget),fileId=randomUUID();budget.assertAvailable=(service:string,...args:unknown[])=>{if(service==='aliyun-oss-put')throw Object.assign(new SpendBudgetError('SPEND_BOUND_UNAVAILABLE'),{certainty:'NOT_SENT'});return check(service,...args);};
+ await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,{fileId,reserve:()=>{},resultStored:()=>{},effect:()=>{}}),(e:any)=>e.callId===fileId&&e.certainty==='SENT_UNKNOWN'&&e.notSent!==true);const original=f.ai.getCall(fileId),before=f.requests.length;assert.equal(f.requests.filter(r=>r.operation==='DescribeUploadToken').length,1);assert.equal(f.requests.filter(r=>r.operation==='ip-upload'||r.operation==='ImageModeration').length,0);await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,{fileId,reserve:()=>{},resultStored:()=>{}}),(e:any)=>e.callId===fileId&&e.certainty==='SENT_UNKNOWN');assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(fileId),original);
+});
+function controlledReviewGrant(f:Awaited<ReturnType<typeof fixture>>,db:DatabaseSync){
+ const task={id:randomUUID(),revision:1,status:'RUNNING',mode:'live',targetId:f.draft.targetId,sellerId:f.draft.sellerId,marketplaceId:f.draft.marketplaceId,items:[{key:'first',productId:f.product.id,variantId:f.draft.variantId,sku:f.draft.sku}]};db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(task.id,JSON.stringify(task));const scopes=new ControlledRunScopes(db),scope=scopes.register({taskId:task.id,expectedTaskRevision:1,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,items:[{itemKey:'first',productId:f.product.id,variantIds:[f.draft.variantId],sku:f.draft.sku,recipeKey:null,parentage:'NONE'}]});return scopes.activate(scope.id);
+}
 
 test('image plan, candidate OCR and independent text review persist source-bound provenance and shared usage', async t => {
   const f = await fixture(t), fresh = () => {};

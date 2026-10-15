@@ -31,10 +31,11 @@ export function selfPackageDeletion(attributes:JsonObject,sku:string,marketplace
  const after=structuredClone(attributes);delete after.package_contains_sku;
  return {after,patch:{op:'delete',path:'/attributes/package_contains_sku',value:[structuredClone(edges[0])]} as JsonObject};
 }
-interface Hooks {active:(id:string)=>AmazonTarget;schema:(record:DraftRecord)=>Promise<AmazonSchema>;api:AmazonTransport['api'];now?:()=>number}
+interface Hooks {beforeEffect?:(record:DraftRecord,phase:'preflight'|'intent'|'before-send')=>void;active:(id:string)=>AmazonTarget;schema:(record:DraftRecord)=>Promise<AmazonSchema>;api:AmazonTransport['api'];now?:()=>number}
 export class ListingCorrections {
  private busy=new Set<string>();private p:AmazonPersistence;private hooks:Hooks;
  constructor(p:AmazonPersistence,hooks:Hooks){this.p=p;this.hooks=hooks;}
+ private checkEffect(record:DraftRecord,phase:'preflight'|'intent'|'before-send'):void{const callback=this.hooks.beforeEffect;if(callback?.constructor.name==='AsyncFunction')fail('修正权限检查必须同步完成');const result=callback?.(record,phase) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')fail('修正权限检查必须同步完成');}
  private at(){return new Date((this.hooks.now??Date.now)()).toISOString();}
  get(id:string):ListingCorrection {const row=this.p.db.prepare('SELECT record_json FROM listing_corrections WHERE id=?').get(id);if(!row)fail('原 SKU 修正记录不存在');return validateCorrectionRecord(JSON.parse(String(row.record_json)));}
  list(draftId:string):ListingCorrection[]{return this.p.db.prepare('SELECT record_json FROM listing_corrections WHERE draft_id=? ORDER BY rowid DESC').all(draftId).map(r=>validateCorrectionRecord(JSON.parse(String(r.record_json))));}
@@ -57,7 +58,7 @@ export class ListingCorrections {
  private query(c:ListingCorrection){return {marketplaceIds:c.marketplaceId,issueLocale:c.locale};}
  private async remote(c:ListingCorrection,readOnly=false){
   const target=readOnly?this.hooks.active(c.targetId):this.active(c),generation=this.p.generation(c.targetId);
-  const guard=()=>{const current=readOnly?this.hooks.active(c.targetId):this.active(c);if(targetStamp(current)!==c.targetStamp||this.p.generation(c.targetId)!==generation)fail('核对期间店铺身份或授权已变化');};guard();
+  const guard=()=>{this.checkEffect(this.p.record(c.draftId),'before-send');const current=readOnly?this.hooks.active(c.targetId):this.active(c);if(targetStamp(current)!==c.targetStamp||this.p.generation(c.targetId)!==generation)fail('核对期间店铺身份或授权已变化');};guard();
   const result=await this.hooks.api(target,'getListingsItem',this.path(c),{...this.query(c),includedData:'attributes,summaries,issues,productTypes'},undefined,guard);guard();const data=result.data;
   if(data.sku!==c.sku||!isObject(data.attributes)||!Array.isArray(data.summaries))fail('Amazon 回读缺少匹配的原 SKU、summaries 或属性');
   const matching=(values:JsonValue)=>Array.isArray(values)&&values.every(s=>isObject(s)&&s.marketplaceId===c.marketplaceId&&s.productType===c.productType);
@@ -72,7 +73,7 @@ export class ListingCorrections {
  }
  async prepare(raw:unknown):Promise<ListingCorrection>{
   if(!isObject(raw)||Object.keys(raw).some(k=>!['id','revision'].includes(k))||typeof raw.id!=='string')fail('修正准备参数无效');
-  const r=this.p.record(raw.id),d=r.draft;if(d.revision!==raw.revision)fail('原草稿版本已变化');this.eligible(r);
+  const r=this.p.record(raw.id),d=r.draft;this.checkEffect(r,'preflight');if(d.revision!==raw.revision)fail('原草稿版本已变化');this.eligible(r);
   const target=this.hooks.active(d.targetId),hash=listingHash(d,d.sku);if(this.busy.has(hash))fail('修正正在处理中');this.busy.add(hash);
   try{
    const prior=this.p.db.prepare('SELECT record_json FROM listing_corrections WHERE listing_hash=? ORDER BY rowid DESC').all(hash).map(row=>JSON.parse(String(row.record_json)) as ListingCorrection);
@@ -139,18 +140,19 @@ export class ListingCorrections {
  private async fresh(c:ListingCorrection){this.original(c);const remote=await this.remote(c),schema=await this.hooks.schema(this.p.record(c.draftId));this.active(c);this.original(c);
   if(correctionHash(remote.attributes)!==c.baselineHash||correctionHash({schema:schema.schema,meta:schema.metaSchema,version:schema.version,checksum:schema.checksum})!==c.schemaHash||correctionHash(c.request)!==c.patchHash)fail('远端属性、Schema 或修正指纹已变化');
  }
- async preview(raw:unknown){const c=this.reference(raw);if(c.state!=='PREPARED')fail('仅准备完成的修正案可以预览');if(this.busy.has(c.listingHash))fail('修正正在处理中');this.busy.add(c.listingHash);
+ async preview(raw:unknown){const c=this.reference(raw);this.checkEffect(this.p.record(c.draftId),'preflight');if(c.state!=='PREPARED')fail('仅准备完成的修正案可以预览');if(this.busy.has(c.listingHash))fail('修正正在处理中');this.busy.add(c.listingHash);
   try{await this.fresh(c);const result=await this.hooks.api(this.active(c),'previewPatchListingsItem',this.path(c),{...this.query(c),mode:'VALIDATION_PREVIEW',includedData:'issues'},c.request,()=>{this.active(c);this.original(c);});this.reference(raw);c.preview=result.data;await this.fresh(c);this.reference(raw);
    if(result.data.sku!==c.sku||result.data.status!=='VALID'||!readableIssues(result.data.issues)||Array.isArray(result.data.issues)&&result.data.issues.some(i=>isObject(i)&&i.severity==='ERROR'))return this.state(c,'REJECTED','修正验证预览未通过；正式 PATCH 未发送');
    c.readyAt=this.at();return this.state(c,'READY','修正预览通过；请确认差异后正式发送一次');
   }catch(error){this.state(c,'STALE',error instanceof Error?error.message:'修正预览失败');throw error;}finally{this.busy.delete(c.listingHash);}
  }
- async send(raw:unknown,confirmed:boolean){if(!confirmed)fail('正式修正需要原生窗口确认');const c=this.reference(raw);if(c.state!=='READY'||!c.readyAt||Date.parse(this.at())-Date.parse(c.readyAt)>15*60_000)fail('修正预览已过期或状态不可发送');if(this.busy.has(c.listingHash))fail('同 SKU 正在处理中');this.busy.add(c.listingHash);let begun=false;
+ async send(raw:unknown,confirmed:boolean){if(!confirmed)fail('正式修正需要原生窗口确认');const c=this.reference(raw);this.checkEffect(this.p.record(c.draftId),'preflight');if(c.state!=='READY'||!c.readyAt||Date.parse(this.at())-Date.parse(c.readyAt)>15*60_000)fail('修正预览已过期或状态不可发送');if(this.busy.has(c.listingHash))fail('同 SKU 正在处理中');this.busy.add(c.listingHash);let begun=false;
   try{await this.fresh(c);this.p.transaction(()=>{this.reference(raw);this.original(c);this.active(c);this.assertSendBudget(c);if(this.p.db.prepare('SELECT 1 FROM listing_correction_attempts WHERE correction_id=?').get(c.id))fail('此案已有正式发送意图，禁止重放');
+    this.checkEffect(this.p.record(c.draftId),'intent');
     const lock=this.p.lock(c.listingHash);if(lock)this.p.releaseAccepted(c.listingHash,c.draftId);if(this.p.locked(c.listingHash))fail('同 SKU 已有写入锁');
     this.p.db.prepare("INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at,owner_kind,owner_id) VALUES(?,?,'SENDING',?,'correction',?)").run(c.listingHash,c.draftId,this.at(),c.id);
     const attempt:ListingCorrectionAttempt={id:randomUUID(),correctionId:c.id,listingHash:c.listingHash,intentAt:this.at(),request:c.request,patchHash:c.patchHash,identity:{draftId:c.draftId,targetId:c.targetId,sellerId:c.sellerId,marketplaceId:c.marketplaceId,sku:c.sku,productType:c.productType,generation:c.generation},state:'SENDING',response:null,readback:null};this.p.db.prepare('INSERT INTO listing_correction_attempts(id,correction_id,record_json) VALUES(?,?,?)').run(attempt.id,c.id,JSON.stringify(attempt));this.state(c,'SENDING','已冻结正式修正请求及发送意图；禁止自动重发');});begun=true;
-   const result=await this.hooks.api(this.active(c),'patchListingsItem',this.path(c),{...this.query(c),includedData:'issues'},c.request,()=>{this.active(c);const current=this.get(c.id),lock=this.p.lock(c.listingHash);if(current.state!=='SENDING'||lock?.ownerKind!=='correction'||lock.ownerId!==c.id)fail('修正写锁已变化');this.original(c);});c.response=result.data;
+   const result=await this.hooks.api(this.active(c),'patchListingsItem',this.path(c),{...this.query(c),includedData:'issues'},c.request,()=>{this.checkEffect(this.p.record(c.draftId),'before-send');this.active(c);const current=this.get(c.id),lock=this.p.lock(c.listingHash);if(current.state!=='SENDING'||lock?.ownerKind!=='correction'||lock.ownerId!==c.id)fail('修正写锁已变化');this.original(c);});c.response=result.data;
    const validIssues=result.data.issues===undefined||readableIssues(result.data.issues),errors=Array.isArray(result.data.issues)&&result.data.issues.some(i=>isObject(i)&&i.severity==='ERROR');
    if(result.data.sku===c.sku&&result.data.status==='ACCEPTED'&&typeof result.data.submissionId==='string'&&!!result.data.submissionId&&validIssues&&!errors)return this.finish(c,'ACCEPTED','Amazon 接受了修正请求；尚未核实目标关系是否消除');
    if(result.data.sku===c.sku&&result.data.status==='INVALID'&&validIssues&&errors)return this.finish(c,'REJECTED','Amazon 拒绝修正；此案不可重发');

@@ -5,7 +5,13 @@ import { responseCollection, transportEvidence } from './response-lifecycle.ts';
 import type { TransportRunEvidence } from '../../shared/run-evidence-contracts.ts';
 
 export interface ProviderMetadata { requestId: string | null; usage: AiUsage; usageKnown: boolean }
+export interface PaidAdapterEffect {service:import('./paid-effect-budget.ts').PaidEffectDescription['service'];url:string;method:'POST'|'PUT';body:string|Buffer}
+/** Last-effect price/scope check, independent of a domain result/recovery flag. */
+export function checkPaidAdapterEffect(context:AdapterContext,effect:PaidAdapterEffect):void{
+ const callback=context.beforePaidEffect;if(!callback)return;if(callback.constructor.name==='AsyncFunction')throw new AiError('INVALID_CONFIG');const result=callback(Object.freeze({...effect,body:Buffer.isBuffer(effect.body)?Buffer.from(effect.body):effect.body})) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new AiError('INVALID_CONFIG');
+}
 export interface AdapterContext {
+  beforePaidEffect?:(effect:Readonly<PaidAdapterEffect>)=>void;
   /** Main-only collector policy. Date.now clock, never the fixture/provider timestamp. */
   responseDeadlineAt?: number;
   responseTimeoutMs?: number;
@@ -82,6 +88,7 @@ export async function postJson(url: string, headers: Record<string, string>, bod
   const captureRaw=context.captureRawResponse?async(status:number,text:string)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:Buffer.byteLength(text)});await context.captureRawResponse!(status,text);}:undefined;
   const captureBytes=context.captureRawBytes?async(status:number,bytes:Buffer)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:bytes.length});await context.captureRawBytes!(status,bytes);}:undefined;
   try {
+  if(context.beforePaidEffect){const action=new Headers(headers).get('x-acs-action'),host=new URL(url).hostname,service:PaidAdapterEffect['service']=action==='DescribeUploadToken'?'aliyun-upload-token':action==='ImageModeration'?'aliyun-image-risk':action==='RecognizeAllText'?'aliyun-ocr':action==='ImageMatting'?'aliyun-segmentation':host==='api.deepseek.com'?'deepseek-chat':'provider-result-download';checkPaidAdapterEffect(context,{service,url,method:'POST',body});}
   context.beforeSend?.(body);
   dispatched=true;
   transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});

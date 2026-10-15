@@ -14,8 +14,9 @@ function check(db: DatabaseSync): void {
  if(rows.length!==1||rows[0].integrity_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw Error('Invalid database');
 }
 
-/** Called under the application's single-instance lock, before opening services and after closing them. */
-export async function snapshotWorkspaceDatabase(directory: string): Promise<string|null> {
+/** Called under the application's single-instance lock, before opening services and after closing them.
+ * Controlled acceptance still creates verified safety snapshots, but must not prune existing files. */
+export async function snapshotWorkspaceDatabase(directory: string,{prune=true}:{prune?:boolean}={}): Promise<string|null> {
  const root=resolve(directory), sourcePath=join(root,'red.sqlite');
  if(!existsSync(sourcePath))return null;
  let source:DatabaseSync|undefined, snapshot:DatabaseSync|undefined, temporary:string|undefined;
@@ -31,8 +32,8 @@ export async function snapshotWorkspaceDatabase(directory: string): Promise<stri
   snapshot=new DatabaseSync(temporary);snapshot.exec('PRAGMA journal_mode=DELETE');check(snapshot);snapshot.close();snapshot=undefined;
   renameSync(temporary,finalPath);temporary=undefined;
   // Only prune snapshots created by this module, after a new verified snapshot exists.
-  const saved=readdirSync(folder).filter(n=>/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9-]{36}\.sqlite$/.test(n)).sort().reverse();
-  for(const name of saved.slice(10)){const file=join(folder,name);if(lstatSync(file).isFile()&&!lstatSync(file).isSymbolicLink())unlinkSync(file);}
+  if(prune){const saved=readdirSync(folder).filter(n=>/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9-]{36}\.sqlite$/.test(n)).sort().reverse();
+  for(const name of saved.slice(10)){const file=join(folder,name);if(lstatSync(file).isFile()&&!lstatSync(file).isSymbolicLink())unlinkSync(file);}}
   return finalPath;
  } catch {
   throw new UserFacingError('数据库完整性检查未通过或安全快照无法保存，已停止启动以保护现有商品。请保留工作区和 database-snapshots 目录，不要重置数据。');

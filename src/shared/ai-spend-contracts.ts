@@ -9,3 +9,6 @@ export interface AiSpendReservation {
  actualUsdMicros:number|null;receiptIds:string[];receiptProofs:AiSpendReceiptProof[];
 }
 export interface AiSpendSummary {reportedUsdMicros:number;heldUsdMicros:number;unboundedCalls:number;anomaly:boolean;limitUsdMicros:number|null}
+export interface AiSpendStatus extends AiSpendSummary {policyUpdatedAt:string|null;remainingUsdMicros:number|null;pendingCalls:number;unknownCalls:number}
+export interface ImageGenerationSpendStatus {currency:'USD';unit:'microUSD';daily:AiSpendStatus;controlledLifetime:AiSpendStatus;controlledRunStatus:'not-registered'|'PAUSED'|'ACTIVE';quoteStatus:'not-checked'}
+export interface SetImageDailySpendLimit {limitUsd:string|null;expectedUpdatedAt:string|null}

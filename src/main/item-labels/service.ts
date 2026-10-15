@@ -21,9 +21,12 @@ class LabelPausedBeforeSend extends UserFacingError {}
 export class ItemLabelService {
   private db:DatabaseSync; private directory:string;private amazon:LabelsAmazon;private procurement:LabelsProcurement;private now:()=>number;private sleep:(ms:number)=>Promise<void>;
   private running:Promise<void>|null=null;private timer:ReturnType<typeof setTimeout>|null=null;private stopped=false;private started=false;
-  constructor(directory:string,amazon:LabelsAmazon,procurement:LabelsProcurement,deps:{now?:()=>number;sleep?:(ms:number)=>Promise<void>}={}){
+  private canManageDraft:(draftId:string)=>boolean;
+  constructor(directory:string,amazon:LabelsAmazon,procurement:LabelsProcurement,deps:{now?:()=>number;sleep?:(ms:number)=>Promise<void>;canManageDraft?:(draftId:string)=>boolean}={}){
     this.directory=directory;this.db=openDatabase(directory);this.amazon=amazon;this.procurement=procurement;this.now=deps.now??Date.now;this.sleep=deps.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
+    this.canManageDraft=deps.canManageDraft??(()=>true);
     for(const row of this.list()){
+      if(!this.canManageDraft(row.draftId))continue;
       if(row.current&&!row.requestedAt&&['QUEUED','WAITING_SKU','WAITING_QUANTITY'].includes(row.status)){row.paused=true;this.put(row);}
       else if(row.requestPending||row.status==='REQUESTING'||row.current&&row.status==='DOWNLOADING'){
         if(!row.requestedAt)appendAuditEvent(this.db,randomUUID(),null,'item-labels.legacy-interrupted','保留旧标签中断状态与原请求证据',JSON.stringify(row),this.at());
@@ -36,6 +39,7 @@ export class ItemLabelService {
     }
   }
   private at(){return new Date(this.now()).toISOString();}
+  private assertManaged(draftId:string):void{if(!this.canManageDraft(draftId))throw new UserFacingError('受控验收窗口不能修改或调度其他标签草稿');}
   /** Signed download capabilities stay in main-only storage, never ItemLabelRecord/IPC. */
   private saveDownloads(row:ItemLabelRecord,downloads:{uri:string;expiration:number}[]):void{
     writeOwnedSetting(this.db,'labels','item_label_download_v1:'+row.id,JSON.stringify({version:1,labelId:row.id,fingerprint:row.fingerprint,requestId:row.requestId,receivedAt:this.at(),downloads}));
@@ -49,13 +53,14 @@ export class ItemLabelService {
       return itemLabelDownloads({documentDownloads:value.downloads.map(raw=>{const d=record(raw,'标签恢复文件',['uri','expiration']);if(typeof d.expiration!=='number'||!Number.isFinite(d.expiration)||d.expiration>Date.parse(value.receivedAt as string)+86400000)throw Error();return {downloadType:'URL',uri:d.uri,expiration:new Date(d.expiration).toISOString()};})},this.now());
     }catch{throw new UserFacingError('原标签下载资料已过期、缺失或不匹配；保留原请求，不能重新生成');}
   }
-  private put(row:ItemLabelRecord){row.updatedAt=this.at();const valid=validateItemLabelRecord(row);this.db.prepare('INSERT INTO item_labels(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(row.id,JSON.stringify(valid));if(row.current)this.procurement.setLabelStatus(row.batchId,row.lineId,row.status);}
+  private put(row:ItemLabelRecord){this.assertManaged(row.draftId);row.updatedAt=this.at();const valid=validateItemLabelRecord(row);this.db.prepare('INSERT INTO item_labels(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(row.id,JSON.stringify(valid));if(row.current)this.procurement.setLabelStatus(row.batchId,row.lineId,row.status);}
   list(input:{batchId?:string;jobId?:string}={}):ItemLabelRecord[]{const batchId=input.batchId===undefined?null:identifier(input.batchId),jobId=input.jobId===undefined?null:identifier(input.jobId);return this.db.prepare('SELECT id,record_json FROM item_labels ORDER BY rowid').all().map(row=>{const parsed=validateItemLabelRecord(JSON.parse(String(row.record_json)));if(parsed.id!==row.id)throw new UserFacingError('标签记录身份不一致');return parsed;}).filter(row=>(!batchId||row.batchId===batchId)&&(!jobId||row.jobId===jobId));}
   get(rawId:string):ItemLabelRecord{const id=identifier(rawId),row=this.db.prepare('SELECT record_json FROM item_labels WHERE id=?').get(id);if(!row)throw new UserFacingError('商品标签记录不存在');const parsed=validateItemLabelRecord(JSON.parse(String(row.record_json)));if(parsed.id!==id)throw new UserFacingError('标签记录身份不一致');return parsed;}
   private base(batch:ProcurementBatch,line:ProcurementLine,jobId:string|null,format:ItemLabelFormat){let generation=0;try{generation=this.amazon.executionTargetScope(line.targetId).generation;}catch{/* Missing target is persisted as a context failure. */}return {jobId,batchRevision:batch.revision,batchId:batch.id,lineId:line.id,draftId:line.draftId,productId:line.productId,variantId:line.variantId,targetId:line.targetId,sellerId:line.sellerId,marketplaceId:line.marketplaceId,sku:line.sku,mode:batch.mode,targetGeneration:generation,quantity:line.stockQuantity,format};}
   private targetMatches(row:Pick<ItemLabelRecord,'targetId'|'sellerId'|'marketplaceId'|'mode'|'targetGeneration'>):boolean{try{const scope=this.amazon.executionTargetScope(row.targetId);return scope.target.sellerId===row.sellerId&&scope.target.marketplaceId===row.marketplaceId&&scope.target.mode===row.mode&&scope.generation===row.targetGeneration;}catch{return false;}}
   syncBatch(batchId:string,options:{jobId?:string;format?:ItemLabelFormat}={}):ItemLabelRecord[]{
     const batch=this.procurement.get(batchId),prior=this.list({batchId:batch.id}),eligible=new Map(this.procurement.candidates().map(row=>[row.draftId,row]));const result:ItemLabelRecord[]=[];
+    for(const line of batch.lines)this.assertManaged(line.draftId);
     for(const line of batch.lines){
       const unknown=prior.findLast(row=>row.lineId===line.id&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(row.errorCode??''));
       // A procurement revision is not evidence that the prior request was not sent.
@@ -98,6 +103,7 @@ export class ItemLabelService {
   private matches(row:ItemLabelRecord):boolean{try{const current=this.get(row.id),batch=this.procurement.get(row.batchId),line=batch.lines.find(line=>line.id===row.lineId);return !this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(value.errorCode??''))&&this.targetMatches(row)&&current.current&&current.status!=='CANCELLED'&&!!line&&itemLabelFingerprint(this.base(batch,line,row.jobId,row.format))===row.fingerprint;}catch{return false;}}
   private stale(row:ItemLabelRecord){const latest=this.get(row.id);if(!latest.current)return;if(latest.status==='REQUESTING')latest.requestPending=true;latest.current=false;latest.status='STALE';latest.nextDueAt=null;latest.message='标签绑定已变化，请同步当前备货数量';this.put(latest);}
   private async run(row:ItemLabelRecord):Promise<void>{
+    this.assertManaged(row.draftId);
     if(row.status!=='QUEUED'||row.paused||!row.requestedAt)return; if(!this.matches(row)){this.stale(row);return;}
     const candidate=this.procurement.candidates().find(v=>v.draftId===row.draftId);if(!candidate?.eligible){row.status='WAITING_SKU';row.nextDueAt=null;row.message=candidate?.reason??'等待 SKU 建档确认';this.put(row);return;}
     const scope=this.amazon.executionTargetScope(row.targetId);if(!scope.target.configured||scope.target.paused){row.status='FAILED';row.errorCode='TARGET_UNAVAILABLE';row.message='标签连接当前不可用，请检查店铺授权';row.nextDueAt=null;this.put(row);return;}
@@ -106,7 +112,7 @@ export class ItemLabelService {
       let documents:{uri:string;expiration:number}[];
       if(row.responseReceived){documents=this.downloads(row);this.amazon.restoreItemLabelDownloads(row,documents);}
       else{
-        const response=await this.amazon.createMarketplaceItemLabels(row.targetId,itemLabelRequest(row.marketplaceId,row.sku,row.quantity!,row.format),()=>{if(this.stopped||this.get(row.id).paused||!this.get(row.id).requestedAt)throw new LabelPausedBeforeSend('标签任务已暂停，尚未发出请求');if(!this.matches(row))throw new UserFacingError('标签绑定发生变化');});
+        const response=await this.amazon.createMarketplaceItemLabels(row.targetId,itemLabelRequest(row.marketplaceId,row.sku,row.quantity!,row.format),()=>{this.assertManaged(row.draftId);if(this.stopped||this.get(row.id).paused||!this.get(row.id).requestedAt)throw new LabelPausedBeforeSend('标签任务已暂停，尚未发出请求');if(!this.matches(row))throw new UserFacingError('标签绑定发生变化');});
         const received=this.get(row.id);received.requestPending=false;received.responseReceived=true;received.requestId=response.requestId;if(received.current)received.status='DOWNLOADING';
         row.requestPending=false;row.responseReceived=true;row.requestId=response.requestId;
         // Keep a malformed known response blocked; valid recovery metadata commits with its identity.
@@ -150,8 +156,8 @@ export class ItemLabelService {
       row.message=error instanceof AmazonTransportError&&error.status===403?'商品标签接口权限不足，请核对 Amazon Fulfillment 角色':!row.responseReceived&&error instanceof AmazonTransportError&&error.unknownWrite?'标签请求结果未知，未获得可核验文件；请检查后重试':row.status==='QUEUED'?'标签接口暂时不可用，已安排有限重试':error instanceof UserFacingError?error.message.slice(0,1200):'标签获取或 PDF 校验失败，未获得完整可打印文件';row.files=[];this.put(row);
     }
   }
-  runDue():Promise<void>{if(this.stopped)return Promise.resolve();if(this.running)return this.running;this.running=(async()=>{for(const waiting of this.list().filter(row=>row.current&&row.requestedAt&&!row.paused&&row.status==='WAITING_SKU')){if(!this.matches(waiting)){this.stale(waiting);continue;}if(this.procurement.candidates().find(value=>value.draftId===waiting.draftId)?.eligible&&waiting.quantity&&waiting.quantity<=10000){waiting.status='QUEUED';waiting.nextDueAt=this.at();this.put(waiting);}}for(const row of this.list().filter(row=>row.current&&!!row.requestedAt&&!row.paused&&row.status==='QUEUED'&&Date.parse(row.nextDueAt!)<=this.now())){if(this.stopped)break;await this.run(this.get(row.id));}})().finally(()=>{this.running=null;this.arm();});return this.running;}
-  private arm(){if(!this.started||this.stopped||this.running)return;if(this.timer)clearTimeout(this.timer);const due=this.list().filter(row=>row.current&&!!row.requestedAt&&!row.paused&&['QUEUED','WAITING_SKU'].includes(row.status)).map(row=>row.status==='WAITING_SKU'?this.now()+5000:Date.parse(row.nextDueAt!));if(!due.length){this.timer=null;return;}this.timer=setTimeout(()=>{this.timer=null;void this.runDue().catch(()=>{});},Math.max(10,Math.min(2147483647,Math.min(...due)-this.now())));this.timer.unref?.();}
+  runDue():Promise<void>{if(this.stopped)return Promise.resolve();if(this.running)return this.running;this.running=(async()=>{for(const waiting of this.list().filter(row=>this.canManageDraft(row.draftId)&&row.current&&row.requestedAt&&!row.paused&&row.status==='WAITING_SKU')){if(!this.matches(waiting)){this.stale(waiting);continue;}if(this.procurement.candidates().find(value=>value.draftId===waiting.draftId)?.eligible&&waiting.quantity&&waiting.quantity<=10000){waiting.status='QUEUED';waiting.nextDueAt=this.at();this.put(waiting);}}for(const row of this.list().filter(row=>this.canManageDraft(row.draftId)&&row.current&&!!row.requestedAt&&!row.paused&&row.status==='QUEUED'&&Date.parse(row.nextDueAt!)<=this.now())){if(this.stopped)break;await this.run(this.get(row.id));}})().finally(()=>{this.running=null;this.arm();});return this.running;}
+  private arm(){if(!this.started||this.stopped||this.running)return;if(this.timer)clearTimeout(this.timer);const due=this.list().filter(row=>this.canManageDraft(row.draftId)&&row.current&&!!row.requestedAt&&!row.paused&&['QUEUED','WAITING_SKU'].includes(row.status)).map(row=>row.status==='WAITING_SKU'?this.now()+5000:Date.parse(row.nextDueAt!));if(!due.length){this.timer=null;return;}this.timer=setTimeout(()=>{this.timer=null;void this.runDue().catch(()=>{});},Math.max(10,Math.min(2147483647,Math.min(...due)-this.now())));this.timer.unref?.();}
   resume():void{this.started=true;this.arm();}
   suspendScheduling():void{this.started=false;if(this.timer)clearTimeout(this.timer);this.timer=null;}
   holdForMaintenance(): () => void {
@@ -164,7 +170,7 @@ export class ItemLabelService {
   }
   hasActiveWork():boolean{return this.running!==null;}
   retry(id:string):ItemLabelRecord{
-    let row=this.get(id);
+    let row=this.get(id);this.assertManaged(row.draftId);
     if(this.list({batchId:row.batchId}).some(value=>value.lineId===row.lineId&&['REQUEST_UNKNOWN','RESPONSE_UNUSABLE'].includes(value.errorCode??'')))throw new UserFacingError('标签原请求结果未知或响应无法采用，请先核对原请求；普通重试不能重新发送');
     if(!row.current||row.status!=='FAILED')throw new UserFacingError('只能重试当前失败的标签版本');
     if(!this.matches(row))throw new UserFacingError('备货绑定已变化，请刷新');
@@ -183,9 +189,9 @@ export class ItemLabelService {
     } catch(error){this.db.exec('ROLLBACK');throw error;}
     this.arm();return row;
   }
-  pauseJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&!['READY','CANCELLED'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}
-  resumeJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&row.paused&&row.requestedAt){row.paused=false;this.put(row);}this.arm();}
-  cancelJob(jobId:string):void{for(const row of this.list({jobId}))if(row.current&&!['READY','REQUESTING','DOWNLOADING'].includes(row.status)){row.status='CANCELLED';row.paused=true;row.nextDueAt=null;row.message='已取消后续标签请求';this.put(row);}else if(row.current&&['REQUESTING','DOWNLOADING'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}
+  pauseJob(jobId:string):void{const rows=this.list({jobId});for(const row of rows)this.assertManaged(row.draftId);for(const row of rows)if(row.current&&!['READY','CANCELLED'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}
+  resumeJob(jobId:string):void{const rows=this.list({jobId});for(const row of rows)this.assertManaged(row.draftId);for(const row of rows)if(row.current&&row.paused&&row.requestedAt){row.paused=false;this.put(row);}this.arm();}
+  cancelJob(jobId:string):void{const rows=this.list({jobId});for(const row of rows)this.assertManaged(row.draftId);for(const row of rows)if(row.current&&!['READY','REQUESTING','DOWNLOADING'].includes(row.status)){row.status='CANCELLED';row.paused=true;row.nextDueAt=null;row.message='已取消后续标签请求';this.put(row);}else if(row.current&&['REQUESTING','DOWNLOADING'].includes(row.status)){row.paused=true;this.put(row);}this.arm();}
   private checkedSnapshot(row:ItemLabelRecord):ItemLabelRecord{
     const latest=this.get(row.id);
     if(latest.status!=='READY'||!this.matches(latest)||latest.fingerprint!==row.fingerprint||JSON.stringify(latest.files)!==JSON.stringify(row.files))throw new UserFacingError('标签绑定已变化或已过期，请刷新后重试');

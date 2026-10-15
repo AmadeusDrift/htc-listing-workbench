@@ -33,9 +33,10 @@ function verifyRoutes(routes) {
 }
 async function listen(server){await new Promise((done,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',done);});return server.address().port;}
 
-export async function createFakeProvider({directory,routes,ftp=false,passiveFault=null,observeConnections=false,maxRequestBytes=8*1024*1024}) {
+export async function createFakeProvider({directory,routes,responders={},ftp=false,passiveFault=null,observeConnections=false,maxRequestBytes=8*1024*1024}) {
   directory=resolve(directory);assertTrustedWithin(join(worktreeRoot,'.test-data'),directory);assert.ok(Number.isSafeInteger(maxRequestBytes)&&maxRequestBytes>0);
   await mkdir(directory,{recursive:true});assertTrustedWithin(worktreeRoot,directory);const ledger=ledgerStore(directory),known=verifyRoutes(routes),sockets=new Set(),held=new Map();let closed=false;
+  for(const [id,respond]of Object.entries(responders))assert.ok(known.some(row=>row.id===id)&&typeof respond==='function','S10_RESPONSE_HANDLER_INVALID');
   if(passiveFault)assert.ok(ftp&&['epsv-port','pasv-host'].includes(passiveFault.kind)&&Number.isSafeInteger(passiveFault.port)&&passiveFault.port>0&&passiveFault.port<65536,'S10_PASSIVE_FAULT_INVALID');
   const connections=server=>server.on('connection',socket=>{sockets.add(socket);socket.on('error',()=>{});socket.on('close',()=>sockets.delete(socket));});
   const server=httpServer(async(request,response)=>{
@@ -47,7 +48,7 @@ export async function createFakeProvider({directory,routes,ftp=false,passiveFaul
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
       const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
       const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true}:{})});
-      const output=route.response??{};let json=output.json??{};
+      const output=responders[route.id]?await responders[route.id]({body:input,headers:new Headers(request.headers),requestId:row.requestId}):route.response??{};let json=output.json??{};
       if(output.issueTokenFor){const target=known.find(row=>row.id===output.issueTokenFor);assert.equal(target?.protocol?.kind,'oss4');assert.equal(route.protocol?.action,'DescribeUploadToken');const p=target.protocol;
         json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};
       }

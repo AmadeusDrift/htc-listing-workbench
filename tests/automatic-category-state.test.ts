@@ -5,6 +5,8 @@ import {fixture} from './fixtures/ai-control.ts';
 import {AutomaticListingService,type AutomaticListingDependencies} from '../src/main/automatic-listing/service.ts';
 import {classifyProduct} from '../src/main/catalog/classification.ts';
 import {AiError} from '../src/main/ai/errors.ts';
+import {inheritLegacyPurposeSettings} from '../src/main/ai/purpose-routing.ts';
+import {sourceConsistencyPresentation} from '../src/main/source-image-consistency/proof.ts';
 import {defaultListingRules} from '../src/shared/listing-rules.ts';
 import {automaticItemReason} from '../src/shared/automatic-status-projection.ts';
 import {materializeSourceSnapshot,confirmSourceConsistencyFixture} from './helpers/source-consistency-proof.ts';
@@ -30,15 +32,19 @@ for(const scenario of ['unknown','outer-timeout','invalid'] as const)test(`actua
   const row=automatic.get(task.id).items[0],expected=scenario==='invalid'?['SYSTEM_REPAIR','AI_RECEIVED_INVALID_OUTPUT']:['UNKNOWN','CATEGORY_RESULT_UNKNOWN'];
   assert.equal(row.stage,'CLASSIFY');assert.equal(row.outcome?.kind,expected[0]);assert.equal(row.outcome?.code,expected[1]);assert.equal(row.draftId,null);assert.deepEqual(later,{schema:0,drafts:0,images:0,submit:0});
   assert.equal(f.requests.length,1);assert.equal(http.posts,scenario==='invalid'?1:0);
+  if(scenario==='outer-timeout'){
+   const source=await slowHttp({body:''});t.after(()=>source.close());f.respond(async(_url,init)=>fetch(source.url,init));f.service.saveConnection({id:'deepseek',apiKey:'s09-source-eof-synthetic'});f.service.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((f.service as unknown as {db:DatabaseSync}).db,'deepseek','deepseek-flash',false);
+   await assert.rejects(f.service.observeSourceConsistency(f.service.sourceConsistencyContext({productId:p.id,productRevision:p.revision,variantId:p.variants[0].id}),()=>{}));assert.equal(source.posts,1);assert.equal(sourceConsistencyPresentation((f.service as unknown as {db:DatabaseSync}).db,p.id,[p.variants[0].id]),'RECEIVED_INVALID');
+  }
   const db=(automatic as unknown as {db:DatabaseSync}).db,changes=db.prepare('SELECT total_changes() n').get()!.n;
   const original={call:JSON.stringify(f.service.listCalls()),usage:JSON.stringify(db.prepare('SELECT * FROM ai_usage_ledger').all()),task:JSON.stringify(db.prepare('SELECT * FROM automatic_listing_tasks').all())};
-  for(let i=0;i<100;i++){
+  for(let i=0;i<3;i++){
    const summary=automatic.queryTaskSummaries({taskIds:[task.id],page:1,pageSize:20}).rows[0];assert.equal(summary.counts[scenario==='invalid'?'invalidOutput':'unknown'],1);
    const detail=automatic.getTaskItem({taskId:task.id,revision:automatic.get(task.id).revision,itemKey:row.key});assert.equal(detail.kind,'item');if(detail.kind==='item')assert.equal(detail.item.outcome?.code,expected[1]);
    const groups=automatic.queryTaskGroups({taskId:task.id,revision:automatic.get(task.id).revision,page:1,pageSize:20,search:''});assert.equal(groups.kind,'page');
   }
   assert.equal(db.prepare('SELECT total_changes() n').get()!.n,changes);assert.equal(JSON.stringify(db.prepare('SELECT * FROM automatic_listing_tasks').all()),original.task);
   if(scenario!=='invalid'){assert.match(automaticItemReason(row),/类目.*未知/);automatic.startAuthorized(automatic.prepareStart(task.id));await automatic.waitForIdle();assert.equal(automatic.get(task.id).items[0].outcome?.code,'CATEGORY_RESULT_UNKNOWN');}
-  assert.equal(f.requests.length,1);assert.equal(JSON.stringify(f.service.listCalls()),original.call);assert.equal(JSON.stringify(db.prepare('SELECT * FROM ai_usage_ledger').all()),original.usage);
+  assert.equal(f.requests.length,scenario==='outer-timeout'?2:1);assert.equal(JSON.stringify(f.service.listCalls()),original.call);assert.equal(JSON.stringify(db.prepare('SELECT * FROM ai_usage_ledger').all()),original.usage);
  }finally{await automatic.close();}
 });

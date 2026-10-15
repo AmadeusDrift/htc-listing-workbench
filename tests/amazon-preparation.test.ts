@@ -288,6 +288,15 @@ test('missing products, wrong variants and stale revisions reject individually w
   assert.deepEqual(f.service.listDrafts(f.product.id), []); assert.equal(f.service.listDrafts(other.id).length, 1);
 });
 
+test('a controlled preparation rejection in a later item stops the whole batch before schema or draft writes',async t=>{
+  const f=fixture(t,2),denied=new Error('synthetic controlled scope denied'),seen:string[]=[];
+  const guarded=new implementation.AmazonService(f.directory,id=>f.store.getProduct(id),safeStorage,{beforeEffect:effect=>{
+    if(effect.operation==='prepareDrafts'&&effect.phase==='preflight'){seen.push(effect.sku!);if(effect.sku===f.product.variants[1].sku)throw denied;}
+  },fetch:async()=>{throw Error('No real network allowed');}});
+  let schemas=0;guarded.getSchema=async()=>{schemas++;throw Error('Guard must run before schema');};
+  try{await assert.rejects(prepare(guarded,batch(f)),error=>error===denied);assert.deepEqual(seen,f.product.variants.map(v=>v.sku));assert.equal(schemas,0);assert.equal(guarded.listDrafts(f.product.id).length,0);}finally{guarded.close();}
+});
+
 test('source changes during schema await reject that product while another unchanged product continues', async t => {
   const f = fixture(t, 1); const other = f.store.createProduct(); const input = batch(f);
   input.items.push({ productId: other.id, productRevision: other.revision, variantId: other.variants[0].id, attributes: {} });

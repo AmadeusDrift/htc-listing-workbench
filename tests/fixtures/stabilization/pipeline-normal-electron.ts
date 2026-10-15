@@ -15,14 +15,14 @@ app.setPath('userData',root);app.setName('S10 real normal synthetic worker');app
 void app.whenReady().then(async()=>{
   const fetcher=createSystemProxyFetch((url,init)=>net.fetch(url,init)),s=createNormalServices(root,safeStorage,fetcher,()=>new Date(config.clock));
   const report={normalOnly:true,businessStarted:false,identity:{pid:process.pid,executable:process.execPath,dataRoot:root,userData:app.getPath('userData'),electron:process.versions.electron},blocked:guard.blocked};
-  let configured=false,productId:string|undefined;
+  let configured=false,productId:string|undefined,targetId:string|undefined;
   async function configure(){if(configured)return;const {keys}=config;
     s.ai.saveConnection({id:'openrouter',apiKey:keys.openrouter});s.ai.setEnabled({id:'openrouter',enabled:true});s.ai.setEnabled({id:'openrouter-review',enabled:true});
     s.ai.saveConnection({id:'deepseek',apiKey:keys.deepseek});s.ai.setEnabled({id:'deepseek',enabled:true});s.ai.setEnabled({id:'deepseek-review',enabled:true});
     s.ai.saveConnection({id:'aliyun',accessKeyId:keys.accessKeyId,accessKeySecret:keys.accessKeySecret});for(const id of ['aliyun-ocr','aliyun-image-risk'])s.ai.setEnabled({id,enabled:true});
     s.generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',apiKey:keys.openrouter,enabled:true,size:'1024x1024',quality:'auto'});
     s.images.saveRiskSettings({enabled:true});s.images.saveCopyReviewSettings({enabled:true});s.images.saveAppearanceReviewSettings({enabled:true});
-    await s.amazon.importCredentials(config.amazon);s.source.importConfig({appKey:keys.appKey,appSecret:keys.appSecret});
+    targetId=(await s.amazon.importCredentials(config.amazon)).id;s.source.importConfig({appKey:keys.appKey,appSecret:keys.appSecret});
     s.hosting.importProfile({id:'alpha',host:config.ftp.host,port:config.ftp.port,secure:false,username:config.ftp.user,password:config.ftp.password,remoteRoot:'/s10',publicBaseUrl:'https://htc.185858.xyz/AAA/'});s.hosting.setEnabled({id:'alpha',enabled:true});
     const rules=s.rules.get();rules.product.dimensionFallback=false;rules.product.weightFallback=false;rules.product.variantLimit=1;rules.product.stockSets=5;rules.pricing.bundleEnabled=false;s.rules.save(rules);
     const db=openDatabase(root);try{new AiSpendBudget(db).setImagePolicy(1_000_000);}finally{db.close();}configured=true;
@@ -32,8 +32,10 @@ void app.whenReady().then(async()=>{
       const imported=s.source.importProduct({previewId:preview.previewId,mapping:{priceField:'price',currency:'CNY',skus:preview.product.skus.map(sku=>({sourceKey:sku.key,dimensions:{color:'blue'}}))}});productId=imported.productId;
       const product=s.store.getProductSnapshot(productId);s.store.saveProduct({id:product.id,revision:product.revision,title:product.title,sourceUrl:product.sourceUrl,description:product.description,status:product.status,variants:product.variants.map(({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})=>({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})),facts:product.facts.map(fact=>({...fact,state:'human_confirmed'}))});
     }
-    const product=productId?s.store.getProductSnapshot(productId):null;
-    return {stage:name,normalExecutable:false,finalIntegrationPassed:false,productId,productCount:s.store.listProducts().length,sourceReceiptMode:productId?s.source.getReceipt(productId)?.mode:null,factCount:product?.facts.length??0,aiCalls:s.ai.listCalls().length,nativeProtocolSent:activeGuard.nativeProtocolSent,nodeProtocolSent:activeGuard.nodeProtocolSent};
+    if(name==='start')throw Error('S10_NORMAL_START_PENDING_EXACT_DYNAMIC_ROUTES');
+    const product=productId?s.store.getProductSnapshot(productId):null;let queue;
+    if(name==='queue'){assert.ok(productId&&targetId,'S10_SOURCE_REQUIRED');queue=await s.automatic.queue({productIds:[productId],targetId});}
+    return {stage:name,normalExecutable:false,finalIntegrationPassed:false,productId,productCount:s.store.listProducts().length,sourceReceiptMode:productId?s.source.getReceipt(productId)?.mode:null,factCount:product?.facts.length??0,aiCalls:s.ai.listCalls().length,nativeProtocolSent:activeGuard.nativeProtocolSent,nodeProtocolSent:activeGuard.nodeProtocolSent,...(queue?{queue}:{})};
   }
   let closing:Promise<{drained:true}>|undefined;const drain=()=>closing??=(async()=>{await s.close();appendFileSync(join(root,'s10-lifecycle.jsonl'),JSON.stringify({event:'drained'})+'\n');return {drained:true};})();
   Object.assign(globalThis,{__s10Dryrun:report,__s10NormalStage:stage,__s10Drain:drain});

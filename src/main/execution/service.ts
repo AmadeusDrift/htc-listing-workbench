@@ -70,6 +70,7 @@ export class ExecutionService {
     this.db.prepare('INSERT INTO execution_tasks(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
   }
   list(): ExecutionTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
+  hasPendingSubmission(draftId:string):boolean{this.ensureOpen();const id=identifier(draftId);return [...this.tasks.values()].some(task=>task.items.some(item=>item.draftId===id&&item.submitStarted));}
   get(id: string): ExecutionTask { return structuredClone(this.task(id)); }
   get busy(): boolean { return this.worker !== null; }
   private confirmed(assetId: string, variantId: string): boolean {

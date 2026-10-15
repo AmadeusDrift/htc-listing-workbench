@@ -2196,3 +2196,33 @@ test('item change stamps preserve unrelated SKU details and final verification i
   if(f.service.get(task.id).status==='COMPLETED')assert.ok(seen.includes('VERIFYING'));
   assert.equal(f.service.getOperationProgress(),null);unsub();
 });
+
+test('light continuation confirms without pre-reading every source and stamps only scheduled SKUs',async t=>{
+  const f=fixture(t),task=await f.create();let reads=0;
+  const original=f.dependencies.store.getProduct;f.dependencies.store.getProduct=id=>{reads++;return original(id);};
+  const started=await f.service.confirmStart(task.id,async()=>true);assert.ok(started);f.service.pause(task.id);
+  assert.equal(reads,0,'confirmation only checks fixed target/rules; each source waits for its own scheduler turn');
+  assert.ok(f.service.get(task.id).items.every(row=>row.lastContinuedAt===undefined));
+  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+
+test('from-start preserves original identities, counters and continuation round across pause',async t=>{
+  const f=fixture(t),task=await f.create();
+  await f.service.confirmStartOver(task.id,async()=>true);f.service.pause(task.id);await f.service.waitForIdle();
+  const first=f.service.getCurrentRound(task.id)!;assert.equal(first.mode,'from-start');
+  const before=f.service.get(task.id);
+  await f.service.confirmStart(task.id,async()=>true);f.service.pause(task.id);await f.service.waitForIdle();
+  assert.deepEqual(f.service.getCurrentRound(task.id),first,'ordinary continue cannot reset the round or fees');
+  const after=f.service.get(task.id);assert.equal(after.id,before.id);assert.deepEqual(after.items.map(row=>[row.key,row.sku,row.imageAttempts,row.repairAttempts,row.executionTaskIds]),before.items.map(row=>[row.key,row.sku,row.imageAttempts,row.repairAttempts,row.executionTaskIds]));
+  await f.service.confirmStartOver(task.id,async()=>true);f.service.pause(task.id);await f.service.waitForIdle();
+  assert.notEqual(f.service.getCurrentRound(task.id)!.roundId,first.roundId,'only explicit from-start creates another accounting boundary');
+  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
+});
+
+test('light targeted preview reports saved scope without source, field or image revalidation',async t=>{
+  const f=fixture(t),task=await f.create();
+  f.dependencies.store.getProduct=()=>{throw new Error('preview must not inspect source payloads');};
+  f.dependencies.images.getProgress=()=>{throw new Error('preview must not validate image histories');};
+  const preview=await f.service.previewResume({taskId:task.id,scope:{mode:'targeted',selections:[{key:task.items[0].key}]}});
+  assert.match(preview.lines[0],/到该SKU时核对/);assert.equal(preview.taskRevision,task.revision);
+});

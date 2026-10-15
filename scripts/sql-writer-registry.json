@@ -1010,14 +1010,14 @@
     },
     "main/automatic-listing/checkpoints.ts": {
       "role": "tasks",
-      "review": "Task owner checkpoint only. Fixed full JSON CAS or json_set paths derived solely from validated integer item indices; all dynamic values bound. No schema or history mutation. Complete legacy JSON remains readable.",
+      "review": "Task owner full JSON CAS or explicit item-index json_set CAS. Fixed resumeScope path is bound as JSON or removed; no other scope/identity field is patched. Indices derive only from validated task keys; strict task header/row/unique-SKU and original revision guards remain. No schema/history mutation.",
       "commands": [
         "prepare|UPDATE|automatic_listing_tasks",
         "write|INSERT|automatic_listing_tasks"
       ],
       "statements": {
         "prepare|4a1f576372fc5a3d855557b3d96cedf57a2ef2cb99921aeb21048b40a983dc0f": 1,
-        "prepare|80ee47694f80c29af0c26f5ce50600f1d46f2372770d2d0d6f7b9bee930456f2": 1,
+        "prepare|e764bb60cb6bbe4e91636645086cac17cef543b956d4e1af54b9bcd8b0635c9d": 1,
         "write|f6a5f4a9f5a9af7d33431d8d0e70d058fe6ba3f1ccb3713d82450a517f40bed5": 1
       }
     }

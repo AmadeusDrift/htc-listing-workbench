@@ -43,3 +43,16 @@ test('task-wide changes use full verification; stale CAS cannot overwrite pause'
   }finally{db.close();}
 });
 
+
+test('explicit checkpoint keys avoid inspecting unrelated payloads and patch resume scope',()=>{
+  const {task,db,checkpoints}=fixture();try{
+    checkpoints.remember(task);task.revision++;task.items[0].status='RUNNING';
+    const retained=task.items[1];task.items[1]=new Proxy(retained,{ownKeys(){throw new Error('unrelated SKU payload inspected');}});
+    task.resumeScope={mode:'targeted',selections:[{key:task.items[0].key}]};
+    const changed=checkpoints.prepare(task,false,[],undefined,[task.items[0].key]);assert.equal(changed.full,false);
+    checkpoints.write(db,task,changed,1);checkpoints.remember(task,changed);
+    const saved=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks').get()!.record_json));assert.deepEqual(saved.resumeScope,task.resumeScope);assert.deepEqual(saved.items[1],retained);
+    task.revision++;delete task.resumeScope;const metadata=checkpoints.prepare(task,false,[],undefined,[]);checkpoints.write(db,task,metadata,2);
+    assert.equal(Object.hasOwn(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks').get()!.record_json)),'resumeScope'),false);
+  }finally{db.close();}
+});

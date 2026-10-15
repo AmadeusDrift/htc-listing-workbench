@@ -33,9 +33,10 @@ import {prepareImageSpendReceiptProof} from '../ai/spend-receipts.ts';
 import {SpendBudgetError,priceEvidence,imageSpendBound,spendObject,spendDate,usdLimitMicros} from '../ai/spend-records.ts';
 import type {ImageGenerationSpendStatus} from '../../shared/ai-spend-contracts.ts';
 import type {ImagePriceEvidence} from '../../shared/ai-spend-contracts.ts';
-import {ControlledRunScopes,ControlledRunError,readControlledRunScope} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,ControlledRunError,readControlledRunScope,CONTROLLED_RUN_ID} from '../application/controlled-run-scope.ts';
+import {sourceStamp} from '../automatic-listing/records.ts';
 
-export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
+export interface ImageGenerationDependencies { requiredSpendScopeId?:string; beforeEffect?:(scope:Readonly<AiRequestScope>,db?:DatabaseSync)=>void; fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
   const o = keys(raw, ['productId', 'productRevision', 'prompt', 'referenceAssetIds', 'size', 'quality', 'background']);
   if (!Number.isSafeInteger(o.productRevision) || Number(o.productRevision) < 1 || typeof o.prompt !== 'string' || !o.prompt.trim() || o.prompt.length > 32000 || o.prompt.includes('\0') ||
@@ -60,7 +61,10 @@ export class ImageGenerationService {
   private fetcher: typeof fetch;
   private catalog?: { keyHash: string; value: ImageModelCatalog };
   private spend:AiSpendBudget;private controlledScopes:ControlledRunScopes;
+  private requiredSpendScopeId?:string;
+  private beforeEffect?:ImageGenerationDependencies['beforeEffect'];
   constructor(directory: string, store: WorkspaceStore, storage: SecretStorage, deps: ImageGenerationDependencies) {
+    if(deps.requiredSpendScopeId!==undefined&&deps.requiredSpendScopeId!==CONTROLLED_RUN_ID||deps.beforeEffect?.constructor.name==='AsyncFunction')throw new AiError('INVALID_CONFIG');this.requiredSpendScopeId=deps.requiredSpendScopeId;this.beforeEffect=deps.beforeEffect;
     this.directory = directory; this.store = store; this.vault = new ImageGenerationVault(directory, storage);
     this.fetcher = deps.fetch ?? globalThis.fetch; this.db=openDatabase(directory);
     this.spend=new AiSpendBudget(this.db);this.controlledScopes=new ControlledRunScopes(this.db);
@@ -69,6 +73,22 @@ export class ImageGenerationService {
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 1800000) throw new AiError('INVALID_CONFIG');
   }
   private ensureOpen(): void { if (this.closed) throw new AiError('SERVICE_CLOSED'); }
+  private controlledImageBlocked():never{throw Object.assign(new ControlledRunError(),{certainty:'NOT_SENT' as const,notSent:true as const});}
+  /** Local recovery needs original fixed ownership, but never a new dispatch grant, Key or quote. */
+  private assertRequiredImageOwner(effect:AiRequestScope,intent?:ImageRequestIntent):void{
+    if(this.requiredSpendScopeId===undefined)return;const scope=readControlledRunScope(this.db);
+    if(!scope?.review||scope.id!==this.requiredSpendScopeId||!effect.draftId||!effect.sku||effect.slot===undefined||!effect.variantIds||effect.operation!=='image-generation')this.controlledImageBlocked();
+    this.controlledScopes.taskSelection(scope.taskId);const item=scope.items.find(row=>row.itemKey===scope.activeItemKey)!;
+    if(effect.productId!==item.productId||effect.sku!==item.sku||effect.targetId!==scope.targetId||effect.marketplaceId!==scope.marketplaceId||listingFingerprint(effect.variantIds)!==listingFingerprint([...item.variantIds].sort()))this.controlledImageBlocked();
+    const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(scope.taskId),task=saved?JSON.parse(String(saved.record_json)):null,row=task?.items?.find((row:{key:string})=>row.key===item.itemKey),stamp=scope.review.sourceStamps.find(row=>row.itemKey===item.itemKey)?.stamp;
+    if(!row||row.draftId!==effect.draftId||row.sourceStamp!==stamp||sourceStamp(this.store.getProductSnapshot(item.productId))!==stamp)this.controlledImageBlocked();
+    const stored=this.db.prepare('SELECT record_json FROM listing_drafts WHERE id=?').get(effect.draftId),draft=stored?JSON.parse(String(stored.record_json)).draft:null,variants=draft?.salesPlan?.recipe?.components?.map((component:{variantId:string})=>component.variantId)??(draft?.variantId?[draft.variantId]:[]);
+    if(!draft||draft.id!==effect.draftId||draft.productId!==item.productId||draft.sku!==item.sku||draft.targetId!==scope.targetId||draft.sellerId!==scope.sellerId||draft.marketplaceId!==scope.marketplaceId||draft.mode!=='live'||draft.schema?.parentageLevel!=='NONE'||draft.salesPlan&&draft.salesPlan.parentage!=='NONE'||(draft.salesPlan?.recipe?.key??null)!==item.recipeKey||listingFingerprint([...new Set(variants)].sort())!==listingFingerprint([...item.variantIds].sort()))this.controlledImageBlocked();
+    if(intent){const money=this.spend.list().find(row=>row.id===intent.id);if(intent.version!==2||intent.productId!==item.productId||intent.productRevision!==draft.productRevision||listingFingerprint(intent.requestScope)!==listingFingerprint(effect)||!money||money.scopeId!==scope.id)this.controlledImageBlocked();}
+  }
+  private authorizeImageScope(effect:AiRequestScope):string|null{
+    try{this.assertRequiredImageOwner(effect);const scope=this.controlledScopes.authorizeImage(effect);if(this.requiredSpendScopeId!==undefined&&scope!==this.requiredSpendScopeId)this.controlledImageBlocked();const checked=this.beforeEffect?.(Object.freeze({...effect}),this.db.isTransaction?this.db:undefined) as unknown;if(checked&&typeof(checked as PromiseLike<unknown>).then==='function')throw new AiError('INVALID_CONFIG');return scope;}catch(error){if(this.requiredSpendScopeId!==undefined&&error instanceof ControlledRunError)Object.assign(error,{certainty:'NOT_SENT' as const,notSent:true as const});throw error;}
+  }
   attachOpenRouterConnection(port:{read():string|null;save(key:string):unknown;disconnect():unknown}):void{
     if(this.sharedConnection)throw new AiError('INVALID_CONFIG');this.sharedConnection=port;
   }
@@ -182,13 +202,14 @@ export class ImageGenerationService {
     try{requestId=uuid(attempt.requestId);editCandidateId=attempt.editCandidateId?uuid(attempt.editCandidateId):undefined;
       this.ensureOpen();if(callerSignal)throwIfAborted(callerSignal);
       const intent=readImageRequestIntent(this.db,requestId);
-      if(intent){const input=parseInput(raw,'openrouter',intent.model);this.assertProduct(input);this.assertImageRecoveryIdentity(input,this.generationScope(input,attempt.owner),intent,editCandidateId);const outcome=this.imageOutcome(intent);if(outcome.kind==='candidate')return outcome.candidate!;if(outcome.kind==='raw'){const known=await this.reconcileWorkflowGeneration(requestId);if(callerSignal)throwIfAborted(callerSignal);if(known)return known;}throw this.imageBlocked(intent);}
+      if(intent){const input=parseInput(raw,'openrouter',intent.model);this.assertProduct(input);this.assertRequiredImageOwner(intent.version===2?intent.requestScope:{version:1,operation:'image-generation',productId:intent.productId},intent);this.assertImageRecoveryIdentity(input,this.generationScope(input,attempt.owner),intent,editCandidateId);const outcome=this.imageOutcome(intent);if(outcome.kind==='candidate')return outcome.candidate!;if(outcome.kind==='raw'){const known=await this.reconcileWorkflowGeneration(requestId);if(callerSignal)throwIfAborted(callerSignal);if(known)return known;}throw this.imageBlocked(intent);}
       if(existsSync(join(this.directory,'image-generation','candidates',requestId)))throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId,message:'历史候选缺少原请求输入与业务身份；保留原图，请核对原请求，未重发'});
     }catch(error){throw imageRequestNotSent(error);}
     return this.generateInternal(raw,callerSignal,assertWorkflowFresh,{requestId,editCandidateId,...(attempt.owner?{owner:attempt.owner}:{})});
   }
   async reconcileWorkflowGeneration(rawId:string):Promise<GeneratedImageCandidate|null>{
     this.ensureOpen();const id=uuid(rawId);
+    if(this.requiredSpendScopeId!==undefined){const original=readImageRequestIntent(this.db,id);if(!original)this.controlledImageBlocked();this.assertRequiredImageOwner(original.version===2?original.requestScope:{version:1,operation:'image-generation',productId:original.productId},original);}
     if(!existsSync(join(this.directory,'image-generation','candidates',id))){
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
@@ -240,7 +261,7 @@ export class ImageGenerationService {
     if(intent.version!==2||listingFingerprint(scope)!==listingFingerprint(intent.requestScope)||(intent.editSource?.id??null)!==(editCandidateId??null)||this.imageFingerprint(input,intent,editCandidateId)!==intent.requestFingerprint){const error=new AiError('SOURCE_CHANGED');error.requestId=intent.id;error.message=intent.version===1?'历史生图请求缺少完整输入与业务身份；保留原图，请核对原请求，未重发':'当前输入、SKU或图片槽与原生图请求不一致；保留原回执与候选，未重发';throw error;}
   }
   private async recoverBeforeImageSend(input:GenerateImageCandidateInput,scope:AiRequestScope,requestId?:string,editCandidateId?:string):Promise<GeneratedImageCandidate|undefined> {
-    const intents=this.imageIntents(scope),outcomes=intents.map(intent=>({intent,outcome:this.imageOutcome(intent)})),pending=outcomes.filter(value=>['unknown','raw'].includes(value.outcome.kind));
+    const intents=this.imageIntents(scope),outcomes=intents.map(intent=>{this.assertRequiredImageOwner(scope,intent);return{intent,outcome:this.imageOutcome(intent)};}),pending=outcomes.filter(value=>['unknown','raw'].includes(value.outcome.kind));
     const connection=this.getConnection();
     if(pending.length){const item=pending[0];if(pending.length>1||item.outcome.kind==='unknown'||requestId&&requestId!==item.intent.id)throw this.imageBlocked(item.intent);this.assertImageRecoveryIdentity(input,scope,item.intent,editCandidateId);if(!requestId&&connection.configured&&connection.model!==item.intent.model)throw Object.assign(new AiError('SOURCE_CHANGED'),{requestId:item.intent.id,message:'当前选用模型与原生图请求不一致；请按原请求身份恢复，未重发'});const restored=await this.reconcileWorkflowGeneration(item.intent.id);if(!restored)throw this.imageBlocked(item.intent);return restored;}
     for(const item of outcomes)if(item.outcome.kind==='candidate'&&item.intent.version===2){if(listingFingerprint(scope)!==listingFingerprint(item.intent.requestScope)||(item.intent.editSource?.id??null)!==(editCandidateId??null))continue;const frozen={...item.intent,model:connection.configured?String(connection.model):item.intent.model};if(this.imageFingerprint(input,frozen,editCandidateId)===item.intent.requestFingerprint){
@@ -256,15 +277,17 @@ export class ImageGenerationService {
     return undefined;
   }
   private async generateInternal(raw:unknown,callerSignal?:AbortSignal,assertWorkflowFresh?:()=>void|Promise<void>,attempt?:{requestId:string;editCandidateId?:string;owner?:ImageGenerationOwner}):Promise<GeneratedImageCandidate>{
-    let enteredAdapter=false,stage='validation',recorded=false;let productId:string|undefined,activeRequestId:string|undefined;
+    let enteredAdapter=false,stage='validation',recorded=false,requiredEntryApproved=this.requiredSpendScopeId===undefined;let productId:string|undefined,activeRequestId:string|undefined;
     const record=(error:unknown)=>{recorded=true;try{recordErrorEvidence(detail=>this.store.recordWorkspaceEvent('operation.failed','生图步骤失败（脱敏诊断）',detail),error,{stage:`image-generation.${stage}`,productId,requestId:attempt?.requestId??(error instanceof AiError?error.requestId:undefined),requestOutcome:error instanceof AiError&&error.certainty==='SENT_UNKNOWN'?'RESULT_UNKNOWN':!enteredAdapter||error instanceof AiError&&'notSent' in error&&error.notSent===true?'NOT_SENT':error instanceof AiError&&['RECEIVED_VALID','RECEIVED_INVALID'].includes(error.certainty??'')?undefined:error instanceof AiError&&'definitive' in error&&error.definitive===true?'DEFINITIVE_FAILURE':'RESULT_UNKNOWN'});}catch{/* Diagnostic access must not replace the original failure. */}};
     try{
     this.ensureOpen(); if (callerSignal) throwIfAborted(callerSignal);
     if(this.running)throw new AiError('BUSY');
     const input=parseInput(raw,'openrouter',String(this.getConnection().model));productId=input.productId;this.assertProduct(input);const ownerScope=this.generationScope(input,attempt?.owner);
+    this.assertRequiredImageOwner(ownerScope);requiredEntryApproved=true;
     stage='recovery';const reused=await this.recoverBeforeImageSend(input,ownerScope,attempt?.requestId,attempt?.editCandidateId);if(callerSignal)throwIfAborted(callerSignal);if(reused)return reused;
+    if(this.requiredSpendScopeId!==undefined)this.authorizeImageScope(ownerScope);
     const config=this.config(true);this.assertProduct(input);
-    stage='controlled-scope';const controlledScopeId=this.controlledScopes.authorizeImage(ownerScope);
+    stage='controlled-scope';const controlledScopeId=this.authorizeImageScope(ownerScope);
     return await this.controlled(async (signal,responseDeadlineAt) => {
       let evidence:ImagePriceEvidence|undefined;
       if(this.spend.needsBound(controlledScopeId)){
@@ -293,6 +316,7 @@ export class ImageGenerationService {
       if (assertWorkflowFresh) await abortable(Promise.resolve().then(assertWorkflowFresh), signal);
       throwIfAborted(signal); this.assertProduct(input, assets); this.assertConfig(config);
       const request = { apiKey: config.apiKey, prompt: input.prompt, size: input.size, quality: input.quality, background: input.background, references };
+      if(this.requiredSpendScopeId!==undefined)this.authorizeImageScope(ownerScope);
       this.store.freezeSourceVersion(input.productId,input.productRevision);
       stage='request';enteredAdapter=true;
       const requestId=attempt?.requestId??randomUUID();
@@ -301,7 +325,7 @@ export class ImageGenerationService {
       const intentBase={id:requestId,provider:'openrouter' as const,model:config.model,productId:input.productId,productRevision:input.productRevision,createdAt:new Date().toISOString(),mode:references.length?'edit' as const:'generate' as const,sourceAssets:assets.map(asset=>({id:asset.id,sha256:asset.sha256})),...(editSource?{editSource}:{})},requestInput=this.imageInputSnapshot(input);
       const intent:ImageRequestIntent={...intentBase,version:2,requestScope:ownerScope,requestInput,requestFingerprint:imageRequestFingerprint(intentBase,requestInput)};
       const result=await this.adapter.generate({...request,model:config.model},signal,{responseDeadlineAt,beforeSend:body=>{
-        try{return transaction(this.db,()=>{throwIfAborted(signal);this.assertProduct(input,assets);this.generationScope(input,attempt?.owner);if(this.controlledScopes.authorizeImage(ownerScope)!==controlledScopeId)throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');const pending=this.imageIntents(ownerScope).find(prior=>['unknown','raw'].includes(this.imageOutcome(prior).kind));if(pending)throw this.imageBlocked(pending);if(typeof body!=='string')throw new SpendBudgetError('SPEND_RECORD_INVALID');const bound=evidence?imageSpendBound(body,evidence,new Date().toISOString()):null;this.spend.reserveInTransaction(this.db,{id:requestId,businessKey:listingFingerprint(ownerScope),requestSha256:digest(body),model:config.model,purpose:'image_generation',scopeId:controlledScopeId},body,bound);saveImageRequestIntent(this.db,intent);});}
+        try{return transaction(this.db,()=>{throwIfAborted(signal);this.assertProduct(input,assets);this.generationScope(input,attempt?.owner);if(this.authorizeImageScope(ownerScope)!==controlledScopeId)throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');const pending=this.imageIntents(ownerScope).find(prior=>['unknown','raw'].includes(this.imageOutcome(prior).kind));if(pending)throw this.imageBlocked(pending);if(typeof body!=='string')throw new SpendBudgetError('SPEND_RECORD_INVALID');const bound=evidence?imageSpendBound(body,evidence,new Date().toISOString()):null;this.spend.reserveInTransaction(this.db,{id:requestId,businessKey:listingFingerprint(ownerScope),requestSha256:digest(body),model:config.model,purpose:'image_generation',scopeId:controlledScopeId},body,bound);saveImageRequestIntent(this.db,intent);});}
         catch(error){
           // This transaction never dispatched. Preserve an older UNKNOWN's
           // identity, but do not turn a rolled-back budget refusal into one.
@@ -328,7 +352,7 @@ export class ImageGenerationService {
       stage='save';this.saveCandidate(candidate, result.bytes, preview,record);
       return candidate;
     }, callerSignal,error=>{if(!recorded)record(error);});
-    }catch(error){try{if(activeRequestId&&this.spend.list().some(r=>r.id===activeRequestId))transaction(this.db,()=>this.spend.markUnknownInTransaction(this.db,activeRequestId!));}catch{/* Retain the original request failure and conservative committed hold. */}if(!recorded)record(error);throw enteredAdapter?error:error instanceof SpendBudgetError||error instanceof ControlledRunError?Object.assign(error,{notSent:true as const}):imageRequestNotSent(error);}
+    }catch(error){if(this.requiredSpendScopeId!==undefined&&(!requiredEntryApproved||!enteredAdapter&&error instanceof ControlledRunError))throw imageRequestNotSent(error);try{if(activeRequestId&&this.spend.list().some(r=>r.id===activeRequestId))transaction(this.db,()=>this.spend.markUnknownInTransaction(this.db,activeRequestId!));}catch{/* Retain the original request failure and conservative committed hold. */}if(!recorded)record(error);throw enteredAdapter?error:error instanceof SpendBudgetError||error instanceof ControlledRunError?Object.assign(error,{notSent:true as const}):imageRequestNotSent(error);}
   }
   /** Main-process workflow entry point; never accepts or returns a caller-selected filesystem path. */
   async readCandidate(id: string): Promise<{ candidate: GeneratedImageCandidate; bytes: Buffer; preview: Buffer }> {

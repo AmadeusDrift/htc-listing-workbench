@@ -108,6 +108,7 @@ async function start() {
   const aiFetch = createSystemProxyFetch((url, init) => {guardExternal({kind:'ai'});if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();return net.fetch(url, init);});
   const networkDiagnostics = createAiNetworkDiagnostics({fetch:aiFetch,resolveProxy:url=>session.defaultSession.resolveProxy(url)});
   imageGeneration = new ImageGenerationService(dataRoot, db, safeStorage, {
+    ...(controlledAcceptanceMode?{requiredSpendScopeId:CONTROLLED_RUN_ID,beforeEffect:(scope:import('../shared/ai-request-identity-contracts.ts').AiRequestScope,transactionDb?:import('node:sqlite').DatabaseSync)=>guardExternal({kind:'image',productId:scope.productId,sku:scope.sku,targetId:scope.targetId,marketplaceId:scope.marketplaceId,variantIds:scope.variantIds},transactionDb)}:{}),
     normalizeImage: normalizeGeneratedImage,
     fetch: aiFetch, decodePreview,
     downloadDependencies: { nativeFetch: (url, init) => {guardWire({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} },

@@ -11,9 +11,10 @@ const edge=['tests/hosting.test.ts','tests/hosting-network.test.ts','tests/hosti
 const ui=['tests/image-spend-settings-ui.test.ts','tests/image-risk-ui.test.ts'];
 const startup=['tests/controlled-startup-host.test.ts','tests/controlled-startup.test.ts','tests/controlled-acceptance.test.ts','tests/controlled-candidate.test.ts','tests/controlled-review.test.ts','tests/controlled-task-owner.test.ts','tests/controlled-run-scope.test.ts','tests/backup-retention.test.ts','tests/database-snapshots.test.ts','tests/source-observations-v2.test.ts','tests/source-observation-authority.test.ts'];
 const usage=['tests/ai-usage.test.ts','tests/ai-backup.test.ts','tests/provider-receipt-recovery.test.ts','tests/backup.test.ts','tests/backup-v2.test.ts'];
+const manual=['tests/controlled-image-entry.test.ts'];
 const owner=['tests/automatic-listing.test.ts','tests/automatic-resume-scope.test.ts','tests/automatic-families.test.ts','tests/automatic-listing-family-identity.test.ts','tests/automatic-classification.test.ts','tests/automatic-adaptation.test.ts','tests/automatic-listing-migration.test.ts','tests/automatic-listing-recheck-evidence.test.ts','tests/automatic-pricing-resume.test.ts','tests/task-batch-runtime.test.ts','tests/automatic-task-query.test.ts'];
 const backups=['tests/ai-request-identity.test.ts','tests/provider-receipt-recovery.test.ts','tests/ai-backup.test.ts','tests/image-generation-backup.test.ts','tests/image-candidate-backup.test.ts','tests/listing-ai-backup.test.ts','tests/listing-completion-backup.test.ts','tests/backup.test.ts','tests/backup-v2.test.ts','tests/work-batches-backup.test.ts'];
-const testGroups={related,ai,edge,owner,backups,ui,startup,usage};
+const testGroups={related,ai,edge,owner,backups,ui,startup,usage,manual};
 const mode=process.argv[2],label=process.argv[3];if(![...Object.keys(testGroups),'typecheck','boundaries','build'].includes(mode)||!label||!/^[a-z0-9-]+$/.test(label))throw Error('Use related/ai/edge/owner/backups/ui/startup/usage/typecheck/boundaries/build plus a safe label');
 const git=(...args)=>execFileSync('git',args,{encoding:'utf8',windowsHide:true}).trim();
 const sourceCommit=git('rev-parse','HEAD'),worktreeStatus=git('status','--short');if(worktreeStatus)throw Error('S08 verification requires a clean committed source');

@@ -163,6 +163,7 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
   if ((value.textMode === 'none') !== (expectedText.length === 0) || new Set(expectedText.map(line => line.text)).size !== expectedText.length) fail();
   let productUnderstanding: ImagePlanOutput['productUnderstanding'];
   if (value.productUnderstanding !== undefined) {
+    if (!value.productUnderstanding || typeof value.productUnderstanding !== 'object' || Array.isArray(value.productUnderstanding) || typeof (value.productUnderstanding as Record<string,unknown>).sufficient !== 'boolean') planFailure('IMAGE_PLAN_SUFFICIENCY_REQUIRED','productUnderstanding.sufficient');
     const understanding = keys(value.productUnderstanding,['summary','referenceAssetIds','uncertainties','sufficient']);
     const referenceAssetIds = list(understanding.referenceAssetIds,10,uuid), uncertainties = list(understanding.uncertainties,10,item=>boundedText(item,1000)), sufficient = flag(understanding.sufficient);
     if (!referenceAssetIds.length || new Set(referenceAssetIds).size !== referenceAssetIds.length || (!sufficient && !uncertainties.length)) fail();
@@ -400,7 +401,11 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
     else{
       if(plan.setPlan||!context.setPlan)fail();
       const slot=context.setPlan.slots[context.slot.index-1];
-      if(plan.textMode!==slot.textMode||listingFingerprint(plan.expectedText)!==listingFingerprint(slot.expectedText))fail();
+      if(plan.textMode!==slot.textMode)planFailure('IMAGE_PLAN_FROZEN_TEXT_MODE','textMode');
+      // A single sentence period after a letter changes no caption fact. Keep
+      // citation identity/order and all numbers, units and other wording exact.
+      const caption=(text:string)=>text.replace(/([A-Za-z])\.$/,'$1');
+      if(plan.expectedText.length!==slot.expectedText.length||plan.expectedText.some((line,index)=>caption(line.text)!==caption(slot.expectedText[index].text)||listingFingerprint(line.evidenceIds)!==listingFingerprint(slot.expectedText[index].evidenceIds)))planFailure('IMAGE_PLAN_FROZEN_CAPTION_MISMATCH','expectedText');
     }
   }else if(plan.setPlan)fail();
   const evidenceContext=plan.setPlan?{...context,setPlan:plan.setPlan}:context;

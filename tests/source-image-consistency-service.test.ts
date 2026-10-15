@@ -338,10 +338,11 @@ test('legacy saved-connection audit supports denied source recovery without alte
  await explicitlyContinue(f,()=>f.observe());assert.equal(f.count(),2);assert.equal(readConsistencyView(f.db,f.context()).status,'MATCH');assert.deepEqual(f.ai.listCalls().find(c=>c.id===original.id),original);
 });
 
-for(const kind of ['empty','missing','broken-stream'] as const)test(`source HTTP 200 ${kind} body stays UNKNOWN and never resends`,async t=>{
+for(const kind of ['empty','missing','broken-stream'] as const)test(`source HTTP 200 ${kind} body has evidence-based display and never resends`,async t=>{
  const f=await fixture(t);f.respond(()=>kind==='empty'?new Response('',{status:200}):kind==='missing'?new Response(null,{status:200}):new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"choices":'));controller.error(new Error('synthetic interrupted body'));}}),{status:200}));
- await assert.rejects(f.observe());const call=f.ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');assert.equal(call.responseReceived,undefined);
- assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);assert.equal(readConsistencyView(f.db,f.context()).status,'UNKNOWN');
+ await assert.rejects(f.observe(),(error:any)=>{assert.equal(error.certainty,kind==='empty'?'RECEIVED_INVALID':'SENT_UNKNOWN');return true;});const call=f.ai.listCalls()[0];assert.equal(call.errorCode,'OUTPUT_INVALID');assert.equal(call.responseReceived,undefined);
+ assert.equal(sourceConsistencyUnknown(f.db,f.p.id,[f.p.variants[0].id]),true);assert.equal(readConsistencyView(f.db,f.context()).status,kind==='empty'?'SYSTEM_REPAIR':'UNKNOWN');
+ if(kind==='empty'){const receipt=await f.ai.readProviderReceipt(call.id) as {status:number;body:unknown};assert.equal(receipt.status,200);assert.equal(receipt.body,'');assert.deepEqual(readConsistencyView(f.db,f.context()).reasons,['SOURCE_CONSISTENCY_INVALID_OUTPUT']);}
  f.ai.saveConnection({id:'deepseek',apiKey:'body-new-synthetic'});assert.throws(()=>explicitlyContinue(f,()=>reserveConsistencyAttempt(f.db,f.context(),{id:randomUUID(),startedAt:new Date().toISOString(),providerId:'deepseek',generation:f.ai.listProfiles().find(p=>p.id==='deepseek')!.generation})));await assert.rejects(explicitlyContinue(f,()=>f.observe()));assert.equal(f.count(),1);
  assert.deepEqual(f.ai.listCalls()[0],call);
 });

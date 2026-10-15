@@ -179,7 +179,7 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
     if(result.kind!==SOURCE_CONSISTENCY_OUTCOMES[result.code as keyof typeof SOURCE_CONSISTENCY_OUTCOMES]||result.pricingReport||result.image)fail();
   }else if(result.code==='READBACK_BRAND_REQUIRES_MANUAL'){
     if(result.kind!=='NEEDS_INPUT'||row.stage!=='READBACK'||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();
-  }else if(AI_ERROR_CODES.some(code=>result.code==='AI_'+code)){
+  }else if(result.code==='AI_RECEIVED_INVALID_OUTPUT'||AI_ERROR_CODES.some(code=>result.code==='AI_'+code)){
     if(result.kind!=='SYSTEM_REPAIR'||result.pricingReport||result.image)fail();
   }else if(['LABELS_FAILED','READBACK_FAILED'].includes(result.code)){
     if(result.kind!=='SYSTEM_REPAIR'||row.stage!==(result.code==='LABELS_FAILED'?'LABELS':'READBACK')||!result.draftId||!result.draftRevision||result.pricingReport||result.image)fail();

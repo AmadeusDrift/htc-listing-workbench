@@ -18,7 +18,7 @@ async function failed(t:any,reviewed=false,imageCitation=false){
  await assert.rejects(listing.complete(f.reference));
  const op=listing.completionOperations(f.draft.id)[0],call=f.ai.getCall(op.rounds[0].candidate.id)!;
  const path=join(f.directory,'ai-diagnostics',readdirSync(join(f.directory,'ai-diagnostics')).find(n=>n.endsWith(`${call.id}.json`))!);
- const diagnostic=JSON.parse(readFileSync(path,'utf8'));diagnostic.output=raw;writeFileSync(path,JSON.stringify(diagnostic));
+ const diagnostic=JSON.parse(readFileSync(path,'utf8'));diagnostic.output=raw;diagnostic.rejectionStage='operation-output-validation';writeFileSync(path,JSON.stringify(diagnostic));
  return {...f,listing,op,call,path};
 }
 test('known invalid response recovers on continuation, preserves failed call and usage, and survives restart and backup without diagnostics',async t=>{
@@ -31,7 +31,7 @@ test('known invalid response recovers on continuation, preserves failed call and
  assert.equal(completed.aiCalls,0);assert.equal(f.requests.length,1);assert.equal(completed.draft.fieldAdoptions?.length,1);
  assert.deepEqual(db.prepare('SELECT record_json FROM ai_calls ORDER BY id').all(),calls);assert.deepEqual(db.prepare('SELECT record_json FROM ai_usage_ledger ORDER BY id').all(),usage);
  const result=f.ai.getResult(f.listing.getCompletion(f.op.id).rounds[0].candidate.resultId!)!;
- assert.ok(result.localRecovery);assert.equal(result.localRecovery.parserVersion,'full-schema-recovery/v2');assert.equal(result.callId,f.call.id);assert.equal(f.ai.getCall(f.call.id)!.status,'FAILED');
+ assert.ok(result.localRecovery);assert.equal(result.localRecovery.parserVersion,'full-schema-recovery/v3');assert.equal(result.callId,f.call.id);assert.equal(f.ai.getCall(f.call.id)!.status,'FAILED');
  rmSync(join(f.directory,'ai-diagnostics'),{recursive:true});
  const again=await f.listing.complete({draftId:completed.draft.id,draftRevision:completed.draft.revision},undefined,f.op.id);assert.equal(again.aiCalls,0);assert.equal(again.draft.fieldAdoptions?.length,1);
  const restarted=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:async()=>{throw Error('No network allowed');}});
@@ -128,7 +128,7 @@ test('legacy v1 recovery keeps the original rejected image citation readable wit
  const color=output.candidates.find(c=>c.field==='color')!;assert.ok(color);const assetId=color.items[0].evidenceIds[0],reason='color 的来源引用无法对应当前规格：'+assetId;
  for(const item of color.items)item.evidenceIds=[];(color.normalizationNotes??=[]).push(reason);
  output.candidates=output.candidates.filter(c=>c!==color);(output.rejectedCandidates??=[]).push(color);output.missing.push({field:'color',reason:'[FIELD_REFERENCE] '+reason+'；待补资料，已保留其他可用字段'});
- assert.equal(result.localRecovery!.parserVersion,'full-schema-recovery/v2');
+ assert.equal(result.localRecovery!.parserVersion,'full-schema-recovery/v3');
  const transitional=structuredClone(result);transitional.localRecovery!.parserVersion='full-schema-recovery/v1';assert.deepEqual(validateStoredAiResult(transitional),transitional,'the later published v1 shape stays readable too');
  for(const mutate of [
   (r:any)=>{r.localRecovery.parserVersion='full-schema-recovery/v2';},

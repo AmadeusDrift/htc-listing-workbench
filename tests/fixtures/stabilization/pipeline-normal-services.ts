@@ -28,6 +28,7 @@ import { AutomaticListingService } from '../../../src/main/automatic-listing/ser
 import { planSalesListings } from '../../../src/main/sales-plans/planning.ts';
 import { resolveSalesFamily, ensureFamilyParent } from '../../../src/main/automatic-listing/families.ts';
 import { classifyProduct } from '../../../src/main/catalog/classification.ts';
+import {categoryExpansionPort} from '../../../src/main/catalog/category-expansion.ts';
 import { assertConsistencyView } from '../../../src/main/source-image-consistency/proof.ts';
 
 export function createNormalServices(dataRoot:string,storage:SecretStorage,fetcher:typeof fetch,now:()=>Date){
@@ -70,6 +71,7 @@ export function createNormalServices(dataRoot:string,storage:SecretStorage,fetch
         localCandidates: targetId => catalogService.get(targetId)?.productTypes??[],
         fallback: (targetId,keywords) => amazonService.searchProductTypes({targetId,keywords}),
         choose: (value,phase) => aiService.decideCategory({...value,phase},fresh,signal),
+        expansion: categoryExpansionPort(input,aiService,amazonService,fresh),
       });
     },
     preflight: () => {

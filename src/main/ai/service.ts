@@ -4,6 +4,7 @@ import {recoverCategoryPhase,categoryCalls,claimCategoryRepair} from './category
 import {categoryOperationId,categoryCandidateSnapshot} from './category-context.ts';
 import {readCategoryOperation,reserveCategoryExpansion,permitCategoryExpansionRequest,storeCategoryExpansionSnapshot,assertCategoryExpansionReady} from './category-operations.ts';
 import type {CategoryExpansionOperation,CategoryExpansionSnapshot} from '../../shared/category-operation-contracts.ts';
+import {captureCategoryLookup,readCategoryLookup,assertCategoryLookupSnapshot,type CategoryLookupCapture,type CategoryLookupTarget} from './category-expansion-receipts.ts';
 import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
 import { fieldGroupCallId,fieldGroupRetryScope,assertFieldGroupHistory } from './field-purpose-groups.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
@@ -684,7 +685,12 @@ export class AiService {
     if(!existing||existing.inputVersion!==source.inputVersion)throw new AiError('SOURCE_CHANGED');return permitCategoryExpansionRequest(this.db,this.directory,product.id,input.requestId,this.timestamp()).expansion!;
   }
   retainCategoryCandidateExpansion(productId:string,snapshot:CategoryExpansionSnapshot):CategoryExpansionSnapshot {
-    this.ensureOpen();return storeCategoryExpansionSnapshot(this.db,this.directory,uuid(productId),snapshot).expansion!.snapshot!;
+    this.ensureOpen();assertCategoryLookupSnapshot(this.db,this.directory,uuid(productId),snapshot);return storeCategoryExpansionSnapshot(this.db,this.directory,uuid(productId),snapshot).expansion!.snapshot!;
+  }
+  async captureCategoryCandidateExpansionReceipt(productId:string,capture:CategoryLookupCapture):Promise<void> {this.ensureOpen();captureCategoryLookup(this.db,this.directory,uuid(productId),capture);}
+  readCategoryCandidateExpansionReceipt(input:{productId:string;requestId:string;targetScope:CategoryLookupTarget}) {
+    this.ensureOpen();const operation=readCategoryOperation(this.db,uuid(input.productId)).expansion;if(!operation||operation.requestId!==uuid(input.requestId))throw new AiError('INVALID_CONFIG');
+    if(!operation.permittedAt)return null;return readCategoryLookup(this.db,this.directory,input.productId,input.requestId,input.targetScope);
   }
   /** Main-only classification role; reuses the existing provider, usage ledger and real source images. */
   async decideCategory(input: { productId: string; productRevision: number; phase: CategoryDecision['phase']; candidates: ProductTypeOption[]; keywords?: string[];expansion?:0|1 }, assertContextFresh: () => void = () => {}, signal?: AbortSignal): Promise<AiResult & { output: CategoryDecision }> {
@@ -696,7 +702,7 @@ export class AiService {
     const {sourceEvidence,references,referenceIdentity,inputVersion}=this.categorySource(product),payload={phase:input.phase,candidates:input.candidates,keywords:input.keywords??[],...sourceEvidence};
     const expansion=input.expansion??0;if(expansion!==0&&expansion!==1||input.phase==='keywords'&&expansion!==0)throw new AiError('INVALID_INPUT');
     const categoryContext={version:2 as const,phase:input.phase,operationId:categoryOperationId(product.id),inputVersion,candidateSnapshotSha256:categoryCandidateSnapshot(input.candidates),expansion,requestSha256:listingFingerprint({payload,references:referenceIdentity,model:profile.model,effort:profile.routing?.effectiveEffort})};
-    if(expansion===1)assertCategoryExpansionReady(this.db,this.directory,product.id,inputVersion,categoryContext.candidateSnapshotSha256);
+    if(expansion===1){const snapshot=assertCategoryExpansionReady(this.db,this.directory,product.id,inputVersion,categoryContext.candidateSnapshotSha256);assertCategoryLookupSnapshot(this.db,this.directory,product.id,snapshot);}
     const categoryScope=taskAiContext.getStore(),categoryBatch=categoryScope?.waitingOperationId?this.batchTasks.find(categoryScope.waitingOperationId):undefined;
     const originalBatchCallId=input.phase!=='select'&&categoryBatch&&categoryBatch.owner.productId===product.id&&categoryBatch.owner.productRevision===product.revision?categoryBatch.aiCallId:undefined;
     const recovery=await recoverCategoryPhase({originalBatchCallId,db:this.db,directory:this.directory,calls:this.categoryHistory(product.id),results:this.listResults(product.id),productId:product.id,productRevision:product.revision,model:profile.model,effort:profile.routing?.effectiveEffort??'',context:categoryContext,payloadHash:listingFingerprint(payload),current:{providerId:profile.id,generation:profile.generation},payload});

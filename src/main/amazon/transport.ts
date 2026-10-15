@@ -11,6 +11,8 @@ import type { ProductDataKind } from './read-data.ts';
 import type { ItemLabelRecord } from '../../shared/item-label-contracts.ts';
 export type LabelDownloadScope=Pick<ItemLabelRecord,'targetId'|'targetGeneration'|'sellerId'|'marketplaceId'|'mode'>;
 import { itemLabelDownloads, validateItemLabelRequest } from '../item-labels/adapter.ts';
+import type {CategoryLookupCapture} from '../ai/category-expansion-receipts.ts';
+export interface ObservedCategoryLookup {clientRequestId:string;beforeDispatch:()=>void;onReceived:(capture:CategoryLookupCapture)=>void|Promise<void>}
 
 type SchemaFetch = (url: string, init: RequestInit) => Promise<Response>;
 export interface AmazonDependencies {
@@ -186,13 +188,15 @@ export class AmazonTransport {
     } catch (error) { category = status === 429 ? 'rate_limit' : 'authorization'; throw error instanceof UserFacingError ? error : new AmazonTransportError('Amazon 授权连接失败'); }
     finally { this.log(target, 'lwaToken', start, attempts, status, headers, category); }
   }
-  async api(target: AmazonTarget, operation: Operation, path: string, query: Record<string, string>, body?: JsonObject, beforeSend?: () => void): Promise<ApiResult> {
+  async api(target: AmazonTarget, operation: Operation, path: string, query: Record<string, string>, body?: JsonObject, beforeSend?: () => void, observed?:ObservedCategoryLookup): Promise<ApiResult> {
+    if(observed){observed=Object.freeze({...observed});query=Object.freeze({...query});}
     this.hooks.active(target.id); marketplace(target.marketplaceId, target.region);
     const write = operation === 'putListingsItem' || operation === 'patchListingsItem'; const method = operation === 'patchListingsItem' || operation === 'previewPatchListingsItem' ? 'PATCH' : operation === 'putListingsItem' || operation === 'previewListingsItem' ? 'PUT' : 'GET';
     const validPath = operation === 'searchDefinitionsProductTypes' ? path === '/definitions/2020-09-01/productTypes'
       : operation === 'getDefinitionsProductType' ? /^\/definitions\/2020-09-01\/productTypes\/[A-Z0-9][A-Z0-9_]*$/.test(path)
       : /^\/listings\/2021-08-01\/items\/[^/]+\/[^/]+$/.test(path);
     if (!validPath || query.marketplaceIds !== target.marketplaceId) throw new UserFacingError('Amazon 请求上下文不匹配');
+    if(observed&&(operation!=='searchDefinitionsProductTypes'||method!=='GET'||!query.keywords||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(observed.clientRequestId)||typeof observed.beforeDispatch!=='function'||typeof observed.onReceived!=='function'))throw new UserFacingError('受控类目检索身份无效');
     if ((operation === 'previewListingsItem' || operation === 'previewPatchListingsItem') && query.mode !== 'VALIDATION_PREVIEW' || write && 'mode' in query) throw new UserFacingError('Amazon 请求模式无效');
     const url = new URL(path, ENDPOINTS[target.region]);
     if (url.pathname !== path) throw new UserFacingError('SKU 或 Amazon 请求路径包含不允许的路径片段');
@@ -201,28 +205,34 @@ export class AmazonTransport {
     let status: number | null = null; let headers = new Headers(); let attempts = 0; let category: string | null = null; let authPaused = false;
     try {
       const accessToken = await this.token(target, write,undefined,beforeSend);
-      for (let attempt = 0; attempt < (write ? 1 : 3); attempt++) {
+      for (let attempt = 0; attempt < (write||observed ? 1 : 3); attempt++) {
         const wait = (this.nextAllowed.get(rateKey) ?? 0) - this.now();
         if (wait > 30_000) throw new AmazonTransportError('Amazon 调用速率较低，请稍后再试');
         if (wait > 0) await this.sleep(wait);
         this.hooks.active(target.id);
         if (generation !== this.hooks.generation(target.id)) throw new UserFacingError('授权配置已变化，请重新预览');
-        beforeSend?.(); attempts++;
+        beforeSend?.();if(observed){const result=observed.beforeDispatch() as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new UserFacingError('类目检索发送许可必须同步持久化');}attempts++;
         let result: HttpResult;
         try { result = await this.http(url.href, { method, headers: { 'x-amz-access-token': accessToken, 'x-amz-date': new Date(this.now()).toISOString().replace(/[:-]|\.\d{3}/g, ''),
           'user-agent': 'HTC/0.2.0 (Language=TypeScript; Platform=Windows)', 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) }, 2 * 1024 * 1024, (code, receivedHeaders) => {
             status = code; headers = receivedHeaders;
             if (code === 401 || code === 403) { this.clear(target.id); this.hooks.pause(target.id, 'Amazon 授权或权限失败，店铺已暂停'); authPaused = true; }
           }); }
-        catch { if (!write && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
+        catch { if (!write && !observed && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
           if(operation==='getDefinitionsProductType')throw new SchemaTransientError('NETWORK');
           throw new AmazonTransportError(write ? '提交连接中断，结果未知；请回读核对，禁止重放' : 'Amazon 网络请求失败或超时', null, null, write); }
         status = result.status; headers = result.headers;
         const { requestId, rateLimit } = this.hooks.redact(metadata(headers)); if (rateLimit) this.nextAllowed.set(rateKey, this.now() + 1000 / Number(rateLimit));
+        if(observed&&!result.bodyUnavailable){
+          const text=result.bytes.toString('utf8');let secretEcho=this.hooks.redact(text)!==text;
+          try{const decoded=JSON.parse(text);secretEcho||=JSON.stringify(this.hooks.redact(decoded))!==JSON.stringify(decoded);}catch{/* Invalid complete JSON is retained as received-invalid evidence. */}
+          if(secretEcho)throw new AmazonTransportError('类目检索响应包含凭据回显，原请求保持待核对',status,requestId);
+          await observed.onReceived({requestId:observed.clientRequestId,targetScope:{targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,region:target.region,locale:target.locale,mode:target.mode},targetGeneration:generation,query:query.keywords,status,remoteRequestId:requestId,receivedAt:new Date(this.now()).toISOString(),bytes:Buffer.from(result.bytes)});
+        }
         if (status === 401 || status === 403) { this.clear(target.id); if (!authPaused) this.hooks.pause(target.id, 'Amazon 授权或权限失败，店铺已暂停'); throw new AmazonTransportError('Amazon 授权或权限失败，店铺已暂停；请核对授权和角色', status, requestId, false, this.errorBody(result)); }
         if (status === 429 || status >= 500 || status === 408) {
           const delay = this.delay(headers, attempt);
-          if (!write && attempt < 2 && delay <= 30_000) { await this.sleep(delay); continue; }
+          if (!write && !observed && attempt < 2 && delay <= 30_000) { await this.sleep(delay); continue; }
           if (status === 429) this.hooks.pause(target.id, 'Amazon 持续限流，店铺已暂停；请稍后解除暂停');
           throw new AmazonTransportError(status === 429 ? 'Amazon 持续限流，店铺已暂停' : write ? '提交结果未知，请回读核对；禁止重放' : 'Amazon 服务暂时不可用，请稍后重试', status, requestId, write && status !== 429, this.errorBody(result));
         }
@@ -230,7 +240,7 @@ export class AmazonTransport {
         if (result.bodyUnavailable) {
           // Receiving HTTP 200 does not mean the streamed JSON finished. Only
           // retry read/preview requests; a formal submission remains unknown.
-          if (!write && result.bodyUnavailable === 'read' && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
+          if (!write && !observed && result.bodyUnavailable === 'read' && attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; }
           if(operation==='getDefinitionsProductType'&&status===200&&result.bodyUnavailable==='read')throw new SchemaTransientError('BODY_INCOMPLETE');
           const reason = result.bodyUnavailable === 'limit' ? 'Amazon 响应正文超过允许大小' : 'Amazon 响应正文读取中断或超时';
           throw new AmazonTransportError(write ? `${reason}，提交结果未知；请回读核对，禁止重放` : reason, status, requestId, write, this.errorBody(result));

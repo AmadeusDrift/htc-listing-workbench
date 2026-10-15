@@ -24,6 +24,23 @@ export function rankCategoryCandidates(hits:readonly CandidateHit[],limit=50):Ra
     const displayName=group.map(hit=>hit.candidate.displayName).sort(compare)[0];
     const matches=group.map(hit=>({...candidateRelevance(hit.candidate,hit.keyword),source:hit.source})).sort((a,b)=>b.score-a.score||compare(a.basis,b.basis));
     const best=matches[0];
-    return {name,displayName,recall:{sources:[...new Set(group.map(hit=>hit.source))].sort(compare),keywords:[...new Set(group.map(hit=>normalize(hit.keyword)))].sort(compare),score:best.score,basis:best.score===0&&group.some(hit=>hit.source==='platform')?'platform-result' as const:best.basis}};
+    return {name,displayName,recall:{sources:[...new Set(group.map(hit=>hit.source))].sort(compare),keywords:[...new Set(group.map(hit=>normalize(hit.keyword)).filter(Boolean))].sort(compare),score:best.score,basis:best.score===0&&group.some(hit=>hit.source==='platform')?'platform-result' as const:best.basis}};
   }).sort((a,b)=>b.recall.score-a.recall.score||b.recall.keywords.length-a.recall.keywords.length||compare(a.name,b.name)).slice(0,limit);
+}
+/** Expanded platform recall must add actual new options, including zero lexical matches.
+ * This reserves visibility, not suitability or confidence. */
+export function rankExpandedCategoryCandidates(hits:readonly CandidateHit[],originalNames:readonly string[]):RankedCandidate[] {
+  const ranked=rankCategoryCandidates(hits,Number.MAX_SAFE_INTEGER),original=new Set(originalNames);
+  const novel=ranked.filter(candidate=>!original.has(candidate.name)&&candidate.recall.sources.includes('platform'));
+  if(!novel.length)return [];
+  const selected=new Set(novel.slice(0,50).map(candidate=>candidate.name));
+  for(const candidate of ranked){if(selected.size===50)break;selected.add(candidate.name);}
+  return ranked.filter(candidate=>selected.has(candidate.name));
+}
+export function categoryExpansionQuery(keywords:readonly string[]):string {
+  const selected:string[]=[];
+  for(const keyword of [...new Set(keywords.map(normalize))].sort(compare)){
+    if(!keyword)continue;if([...selected,keyword].join(' ').length>200)continue;selected.push(keyword);
+  }
+  return selected.join(' ');
 }

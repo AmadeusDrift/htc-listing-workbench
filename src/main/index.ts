@@ -41,6 +41,7 @@ import { AutomaticListingService } from './automatic-listing/service.ts';
 import { ItemLabelService } from './item-labels/service.ts';
 import { ItemLabelSettings } from './item-labels/settings.ts';
 import { classifyProduct } from './catalog/classification.ts';
+import {categoryExpansionPort} from './catalog/category-expansion.ts';
 import { SkuNamingService } from './sku-naming/service.ts';
 import { planSalesListings } from './sales-plans/planning.ts';
 import { ensureFamilyParent, resolveSalesFamily } from './automatic-listing/families.ts';
@@ -171,6 +172,7 @@ async function start() {
         localCandidates: targetId => catalogService.get(targetId)?.productTypes??[],
         fallback: (targetId,keywords) => amazonService.searchProductTypes({targetId,keywords}),
         choose: (value,phase) => aiService.decideCategory({...value,phase},fresh,signal),
+        expansion: categoryExpansionPort(input,aiService,amazonService,fresh),
       });
     },
     preflight: () => {

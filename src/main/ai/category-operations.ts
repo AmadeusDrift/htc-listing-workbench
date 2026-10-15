@@ -1,8 +1,8 @@
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiCall,AiResult} from '../../shared/ai-contracts.ts';
 import type {CategoryRepairClaim} from '../../shared/category-ai-contracts.ts';
-import type {CategoryOperationRecord,CategoryExpansionOperation,CategoryExpansionSnapshot} from '../../shared/category-operation-contracts.ts';
-import {newCategoryOperation,parseCategoryOperation,addCategoryRepair,addCategoryExpansion,permitCategoryExpansion,completeCategoryExpansion,mergeCategoryOperations} from './category-operation-records.ts';
+import type {CategoryOperationRecord,CategoryExpansionOperation,CategoryExpansionSnapshot,CategoryExpansionCaptureProof} from '../../shared/category-operation-contracts.ts';
+import {newCategoryOperation,parseCategoryOperation,addCategoryRepair,addCategoryExpansion,permitCategoryExpansion,completeCategoryExpansion,freezeCategoryExpansionCapture,mergeCategoryOperations} from './category-operation-records.ts';
 import {categoryOperationId} from './category-context.ts';
 import {validateAiCall,validateStoredAiResult} from './validation.ts';
 import {validateAiUsageRecord} from './usage.ts';
@@ -85,6 +85,11 @@ export function permitCategoryExpansionRequest(db:DatabaseSync,directory:string,
 }
 export function storeCategoryExpansionSnapshot(db:DatabaseSync,directory:string,productId:string,snapshot:CategoryExpansionSnapshot):CategoryOperationRecord {
  return transaction(db,()=>{const operation=readCategoryOperation(db,productId),next=completeCategoryExpansion(operation,snapshot);originalExpansionResult(db,directory,productId,next.expansion);if(listingFingerprint(operation)!==listingFingerprint(next))write(db,operation,next);return next;});
+}
+/** A previously permitted response may arrive after pause. This freezes received evidence,
+ * without granting a new request or requiring a now-revoked dispatch capability. */
+export function retainCategoryExpansionCapture(db:DatabaseSync,directory:string,productId:string,proof:CategoryExpansionCaptureProof):CategoryExpansionCaptureProof {
+ return transaction(db,()=>{const previous=readCategoryOperation(db,productId),next=freezeCategoryExpansionCapture(previous,proof);originalExpansionResult(db,directory,productId,next.expansion);if(listingFingerprint(previous)!==listingFingerprint(next))write(db,previous,next);return next.expansion.captureProof!;});
 }
 /** Exact input and actual candidate bytes are required again before an expanded paid choice. */
 export function assertCategoryExpansionReady(db:DatabaseSync,directory:string,productId:string,inputVersion:string,candidateSnapshotSha256:string):CategoryExpansionSnapshot {

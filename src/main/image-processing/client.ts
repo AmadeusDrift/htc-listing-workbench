@@ -2,8 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { UserFacingError } from '../../shared/errors.ts';
 import type { DecodedArtifact } from '../image-versions/service.ts';
+import { ImageProcessingCapacity } from './capacity.ts';
 
 let child:ChildProcess|undefined,ready:Promise<ChildProcess>|undefined;
+const capacity=new ImageProcessingCapacity();
 let tail:Promise<unknown>=Promise.resolve(),sequence=0,closed=false;
 let rejectActive:((error:Error)=>void)|undefined;
 const localFailure=()=>new UserFacingError('图片后台本地处理未完成；原生图请求未重新发送');
@@ -25,6 +27,8 @@ function worker():Promise<ChildProcess>{
 }
 function processImage(kind:'preview'|'artifact',bytes:Buffer):Promise<Buffer|DecodedArtifact>{
   if(closed||!Buffer.isBuffer(bytes)||bytes.length>20*1024*1024)return Promise.reject(localFailure());
+  let release:()=>void;
+  try { release=capacity.reserve(bytes.length); } catch(error) { return Promise.reject(error); }
   // One image at a time across callers; CPU work never executes in this process.
   const result=tail.then(async()=>{
     if(closed)throw localFailure();
@@ -38,7 +42,7 @@ function processImage(kind:'preview'|'artifact',bytes:Buffer):Promise<Buffer|Dec
       rejectActive=fail;target.on('message',receive);
       target.send({id,kind,bytes},error=>{if(error)fail(localFailure());});
     });
-  });
+  }).finally(release);
   tail=result.catch(()=>{});return result;
 }
 export async function decodePreviewInBackground(bytes:Buffer):Promise<Buffer>{

@@ -20,10 +20,13 @@ export function automaticItemReason(item:AutomaticListingItem):string{return san
 function itemReason(item: AutomaticListingItem): string {
   if(legacyItemSourceServiceFailure(item))return legacySourceServiceReason;
   const code = item.outcome?.kind === 'RULE_FILTERED' ? item.outcome.code : item.rejection?.detail.code ?? item.outcome?.code;
+  if(item.outcome?.kind==='UNKNOWN'&&item.outcome.code==='EVIDENCE_READ_FAILED')return '原请求或依赖记录暂不可读，结果仍未知；请核对原调用与草稿记录。本次页面读取未发送新请求，原发送保护保留。';
   const reasons: Record<string, string> = {
     FIELD_RESULT_UNKNOWN: '字段请求结果未知，请查看已保存的字段调用记录与恢复进度。',
     IMAGE_RESULT_UNKNOWN: '图片请求结果未知，请查看已保存的图片调用记录与恢复进度；已完成图片保留。',
     SOURCE_CONSISTENCY_SENT_UNKNOWN: '来源观察请求结果未知，请查看已保存的来源调用记录与恢复进度。',
+    SOURCE_CONSISTENCY_INVALID_OUTPUT: '来源观察已收到完整响应，但输出无法采用；请核对原调用记录。显示修正不会增加重试许可，原次数、费用和发送保护保留。',
+    AI_RECEIVED_INVALID_OUTPUT: '请求已收到完整响应，但输出无法采用；请核对原回执和具体校验原因。费用、次数及有界修复条件继续保留。',
     SUBMISSION_UNKNOWN: 'Amazon 正式提交结果未知，禁止自动重发。请查询原提交结果。',
     READBACK_BRAND_REQUIRES_MANUAL: '品牌已为 Generic，Amazon 仍返回品牌问题，需人工处理；请查看平台字段及错误代码。',
     LABELS_FAILED: '商品标签处理失败，请查看备货与标签中的具体原因；已提交商品和已保存文件保留。',
@@ -51,14 +54,32 @@ function itemReason(item: AutomaticListingItem): string {
   };
   return item.status === 'WAITING' ? waiting[item.stage] : presentRejection(code);
 }
-export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'notSelected' | 'profitFiltered' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
+export type AutomaticItemOutcome = 'completed' | 'submittedAwaitingReadback' | 'labels' | 'running' | 'waiting' | 'pending' | 'ruleFiltered' | 'notSelected' | 'profitFiltered' | 'packagingFiltered' | 'invalidOutput' | 'needsInput' | 'systemRepair' | 'unknown' | 'unclassified';
+/** Presentation only. A pricing report is evidence, not a reason category. */
+export function automaticRuleOutcome(code:string|undefined):'notSelected'|'profitFiltered'|'packagingFiltered'|'ruleFiltered' {
+  if(code==='SKU_SELECTION_FILTERED')return 'notSelected';
+  if(code==='DIMENSIONAL_WEIGHT_LIMIT')return 'packagingFiltered';
+  if(['ROI_MAX_PRICE','ROI_PROMOTION_OR_MARGIN','ACTUAL_PRICE_CAP','ACTUAL_PRICE_ROI','ACTUAL_PRICE_MARGIN'].includes(code??''))return 'profitFiltered';
+  return 'ruleFiltered';
+}
+function receivedInvalidCode(code:string|undefined):boolean {
+  // Domain codes establish rejected output; generic OUTPUT_INVALID can also mean
+  // an incomplete transport and must first be resolved by its domain owner.
+  return code==='SOURCE_CONSISTENCY_INVALID_OUTPUT'||code==='AI_RECEIVED_INVALID_OUTPUT';
+}
+export function automaticQueueOutcome(row:AutomaticQueueRow):AutomaticItemOutcome {
+  const kind=automaticQueueDisplayKind(row);
+  if(kind==='RULE_FILTERED')return automaticRuleOutcome(row.reasonCode);
+  if(kind==='SYSTEM_REPAIR'&&receivedInvalidCode(row.reasonCode))return 'invalidOutput';
+  return {SYSTEM_REPAIR:'systemRepair',NEEDS_INPUT:'needsInput',UNKNOWN:'unknown',UNCLASSIFIED:'unclassified',PENDING:'pending',SUBMITTED:'submittedAwaitingReadback',COMPLETED:'completed'}[kind] as AutomaticItemOutcome;
+}
 export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemOutcome {
   if(legacyItemSourceServiceFailure(item))return 'systemRepair';
   if (item.status === 'FAILED'||item.status==='SCREENED') {
     if(item.outcome?.kind==='RULE_FILTERED'){
-      if(item.outcome.code==='SKU_SELECTION_FILTERED')return 'notSelected';
-      if(item.outcome.pricingReport)return 'profitFiltered';
+      return automaticRuleOutcome(item.outcome.code);
     }
+    if(item.outcome?.kind==='SYSTEM_REPAIR'&&receivedInvalidCode(item.outcome.code))return 'invalidOutput';
     return item.outcome?({RULE_FILTERED:'ruleFiltered',SYSTEM_REPAIR:'systemRepair',NEEDS_INPUT:'needsInput',UNKNOWN:'unknown',UNCLASSIFIED:'unclassified'} as const)[item.outcome.kind]:'unclassified';
   }
   if (item.status === 'DONE') return 'completed';
@@ -67,7 +88,7 @@ export function automaticItemOutcome(item: AutomaticListingItem): AutomaticItemO
   return item.status === 'RUNNING' ? 'running' : item.status === 'WAITING' ? 'waiting' : 'pending';
 }
 export function summarizeAutomaticItems(items: AutomaticListingItem[]): Record<AutomaticItemOutcome, number> {
-  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, ruleFiltered: 0, notSelected:0, profitFiltered:0, needsInput: 0, systemRepair: 0, unknown:0,unclassified:0 };
+  const counts: Record<AutomaticItemOutcome, number> = { completed: 0, submittedAwaitingReadback: 0, labels: 0, running: 0, waiting: 0, pending: 0, ruleFiltered: 0, notSelected:0, profitFiltered:0, packagingFiltered:0, invalidOutput:0, needsInput: 0, systemRepair: 0, unknown:0,unclassified:0 };
   for (const item of items) counts[automaticItemOutcome(item)]++;
   return counts;
 }

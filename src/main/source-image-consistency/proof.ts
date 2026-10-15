@@ -1,4 +1,6 @@
 import { confirmedAuthenticationRejection,confirmedForbiddenRejection } from '../ai/receipts.ts';
+import { localAiRequestResolved } from '../ai/request-certainty.ts';
+import { listingFingerprint } from '../json-fingerprint.ts';
 import {explicitRandomFulfillment} from '../sales-plans/source-meaning.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -25,6 +27,25 @@ export function sourceConsistencyUnknown(db:DatabaseSync,productId:string,varian
   }
   return false;
 }
+/** Read-only display certainty. Never use this to authorize sending, repair,
+ * archive or discard: the original consistencyAttemptUnknown guard remains. */
+export function sourceConsistencyPresentation(db:DatabaseSync,productId:string,variantIds:string[]):'UNKNOWN'|'RECEIVED_INVALID'|null {
+  const file=db.prepare('PRAGMA database_list').all().find(row=>row.name==='main')?.file;
+  let invalid=false;
+  for(const row of db.prepare("SELECT record_json FROM source_consistency_attempts WHERE json_extract(record_json,'$.context.productId')=?").all(productId)){
+    const attempt=validateConsistencyAttempt(JSON.parse(String(row.record_json)));if(!variantIds.includes(attempt.context.variantId))continue;
+    const saved=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=saved?validateAiCall(JSON.parse(String(saved.record_json))):null;
+    if(!consistencyAttemptUnknown(db,attempt)){
+      // responseReceived is an old coarse flag. An omitted/processing/damaged
+      // retained response cannot be presented as a known invalid domain result.
+      if(call?.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID'&&call.providerReceiptId&&(typeof file!=='string'||!file||!localAiRequestResolved(db,dirname(file),call.id,call)))return 'UNKNOWN';
+      continue;
+    }
+    if(!call||call.id!==attempt.callId||call.productId!==attempt.context.productId||call.productRevision!==attempt.context.productRevision||call.startedAt!==attempt.sentAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(attempt.context)||call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID'||typeof file!=='string'||!file||!localAiRequestResolved(db,dirname(file),call.id,call))return 'UNKNOWN';
+    invalid=true;
+  }
+  return invalid?'RECEIVED_INVALID':null;
+}
 /** No send, reservation, recovery write, fact adoption or implicit confirmation. */
 export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyContext):SourceConsistencyView {
   assertConsistencyHistory(db);
@@ -39,7 +60,8 @@ export function readConsistencyView(db:DatabaseSync,context:SourceConsistencyCon
   // Historical assessment decisions remain immutable; current v2 use merges their observations anew.
   if(observations&&context.version===SOURCE_OBSERVATION_VERSION)observations=normalizeSourceObservations(observations,context);
   const view:SourceConsistencyView={context,fingerprint,status:'PENDING',reasons:['SOURCE_CONSISTENCY_PENDING'],assessmentId:assessment?.id??null,observations,humanDecision:human?{decision:human.decision,reason:human.reason}:null};
-  if(sourceConsistencyUnknown(db,context.productId,[context.variantId])){view.status='UNKNOWN';view.reasons=['SOURCE_CONSISTENCY_SENT_UNKNOWN'];return view;}
+  const certainty=sourceConsistencyPresentation(db,context.productId,[context.variantId]);
+  if(certainty){view.status=certainty==='UNKNOWN'?'UNKNOWN':'SYSTEM_REPAIR';view.reasons=[certainty==='UNKNOWN'?'SOURCE_CONSISTENCY_SENT_UNKNOWN':'SOURCE_CONSISTENCY_INVALID_OUTPUT'];return view;}
   if(context.fields.some(field=>explicitRandomFulfillment(field.value))){view.status='NEEDS_INPUT';view.reasons=['EXPLICIT_RANDOM_FULFILLMENT'];return view;}
   if(attempt&&!assessment){
     const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;

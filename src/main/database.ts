@@ -1,3 +1,4 @@
+import { validateStartupHistory } from './startup-database-validation.ts';
 import { assertProductFactModels } from './products/fact-models.ts';
 import { CONSISTENCY_SCHEMA, assertConsistencyHistory } from './source-image-consistency/history.ts';
 import { migrateModules, MODULE_SCHEMA_VERSION } from './storage/migrations.ts';
@@ -249,12 +250,12 @@ export function openDatabase(directory: string): DatabaseSync {
       PRAGMA user_version=21; COMMIT;`); }
     catch(error) { try { db.exec('ROLLBACK'); } finally { db.close(); } throw error; }
   }
-  try { assertConsistencyHistory(db);assertSourceImageHistory(db); } catch(error) { db.close();throw error; }
+  try { validateStartupHistory(directory,'consistency',()=>assertConsistencyHistory(db));validateStartupHistory(directory,'sourceImage',()=>assertSourceImageHistory(db)); } catch(error) { db.close();throw error; }
   // Idempotent for databases created during development of schema version 2.
   db.exec(`CREATE TABLE IF NOT EXISTS amazon_exchanges (
     id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES listing_drafts(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL, exchange_json TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS amazon_exchanges_draft ON amazon_exchanges(draft_id,created_at);`);
-  try { migrateModules(db);assertProductFactModels(db);assertSourceAdoptionHistory(db);assertSchemaOperationHistory(db); } catch(error) { db.close();throw error; }
+  try { migrateModules(db);validateStartupHistory(directory,'factModels',()=>assertProductFactModels(db));validateStartupHistory(directory,'sourceAdoption',()=>assertSourceAdoptionHistory(db));validateStartupHistory(directory,'schemaOperations',()=>assertSchemaOperationHistory(db)); } catch(error) { db.close();throw error; }
   return db;
 }

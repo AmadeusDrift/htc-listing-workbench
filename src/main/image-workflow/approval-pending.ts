@@ -1,3 +1,4 @@
+import {canRetireLegacyOcr} from './legacy-ocr.ts';
 import {verifiedRecoveryReceipt} from '../ai/receipt-recovery.ts';
 import {imageReviewProvenNotSent} from './review-journal.ts';
 import type {DatabaseSync} from 'node:sqlite';
@@ -30,6 +31,7 @@ export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,a
  });
  for(const call of relevant){
   if(localAiRequestResolved(db,directory,call.id,call))continue;
+  if(reviewStep(call)==='ocr'&&owned.some(run=>canRetireLegacyOcr(db,directory,run,call)))continue;
   const originalRecovery=owned.find(r=>r.id===recoveryRunId)?.reviewRequests?.find(r=>r.version===2&&r.requestId===call.id&&r.state==='SENT_UNKNOWN');
   if(originalRecovery&&verifiedRecoveryReceipt(db,directory,call))continue;
   const p=call.presentationContext,s=call.requestScope,scopeSlot=s?.slot??(p?.slot===0?0:undefined),slot=p?.slot===scopeSlot?p?.slot:undefined;

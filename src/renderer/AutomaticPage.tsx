@@ -2,7 +2,7 @@ import type { AutomaticWorkBatch } from '../shared/automatic-work-batches';
 import { usePageState } from './navigation-context';
 import type { ProblemContext } from './navigation-context';
 import { FileCheck2, ChevronDown } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ProductSummary } from '../shared/contracts';
 import type { AmazonTarget } from '../shared/amazon-contracts';
 import type { AutomaticListingQueue } from '../shared/automatic-listing-contracts';
@@ -18,6 +18,7 @@ export function AutomaticPage({ products: laneProducts, allProducts, targets, bu
   const products=(allProducts??laneProducts).filter(product=>selectedBatch?.productIds.includes(product.id));
   const [targetId, setTargetId] = usePageState('automatic:target', ''), [queue, setQueue] = useState<AutomaticListingQueue | null>(null);
   const [queueLoading, setQueueLoading] = useState(false), [queueError, setQueueError] = useState(''), [queueReload, setQueueReload] = useState(0);
+  const queueFlight=useRef<Promise<AutomaticListingQueue>|null>(null);
   const batchKey=JSON.stringify(laneProducts.map(p=>p.id));
   useEffect(()=>{let active=true;void window.red.listAutomaticWorkBatches().then(values=>{if(active){setBatches(values);setBatchError('');}},error=>{if(active)setBatchError(String(error));});return()=>{active=false;};},[queueReload,batchKey]);
   async function archive(){if(!current||batchBusy)return;setBatchBusy(true);setBatchError('');try{const next=await window.red.archiveAutomaticWorkBatch(current.id);setBatchId(next.id);setQueue(null);setBatches(await window.red.listAutomaticWorkBatches());setQueueReload(v=>v+1);}catch(error){setBatchError(String(error));}finally{setBatchBusy(false);}}
@@ -26,7 +27,13 @@ export function AutomaticPage({ products: laneProducts, allProducts, targets, bu
   useEffect(() => { const update = () => setQueueReload(value => value + 1); window.addEventListener('automatic-listing-changed', update); return () => window.removeEventListener('automatic-listing-changed', update); }, []);
   useEffect(() => {
     let active = true; setQueue(null);setQueueError(''); setQueueLoading(Boolean(targetId)&&products.length>0);
-    if (targetId&&products.length) void window.red.getAutomaticListingQueue({ productIds: products.map(product => product.id), targetId }).then(value => { if (active) setQueue(value); }, error => { if (active) setQueueError(error instanceof Error ? error.message : '队列读取失败'); }).finally(() => { if (active) setQueueLoading(false); });
+    if(targetId&&products.length)void(async()=>{
+      if(queueFlight.current)await queueFlight.current.catch(()=>{});
+      if(!active)return;
+      const flight=window.red.getAutomaticListingQueue({productIds:products.map(product=>product.id),targetId});queueFlight.current=flight;
+      try{const value=await flight;if(active)setQueue(value);}catch(error){if(active)setQueueError(error instanceof Error?error.message:'队列读取失败');}
+      finally{if(queueFlight.current===flight)queueFlight.current=null;if(active)setQueueLoading(false);}
+    })();
     return () => { active = false; };
   }, [targetId, productsKey, queueReload, selectedBatch?.id]);
   const currentQueue = queue?.targetId === targetId ? queue : null;

@@ -171,8 +171,12 @@ test('disable, reimport and external cancellation abort requests even when injec
     else if (action === 'reimport') f.service.importProfile({ id: 'aliyun-ocr', ...aliyun });
     else controller.abort();
     await assert.rejects(pending, isCode(action === 'disable' ? 'DISABLED' : action === 'reimport' ? 'CONFIG_CHANGED' : 'CANCELLED'));
-    assert.equal(f.service.listResults(f.product.id).length, 0); assert.equal(f.service.listCalls()[0].status, 'FAILED'); assert.equal(f.service.busy, false);
+    assert.equal(f.service.listResults(f.product.id).length, 0); assert.equal(f.service.listCalls()[0].status, 'FAILED');
+    // Caller cancellation does not release the original in-flight collector.
+    // Let the synthetic response finish before asserting bounded drain.
     hold.release(ocr());
+    const drainDeadline=Date.now()+5000;while(f.service.busy&&Date.now()<drainDeadline)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(f.service.busy,false);assert.equal(f.service.listResults(f.product.id).length,0);assert.equal(f.service.listCalls().length,1);assert.equal(f.requests.length,1);
   }
 });
 

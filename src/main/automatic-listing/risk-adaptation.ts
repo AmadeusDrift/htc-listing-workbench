@@ -1,3 +1,5 @@
+import {assertReceiptRecovery} from '../ai/receipt-recovery.ts';
+import {dirname} from 'node:path';
 import { sourceStamp } from './records.ts';
 import { compatibleApprovalRecipe } from '../image-workflow/approval-reuse.ts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -20,6 +22,7 @@ export function currentRiskRecheck(db:DatabaseSync|undefined,row:AutomaticListin
  try{
   const saved=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(proof.resultId),callSaved=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(proof.callId);if(!saved||!callSaved)return false;
   const result=validateStoredAiResult(JSON.parse(String(saved.record_json))),call=validateAiCall(JSON.parse(String(callSaved.record_json))),context=result.imageContext;
+  if(result.providerReceiptRecovery){const file=String(db.prepare('PRAGMA database_list').all().find(r=>r.name==='main')?.file??'');if(!file)return false;assertReceiptRecovery(db,dirname(file),result,call);}
   if(!resultHasOwner(result,call)||result.callId!==proof.callId||result.id!==proof.resultId||result.output.kind!=='image-ip-review'||result.output.candidate.id!==proof.candidateId||result.output.planResultId!==proof.planResultId||result.productId!==source.id||result.productRevision!==source.revision||result.variantId!==draft.variantId||!context||listingFingerprint(context)!==proof.contextSha256||result.sourceSha256!==proof.contextSha256||context.listing.draftId!==draft.id||context.listing.draftRevision!==draft.revision||context.listing.sku!==draft.sku||listingFingerprint(context.referenceAssets.map(ref=>({id:ref.assetId,sha256:ref.sha256})))!==listingFingerprint(proof.references))return false;
   const attempt=run.slots?.find(slot=>slot.index===context.slot?.index)?.attempts.at(-1);
   if(attempt?.candidateId!==proof.candidateId||attempt.ipReviewResultId!==proof.resultId||attempt.planResultId!==proof.planResultId||attempt.state!=='BLOCKED')return false;

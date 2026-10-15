@@ -2138,7 +2138,7 @@ test('direct candidate vision honors current Luna route and medium effort over f
  const wire=f.requests.at(-1)!,call=f.ai.getCall(fileId)!;
  assert.equal(wire.url,'https://openrouter.ai/api/v1/chat/completions');assert.equal(wire.body.model,'openai/gpt-6-luna');assert.deepEqual(wire.body.reasoning,{effort:'medium'});
  assert.equal(wire.body.messages[1].content[1].image_url.url,`data:image/png;base64,${f.bytes.toString('base64')}`);
- assert.equal(call.providerId,'openrouter-review');assert.deepEqual(call.purposeSnapshot,profile.routing);assert.equal(result.output.method,'candidate-vision/v1');assert.equal(result.output.ocrResultId,null);
+ assert.equal(call.providerId,'openrouter-review');assert.deepEqual(call.purposeSnapshot,profile.routing);assert.ok(result.output.kind==='image-text-review');assert.equal(result.output.method,'candidate-vision/v1');assert.equal(result.output.ocrResultId,null);
  assert.deepEqual(result.sourceResultIds,[f.context.listingReviewResultId,plan.id]);assert.deepEqual(validateAiResult(result),result);assert.equal(reserved,1);assert.equal(linked,1);assert.ok(authorized>0);
  // A later current-role change must not retarget recovery of this original owner.
  f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:profile.routing!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});

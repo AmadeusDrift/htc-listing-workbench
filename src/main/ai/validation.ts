@@ -151,7 +151,7 @@ export function validateAiResult(raw: unknown, options:{stored?:boolean}={}): Ai
     if (output.kind === 'generated-image-ocr' && sourceResultIds.length !== offset) invalid();
     if (output.kind === 'image-ip-review' && (sourceResultIds.length!==offset+1 || sourceResultIds[offset]!==output.planResultId || imageContext.policyVersion!==PRODUCT_IMAGE_POLICY_VERSION))invalid();
     if (output.kind === 'image-appearance-review' && (sourceResultIds.length !== offset + (output.previousResultId ? 2 : 1) || sourceResultIds[offset] !== output.planResultId || output.previousResultId && sourceResultIds[offset+1] !== output.previousResultId || output.checks.some(c=>c.referenceAssetIds.some(id=>!imageContext.referenceAssets.some(a=>a.assetId===id))))) invalid();
-    if (output.kind === 'image-text-review' && (sourceResultIds.length !== offset + 2 || sourceResultIds[offset] !== output.planResultId || sourceResultIds[offset+1] !== output.ocrResultId)) invalid();
+    if (output.kind === 'image-text-review' && (sourceResultIds.length !== offset + (output.method==='candidate-vision/v1'?1:2) || sourceResultIds[offset] !== output.planResultId || output.method!=='candidate-vision/v1'&&sourceResultIds[offset+1] !== output.ocrResultId)) invalid();
   }
   if (imageContext && imageContext.policyVersion !== 'product-image/v1' && (output.kind === 'image-plan'||output.kind === 'image-appearance-review') && !textModelCapability(id==='openrouter'||id==='openrouter-review'?'openrouter':'deepseek',String(o.model)).vision) invalid();
   const sourceConsistencyContext=output.kind==='source-image-consistency'?validateConsistencyContext(o.sourceConsistencyContext):undefined;

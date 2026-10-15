@@ -98,7 +98,7 @@ import { reviewListingFields, suggestListingFields } from './listing-adapters.ts
 import { listingFingerprint } from "../json-fingerprint.ts";
 import type { CandidateImageIdentity, CurrentListingCopy, ProductImageContext } from '../../shared/image-ai-contracts.ts';
 import { PRODUCT_IMAGE_POLICY_VERSION, imageCopySourceIds } from '../../shared/image-ai-contracts.ts';
-import { planProductImage, reviewCurrentListing, reviewProductImageText } from './image-adapters.ts';
+import { planProductImage, reviewCurrentListing, reviewProductImageText, reviewProductImageTextDirect } from './image-adapters.ts';
 import { imageRiskSourceSnapshot, validateCandidateImageIdentity, validateCurrentListingCopy, validateProductImageContext } from './image-validation.ts';
 import { inspectRaster } from '../image-format.ts';
 import { MAX_IMAGE_BYTES } from "./primitives.ts";
@@ -990,6 +990,25 @@ export class AiService {
         invoke: (credentials, adapterContext) => reviewProductImageText(context, plan, ocr, candidate, profile.model as DeepSeekModel, credentials as DeepSeekCredentials, activeSignal, adapterContext) };
     }, signal,undefined,undefined,owner);
   }
+  /** Current configured direct-vision route; journal preparation must use this same snapshot. */
+  directImageReviewProfile():AiProfile {
+    this.ensureOpen();const profile=taskAiContext.exit(()=>this.activePurpose('image_text_review',true,true));
+    if(profile.model!=='deepseek-flash'||profile.id!=='deepseek-review'||!profile.routing?.capability.vision||!profile.routing.capability.json)throw new AiError('INVALID_CONFIG');
+    return profile;
+  }
+  async reviewGeneratedImageDirect(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,owner?:AiDurableRequestPort):Promise<AiResult> {
+    this.ensureOpen();const context=validateProductImageContext(rawContext),candidate=validateCandidateImageIdentity(rawCandidate),plan=this.imageResult(rawPlan,context,'image-plan');
+    if(!Buffer.isBuffer(bytes)||!bytes.length||bytes.length>MAX_IMAGE_BYTES||createHash('sha256').update(bytes).digest('hex')!==candidate.sha256)throw new AiError('IMAGE_INVALID');
+    const image=Buffer.from(bytes),raster=inspectRaster(image);
+    if(!['image/png','image/jpeg'].includes(raster.mimeType)||raster.width!==candidate.width||raster.height!==candidate.height)throw new AiError('IMAGE_INVALID');
+    const profile=this.reviewProfile('text-direct',owner);
+    if(profile.model!=='deepseek-flash'||profile.id!=='deepseek-review'||!profile.routing?.capability.vision||!profile.routing.capability.json)throw new AiError('INVALID_CONFIG');
+    return this.start(profile,context.listing,{operation:'image-text-review',method:'candidate-vision/v1',context,plan,candidate},async activeSignal=>{
+      const assertFresh=async()=>{await this.assertImageFresh(context,assertContextFresh,activeSignal);this.imageResult(plan,context,'image-plan');};await assertFresh();
+      return {variantId:context.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:[...imageCopySourceIds(context),plan.id],sourceSha256:listingFingerprint(context),imageContext:context,assertFresh,
+        invoke:(credentials,adapterContext)=>reviewProductImageTextDirect(context,plan,candidate,{assetId:candidate.id,sha256:candidate.sha256,mimeType:raster.mimeType,width:candidate.width,height:candidate.height,bytes:image},profile.model as DeepSeekModel,credentials as DeepSeekCredentials,activeSignal,adapterContext)};
+    },signal,undefined,undefined,owner);
+  }
   async reviewGeneratedImageAppearance(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,snapshot?:import('../../shared/ai-purpose-contracts.ts').AiPurposeSnapshot,previousResultId?:string|null):Promise<AiResult> {
     this.ensureOpen(); const context=validateProductImageContext(rawContext),candidate=validateCandidateImageIdentity(rawCandidate),plan=this.imageResult(rawPlan,context,'image-plan');
     const routing=validateAppearancePurposeSnapshot(snapshot??this.activePurpose('appearance_review',true,true).routing);
@@ -1057,9 +1076,10 @@ export class AiService {
   private unknownInvocation(call:AiCall):AiError {
     const error=new AiError('INTERRUPTED');error.callId=call.id;error.certainty='SENT_UNKNOWN';error.message=call.requestScope?'原业务步骤的请求尚未得到可采用结果；请按原调用核对或恢复，未发送新请求':'旧请求缺原业务身份（任务/草稿/SKU/卖家站点关联未完整保存），不能据当前资料补造或重发；请按原调用核对';return error;
   }
-  private reviewProfile(id:'aliyun-ocr'|'aliyun-image-risk'|'text',owner:AiDurableRequestPort|undefined):AiProfile {
+  private reviewProfile(id:'aliyun-ocr'|'aliyun-image-risk'|'text'|'text-direct',owner:AiDurableRequestPort|undefined):AiProfile {
     const call=owner?this.getCall(uuid(owner.fileId)):undefined;
-    if(call&&call.requestScope&&(id==='text'?call.requestScope.operation==='image-text-review':call.providerId===id))return this.originalProfile(call);
+    if(call&&call.requestScope&&(id.startsWith('text')?call.requestScope.operation==='image-text-review':call.providerId===id))return this.originalProfile(call);
+    if(id==='text-direct')return this.directImageReviewProfile();
     return id==='text'?this.activePurpose('image_text_review',false,true):this.assertProfile(id);
   }
   get reviewRequestJournalVersion():2 {this.ensureOpen();return 2;}

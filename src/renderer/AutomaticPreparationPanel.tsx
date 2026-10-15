@@ -162,6 +162,6 @@ export function AutomaticPreparationPanel({ workBatchId,taskIds,archived,product
       {notice && <p className="workflow-notice" role="status">{notice}</p>}
       {error && <p className="workflow-notice" role="alert">{error}</p>}
     </section>
-    <AutomaticTaskPanel taskIds={taskIds} products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
+    <AutomaticTaskPanel workBatchId={workBatchId} taskIds={taskIds} products={taskProducts} startedTask={startedTask} busy={busy} onManual={onManual} onShipping={onShipping} />
   </>;
 }

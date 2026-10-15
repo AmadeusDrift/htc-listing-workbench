@@ -58,6 +58,22 @@ test('manual image UNKNOWN cannot use a new prompt, references, Key, model or wo
   await assert.rejects(f.service.generate(f.input),blocked);await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),blocked);assert.equal(f.calls.length,1);
 });
 
+test('a verified workflow new attempt can repaint a known candidate without rewriting or adopting it',async t=>{
+  const f=await fixture(t);f.enable();const draftId=randomUUID(),variantId=f.product.variants[0].id,owner={draftId,sku:'S02-BOUNDED',targetId:'s02-target',marketplaceId:'US',variantIds:[variantId],slot:1};
+  const db=openDatabase(f.directory);try{db.prepare('INSERT INTO listing_drafts(id,product_id,request_json,schema_checksum,validation_json,state,created_at,record_json) VALUES(?,?,?,?,?,?,?,?)').run(draftId,f.product.id,'{}','synthetic','{}','DRAFT',new Date().toISOString(),JSON.stringify({draft:{id:draftId,productId:f.product.id,productRevision:f.product.revision,sku:owner.sku,targetId:owner.targetId,marketplaceId:owner.marketplaceId,variantId}}));}finally{db.close();}
+  const originalId=randomUUID(),first=await f.service.generateForWorkflow(f.input,{requestId:originalId,owner});
+  const original=(f.service as any).db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(originalId).record_json,receipt=JSON.stringify(await readProviderReceipt((f.service as any).db,f.directory,originalId)),bytes=(await f.service.readCandidate(originalId)).bytes;
+  assert.equal((await f.service.generateForWorkflow(f.input,{requestId:originalId,owner})).id,first.id);assert.equal(f.calls.length,1);
+  let budgetChecks=0;const nextId=randomUUID(),second=await f.service.generateForWorkflow(f.input,{requestId:nextId,owner},undefined,()=>{budgetChecks++;});
+  assert.equal(second.id,nextId);assert.notEqual(second.id,first.id);assert.equal(f.calls.length,2);assert.equal(budgetChecks,1);
+  assert.equal((f.service as any).db.prepare('SELECT record_json FROM ai_image_requests WHERE id=?').get(originalId).record_json,original);assert.equal(JSON.stringify(await readProviderReceipt((f.service as any).db,f.directory,originalId)),receipt);assert.deepEqual((await f.service.readCandidate(originalId)).bytes,bytes);
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID(),owner},undefined,()=>{throw new AiError('QUOTA_EXCEEDED');}),code('QUOTA_EXCEEDED'));assert.equal(f.calls.length,2);
+});
+
+test('manual known candidate input reuses the original without another POST',async t=>{
+ const f=await fixture(t);f.enable();const first=await f.service.generate(f.input),again=await f.service.generate(f.input);assert.equal(again.id,first.id);assert.equal(f.calls.length,1);
+});
+
 test('manual late raw image restores the original candidate without a new Key or paid request',async t=>{
   let start!:()=>void,release!:(value:Response)=>void;const started=new Promise<void>(resolve=>{start=resolve;}),held=new Promise<Response>(resolve=>{release=resolve;});
   const f=await fixture(t,{fetch:async()=>{start();return held;}});f.enable();const controller=new AbortController(),pending=f.service.generate(f.input,controller.signal),rejected=assert.rejects(pending,code('CANCELLED'));await started;controller.abort();await rejected;
@@ -77,6 +93,7 @@ test('late raw image cannot be adopted for a different prompt, references or con
   const f=await fixture(t,{fetch:async()=>{start();return held;}});f.enable();const controller=new AbortController(),pending=f.service.generate(f.input,controller.signal),rejected=assert.rejects(pending,code('CANCELLED'));await started;controller.abort();await rejected;
   release(Response.json({id:'gen_s02_raw_identity',data:[{b64_json:png.toString('base64')}],usage:{cost:.08}}));while(f.service.busy)await new Promise(resolve=>setTimeout(resolve,5));
   const db=openDatabase(f.directory);let requestId:string;try{requestId=String(db.prepare('SELECT id FROM ai_image_requests').get()!.id);}finally{db.close();}
+  await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:randomUUID()}),(e:any)=>e.code==='INTERRUPTED'&&e.requestId===requestId);
   await assert.rejects(f.service.generate({...f.input,prompt:'Different intended scene'}),(e:any)=>e.code==='SOURCE_CHANGED'&&e.requestId===requestId);
   await assert.rejects(f.service.generate({...f.input,referenceAssetIds:[f.product.assets[0].id]}),code('SOURCE_CHANGED'));
   f.service.saveConnection({model:'openai/gpt-image-2.5-flare',enabled:true,apiKey:'synthetic-rotated-key'});await assert.rejects(f.service.generate(f.input),code('SOURCE_CHANGED'));

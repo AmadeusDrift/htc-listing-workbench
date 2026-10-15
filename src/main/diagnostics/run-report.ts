@@ -162,6 +162,7 @@ export class RunReportReader {
       let e; try { e = readErrorEvidence(JSON.parse(row.detail_json)); } catch { continue; }
       if (!e || q.sku !== undefined && e.sku !== q.sku && !(e.itemKey && keys.has(e.itemKey)) && !(e.draftId && drafts.has(e.draftId))) continue;
       errors.push({ stage: e.stage, code: e.diagnosticReason ?? e.code, at: time(row.created_at),
+        ...(e.validationField ? { validationField:e.validationField } : {}), ...(e.validationPath ? { validationPath:e.validationPath } : {}), ...(e.networkDiagnostic ? { networkDiagnostic:e.networkDiagnostic } : {}),
         ...(e.callId ? { callId: e.callId } : {}), ...(e.requestId ? { requestId: e.requestId } : {}), ...(e.abortSource ? { abortSource: e.abortSource } : {}), ...(e.certainty ? { certainty: e.certainty } : {}),
         ...(e.draftId ? { draftId: e.draftId } : {}), ...(e.itemKey ? { itemKey: e.itemKey } : {}), ...(e.sku ? { sku: e.sku } : {}), ...(e.operationId ? { operationId: e.operationId } : {}) });
     }

@@ -28,7 +28,7 @@ export interface RunDiagnosticReport {
   calls: RunCallReport[]; events: RunEvidence[]; categoryLookups:RunCategoryLookupReport[];
   currentFailures: RunFailureSummary;
   platform: { id: string; draftId: string; stage: 'preview' | 'submit' | 'readback'; at: string | null; httpStatus: number | null; requestId: string | null }[];
-  errors: { stage: string; code: string; at: string | null; callId?: string; requestId?: string; abortSource?: AbortSource; certainty?: RequestCertainty; draftId?: string; itemKey?: string; sku?: string; operationId?: string }[];
+  errors: { stage: string; code: string; at: string | null; callId?: string; requestId?: string; abortSource?: AbortSource; certainty?: RequestCertainty; draftId?: string; itemKey?: string; sku?: string; operationId?: string; validationField?:string; validationPath?:string; networkDiagnostic?:import('./error-evidence-contracts.ts').NetworkDiagnostic }[];
   page: { total: number; returned: number; nextCursor: string | null; complete: boolean };
 }
 export interface RunReportContext { appVersion?: string; sourceCommit?: string; sourceDigest?: string; buildDigest?: string }

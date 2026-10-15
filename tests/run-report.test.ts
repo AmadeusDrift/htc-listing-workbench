@@ -52,11 +52,15 @@ test('current error summary uses saved selected-task rows without rechecking or 
   f.db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify({ id:f.taskId, revision:8, items }), f.taskId);
   f.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(unrelatedTask, JSON.stringify({ id:unrelatedTask, items:[row] }));
   const before = f.db.prepare('SELECT total_changes() n').get()!.n;
+  f.db.prepare('INSERT INTO audit_events VALUES(?,?,?,?,?,?)').run(randomUUID(), f.product.id, 'operation.failed', 'synthetic diagnostic', JSON.stringify({version:1,taskId:f.taskId,stage:'fields',code:'NETWORK_ERROR',validationField:'color',validationPath:'$.output.candidates',networkDiagnostic:{cause:'CONNECTION_RESET',stage:'body',httpStatus:200,receivedBytes:32}}),at);
+  const changesAfterFixture = f.db.prepare('SELECT total_changes() n').get()!.n;
   const reader = new implementation!.RunReportReader(f.db), report = reader.query({ taskId:f.taskId });
   assert.equal(report.currentFailures.affectedProducts, 2); assert.equal(report.currentFailures.failedSalesItems, 3);
   assert.equal(report.currentFailures.groups[0].productCount, 2);
   assert.equal(reader.export({ taskId:f.taskId, sku:row.sku }).currentFailures.affectedProducts, 1);
-  assert.equal(f.db.prepare('SELECT total_changes() n').get()!.n, before);
+  assert.deepEqual(report.errors[0].networkDiagnostic,{cause:'CONNECTION_RESET',stage:'body',httpStatus:200,receivedBytes:32});
+  assert.equal(report.errors[0].validationField,'color'); assert.equal(report.errors[0].validationPath,'$.output.candidates');
+  assert.equal(f.db.prepare('SELECT total_changes() n').get()!.n, changesAfterFixture); assert.equal(changesAfterFixture,Number(before)+1);
 });
 test('pagination counts the whole scope, binds filters and rejects changed snapshots', async t => {
   const f = await fixture(t, 121);

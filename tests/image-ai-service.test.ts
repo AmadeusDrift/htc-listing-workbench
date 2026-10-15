@@ -2108,6 +2108,7 @@ test('403 image continuation cannot increase exhausted original three-call plann
 
 test('direct candidate vision sends real bytes without OCR and persists explicit provenance', async t => {
   const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{});
+  assert.equal(f.ai.taskBatchPlan().coverage.some(item=>item.purposeId==='aliyun_ocr'),false);
   f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_text_review')!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
   assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
   const result=await (f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{});

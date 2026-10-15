@@ -16,7 +16,7 @@ test('source previews validate image identity, coalesce requests and do not modi
   const receipt = { productId: product.id, mode: 'live', snapshot: { images: [{ id: 'image-1', role: 'main', url: 'https://images.example.com/a.png' }] } } as MiaoshouReceipt;
   persistSourceImageFixture(directory,receipt);
   let requests = 0;
-  const service = new MiaoshouImageService(directory, store, () => receipt, bytes => bytes, { download: async () => { requests++; return png; }, getSourceUpdate: () => ({ images: [{ id: 'image-new', url: 'https://images.example.com/new.png', role: 'main' }] }) as never });
+  const service = new MiaoshouImageService(directory, store, () => receipt, async bytes => {await Promise.resolve();return bytes;}, { download: async () => { requests++; return png; }, getSourceUpdate: () => ({ images: [{ id: 'image-new', url: 'https://images.example.com/new.png', role: 'main' }] }) as never });
   t.after(async () => { await service.close(); store.close(); await rm(directory, { recursive: true, force: true }); });
   assert.equal(typeof service.preview, 'function');
   await assert.rejects(service.preview({ productId: product.id, imageId: 'invented' }));

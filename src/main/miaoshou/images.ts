@@ -9,7 +9,7 @@ import type { MiaoshouDownloadResult, MiaoshouProduct, MiaoshouReceipt } from '.
 import { UserFacingError } from '../../shared/errors.ts';
 import { parseMutation, record } from '../../shared/validation.ts';
 import { importImageFiles } from '../assets.ts';
-import type { PreviewDecoder } from '../assets.ts';
+import type { AsyncPreviewDecoder } from '../assets.ts';
 import type { WorkspaceStore } from '../store.ts';
 import { isPublicIp } from '../hosting/public-probe.ts';
 import { publicError } from '../security.ts';
@@ -154,9 +154,9 @@ export class MiaoshouImageService {
   private readonly directory: string;
   private readonly store: WorkspaceStore;
   private readonly getReceipt: (id: string) => MiaoshouReceipt | null;
-  private readonly decode: PreviewDecoder;
+  private readonly decode: AsyncPreviewDecoder;
   private readonly dependencies: ImageDependencies;
-  constructor(directory: string, store: WorkspaceStore, getReceipt: (id: string) => MiaoshouReceipt | null, decode: PreviewDecoder, dependencies: ImageDependencies = {}) {
+  constructor(directory: string, store: WorkspaceStore, getReceipt: (id: string) => MiaoshouReceipt | null, decode: AsyncPreviewDecoder, dependencies: ImageDependencies = {}) {
     this.directory = directory; this.store = store; this.getReceipt = getReceipt; this.decode = decode; this.dependencies = dependencies;
     this.downloader = dependencies.download ?? createSourceImageDownloader();
   }
@@ -180,7 +180,8 @@ export class MiaoshouImageService {
         const bytes = receipt.mode === 'demo' ? this.dependencies.demoImage?.(image.id) : await this.downloader(image.url, this.controller.signal, { remainingBytes: 20 * 1024 * 1024 });
         aborted(this.controller.signal);
         if (!bytes || bytes.length > 20 * 1024 * 1024) throw new UserFacingError('来源图片无法预览');
-        inspectRaster(bytes); const preview = this.decode(bytes);
+        inspectRaster(bytes); const preview = await this.decode(bytes);
+        aborted(this.controller.signal);
         if (!preview.length || preview.length > 4 * 1024 * 1024) throw new UserFacingError('来源图片预览过大');
         const result = `data:image/png;base64,${preview.toString('base64')}`;
         while (this.previewCache.size >= 48) this.previewCache.delete(this.previewCache.keys().next().value!);

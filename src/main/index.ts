@@ -159,7 +159,7 @@ async function start() {
   collection = new CollectionHistory(db);
   miaoshou = new MiaoshouService(dataRoot, db, safeStorage);
   const miaoshouService = miaoshou;
-  miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreview, {
+  miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreviewInBackground, {
     demoImage: miaoshouDemoImage, getSourceUpdate: id => miaoshouService.getSourceUpdate(id),
     download: createSourceImageDownloader({ nativeFetch: (url, init) => {guardWire({kind:'source'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }),
   });

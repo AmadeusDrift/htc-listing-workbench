@@ -36,7 +36,7 @@ import type {ImagePriceEvidence} from '../../shared/ai-spend-contracts.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,CONTROLLED_RUN_ID} from '../application/controlled-run-scope.ts';
 import {sourceStamp} from '../automatic-listing/records.ts';
 
-export interface ImageGenerationDependencies { requiredSpendScopeId?:string; beforeEffect?:(scope:Readonly<AiRequestScope>,db?:DatabaseSync)=>void; fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
+export interface ImageGenerationDependencies { requiredSpendScopeId?:string; beforeEffect?:(scope:Readonly<AiRequestScope>,db?:DatabaseSync)=>void; fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; processPreview?: (bytes: Buffer) => Promise<Buffer>; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
   const o = keys(raw, ['productId', 'productRevision', 'prompt', 'referenceAssetIds', 'size', 'quality', 'background']);
   if (!Number.isSafeInteger(o.productRevision) || Number(o.productRevision) < 1 || typeof o.prompt !== 'string' || !o.prompt.trim() || o.prompt.length > 32000 || o.prompt.includes('\0') ||
@@ -54,7 +54,7 @@ export class ImageGenerationService {
   private pendingReceipts=new Set<Promise<unknown>>();
   private sharedConnection?:{read():string|null;save(key:string):unknown;disconnect():unknown};
   private directory: string; private store: WorkspaceStore; private vault: ImageGenerationVault; private adapter: OpenRouterImageAdapter; private db:DatabaseSync;
-  private decodePreview: (bytes: Buffer) => Buffer; private timeoutMs: number; private closed = false;
+  private processPreview: (bytes: Buffer) => Buffer | Promise<Buffer>; private decodePreview: (bytes: Buffer) => Buffer; private timeoutMs: number; private closed = false;
   private running?: { controller: AbortController; promise: Promise<unknown> };
   private checked?: { fingerprint: string; result: 'accessible' | 'failed'; at: string };
   private scope?: { fingerprint: string; token: string };
@@ -68,7 +68,7 @@ export class ImageGenerationService {
     this.directory = directory; this.store = store; this.vault = new ImageGenerationVault(directory, storage);
     this.fetcher = deps.fetch ?? globalThis.fetch; this.db=openDatabase(directory);
     this.spend=new AiSpendBudget(this.db);this.controlledScopes=new ControlledRunScopes(this.db);
-    this.adapter = new OpenRouterImageAdapter({ fetch: deps.fetch }); this.decodePreview = deps.decodePreview;
+    this.adapter = new OpenRouterImageAdapter({ fetch: deps.fetch }); this.decodePreview = deps.decodePreview; this.processPreview = deps.processPreview ?? deps.decodePreview;
     this.timeoutMs = deps.timeoutMs ?? 660000;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 1800000) throw new AiError('INVALID_CONFIG');
   }
@@ -220,7 +220,7 @@ export class ImageGenerationService {
         const proof=prepareImageSpendReceiptProof(saved.record,saved.capture),settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,id,saved.record.id,proof));if(settled.state==='COST_ANOMALY')throw Object.assign(new SpendBudgetError('SPEND_COST_ANOMALY'),{requestId:id,certainty:proof.certainty});}}
       const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
       const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
-      let result:ReturnType<typeof decodeOpenRouterImage>;try{result=decodeOpenRouterImage(receipt.body);}catch(error){const verified=readImageReceiptSync(this.db,this.directory,intent);if(error instanceof AiError&&error.code==='OUTPUT_INVALID'&&verified&&listingFingerprint(verified.capture)===listingFingerprint(receipt))error.certainty??='RECEIVED_INVALID';throw error;}const preview=this.decodePreview(result.bytes);
+      let result:ReturnType<typeof decodeOpenRouterImage>;try{result=decodeOpenRouterImage(receipt.body);}catch(error){const verified=readImageReceiptSync(this.db,this.directory,intent);if(error instanceof AiError&&error.code==='OUTPUT_INVALID'&&verified&&listingFingerprint(verified.capture)===listingFingerprint(receipt))error.certainty??='RECEIVED_INVALID';throw error;}const preview=await this.processPreview(result.bytes);this.ensureOpen();
       const candidate:GeneratedImageCandidate={id:intent.id,provider:intent.provider,model:intent.model,productId:intent.productId,productRevision:intent.productRevision,createdAt:intent.createdAt,mode:intent.mode,sourceAssets:intent.sourceAssets,...(intent.editSource?{editSource:intent.editSource}:{}),requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
       delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
     }
@@ -336,14 +336,16 @@ export class ImageGenerationService {
         const pending=saveProviderReceipt(this.db,this.directory,requestId,receipt,undefined);this.pendingReceipts.add(pending);try{const saved=await pending,proof=prepareImageSpendReceiptProof(saved,receipt),settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,requestId,saved.id,proof));if(settled.state==='COST_ANOMALY')throw Object.assign(new SpendBudgetError('SPEND_COST_ANOMALY'),{requestId,certainty:proof.certainty});}finally{this.pendingReceipts.delete(pending);}
       }});
       throwIfAborted(signal);
-      // The provider may have been processing while local files changed.
-      stage='revalidate';
-      for (const asset of assets) await readManagedImage(this.directory, asset, signal);
-      throwIfAborted(signal); this.assertProduct(input, assets); this.assertConfig(config);
       let preview: Buffer;
       stage='preview';
-      try { preview = this.decodePreview(result.bytes); const shape = inspectRaster(preview); if (shape.mimeType !== 'image/png' || preview.length > 4 * 1024 * 1024) throw new Error(); }
+      try { preview = await this.processPreview(result.bytes); const shape = inspectRaster(preview); if (shape.mimeType !== 'image/png' || preview.length > 4 * 1024 * 1024) throw new Error(); }
       catch(error) { record(error);throw invalidImageOutput('preview'); }
+      // The provider and local image process both yield: validate once after both,
+      // immediately before committing the candidate with the original scope.
+      stage='revalidate';throwIfAborted(signal);this.ensureOpen();
+      for(const asset of assets)await readManagedImage(this.directory,asset,signal);
+      if(assertWorkflowFresh)await abortable(Promise.resolve().then(assertWorkflowFresh),signal);
+      throwIfAborted(signal);this.assertProduct(input,assets);this.assertConfig(config);
       const candidate: GeneratedImageCandidate = { id: requestId, provider: config.provider, model: config.model, mode: assets.length||editSource ? 'edit' : 'generate',
         productId: input.productId, productRevision: input.productRevision, createdAt: new Date().toISOString(), requestId: result.requestId,
         sourceAssets: assets.map(asset => ({ id: asset.id, sha256: asset.sha256 })), reviewState: 'unreviewed', mimeType: 'image/png',

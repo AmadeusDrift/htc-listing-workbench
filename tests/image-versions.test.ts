@@ -94,3 +94,13 @@ test('backup refuses damaged version files and orphaned selections without creat
   await assert.rejects(createWorkspaceBackup(f.root, file, 'image versions fixture passphrase'), /来源关联/);
   await assert.rejects(readFile(file), { code: 'ENOENT' });
 });
+
+test('background artifact decode is awaited and rechecks source before materializing files',async t=>{
+  let enter!:()=>void,release!:(value:any)=>void;
+  const entered=new Promise<void>(resolve=>{enter=resolve;});
+  const f=await fixture(t,{decode:async()=>{enter();return new Promise(resolve=>{release=resolve;});}});
+  const pending=f.service.save(f.input);await entered;assert.equal(f.service.list(f.product.id).length,0);
+  await writeFile(join(f.root,f.asset.originalPath),Buffer.from('changed while background decoding'));
+  release({width:256,height:256,transparentPixels:30000,subjectPixels:35536,preview:f.output});
+  await assert.rejects(pending);assert.equal(f.service.list(f.product.id).length,0);assert.equal(f.downloads(),1);
+});

@@ -20,7 +20,7 @@ function fixture(){
 async function review(f:ReturnType<typeof fixture>,verdict:AppearanceReviewOutput['verdict']='PASS',aspect='count',reason='Representative single bag; no complete-pack quantity claim.'){
  let request:any;
  const output={verdict,checks:[{aspect,expected:'Selected blue bag, 50 per sale pack',observed:'One representative blue bag',reason,referenceAssetIds:[f.ref]}]};
- const result=await reviewProductAppearance(f.context,f.plan,f.candidate,f.images,undefined,'openai/gpt-6-luna',{apiKey:'offline-appearance-only'},new AbortController().signal,{gateway:'openrouter',effectiveEffort:'medium',now:()=>new Date(),nonce:randomUUID,maxResponseBytes:100000,fetch:async(_url,options)=>{request=JSON.parse(String(options?.body));return chat(output);}});
+ const result=await reviewProductAppearance(f.context,f.plan,f.candidate,f.images,undefined,'openai/gpt-6-luna',{apiKey:'offline-appearance-only'},new AbortController().signal,{gateway:'openrouter',effectiveEffort:'medium',now:()=>new Date(),nonce:randomUUID,maxResponseBytes:100000,fetch:async(_url,options)=>{request=JSON.parse(String(options?.body));return chat(output);}},{policyVersion:'appearance-review/v2'});
  return {request,result};
 }
 

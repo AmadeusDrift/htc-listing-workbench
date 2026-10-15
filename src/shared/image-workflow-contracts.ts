@@ -60,7 +60,7 @@ export interface ImageWorkflowRun {
   unitAdoptionReview?:UnitAdoptionImageReview;
   /** Dependency transition only: original OCR call, journal certainty and usage hold remain untouched. */
   retiredOcrDependencies?:{callId:string;at:string}[];
-  pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text';slot:number;certainty:'SENT_UNKNOWN'};
+  pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text'|'appearance';slot:number;certainty:'SENT_UNKNOWN'};
   reviewRequests?:ImageReviewRequest[];
   retryAllowance?:ImageRetryAllowance;
   /** Absent means historical, not retroactively reviewed. */

@@ -664,7 +664,7 @@ export class AmazonService {
   /** salesPlans is supplied only by the main-process automatic coordinator, never by IPC input. */
   async prepareDrafts(input: unknown, salesPlans?: readonly SalesListingPlan[]): Promise<PrepareAmazonDraftsResult> {
     this.ensureOpen(); const { items, listingProgram: program = 'standard', ...selected } = preparationInput(input,!!salesPlans); const target = this.active(selected.targetId);
-    for(const item of items){const source=this.getProduct(item.productId),variant=source.variants.find(v=>v.id===item.variantId),plan=salesPlans?.find(p=>p.recipe.components.some(c=>c.variantId===item.variantId));this.effect('prepareDrafts','platform-write',target,undefined,'preflight',{productId:source.id,sku:plan?.sku??variant?.sku,variantIds:plan?.recipe.components.map(c=>c.variantId)??[item.variantId],recipeKey:plan?.recipe.key??null,parentage:plan?.parentage??selected.parentageLevel});}
+    if(this.beforeEffect)for(const item of items){const source=this.getProduct(item.productId),variant=source.variants.find(v=>v.id===item.variantId),plan=salesPlans?.find(p=>p.recipe.components.some(c=>c.variantId===item.variantId));this.effect('prepareDrafts','platform-write',target,undefined,'preflight',{productId:source.id,sku:plan?.sku??variant?.sku,variantIds:plan?.recipe.components.map(c=>c.variantId)??[item.variantId],recipeKey:plan?.recipe.key??null,parentage:plan?.parentage??selected.parentageLevel});}
     if(salesPlans && salesPlans.length!==items.length) throw new UserFacingError('销售组合数量与草稿不一致');
     const plans=salesPlans?.map(raw=>{
       const plan=validateSalesPlan(raw);

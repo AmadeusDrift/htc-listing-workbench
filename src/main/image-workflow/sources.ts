@@ -8,7 +8,7 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { AiError, throwIfAborted } from '../ai/errors.ts';
 import { integer, keys, uuid, uuidList } from "../ai/primitives.ts";
 import { listingFingerprint } from "../json-fingerprint.ts";
-import { workflowRuns } from "./records.ts";
+import { derivedAssetIdsForProduct } from './derived-assets.ts';
 import { selectImageReferences } from "../assets/reference-selection.ts";
 import { SourceImageIdentityError, readSourceImageReceipt, allowSourceUnbound, sourceImageReceipt, sourceImageMappings } from '../source-images.ts';
 import type { SourceImageReceipt } from '../source-images.ts';
@@ -63,7 +63,7 @@ export async function prepareImageWorkflowSources(store: WorkspaceStore,db: Data
   try{source=resolve();}catch(error){return {product,missing:input.variantIds.map(variantId=>({variantId,code:error instanceof SourceImageIdentityError?'SOURCE_IDENTITY_CONFLICT':'SOURCE_STORAGE_INVALID',message:error instanceof SourceImageIdentityError?error.message:'来源图片记录无法校验，请修复来源记录后重试'}))};}
   const receipt=source?.receipt,allowUnbound=allowSourceUnbound(product,source);
   const mappings=source?sourceImageMappings(source):[];
-  const originalStamp=sourceStamp(product),derived=new Set(workflowRuns(db).flatMap(run=>run.slots?run.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):run.approvedAssetId?[run.approvedAssetId]:[]));
+  const originalStamp=sourceStamp(product),derived=derivedAssetIdsForProduct(db,product.id);
   const ready=(variantId:string)=>{
     try { selectImageReferences(product,variantId,derived,(assetId,id)=>Boolean(db.prepare('SELECT 1 FROM variant_assets WHERE asset_id=? AND variant_id=? AND confirmed=1').get(assetId,id)),allowUnbound&&!mappings.find(row=>row.localVariantId===variantId)?.images.length);return true; }
     catch(error) { if(error instanceof UserFacingError)return false;throw error; }

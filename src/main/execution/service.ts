@@ -16,6 +16,7 @@ import { fingerprint, stepNames, validateExecutionTask } from './records.ts';
 import { hostedAttributes, imageFields } from './images.ts';
 import { TaskWriteNotSentError } from '../amazon/task-errors.ts';
 import { approvedWorkflowAsset, approvedWorkflowAssets, workflowRuns } from '../image-workflow/records.ts';
+import { derivedAssetIdsForProduct } from '../image-workflow/derived-assets.ts';
 import { hasSevenApprovedImages } from '../../shared/image-workflow-contracts.ts';
 import type { ProductDetail } from '../../shared/contracts.ts';
 import { validateAttributes } from '../amazon/schema.ts';
@@ -90,7 +91,7 @@ export class ExecutionService {
     if(workflow&&draft.schema.parentageLevel!=='PARENT'&&!submitted(draft)&&!hasSevenApprovedImages(workflow))throw new UserFacingError('每个销售 SKU 必须完成 7 张图片审核，请继续自动准备');
     const approved = approvedWorkflowAssets(this.db, draft, product);
     if (approved) return approved.map((asset,index)=>({...asset,role:index===0?'main':'gallery'}));
-    const derived = new Set(workflowRuns(this.db).flatMap(run => run.slots?run.slots.flatMap(slot=>slot.approvedAssetId?[slot.approvedAssetId]:[]):run.approvedAssetId ? [run.approvedAssetId] : []));
+    const derived = derivedAssetIdsForProduct(this.db,product.id);
     return product.assets.filter(a => !derived.has(a.id) && a.role !== 'detail' && a.variantIds.includes(draft.variantId) && this.confirmed(a.id, draft.variantId))
       .sort((a,b) => (a.role === 'main' ? -1 : b.role === 'main' ? 1 : a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)))
       .map(a => ({id:a.id,role:a.role as 'main'|'gallery',sha256:this.store.getAssetRecord(a.id)!.sha256}));

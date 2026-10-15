@@ -17,6 +17,7 @@ export function retainAdoptedObservationEvidence(draft:AmazonDraft,context:Listi
     const call=getCall(result.callId);
     if(call?.status!=='SUCCEEDED'||!resultHasOwner(result,call)||original.draftId!==draft.id||original.productId!==context.productId||original.productRevision!==context.productRevision||original.variantId!==context.variantId||original.sku!==context.sku||original.targetId!==context.targetId||original.marketplaceId!==context.marketplaceId)continue;
     for(const change of adoption.changes){
+      if(change.field==='color')continue;
       if(owners.get(change.field)!==adoption||!adoption.fields.includes(change.field))continue;
       const candidate=result.output.candidates.find(item=>item.field===change.field);
       if(!candidate||!Object.hasOwn(candidate,'nativeValue')||listingFingerprint(candidate.nativeValue)!==listingFingerprint(change.after))continue;

@@ -10,7 +10,7 @@ import { ImageGenerationService } from '../src/main/image-generation/service.ts'
 import { DEFAULT_OPENROUTER_IMAGE_MODEL as model } from '../src/shared/image-generation-contracts.ts';
 import {AiSpendBudget} from '../src/main/ai/spend-budget.ts';
 import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
-import {ControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
+import {ControlledRunScopes,pauseControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
 import {imageSpendBound,priceEvidence} from '../src/main/ai/spend-records.ts';
 
 const png=Buffer.alloc(33);Buffer.from('89504e470d0a1a0a','hex').copy(png);png.writeUInt32BE(13,8);png.write('IHDR',12);png.writeUInt32BE(256,16);png.writeUInt32BE(256,20);
@@ -123,4 +123,9 @@ for(const limit of [null,1_000_000])test(`actual controlled cost anomaly preserv
  const original=budget.list()[0];assert.equal(original.state,'COST_ANOMALY');assert.equal(original.actualUsdMicros,80_000);assert.equal(original.receiptIds.length,1);assert.equal(budget.summary('controlled-live-lifetime').anomaly,true);
  const body=f.bodies[0],hash=(s:string)=>createHash('sha256').update(s).digest('hex'),{transaction}=await import('../src/main/application/transaction.ts');assert.throws(()=>transaction(f.db,()=>budget.reserveInTransaction(f.db,{id:randomUUID(),businessKey:hash('next-controlled'),requestSha256:hash(body),model,purpose:'image_generation',scopeId:c.scope.id},body,original.bound)),(e:any)=>e.diagnosticReason==='SPEND_COST_ANOMALY');
  const next=f.store.createProduct(),ordinary=()=>f.service.generate({...f.input,productId:next.id,productRevision:next.revision});if(limit===null)await ordinary();else await assert.rejects(ordinary(),(e:any)=>e.diagnosticReason==='SPEND_COST_ANOMALY');assert.equal(f.posts,limit===null?2:1);assert.equal(budget.list().length,limit===null?2:1);assert.deepEqual(budget.list().find(r=>r.id===original.id),original);assert.equal(budget.summary('image-generation-daily').anomaly,true);
+});
+
+test('actual image quote cannot dispatch when the same-revision controlled authority is revoked during pricing',async t=>{
+ let revoke=()=>{};const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],null,{onPriceRead:()=>revoke()}),c=controlledImage(f,null);revoke=()=>pauseControlledRunScopes(f.db);
+ await assert.rejects(c.run(()=>f.service.generateForWorkflow(f.input,{requestId:randomUUID(),owner:c.owner})),(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');assert.equal(f.posts,0);assert.equal(new AiSpendBudget(f.db).list().length,0);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,0);assert.equal(f.db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks").get()!.revision,1);
 });

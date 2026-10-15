@@ -3,15 +3,15 @@ import {existsSync,readFileSync,linkSync,unlinkSync} from 'node:fs';
 import {join,dirname} from 'node:path';
 import type {DatabaseSync} from 'node:sqlite';
 import type {ProductTypeOption} from '../../shared/amazon-contracts.ts';
-import type {CategoryExpansionOperation,CategoryExpansionSnapshot} from '../../shared/category-operation-contracts.ts';
+import type {CategoryExpansionOperation,CategoryExpansionSnapshot,CategoryExpansionCaptureProof,CategoryExpansionTargetScope} from '../../shared/category-operation-contracts.ts';
 import {RestorePathGuard,writeRestoreFile} from '../restore-paths.ts';
-import {readCategoryOperation} from './category-operations.ts';
+import {readCategoryOperation,retainCategoryExpansionCapture} from './category-operations.ts';
 import {parseCategoryOperation} from './category-operation-records.ts';
 import {listingFingerprint} from '../json-fingerprint.ts';
 import {AiError} from './errors.ts';
 import {uuid,date,boundedText} from './primitives.ts';
 
-export interface CategoryLookupTarget {targetId:string;sellerId:string;marketplaceId:string;region:'na'|'eu'|'fe';locale:string;mode:'live'|'demo'}
+export type CategoryLookupTarget=CategoryExpansionTargetScope;
 export interface CategoryLookupCapture {requestId:string;targetScope:CategoryLookupTarget;targetGeneration:number;query:string;status:number;remoteRequestId:string|null;receivedAt:string;bytes:Buffer}
 interface LookupRecord extends Omit<CategoryLookupCapture,'bytes'> {version:1;operationId:string;inputVersion:string;requestSha256:string;receiptSha256:string;byteSize:number;base64:string}
 const folder='ai-receipts/category-expansions',maxBytes=2*1024*1024,hash=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex');
@@ -37,7 +37,11 @@ function read(db:DatabaseSync,directory:string,productId:string,requestId:string
  const expansion=claim(db,productId,requestId),path=join(directory,categoryLookupPath(requestId));if(!existsSync(path))return null;
  const guard=new RestorePathGuard(directory),before=guard.assertFile(path);if(before.size>4*1024*1024)invalid(requestId);const fileBytes=readFileSync(path),after=guard.assertFile(path);
  if(before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||fileBytes.length!==before.size)invalid(requestId);
- try{return {...parseRecord(db,fileBytes,expansion),fileBytes,path};}catch{invalid(requestId);}
+ const proof=expansion.captureProof;if(!proof||fileBytes.length!==proof.fileByteSize||hash(fileBytes)!==proof.fileSha256)invalid(requestId);
+ try{const parsed=parseRecord(db,fileBytes,expansion);if(metadataIdentity(parsed.record)!==metadataIdentity(proof)||hash(parsed.body)!==proof.receiptSha256)invalid(requestId);return {...parsed,fileBytes,path};}catch{invalid(requestId);}
+}
+function metadataIdentity(value:LookupRecord|CategoryExpansionCaptureProof):string {
+ return listingFingerprint({version:value.version,operationId:value.operationId,inputVersion:value.inputVersion,requestSha256:value.requestSha256,requestId:value.requestId,targetScope:categoryLookupTarget(value.targetScope),targetGeneration:value.targetGeneration,query:value.query,status:value.status,remoteRequestId:value.remoteRequestId,receivedAt:value.receivedAt,receiptSha256:value.receiptSha256,byteSize:value.byteSize});
 }
 function writeOriginal(directory:string,path:string,bytes:Buffer):void {
  const guard=new RestorePathGuard(directory);guard.assertDirectory(dirname(path),true);const temporary=join(dirname(path),`.lookup-${randomUUID()}.tmp`);
@@ -45,10 +49,15 @@ function writeOriginal(directory:string,path:string,bytes:Buffer):void {
 }
 /** The one M07 owner captures complete original bytes before decoding or business linking. */
 export function captureCategoryLookup(db:DatabaseSync,directory:string,productId:string,capture:CategoryLookupCapture):void {
+ if(db.isTransaction)invalid(capture.requestId);
  const expansion=claim(db,productId,capture.requestId);if(!Buffer.isBuffer(capture.bytes)||capture.bytes.length>maxBytes)invalid(capture.requestId);
  const record:LookupRecord={version:1,operationId:expansion.operationId,inputVersion:expansion.inputVersion,requestSha256:expansion.requestSha256,requestId:capture.requestId,targetScope:categoryLookupTarget(capture.targetScope),targetGeneration:capture.targetGeneration,query:capture.query,status:capture.status,remoteRequestId:capture.remoteRequestId,receivedAt:capture.receivedAt,receiptSha256:hash(capture.bytes),byteSize:capture.bytes.length,base64:capture.bytes.toString('base64')};
- const bytes=Buffer.from(JSON.stringify(record));parseRecord(db,bytes,expansion);const previous=read(db,directory,productId,capture.requestId);
- if(previous){const {receivedAt:_a,...a}=previous.record,{receivedAt:_b,...b}=record;if(listingFingerprint(a)!==listingFingerprint(b))invalid(capture.requestId);return;}
+ const bytes=Buffer.from(JSON.stringify(record));parseRecord(db,bytes,expansion);
+ const {base64:_base64,...metadata}=record,proof:CategoryExpansionCaptureProof={...metadata,fileSha256:hash(bytes),fileByteSize:bytes.length};
+ // Commit an independent immutable tuple before creating the file. A crash on
+ // either side leaves the original used permit, never permission to resend.
+ retainCategoryExpansionCapture(db,directory,productId,proof);const previous=read(db,directory,productId,capture.requestId);
+ if(previous){if(!previous.fileBytes.equals(bytes))invalid(capture.requestId);return;}
  try{writeOriginal(directory,join(directory,categoryLookupPath(capture.requestId)),bytes);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;const existing=read(db,directory,productId,capture.requestId);if(!existing||!existing.fileBytes.equals(bytes))invalid(capture.requestId);}
 }
 function productTypes(db:DatabaseSync,record:LookupRecord,bytes:Buffer):ProductTypeOption[]{
@@ -61,7 +70,7 @@ function productTypes(db:DatabaseSync,record:LookupRecord,bytes:Buffer):ProductT
  if(new Set(types.map(type=>type.name)).size!==types.length)fail('RECEIVED_INVALID');return types;
 }
 export function readCategoryLookup(db:DatabaseSync,directory:string,productId:string,requestId:string,targetScope:CategoryLookupTarget){
- const saved=read(db,directory,productId,requestId);if(!saved)return null;if(listingFingerprint(saved.record.targetScope)!==listingFingerprint(categoryLookupTarget(targetScope)))invalid(requestId);
+ const saved=read(db,directory,productId,requestId);if(!saved){const expansion=claim(db,productId,requestId);if(expansion.captureProof||expansion.snapshot)invalid(requestId);return null;}if(listingFingerprint(saved.record.targetScope)!==listingFingerprint(categoryLookupTarget(targetScope)))invalid(requestId);
  return {requestId,candidates:productTypes(db,saved.record,saved.body),receiptSha256:saved.record.receiptSha256,receivedAt:saved.record.receivedAt};
 }
 /** Every production adoption and backup verifies the raw proof; a digest alone is not proof. */

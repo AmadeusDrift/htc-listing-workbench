@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
-import {readFile} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,unlink} from 'node:fs/promises';
 import type {DatabaseSync} from 'node:sqlite';
 import {fixture,storage} from './fixtures/ai-control.ts';
 import {slowHttp} from './fixtures/stabilization/slow-http.ts';
@@ -63,4 +63,45 @@ test('actual scope refusal before LWA leaves the expansion permit unused',async 
 });
 test('actual scope revocation while LWA is awaiting refuses GET before consuming its permit',async t=>{
  const s=await setup(t);try{s.revokeAfterLwa();await assert.rejects(s.run());assert.equal(s.counts().get,0);assert.equal(s.counts().lwa,1);assert.equal(readCategoryOperation(s.db,s.input.productId).expansion!.permittedAt,null);}finally{await s.close();}
+});
+for(const mutation of ['body-and-selfhash','whole-metadata'] as const)test(`strong immutable original Amazon capture proof rejects gap ${mutation} before another AI call`,async t=>{
+ const s=await setup(t);try{
+  s.db.exec("CREATE TEMP TRIGGER fail_s04_gap_link BEFORE UPDATE ON ai_category_operations WHEN json_extract(NEW.record_json,'$.expansion.snapshot') IS NOT NULL BEGIN SELECT RAISE(FAIL,'synthetic original snapshot link failed'); END");
+  await assert.rejects(s.run(),/synthetic original snapshot link/);s.db.exec('DROP TRIGGER fail_s04_gap_link');
+  const operation=readCategoryOperation(s.db,s.input.productId),calls=s.ai.listCalls(),usage=s.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),rawCalls=await Promise.all(calls.map(call=>s.ai.readProviderReceipt(call.id)));
+  assert.equal(operation.expansion!.snapshot,null);assert.equal(s.counts().selected,0);
+  const path=join(s.f.directory,'ai-receipts/category-expansions',operation.expansion!.requestId+'.json'),original=await readFile(path),record=JSON.parse(original.toString());
+  if(mutation==='body-and-selfhash'){const forged=Buffer.from('{"productTypes":[{"name":"FORGED_TYPE","displayName":"Forged type"}]}');record.base64=forged.toString('base64');record.byteSize=forged.length;record.receiptSha256=createHash('sha256').update(forged).digest('hex');}
+  else {record.targetGeneration++;record.remoteRequestId='forged-remote-id';record.receivedAt=new Date(Date.parse(record.receivedAt)+1000).toISOString();}
+  await writeFile(path,JSON.stringify(record));let result:unknown,error:any;try{result=await s.run();}catch(cause){error=cause;}
+  const directory=join('artifacts/stabilization/s04-gap-proof');await mkdir(directory,{recursive:true});await writeFile(join(directory,`${process.pid}-${mutation}.json`),JSON.stringify({scope:'actual AmazonService/Transport to M07 owner and classifier; snapshot association gap',requestId:operation.expansion!.requestId,originalBodySha256:JSON.parse(original.toString()).receiptSha256,mutatedBodySha256:record.receiptSha256,originalFileSha256:createHash('sha256').update(original).digest('hex'),mutatedFileSha256:createHash('sha256').update(await readFile(path)).digest('hex'),counts:s.counts(),returnedProductType:(result as {productType?:string}|undefined)?.productType??null,error:error?{code:error.code,certainty:error.certainty,requestId:error.requestId}:null},null,2));
+  assert.ok(error&&error.certainty==='SENT_UNKNOWN'&&error.requestId===operation.expansion!.requestId,'gap tamper must remain the original request UNKNOWN before another AI call');
+  assert.deepEqual(s.counts(),{get:1,lwa:1,keywords:1,none:1,selected:0});assert.deepEqual(readCategoryOperation(s.db,s.input.productId),operation);assert.deepEqual(s.ai.listCalls(),calls);assert.deepEqual(s.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.deepEqual(await Promise.all(calls.map(call=>s.ai.readProviderReceipt(call.id))),rawCalls);
+ }finally{await s.close();}
+});
+for(const restored of [false,true])test(`actual proof-first file-write gap ${restored?'survives an older encrypted restore':'accepts only the original late capture'} without another GET`,async t=>{
+ const s=await setup(t);try{
+  const file=join(s.f.directory,'before-proof-file.htcbackup'),password='s04 synthetic proof file backup';if(restored)await createWorkspaceBackup(s.f.directory,file,password);
+  await mkdir(join(s.f.directory,'ai-receipts'),{recursive:true});const blocker=join(s.f.directory,'ai-receipts/category-expansions');await writeFile(blocker,'synthetic file blocks receipt directory');
+  await assert.rejects(s.run(),(e:any)=>e.certainty==='SENT_UNKNOWN');const operation=readCategoryOperation(s.db,s.input.productId),proof=operation.expansion!.captureProof!;assert.ok(proof);assert.equal(operation.expansion!.snapshot,null);await unlink(blocker);
+  if(restored)await s.reopen({file,password});
+  await assert.rejects(s.run(),(e:any)=>e.certainty==='SENT_UNKNOWN'&&e.requestId===proof.requestId);assert.deepEqual(readCategoryOperation(s.db,s.input.productId),operation);assert.deepEqual(s.counts(),{get:1,lwa:1,keywords:1,none:1,selected:0});
+  if(!restored){await s.ai.captureCategoryCandidateExpansionReceipt(s.input.productId,{requestId:proof.requestId,targetScope:proof.targetScope,targetGeneration:proof.targetGeneration,query:proof.query,status:proof.status,remoteRequestId:proof.remoteRequestId,receivedAt:proof.receivedAt,bytes:Buffer.from(s.raw)});assert.equal((await s.run()).productType,novel.name);assert.deepEqual(s.counts(),{get:1,lwa:1,keywords:1,none:1,selected:1});}
+ }finally{await s.close();}
+});
+test('encrypted older restore rejects a gap raw and selfhash rewrite without changing the current original evidence',async t=>{
+ const s=await setup(t);try{
+  const file=join(s.f.directory,'before-tampered-capture.htcbackup'),password='s04 synthetic tampered capture backup';await createWorkspaceBackup(s.f.directory,file,password);
+  s.db.exec("CREATE TEMP TRIGGER fail_s04_backup_gap BEFORE UPDATE ON ai_category_operations WHEN json_extract(NEW.record_json,'$.expansion.snapshot') IS NOT NULL BEGIN SELECT RAISE(FAIL,'synthetic backup gap'); END");await assert.rejects(s.run(),/synthetic backup gap/);s.db.exec('DROP TRIGGER fail_s04_backup_gap');
+  const operation=readCategoryOperation(s.db,s.input.productId),calls=s.ai.listCalls(),usage=s.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),path=join(s.f.directory,'ai-receipts/category-expansions',operation.expansion!.requestId+'.json'),record=JSON.parse((await readFile(path)).toString());
+  const forged=Buffer.from('{"productTypes":[{"name":"FORGED_TYPE","displayName":"Forged type"}]}');record.base64=forged.toString('base64');record.byteSize=forged.length;record.receiptSha256=createHash('sha256').update(forged).digest('hex');await writeFile(path,JSON.stringify(record));
+  await assert.rejects(prepareWorkspaceRestore(s.f.directory,file,password));assert.deepEqual(readCategoryOperation(s.db,s.input.productId),operation);assert.deepEqual(s.ai.listCalls(),calls);assert.deepEqual(s.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.deepEqual(s.counts(),{get:1,lwa:1,keywords:1,none:1,selected:0});
+ }finally{await s.close();}
+});
+test('a completed empty snapshot cannot hide a missing original capture file',async t=>{
+ const s=await setup(t,'empty');try{
+  await assert.rejects(s.run(),/人工/);const operation=readCategoryOperation(s.db,s.input.productId);assert.deepEqual(operation.expansion!.snapshot!.candidates,[]);
+  await unlink(join(s.f.directory,'ai-receipts/category-expansions',operation.expansion!.requestId+'.json'));
+  await assert.rejects(s.run(),(e:any)=>e.certainty==='SENT_UNKNOWN'&&e.requestId===operation.expansion!.requestId);assert.deepEqual(s.counts(),{get:1,lwa:1,keywords:1,none:1,selected:0});
+ }finally{await s.close();}
 });

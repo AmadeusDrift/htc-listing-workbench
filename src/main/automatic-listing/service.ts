@@ -510,19 +510,33 @@ export class AutomaticListingService {
     this.ensureOpen();const input=record(raw,'待上架范围',['productIds','targetId']);
     if(!Array.isArray(input.productIds)||input.productIds.length>1000)throw new UserFacingError('最多读取 1000 个来源商品');
     const ids=input.productIds.map(identifier);if(new Set(ids).size!==ids.length)throw new UserFacingError('商品范围不能重复');
-    const targetId=text(input.targetId,'店铺',100,true),target=this.deps.amazon.executionTargetScope(targetId),rules=this.deps.rules();
+    const targetId=text(input.targetId,'店铺',100,true),target=this.deps.amazon.executionTargetScope(targetId),rules=this.deps.rules(),idSet=new Set(ids);
     const relevantTasks=()=>[...this.tasks.values()].filter(t=>t.mode===target.target.mode&&t.sellerId===target.target.sellerId&&t.marketplaceId===target.target.marketplaceId&&t.items.some(row=>ids.includes(row.productId)));
     const revisions=()=>relevantTasks().map(t=>[t.id,t.revision]);
     const evidenceState=()=>{
       const draftIds=[...new Set(relevantTasks().flatMap(t=>t.items.filter(row=>ids.includes(row.productId)&&row.draftId).map(row=>row.draftId!)))];
 
-      return {fieldOperations:ids.flatMap(id=>this.db.prepare("SELECT id,record_json FROM listing_completion_operations WHERE json_extract(record_json,'$.safetyIdentity.productId')=?").all(id)),risk:this.deps.images.getRiskSettings?.()??null,drafts:draftIds.map(id=>{try{return {id,draft:this.deps.amazon.getDraft(id),workflow:this.deps.images.getProgress(id),fieldOperations:new CompletionJournal(this.db).list(id)};}catch{return {id,unavailable:true};}}),
+      // Scan historical operations once for this scope, retaining the original
+      // product/row order used by the before/after evidence fingerprint.
+      const operations=this.db.prepare("SELECT id,record_json,json_extract(record_json,'$.safetyIdentity.productId') product_id FROM listing_completion_operations WHERE json_extract(record_json,'$.safetyIdentity.productId') IN (SELECT value FROM json_each(?)) ORDER BY rowid").all(JSON.stringify(ids));
+      const byProduct=new Map<string,{id:unknown;record_json:unknown}[]>();
+      for(const row of operations){const key=String(row.product_id),rows=byProduct.get(key)??[];rows.push({id:row.id,record_json:row.record_json});byProduct.set(key,rows);}
+      return {fieldOperations:ids.flatMap(id=>byProduct.get(id)??[]),risk:this.deps.images.getRiskSettings?.()??null,drafts:draftIds.map(id=>{try{return {id,draft:this.deps.amazon.getDraft(id),workflow:this.deps.images.getProgress(id),fieldOperations:new CompletionJournal(this.db).list(id)};}catch{return {id,unavailable:true};}}),
         execution:this.deps.execution.list().flatMap(child=>child.items.filter(item=>draftIds.includes(item.draftId)).map(item=>({id:child.id,status:child.status,item})))};
     };
     const taskRevisions=fingerprint(revisions()),evidenceStamp=fingerprint(evidenceState()),receipts=new Map(ids.map(id=>[id,this.deps.sourceReceipt?.(id)??null]));
     const snapshot=this.deps.store.getProductSnapshot?.bind(this.deps.store);
     if(!snapshot)throw new UserFacingError('只读来源快照服务不可用，未执行历史修复');
     const snapshots=ids.map(id=>snapshot(id)),products:AutomaticListingQueue['products']=[];
+    const historyIndex=()=>{
+      const index=new Map<string,{task:AutomaticListingTask;item:AutomaticListingItem}[]>();
+      for(const task of this.tasks.values())if(task.mode===target.target.mode&&task.sellerId===target.target.sellerId&&task.marketplaceId===target.target.marketplaceId)for(const item of task.items)if(idSet.has(item.productId)){const rows=index.get(item.productId)??[];rows.push({task,item});index.set(item.productId,rows);}
+      return index;
+    };
+    let historiesByProduct=historyIndex();
+    const categoryCache=new Map<string,string|null>(),displayCache=new Map<AutomaticListingItem,string|null>(),guardCache=new Map<AutomaticListingItem,string|null>();
+    const display=(h:{task:AutomaticListingTask;item:AutomaticListingItem})=>{if(!displayCache.has(h.item))displayCache.set(h.item,this.displayUnknownCode(h.item,h.task,categoryCache));return displayCache.get(h.item)!;};
+    const guard=(h:{task:AutomaticListingTask;item:AutomaticListingItem})=>{if(!guardCache.has(h.item))guardCache.set(h.item,this.unknownCode(h.item,h.task,categoryCache));return guardCache.get(h.item)!;};
     for(const product of snapshots){
       let recipes:{key:string;specification:string;stamp:string;legacyVariantId:string|null;value?:SalesListingPlan['recipe']}[],planningError:string|null=null;
       try{recipes=this.deps.planSales?selectSalesRecipes(product,this.deps.previewSales?.(product.id)??previewSalesRecipes(product,receipts.get(product.id)??null,rules),rules,receipts.get(product.id)??null).map(recipe=>({key:recipe.key,specification:recipe.specification,stamp:fingerprint(validateSalesRecipe(recipe)),value:recipe,legacyVariantId:recipe.components.length===1?recipe.components[0].variantId:null}))
@@ -530,12 +544,11 @@ export class AutomaticListingService {
       catch(error){planningError=errorMessage(error);recipes=[];}
       const rows:AutomaticQueueRow[]=[];
       for(const recipe of recipes){
-        const histories=[...this.tasks.values()].filter(t=>t.mode===target.target.mode&&t.sellerId===target.target.sellerId&&t.marketplaceId===target.target.marketplaceId)
-          .flatMap(task=>task.items.filter(item=>item.productId===product.id&&((item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)||item.outcome?.pricingReport&&recipe.value&&fingerprint((item.salesPlan?.recipe.components.map(c=>c.variantId)??[item.variantId]).sort())===fingerprint(recipe.value.components.map(c=>c.variantId).sort()))).map(item=>({task,item}))).reverse();
+        const histories=(historiesByProduct.get(product.id)??[]).filter(({item})=>((item.salesPlan?recipeKey(item)===recipe.key:item.variantId===recipe.legacyVariantId)||item.outcome?.pricingReport&&recipe.value&&fingerprint((item.salesPlan?.recipe.components.map(c=>c.variantId)??[item.variantId]).sort())===fingerprint(recipe.value.components.map(c=>c.variantId).sort()))).reverse();
         const latest=histories[0],view:AutomaticQueueRow={key:product.id+':'+recipe.key,productId:product.id,recipeKey:recipe.key,specification:recipe.specification,sku:latest?.item.sku??null,kind:'PENDING',eligible:true,message:'',reconsideration:null,taskId:latest?.task.id??null};
         try{
-          const unsafe=histories.find(h=>this.displayUnknownCode(h.item,h.task))??histories.find(h=>this.unknownCode(h.item,h.task));
-          if(unsafe){const unknown=this.displayUnknownCode(unsafe.item,unsafe.task);view.kind=unknown?'UNKNOWN':'SYSTEM_REPAIR';view.reasonCode=unknown??'SOURCE_CONSISTENCY_INVALID_OUTPUT';view.eligible=false;view.taskId=unsafe.task.id;view.message=unknown?(unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务'):presentRejection(view.reasonCode);}
+          const unsafe=histories.find(display)??histories.find(guard);
+          if(unsafe){const unknown=display(unsafe);view.kind=unknown?'UNKNOWN':'SYSTEM_REPAIR';view.reasonCode=unknown??'SOURCE_CONSISTENCY_INVALID_OUTPUT';view.eligible=false;view.taskId=unsafe.task.id;view.message=unknown?(unsafe.item.error||'已有付费请求或提交记录需要核对，请继续核对原任务'):presentRejection(view.reasonCode);}
           else if(histories.some(h=>h.item.status==='DONE'||h.item.draftId&&submitted(this.deps.amazon.getDraft(h.item.draftId)))){view.kind=histories.some(h=>h.item.status==='DONE')?'COMPLETED':'SUBMITTED';view.eligible=false;view.message=view.kind==='COMPLETED'?'流程已完成':'已提交，等待平台回读';}
           else if(latest){
             const {task,item}=latest,outcome=item.outcome;
@@ -558,7 +571,7 @@ export class AutomaticListingService {
                 const draft=this.deps.amazon.getDraft(item.draftId);
                 if(draft.revision!==outcome.draftRevision||!this.matching(task,item,draft))stale='DRAFT_CHANGED';
                 else if(outcome.pricingReport&&!pricingEvidenceCurrent(draft,rules))stale='PRICING_CHANGED';
-                else if(outcome.image){const proof=await this.deps.images.getRuleFilterEvidence?.(draft.id);if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='IMAGE_EVIDENCE_CHANGED';}
+                else if(outcome.image){const proof=await Promise.resolve(this.deps.images.getRuleFilterEvidence?.(draft.id)).finally(()=>{categoryCache.clear();displayCache.clear();guardCache.clear();historiesByProduct=historyIndex();});if(!proof||fingerprint(proof)!==fingerprint(outcome.image))stale='IMAGE_EVIDENCE_CHANGED';}
               }
               if(stale){view.noticeCode=stale;view.reconsideration=({RULES_CHANGED:'上架规则已变化，重新评估',SOURCE_CHANGED:'来源资料已变化，重新评估',RECIPE_CHANGED:'销售配方已变化，重新评估',DRAFT_CHANGED:'草稿资料已变化，重新评估',PRICING_CHANGED:'定价输入已变化，重新评估',IMAGE_EVIDENCE_CHANGED:'图片证据或风险设置已变化，重新评估'} as const)[stale];view.message=view.reconsideration+'；原淘汰记录保留，旧任务不会自动重启';}
               else {view.kind='RULE_FILTERED';view.eligible=false;view.reasonCode=outcome.code;view.message=outcome.pricingReport?outcome.message:presentRejection(view.reasonCode);}

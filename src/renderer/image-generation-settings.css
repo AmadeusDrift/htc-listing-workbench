@@ -23,6 +23,11 @@
 .image-generation-settings .image-generation-form .workflow-warning { margin: 0; }
 .image-generation-other { margin-top: 26px; }
 .image-generation-other > h4 { margin: 0; color: var(--ink); font-size: 14px; font-weight: 600; }
+.image-spend-settings { padding-block: 20px; border-block-start: 1px solid var(--line); }
+.image-spend-settings .field { max-width: 420px; }
+.image-spend-amounts { display: flex; flex-wrap: wrap; gap: 16px 32px; margin: 18px 0 10px; }
+.image-spend-amounts dt { color: var(--muted); font-size: 12px; }
+.image-spend-amounts dd { margin: 4px 0 0; font-variant-numeric: tabular-nums; color: var(--ink); }
 .image-generation-settings .image-capability-list > div { gap: 16px; padding: 16px 0; }
 .image-generation-settings .image-capability-list > div > div { min-width: 0; }
 .image-generation-settings .image-capability-list p { overflow-wrap: anywhere; }

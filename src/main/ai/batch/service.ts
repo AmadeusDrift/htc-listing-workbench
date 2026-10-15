@@ -1,3 +1,5 @@
+import {PaidEffectBudget,type PaidEffectDescription} from '../paid-effect-budget.ts';
+import {CONTROLLED_RUN_ID} from '../../application/controlled-run-scope.ts';
 import { randomUUID } from 'node:crypto';
 import { types } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -14,6 +16,7 @@ import { validatePublicUrl } from '../../hosting/public-probe.ts';
 import { readBatch,readItem,writeBatch,writeItem,validateOperation,terminal,REMOTE_STATUSES,remoteId,invalid } from './records.ts';
 
 interface BatchDependencies {
+  requiredSpendScopeId?:typeof CONTROLLED_RUN_ID;
   fetch?:typeof fetch; now?:()=>Date;
   credential:()=>{apiKey:string;scope:string};
   /** M09 must recheck pin, hash and retention; a caller-supplied URL alone is insufficient. */
@@ -28,8 +31,11 @@ function operation(item:BatchItem):BatchOperation{const {version,id,batchId,cust
 
 /** Durable batch identity, transport and receipts. Domain adoption belongs to the caller. */
 export class BatchService {
-  private db:DatabaseSync;private directory:string;private deps:BatchDependencies;private fetcher:typeof fetch;
-  constructor(db:DatabaseSync,directory:string,deps:BatchDependencies){this.db=db;this.directory=directory;this.deps=deps;this.fetcher=deps.fetch??globalThis.fetch;}
+  private db:DatabaseSync;private directory:string;private deps:BatchDependencies;private fetcher:typeof fetch;private paidEffects:PaidEffectBudget;
+  constructor(db:DatabaseSync,directory:string,deps:BatchDependencies){this.db=db;this.directory=directory;this.deps=deps;this.fetcher=deps.fetch??globalThis.fetch;this.paidEffects=new PaidEffectBudget(db,{fetch:this.fetcher,now:deps.now});}
+  private feeGate(operations:readonly BatchOperation[],service:PaidEffectDescription['service'],db?:DatabaseSync):void{
+    for(const op of operations)this.paidEffects.assertAvailable(service,{kind:service==='openrouter-batch-create'?'ai':'ai-batch-read',taskId:op.taskId,productId:op.owner.productId},this.deps.requiredSpendScopeId,db);
+  }
   private now(){return (this.deps.now?.()??new Date()).toISOString();}
   get(id:string){return readBatch(this.db,id);}
   items(id:string){return this.get(id).itemIds.map(key=>readItem(this.db,key));}
@@ -75,6 +81,7 @@ export class BatchService {
     return transaction(this.db,()=>plan.groups.map(group=>{
       const fingerprint=listingFingerprint(group),existing=this.db.prepare("SELECT id FROM ai_batches WHERE json_extract(record_json,'$.fingerprint')=?").get(fingerprint);
       if(existing)return this.get(String(existing.id));
+      this.feeGate(group,'openrouter-batch-create',this.db);
       const id=randomUUID(),now=this.now(),first=group[0],ids=group.map(itemId);if(new Set(ids).size!==ids.length)invalid('Batch包含重复操作身份');
       for(const key of ids)if(this.db.prepare('SELECT 1 FROM ai_batch_items WHERE id=?').get(key))invalid('该操作已有Batch身份；输入变化也不能重发在途或未知请求');
       const batch:BatchRecord={version:1,id,taskId:first.taskId,phase:first.phase,fingerprint,credentialScope:first.credentialScope,purpose:first.purpose,model:first.purpose.model,schemaFingerprint:first.schemaFingerprint,itemIds:ids,state:'prepared',remoteBatchId:null,remoteStatus:null,locallyStopped:false,createdAt:now,submittedAt:null,updatedAt:now,receiptIds:[],reportedCostUsd:null,error:null};
@@ -88,6 +95,7 @@ export class BatchService {
       if(saved?.status>=200&&saved.status<300&&remoteId(saved.body?.id)){await this.collect(id,saved.body);return this.get(id);}
       return invalid('原批次提交结果未知；只能核对原批次，未重新POST');
     }
+    this.feeGate(this.items(id),'openrouter-batch-create');
     if(batch.locallyStopped)invalid('Batch已本地暂停，未发送');if(this.deps.reserve&&types.isAsyncFunction(this.deps.reserve))invalid('Batch预算命令必须同步');const credential=this.credentials(batch),items=this.items(id);
     for(const item of items){const reason=this.eligible(operation(item));if(reason)invalid(reason);}
     const body={endpoint:'/v1/chat/completions',model:batch.model,provider:{allow_fallbacks:true,require_parameters:true},completion_window:'24h',requests:items.map(item=>({custom_id:item.customId,body:item.body}))};
@@ -95,6 +103,7 @@ export class BatchService {
     try{
       const raw=await postOpenRouter('/api/v1/batches',body,credential,signal,{fetch:this.fetcher,now:()=>new Date(this.now()),nonce:()=>'',maxResponseBytes:160*1024*1024,
         beforeSend:()=>transaction(this.db,()=>{
+          this.feeGate(this.items(id),'openrouter-batch-create',this.db);
           batch=this.get(id);if(batch.state!=='prepared'||batch.locallyStopped)invalid('原批次已有发送意图或已暂停');this.credentials(batch);
           for(const item of this.items(id)){
             new AiUsageLedger(this.db,()=>new Date(this.now())).reserveBatch({id:item.aiCallId??item.id,...item.owner,status:'RUNNING',errorCode:null,requestId:null,model:item.purpose.model,purposeSnapshot:item.purpose,startedAt:this.now(),finishedAt:null,usage:emptyUsage()},JSON.stringify(item.body),item.references);
@@ -121,7 +130,9 @@ export class BatchService {
   }
   async reconcile(id:string,signal=AbortSignal.timeout(60_000)):Promise<BatchRecord>{
     const batch=this.get(id);if(!batch.remoteBatchId)return this.submitUnknownRecovery(id);
+    this.feeGate(this.items(id),'openrouter-batch-status');
     const credential=this.credentials(batch);throwIfAborted(signal);
+    this.feeGate(this.items(id),'openrouter-batch-status');
     const response=await this.fetcher('https://openrouter.ai/api/v1/batches/'+batch.remoteBatchId,{method:'GET',headers:{authorization:'Bearer '+credential.apiKey,accept:'application/json'},redirect:'error',signal});
     const raw=await readBounded(response,160*1024*1024,AbortSignal.timeout(30_000),undefined,async(status,text)=>{
       // Keys are ASCII and cannot legitimately appear in a result. Escaped echoes are also rejected.

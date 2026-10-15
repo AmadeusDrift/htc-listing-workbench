@@ -1,7 +1,10 @@
+import {PaidEffectBudget,type PaidEffectDescription} from './paid-effect-budget.ts';
+import {CONTROLLED_RUN_ID,type ControlledEffect} from '../application/controlled-run-scope.ts';
 import {recoverCategoryPhase,categoryCalls,claimCategoryRepair} from './category-recovery.ts';
 import {categoryOperationId,categoryCandidateSnapshot} from './category-context.ts';
 import {readCategoryOperation,reserveCategoryExpansion,permitCategoryExpansionRequest,storeCategoryExpansionSnapshot,assertCategoryExpansionReady} from './category-operations.ts';
 import type {CategoryExpansionOperation,CategoryExpansionSnapshot} from '../../shared/category-operation-contracts.ts';
+import {captureCategoryLookup,readCategoryLookup,assertCategoryLookupSnapshot,type CategoryLookupCapture,type CategoryLookupTarget} from './category-expansion-receipts.ts';
 import { assertConfirmedForbiddenRetry,claimConfirmedForbiddenRetry } from './confirmed-forbidden-retry.ts';
 import { fieldGroupCallId,fieldGroupRetryScope,assertFieldGroupHistory } from './field-purpose-groups.ts';
 import { appendAuditEvent } from '../storage/audit.ts';
@@ -119,6 +122,9 @@ import { observeSourceColor as requestSourceColor } from './source-color-adapter
 import { selectImageReferences } from "../assets/reference-selection.ts";
 
 export interface AiDependencies {
+  /** Main-only frozen original call IDs; never a renderer product-wide grant. */
+  canManageRecovery?:(callId:string)=>boolean;
+  requiredSpendScopeId?:typeof CONTROLLED_RUN_ID;
   /** M09 main-only pin adapter. No renderer URLs or inline images enter Batch directly. */
   batchReferences?:{
     prepare(body:Record<string,unknown>,owner:{taskId:string;operationId:string;productId:string;productRevision:number},signal?:AbortSignal):Promise<{body:Record<string,unknown>;references:BatchReference[]}>;
@@ -177,12 +183,14 @@ export class AiService {
   private records: RecordReader;
   private context: AdapterContext;
   private requests: AiRequestControl;
-  private usage: AiUsageLedger;
+  private usage: AiUsageLedger;private spendEffects:PaidEffectBudget;private requiredSpendScopeId:typeof CONTROLLED_RUN_ID|undefined;
   private closed = false;
   private closing?: Promise<void>;
   private imageGenerationCapability?: () => AiCapabilityInfo;
   private thinkingTimeoutMs: number;
   constructor(directory: string, store: WorkspaceStore, hosting: HostingService, storage: SecretStorage, dependencies: AiDependencies = {}) {
+    if(dependencies.canManageRecovery&&types.isAsyncFunction(dependencies.canManageRecovery)||dependencies.requiredSpendScopeId!==undefined&&dependencies.requiredSpendScopeId!==CONTROLLED_RUN_ID)throw new AiError('INVALID_INPUT');
+    this.requiredSpendScopeId=dependencies.requiredSpendScopeId;
     this.imageGenerationCapability = dependencies.imageGenerationCapability;this.batchReferences=dependencies.batchReferences;
     this.thinkingTimeoutMs=integer(dependencies.timeoutMs??300000,1,600000);
     this.directory = directory; this.store = store; this.hosting = hosting; this.vault = new AiVault(directory, storage);
@@ -190,9 +198,9 @@ export class AiService {
     this.context = { fetch: dependencies.fetch ?? globalThis.fetch, now: dependencies.now ?? (() => new Date()), nonce: dependencies.nonce ?? randomUUID, maxResponseBytes: integer(dependencies.maxResponseBytes ?? 2 * 1024 * 1024, 1024, 16 * 1024 * 1024) };
     this.db = openDatabase(directory);
     this.completionJournal = new CompletionJournal(this.db,this.directory);
-    this.batchTasks=new TaskBatchRuntime(this.db,directory,{validateReference:reference=>this.batchReferences?.validate(reference)===true,fetch:(...args)=>this.context.fetch(...args),credential:()=>({apiKey:this.openRouterApiKey()??'',scope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation})})});
+    this.batchTasks=new TaskBatchRuntime(this.db,directory,{requiredSpendScopeId:this.requiredSpendScopeId,validateReference:reference=>this.batchReferences?.validate(reference)===true,fetch:(...args)=>this.context.fetch(...args),credential:()=>({apiKey:this.openRouterApiKey()??'',scope:requestKey({provider:'openrouter',generation:this.getProfile('openrouter').generation})})});
     this.records = new RecordReader(this.db);
-    this.usage = new AiUsageLedger(this.db, this.context.now);
+    this.usage = new AiUsageLedger(this.db, this.context.now);this.spendEffects=new PaidEffectBudget(this.db,{fetch:this.context.fetch,now:this.context.now});
     try {
       const addImageRisk=!this.db.prepare('SELECT id FROM ai_profiles WHERE id=?').get('aliyun-image-risk');
       for (const id of AI_PROVIDER_IDS) {
@@ -207,8 +215,8 @@ export class AiService {
           this.commitProfiles([{profile:{...profile,configured:true,enabled:source.enabled,generation:1},credentials}]);
         }
       }
-      for (const call of this.records.list('ai_calls', { status: 'RUNNING' }, validateAiCall)) this.saveCall({ ...call, status: 'FAILED', errorCode: 'INTERRUPTED', finishedAt: this.finishedAt(call.startedAt) });
-      this.usage.recoverPending();
+      for (const call of this.records.list('ai_calls', { status: 'RUNNING' }, validateAiCall)) if(!dependencies.canManageRecovery||dependencies.canManageRecovery(call.id)===true)this.saveCall({ ...call, status: 'FAILED', errorCode: 'INTERRUPTED', finishedAt: this.finishedAt(call.startedAt) });
+      this.usage.recoverPending(dependencies.canManageRecovery);
     } catch (error) { this.db.close(); throw safeError(error); }
   }
   private ensureOpen(): void { if (this.closed) throw new AiError('SERVICE_CLOSED'); }
@@ -677,7 +685,12 @@ export class AiService {
     if(!existing||existing.inputVersion!==source.inputVersion)throw new AiError('SOURCE_CHANGED');return permitCategoryExpansionRequest(this.db,this.directory,product.id,input.requestId,this.timestamp()).expansion!;
   }
   retainCategoryCandidateExpansion(productId:string,snapshot:CategoryExpansionSnapshot):CategoryExpansionSnapshot {
-    this.ensureOpen();return storeCategoryExpansionSnapshot(this.db,this.directory,uuid(productId),snapshot).expansion!.snapshot!;
+    this.ensureOpen();assertCategoryLookupSnapshot(this.db,this.directory,uuid(productId),snapshot);return storeCategoryExpansionSnapshot(this.db,this.directory,uuid(productId),snapshot).expansion!.snapshot!;
+  }
+  async captureCategoryCandidateExpansionReceipt(productId:string,capture:CategoryLookupCapture):Promise<void> {this.ensureOpen();captureCategoryLookup(this.db,this.directory,uuid(productId),capture);}
+  readCategoryCandidateExpansionReceipt(input:{productId:string;requestId:string;targetScope:CategoryLookupTarget}) {
+    this.ensureOpen();const operation=readCategoryOperation(this.db,uuid(input.productId)).expansion;if(!operation||operation.requestId!==uuid(input.requestId))throw new AiError('INVALID_CONFIG');
+    if(!operation.permittedAt)return null;return readCategoryLookup(this.db,this.directory,input.productId,input.requestId,input.targetScope);
   }
   /** Main-only classification role; reuses the existing provider, usage ledger and real source images. */
   async decideCategory(input: { productId: string; productRevision: number; phase: CategoryDecision['phase']; candidates: ProductTypeOption[]; keywords?: string[];expansion?:0|1 }, assertContextFresh: () => void = () => {}, signal?: AbortSignal): Promise<AiResult & { output: CategoryDecision }> {
@@ -689,7 +702,7 @@ export class AiService {
     const {sourceEvidence,references,referenceIdentity,inputVersion}=this.categorySource(product),payload={phase:input.phase,candidates:input.candidates,keywords:input.keywords??[],...sourceEvidence};
     const expansion=input.expansion??0;if(expansion!==0&&expansion!==1||input.phase==='keywords'&&expansion!==0)throw new AiError('INVALID_INPUT');
     const categoryContext={version:2 as const,phase:input.phase,operationId:categoryOperationId(product.id),inputVersion,candidateSnapshotSha256:categoryCandidateSnapshot(input.candidates),expansion,requestSha256:listingFingerprint({payload,references:referenceIdentity,model:profile.model,effort:profile.routing?.effectiveEffort})};
-    if(expansion===1)assertCategoryExpansionReady(this.db,this.directory,product.id,inputVersion,categoryContext.candidateSnapshotSha256);
+    if(expansion===1){const snapshot=assertCategoryExpansionReady(this.db,this.directory,product.id,inputVersion,categoryContext.candidateSnapshotSha256);assertCategoryLookupSnapshot(this.db,this.directory,product.id,snapshot);}
     const categoryScope=taskAiContext.getStore(),categoryBatch=categoryScope?.waitingOperationId?this.batchTasks.find(categoryScope.waitingOperationId):undefined;
     const originalBatchCallId=input.phase!=='select'&&categoryBatch&&categoryBatch.owner.productId===product.id&&categoryBatch.owner.productRevision===product.revision?categoryBatch.aiCallId:undefined;
     const recovery=await recoverCategoryPhase({originalBatchCallId,db:this.db,directory:this.directory,calls:this.categoryHistory(product.id),results:this.listResults(product.id),productId:product.id,productRevision:product.revision,model:profile.model,effort:profile.routing?.effectiveEffort??'',context:categoryContext,payloadHash:listingFingerprint(payload),current:{providerId:profile.id,generation:profile.generation},payload});
@@ -1119,6 +1132,12 @@ export class AiService {
         if(!saved||openRouterFailure(saved.record.status,saved.capture.body))throw this.unknownInvocation(original);
         replay=saved;replayCall=original;Object.assign(profile,frozen);
       }
+      const spendService:PaidEffectDescription['service']=profile.id==='aliyun-ocr'?'aliyun-ocr':profile.id==='aliyun-image-risk'?'aliyun-upload-token':profile.id==='aidge-segmentation'?'aliyun-segmentation':profile.routing?.gateway==='openrouter'?(profile.routing.capability.endpoint==='decisions'?'openrouter-decisions':'openrouter-chat'):'deepseek-chat';
+      const spendScope:ControlledEffect={kind:'ai',productId:input.productId,...(scope.sku?{sku:scope.sku}:{}),...(scope.targetId?{targetId:scope.targetId}:{}),...(scope.marketplaceId?{marketplaceId:scope.marketplaceId}:{}),...(scope.variantIds?{variantIds:scope.variantIds}:{})};
+      const assertFreshSpend=(db?:DatabaseSync,service:PaidEffectDescription['service']=spendService)=>this.spendEffects.assertAvailable(service,spendScope,this.requiredSpendScopeId,db);
+      // Original local receipts and already-reserved Batch adoption are not a new
+      // fee. A fresh preparation cannot perform a paid upload before this gate.
+      if(!replay&&!originalBatch&&!this.batchTasks.pendingOperation(batchOperationId))assertFreshSpend();
       let call: AiCall | undefined=replayCall, metadata: ProviderMetadata = { requestId: null, usage: emptyUsage(), usageKnown: false }, finished = false, requestBytes = 0;
       if(replayCall)id=replayCall.id;
       let batchItem:BatchItem|undefined,reservingBatch=false,preserveStoredCall=false;let adapterContext:AdapterContext;
@@ -1154,7 +1173,7 @@ export class AiService {
           await prepared.assertFresh();const saved=this.getResult(adopted.adoption.id);if(!saved)throw new AiError('INVALID_CONFIG');return this.linkDurableResult(owner,saved);
         }
         const credentials = replay?{apiKey:'local-receipt-read-only'}:this.vault.read(profile.id, profile.generation);
-        adapterContext={ ...this.context, ...(replay?{fetch:async(url:any)=>{const expected='https://'+(replay!.record.gateway==='openrouter'?'openrouter.ai':'api.deepseek.com')+replay!.record.endpoint;if(String(url)!==expected)throw new AiError('INVALID_CONFIG');return Response.json(replay!.capture.body,{status:replay!.record.status});}}:{}), responseDeadlineAt, thinking:profile.thinking,gateway:profile.routing?.gateway,effectiveEffort:profile.routing?.effectiveEffort,purposeSnapshot:profile.routing,
+        adapterContext={ ...this.context, beforePaidEffect:replay?undefined:effect=>{assertFreshSpend(undefined,effect.service);}, ...(replay?{fetch:async(url:any)=>{const expected='https://'+(replay!.record.gateway==='openrouter'?'openrouter.ai':'api.deepseek.com')+replay!.record.endpoint;if(String(url)!==expected)throw new AiError('INVALID_CONFIG');return Response.json(replay!.capture.body,{status:replay!.record.status});}}:{}), responseDeadlineAt, thinking:profile.thinking,gateway:profile.routing?.gateway,effectiveEffort:profile.routing?.effectiveEffort,purposeSnapshot:profile.routing,
           deferOpenRouter:async(endpoint,body)=>{
             if(replay)return null;
             if(!taskScope||endpoint!=='/api/v1/chat/completions'||profile.routing?.gateway!=='openrouter')return null;
@@ -1172,7 +1191,7 @@ export class AiService {
             id=batchOperationId;batchItem=batchReplay.item;call=this.getCall(id)??undefined;if(!call)throw new AiError('INVALID_CONFIG');
             requestBytes=Buffer.byteLength(JSON.stringify(body));return {body:batchReplay.body};
           },
-          onReviewEffect:owner?(kind,event)=>{if(!replay&&owner.effect)transaction(this.db,()=>owner.effect!(this.db,kind,event,this.timestamp()));}:undefined,
+          onReviewEffect:owner?(kind,event)=>{if(!replay&&owner.effect){if(event==='permit')assertFreshSpend(undefined,kind==='token'?'aliyun-upload-token':kind==='upload'?'aliyun-oss-put':kind==='moderation'?'aliyun-image-risk':kind==='ocr'?'aliyun-ocr':spendService);transaction(this.db,()=>{if(event==='permit')assertFreshSpend(this.db,kind==='token'?'aliyun-upload-token':kind==='upload'?'aliyun-oss-put':kind==='moderation'?'aliyun-image-risk':kind==='ocr'?'aliyun-ocr':spendService);owner.effect!(this.db,kind,event,this.timestamp());});}}:undefined,
           onProviderReceipt:async receipt=>{
             if(replay)return;
             if(!call)throw new AiError('INVALID_CONFIG');const callId=call.id;
@@ -1182,7 +1201,7 @@ export class AiService {
           onRunEvidence: event => {if(!replay)evidence(validateTransportRunEvidence(event));},
           beforeSend: body => {
             if(replay){requestBytes=Buffer.byteLength(body);return;}
-            assertTaskAuthorized();
+            assertFreshSpend();assertTaskAuthorized();
             if(!reservingBatch&&taskScope)this.batchTasks.assertCredentialIdentity(taskScope.taskId);
             if(!reservingBatch&&(this.batchTasks.find(batchOperationId)||this.batchTasks.pendingOperation(batchOperationId)))throw new UserFacingError('原Batch身份仍受保护，不能转为普通请求重发');
             requestBytes = Buffer.byteLength(body);
@@ -1194,7 +1213,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, requestScope:scope,requestFingerprint:this.invocationFingerprint(profile,input,source), ...(prepared.categoryContext?{categoryContext:prepared.categoryContext}:{}), ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}), ...(prepared.sourceReferenceAliases?{sourceReferenceProtocol:prepared.sourceReferenceAliases.version,sourceReferenceAliases:prepared.sourceReferenceAliases}:{}) }, body, call => { assertTaskAuthorized(); const unresolved=this.pendingInvocation(scope,call.id);if(unresolved.length)throw this.unknownInvocation(unresolved[0]); if(prepared.categoryPriorSnapshot&&listingFingerprint(this.categoryHistory(input.productId).filter(c=>c.id!==call.id))!==prepared.categoryPriorSnapshot)throw new AiError('CONFIG_CHANGED'); if(prepared.categoryRepairPriors?.length)claimCategoryRepair(this.db,prepared.categoryRepairPriors,call,this.directory,prepared.categoryCandidates); if(prepared.forbiddenRetry)claimConfirmedForbiddenRetry(this.db,prepared.forbiddenRetry.prior,call,prepared.forbiddenRetry.scopeKey); freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(owner)transaction(this.db,()=>owner.reserve(this.db,call)); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); evidence({ event: 'REQUEST_RESERVED', callId: call.id, at: call.startedAt, certainty: 'NOT_SENT' }, true); });
+            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, requestScope:scope,requestFingerprint:this.invocationFingerprint(profile,input,source), ...(prepared.categoryContext?{categoryContext:prepared.categoryContext}:{}), ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}), ...(prepared.sourceReferenceAliases?{sourceReferenceProtocol:prepared.sourceReferenceAliases.version,sourceReferenceAliases:prepared.sourceReferenceAliases}:{}) }, body, call => { assertFreshSpend(this.db);assertTaskAuthorized(); const unresolved=this.pendingInvocation(scope,call.id);if(unresolved.length)throw this.unknownInvocation(unresolved[0]); if(prepared.categoryPriorSnapshot&&listingFingerprint(this.categoryHistory(input.productId).filter(c=>c.id!==call.id))!==prepared.categoryPriorSnapshot)throw new AiError('CONFIG_CHANGED'); if(prepared.categoryRepairPriors?.length)claimCategoryRepair(this.db,prepared.categoryRepairPriors,call,this.directory,prepared.categoryCandidates); if(prepared.forbiddenRetry)claimConfirmedForbiddenRetry(this.db,prepared.forbiddenRetry.prior,call,prepared.forbiddenRetry.scopeKey); freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(owner)transaction(this.db,()=>owner.reserve(this.db,call)); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); evidence({ event: 'REQUEST_RESERVED', callId: call.id, at: call.startedAt, certainty: 'NOT_SENT' }, true); });
           },
           onMetadata: value => { if (!finished && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },
@@ -1236,6 +1255,9 @@ export class AiService {
         if(error instanceof BatchWaitingError)throw error;
         const schemaReceived=isSchemaTransientError(error)&&rejectionStage==='source-freshness'&&!!call;
         const safe = safeError(error, activeSignal);
+        // A denied later effect does not undo the original moderation permit or
+        // its already received token. Keep logical UNKNOWN and its original ID.
+        if(call&&!replay&&scope.operation==='image-ip-review'&&safe.certainty==='NOT_SENT')Object.assign(safe,{certainty:'SENT_UNKNOWN' as const,notSent:false});
         evidence({ event: safe.code === 'OUTPUT_INVALID' && untrustedOutput ? 'OUTPUT_REJECTED' : 'STAGE_BLOCKED',
           errorCode: evidenceCode(safe.diagnosticReason) ? safe.diagnosticReason : safe.code,
           abortSource: safe.abortSource ?? 'NONE',

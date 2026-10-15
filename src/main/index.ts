@@ -1,3 +1,8 @@
+import {BasicFtpTransport,FtpConnectionPool} from './hosting/ftp.ts';
+import {ControlledAcceptanceSession,CONTROLLED_ACCEPTANCE_FLAG} from './application/controlled-acceptance.ts';
+import {verifyControlledCandidate} from './application/controlled-candidate.ts';
+import {preflightControlledAcceptance} from './application/controlled-startup.ts';
+import {CONTROLLED_RUN_ID,ControlledRunError,type ControlledEffect} from './application/controlled-run-scope.ts';
 import {createSystemProxyFetch, createAiNetworkDiagnostics} from './ai-network.ts';
 import {createBatchReferencePort} from './hosting/batch-references.ts';
 import { assertConsistencyView } from './source-image-consistency/proof.ts';
@@ -36,6 +41,7 @@ import { AutomaticListingService } from './automatic-listing/service.ts';
 import { ItemLabelService } from './item-labels/service.ts';
 import { ItemLabelSettings } from './item-labels/settings.ts';
 import { classifyProduct } from './catalog/classification.ts';
+import {categoryExpansionPort} from './catalog/category-expansion.ts';
 import { SkuNamingService } from './sku-naming/service.ts';
 import { planSalesListings } from './sales-plans/planning.ts';
 import { ensureFamilyParent, resolveSalesFamily } from './automatic-listing/families.ts';
@@ -56,6 +62,10 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'red-asset', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 const productionCsp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' red-asset: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
+const controlledAcceptanceMode=process.argv.includes(CONTROLLED_ACCEPTANCE_FLAG);
+let controlledAcceptance:ControlledAcceptanceSession|undefined;
+const guardExternal=(effect:ControlledEffect,transactionDb?:import('node:sqlite').DatabaseSync)=>{if(controlledAcceptanceMode){if(!controlledAcceptance)throw new ControlledRunError();try{controlledAcceptance.assertExternal(effect,transactionDb);}catch(error){if(error instanceof Error&&!(error as {certainty?:string}).certainty)Object.assign(error,{certainty:'NOT_SENT',notSent:true});throw error;}}};
+const guardWire=(effect:ControlledEffect)=>{guardExternal(effect);if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();};
 let store: WorkspaceStore | undefined;
 let amazon: AmazonService | undefined;
 let followup: FollowupService | undefined;
@@ -82,31 +92,36 @@ let miaoshouImages: MiaoshouImageService | undefined;
 let window: BrowserWindow | undefined;
 
 async function start() {
+  if(controlledAcceptanceMode)preflightControlledAcceptance(dataRoot);
+  const verifiedCandidate=controlledAcceptanceMode?await verifyControlledCandidate(app.getAppPath(),process.execPath):null;
   const recovered = await recoverInterruptedRestore(dataRoot);
   await snapshotWorkspaceDatabase(dataRoot);
   store = new WorkspaceStore(dataRoot);
   const db = store;
+  if(verifiedCandidate)controlledAcceptance=new ControlledAcceptanceSession(dataRoot,verifiedCandidate,id=>db.getProductSnapshot(id));
   if (recovered) db.recordWorkspaceEvent('workspace.restore.recovered', recovered === 'rolled-back' ? '启动时已回滚中断的备份恢复，保留原始工作区' : '启动时已完成中断的备份恢复清理');
   amazon = new AmazonService(dataRoot, id => db.getProductSnapshot(id), safeStorage, {
-    schemaFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
-    dataFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }),
+    ...(controlledAcceptanceMode?{preserveHistoricalRecords:true,beforeEffect:(effect:import('./amazon/service.ts').AmazonEffectIdentity,transactionDb?:import('node:sqlite').DatabaseSync)=>{const {kind,operation:_operation,phase:_phase,draftId:_draftId,...scope}=effect;guardExternal({...scope,kind:kind==='target'?'platform-write':kind},transactionDb);if(kind!=='target'&&['schema','platform-read','platform-write'].includes(kind)&&!['createDraft','prepareDrafts','rebindFamily'].includes(effect.operation))controlledAcceptance!.assertBillingPlanAvailable();}}:{}),
+    schemaFetch: (url, init) => {guardWire({kind:'schema'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
+    dataFetch: (url, init) => {guardWire({kind:String(url).includes('/auth/o2/token')?'lwa':init?.method&&['PUT','POST','PATCH','DELETE'].includes(init.method.toUpperCase())?'platform-write':'platform-read'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });},
   });
-  hosting = new HostingService(dataRoot, db, safeStorage, { probe: createPublicImageProbe({ nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) }) });
-  const aiFetch = createSystemProxyFetch((url, init) => net.fetch(url, init));
+  hosting = new HostingService(dataRoot, db, safeStorage, { ...(controlledAcceptanceMode?{transport:new BasicFtpTransport(new FtpConnectionPool({beforeEffect:()=>guardWire({kind:'hosting'})})),prepareUpload:async (identity:import('./hosting/service.ts').HostingEffectIdentity)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})});return controlledAcceptance!.assertBillingPlanAvailable();},beforeEffect:(identity:import('./hosting/service.ts').HostingEffectIdentity,_kind:unknown,transactionDb?:import('node:sqlite').DatabaseSync)=>{guardExternal({kind:'hosting',...(identity.productId?{productId:identity.productId,variantIds:identity.variantIds}:{})},transactionDb);controlledAcceptance!.assertBillingPlanAvailable();}}:{}), probe: createPublicImageProbe({ nativeFetch: (url, init) => {guardWire({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }) });
+  const aiFetch = createSystemProxyFetch((url, init) => {guardExternal({kind:'ai'});if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();return net.fetch(url, init);});
   const networkDiagnostics = createAiNetworkDiagnostics({fetch:aiFetch,resolveProxy:url=>session.defaultSession.resolveProxy(url)});
   imageGeneration = new ImageGenerationService(dataRoot, db, safeStorage, {
     normalizeImage: normalizeGeneratedImage,
     fetch: aiFetch, decodePreview,
-    downloadDependencies: { nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) },
+    downloadDependencies: { nativeFetch: (url, init) => {guardWire({kind:'hosting'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} },
   });
   const generationService = imageGeneration;
-  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>net.fetch(url,{...init,bypassCustomProtocolHandlers:true})})});
-  ai = new AiService(dataRoot, db, hosting, safeStorage, { fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
+  batchReferences=createBatchReferencePort({directory:dataRoot,store:db,generation:generationService,hosting,task:id=>{if(!automatic)throw new Error('Task service unavailable');return automatic.get(id);},probe:createPublicImageProbe({nativeFetch:(url,init)=>{guardWire({kind:'hosting'});return net.fetch(url,{...init,bypassCustomProtocolHandlers:true});}})});
+  const controlledRecoveryIds=controlledAcceptance?.recoveryCallIds();
+  ai = new AiService(dataRoot, db, hosting, safeStorage, { ...(controlledAcceptanceMode?{requiredSpendScopeId:CONTROLLED_RUN_ID,canManageRecovery:(id:string)=>controlledRecoveryIds?.has(id)===true}:{}), fetch:aiFetch, imageGenerationCapability: () => generationService.capability(),batchReferences });
   const routingAi=ai;
   generationService.attachOpenRouterConnection({read:()=>routingAi.openRouterApiKey(),save:apiKey=>routingAi.saveConnection({id:'openrouter',apiKey}),disconnect:()=>routingAi.disconnectConnection('openrouter')});
   images = new ImageVersionService(dataRoot, db, ai, { decode: decodeArtifact });
   content = new ReviewedContentService(dataRoot, db, ai);
-  followup = new FollowupService(dataRoot, amazon);
+  followup = new FollowupService(dataRoot, amazon,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true,runDraftScope:(id,work)=>{if(!controlledAcceptanceMode)return work();if(!automatic)throw new ControlledRunError();return automatic.runControlledDraft(id,work);}});
   catalog = new CatalogService(dataRoot, amazon);
   procurement = new ProcurementService(dataRoot, db, amazon);
   productData = new ProductDataService(dataRoot, db, amazon);
@@ -114,7 +129,7 @@ async function start() {
   execution = new ExecutionService(dataRoot, db, amazon, hosting, { scheduleFollowup: id => listingFollowup.schedule(id) });
   // Recover accepted submissions whose process ended between the write checkpoint and queue registration.
   for (const product of db.listProducts()) for (const draft of amazon.listDrafts(product.id)) {
-    if (draft.mode === 'live' && (draft.submittedAt || ['UNKNOWN','SUBMITTING'].includes(draft.state))) {
+    if ((!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(draft.id)) && draft.mode === 'live' && (draft.submittedAt || ['UNKNOWN','SUBMITTING'].includes(draft.state))) {
       try { listingFollowup.schedule(draft.id); } catch { db.recordWorkspaceEvent('listing.followup.schedule_failed', '有一条已提交记录尚未登记跟进，请核对上架结果'); }
     }
   }
@@ -123,10 +138,10 @@ async function start() {
   const miaoshouService = miaoshou;
   miaoshouImages = new MiaoshouImageService(dataRoot, db, id => miaoshouService.getReceipt(id), decodePreview, {
     demoImage: miaoshouDemoImage, getSourceUpdate: id => miaoshouService.getSourceUpdate(id),
-    download: createSourceImageDownloader({ nativeFetch: (url, init) => net.fetch(url, { ...init, bypassCustomProtocolHandlers: true }) }),
+    download: createSourceImageDownloader({ nativeFetch: (url, init) => {guardWire({kind:'source'});return net.fetch(url, { ...init, bypassCustomProtocolHandlers: true });} }),
   });
   imageWorkflow = new ImageWorkflowService(dataRoot, db, amazon, ai, imageGeneration, { sources: { getReceipt: id => miaoshouService.getReceipt(id), images: miaoshouImages } });
-  labels = new ItemLabelService(dataRoot, amazon, procurement);
+  labels = new ItemLabelService(dataRoot, amazon, procurement,{canManageDraft:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageDraft(id)===true});
   labelSettings = new ItemLabelSettings(dataRoot);
   skuNaming = new SkuNamingService(dataRoot);
   automaticRules = new ListingRuleStore(dataRoot);
@@ -134,6 +149,8 @@ async function start() {
   const workflowService = imageWorkflow, listingService = new ListingAiService(db, amazon, ai,()=>workflowService.getCopyReviewSettings().enabled), amazonService = amazon, aiService = ai, formatSettings = labelSettings, catalogService = catalog, namingService=skuNaming, executionService=execution, ruleStore=automaticRules;
   automatic = new AutomaticListingService(dataRoot, {
     store: db, amazon, hosting, images: imageWorkflow, execution, followup, procurement, labels,
+    canManageTask:id=>!controlledAcceptanceMode||controlledAcceptance?.canManageTask(id)===true,
+    ...(controlledAcceptanceMode?{admitTask:(task:import('../shared/automatic-listing-contracts.ts').AutomaticListingTask)=>{if(!controlledAcceptance)throw new ControlledRunError();controlledAcceptance.admitTask(task);}}:{}),
     batch:aiService.batchTasks,batchPlan:()=>aiService.taskBatchPlan(),
     rules: () => ruleStore.get(),
     labelFormat: () => formatSettings.get(),
@@ -154,6 +171,7 @@ async function start() {
         localCandidates: targetId => catalogService.get(targetId)?.productTypes??[],
         fallback: (targetId,keywords) => amazonService.searchProductTypes({targetId,keywords}),
         choose: (value,phase) => aiService.decideCategory({...value,phase},fresh,signal),
+        expansion: categoryExpansionPort(input,aiService,amazonService,fresh),
       });
     },
     preflight: () => {
@@ -264,6 +282,7 @@ async function start() {
     await images?.close(); images = undefined; content?.close(); content = undefined;
     await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined;
     await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined;
+    controlledAcceptance?.close();controlledAcceptance=undefined;
     amazon?.close(); amazon = undefined; store?.close(); store = undefined;
     try {
       await commitWorkspaceRestore(dataRoot, prepared);
@@ -296,7 +315,7 @@ async function start() {
   mainWindow.once('ready-to-show', () => { if (process.env.RED_E2E !== '1') mainWindow.show(); });
   await mainWindow.loadURL(expectedUrl);
   listingFollowup.start();
-  labels.resume(); automatic.start();
+  if(!controlledAcceptanceMode)labels.resume(); automatic.start();
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -318,7 +337,7 @@ else {
       await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
       try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
       finally {
-        await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
+        await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; controlledAcceptance?.close();controlledAcceptance=undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
         try { await snapshotWorkspaceDatabase(dataRoot); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }
         drained = true; setImmediate(() => app.quit());
       }

@@ -21,7 +21,8 @@ export interface HostingTransport {
   close(): Promise<void> | void;
 }
 interface Lease { key: string; client: FtpClient; busy: boolean }
-export interface FtpPoolOptions { maxConnections?: number; connectionTimeoutMs?: number; createClient?: () => FtpClient }
+export interface FtpEffect {kind:'connect'|'directory'|'cd'|'upload'|'size';profile:HostingProfile;remotePath:string|null}
+export interface FtpPoolOptions { beforeEffect?:(effect:Readonly<FtpEffect>)=>void; maxConnections?: number; connectionTimeoutMs?: number; createClient?: () => FtpClient }
 /** The single service-owned pool enforces a global cap across all five profiles. */
 export class FtpConnectionPool {
   private leases = new Set<Lease>();
@@ -29,8 +30,9 @@ export class FtpConnectionPool {
   private controllers = new Set<AbortController>();
   private closed = false;
   private max: number;
-  private createClient: () => FtpClient;
+  private createClient: () => FtpClient;private beforeEffect:FtpPoolOptions['beforeEffect'];
   constructor(options: FtpPoolOptions = {}) {
+    this.beforeEffect=options.beforeEffect;
     this.max = options.maxConnections ?? 5;
     if (!Number.isInteger(this.max) || this.max < 1 || this.max > 5) throw new HostingError('INVALID_CONFIG');
     this.createClient = options.createClient ?? (() => new Client(options.connectionTimeoutMs ?? 15000, { allowSeparateTransferHost: false }));
@@ -55,6 +57,17 @@ export class FtpConnectionPool {
       finally { this.waiters.delete(wake); }
     }
   }
+  private check(profile:HostingProfile,kind:FtpEffect['kind'],remotePath:string|null):void{
+    if(this.beforeEffect?.constructor.name==='AsyncFunction')throw new HostingError('INVALID_CONFIG');const result=this.beforeEffect?.(Object.freeze({kind,profile:Object.freeze({...profile}),remotePath})) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new HostingError('INVALID_CONFIG');
+  }
+  private guarded(profile:HostingProfile,client:FtpClient):FtpClient{return {
+    get closed(){return client.closed;},close:()=>client.close(),
+    access:options=>{this.check(profile,'connect',null);return client.access(options);},
+    ensureDir:path=>{this.check(profile,'directory',path);return client.ensureDir(path);},
+    cd:path=>{this.check(profile,'cd',path);return client.cd(path);},
+    uploadFrom:(bytes,path)=>{this.check(profile,'upload',path);return client.uploadFrom(bytes,path);},
+    size:path=>{this.check(profile,'size',path);return client.size(path);},
+  };}
   async use<T>(profile: HostingProfile, credentials: HostingCredentials, operation: (client: FtpClient) => Promise<T>, signal: AbortSignal): Promise<T> {
     throwIfAborted(signal);
     const controller = new AbortController(), cancel = () => controller.abort(signal.reason instanceof HostingError ? signal.reason : new HostingError('CANCELLED'));
@@ -65,9 +78,9 @@ export class FtpConnectionPool {
       throwIfAborted(controller.signal);
       const connection = lease.client;
       return await abortable((async () => {
-        if (acquired.fresh) await connection.access({ host: profile.host, port: profile.port, user: credentials.username, password: credentials.password, secure: profile.secure, secureOptions: { rejectUnauthorized: true } });
+        if (acquired.fresh) {this.check(profile,'connect',null);await connection.access({ host: profile.host, port: profile.port, user: credentials.username, password: credentials.password, secure: profile.secure, secureOptions: { rejectUnauthorized: true } });}
         throwIfAborted(controller.signal);
-        return operation(connection);
+        return operation(this.guarded(profile,connection));
       })(), controller.signal, () => connection.close());
     } catch (error) { if (lease) this.discard(lease); throw classifyHostingError(error); }
     finally { if (lease) lease.busy = false; signal.removeEventListener('abort', cancel); this.controllers.delete(controller); this.wake(); }

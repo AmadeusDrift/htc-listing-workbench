@@ -1,3 +1,5 @@
+import {transaction} from '../application/transaction.ts';
+import {sourceStamp} from '../automatic-listing/records.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { open, realpath } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
@@ -17,7 +19,14 @@ import { HostingError, abortable, classifyHostingError, isTransient, sleepWithSi
 import { HostingVault } from './vault.ts';
 import { MAX_IMAGE_BYTES, PROFILE_NAMES, objectKeys, parseProfileImport, parseUploadInput, profileId, uuid, validatePersistedProfile, validatePersistedUpload } from './validation.ts';
 
+export interface HostingEffectIdentity {
+ productId:string|null;assetId:string;variantIds:string[];skus:string[];sourceStamp:string|null;profile:Pick<HostingProfile,'id'|'generation'|'host'|'port'|'secure'|'remoteRoot'|'publicBaseUrl'>;uploadId:string|null;batchId:string|null;sha256:string;byteSize:number;mimeType:string;remotePath:string;publicUrl:string;mayUpload:boolean;
+}
 export interface HostingDependencies {
+  /** Main-only quote preparation, outside SQLite. The returned synchronous permit
+   * rechecks authority and reserves in the original upload intent transaction. */
+  prepareUpload?: (identity:Readonly<HostingEffectIdentity>,bytes:Buffer,signal:AbortSignal)=>Promise<(db:DatabaseSync)=>void>;
+  beforeEffect?: (identity:Readonly<HostingEffectIdentity>,kind:'intent'|'size'|'upload'|'public-get',db?:DatabaseSync)=>void;
   transport?: HostingTransport;
   probe?: PublicImageProbe;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -42,10 +51,12 @@ export class HostingService {
   private maxAttempts: number;
   private retryBaseMs: number;
   private totalTimeoutMs: number;
+  private prepareUpload:HostingDependencies['prepareUpload'];private beforeEffect:HostingDependencies['beforeEffect'];
   private operations = new Map<string, ActiveOperation>();
   private closed = false;
   private closing?: Promise<void>;
   constructor(directory: string, store: WorkspaceStore, storage: SecretStorage, dependencies: HostingDependencies = {}) {
+    this.prepareUpload=dependencies.prepareUpload;this.beforeEffect=dependencies.beforeEffect;
     this.directory = directory; this.store = store; this.vault = new HostingVault(directory, storage);
     this.transport = dependencies.transport ?? new BasicFtpTransport(); this.probe = dependencies.probe ?? createPublicImageProbe();
     this.sleep = dependencies.sleep ?? sleepWithSignal; this.now = dependencies.now ?? (() => new Date()); this.random = dependencies.random ?? Math.random;
@@ -145,6 +156,11 @@ export class HostingService {
       } finally { await handle.close(); }
     } catch (error) { if (error instanceof HostingError) throw error; throw new HostingError('LOCAL_FILE_MISSING'); }
   }
+  private checkEffect(identity:Readonly<HostingEffectIdentity>,kind:'intent'|'size'|'upload'|'public-get',db?:DatabaseSync):void{if(this.beforeEffect?.constructor.name==='AsyncFunction')throw new HostingError('INVALID_CONFIG');const result=this.beforeEffect?.(identity,kind,db) as unknown;if(result&&typeof(result as PromiseLike<unknown>).then==='function')throw new HostingError('INVALID_CONFIG');}
+  private effectIdentity(assetId:string,profile:HostingProfile,sha256:string,byteSize:number,mimeType:string,remotePath:string,publicUrl:string,uploadId:string|null,batchId:string|null,mayUpload:boolean):Readonly<HostingEffectIdentity>{
+    const asset=this.store.getAssetRecord(assetId),product=asset?this.store.getProduct(asset.productId):null,image=product?.assets.find(a=>a.id===assetId),variantIds=[...(image?.variantIds??[])].sort();
+    return Object.freeze({productId:product?.id??null,assetId,variantIds:Object.freeze(variantIds) as unknown as string[],skus:Object.freeze(variantIds.map(id=>product!.variants.find(v=>v.id===id)!.sku)) as unknown as string[],sourceStamp:product?sourceStamp(product):null,profile:Object.freeze({id:profile.id,generation:profile.generation,host:profile.host,port:profile.port,secure:profile.secure,remoteRoot:profile.remoteRoot,publicBaseUrl:profile.publicBaseUrl}),uploadId,batchId,sha256,byteSize,mimeType,remotePath,publicUrl,mayUpload});
+  }
   /** Internal M09 port for source/candidate references. It never adopts an asset for listing. */
   async uploadReferenceVersion(profileId: string, generation: number, version: import('./reference-pins.ts').ReferenceVersion, bytes: Buffer, signal = new AbortController().signal): Promise<string> {
     this.ensureOpen(); const profile = this.assertProfile(profileId, generation);
@@ -154,10 +170,13 @@ export class HostingService {
     const remotePath = `${profile.remoteRoot === '/' ? '' : profile.remoteRoot}/${relativePath}`, url = new URL(relativePath, profile.publicBaseUrl).href;
     const credentials = this.vault.read(profile.id, profile.generation);
     throwIfAborted(signal);
+    const identity=this.effectIdentity(version.assetId,profile,version.sha256,version.byteSize,version.mimeType,remotePath,url,null,null,true);
+    this.checkEffect(identity,'size');
     const size = await abortable(this.transport.size(profile, credentials, remotePath, signal), signal);
     // An existing immutable version is never overwritten, even if it is damaged.
     if (size !== null && size !== bytes.length) throw new HostingError('SIZE_MISMATCH');
-    if (size === null && await abortable(this.transport.upload(profile, credentials, remotePath, bytes, signal), signal) !== bytes.length) throw new HostingError('SIZE_MISMATCH');
+    if(size===null){this.checkEffect(identity,'upload');if(await abortable(this.transport.upload(profile,credentials,remotePath,bytes,signal),signal)!==bytes.length)throw new HostingError('SIZE_MISMATCH');}
+    this.checkEffect(identity,'public-get');
     await abortable(this.probe({url,sha256:version.sha256,byteSize:version.byteSize,mimeType:version.mimeType}, signal), signal);
     this.assertProfile(profile.id, generation); throwIfAborted(signal); return url;
   }
@@ -192,24 +211,30 @@ export class HostingService {
     if (!record) {
       const date = this.timestamp(), directory = `${date.slice(0, 10).replaceAll('-', '')}/${input.batchId}`;
       const relativePath = `${directory}/${asset.id}-${asset.sha256.slice(0, 16)}.${asset.mimeType === 'image/png' ? 'png' : 'jpg'}`;
-      record = this.saveUpload({ id: randomUUID(), assetId: asset.id, profileId: profile.id, batchId: input.batchId, generation: profile.generation, sha256: asset.sha256,
+      record = { id: randomUUID(), assetId: asset.id, profileId: profile.id, batchId: input.batchId, generation: profile.generation, sha256: asset.sha256,
         byteSize: asset.byteSize, mimeType: asset.mimeType as HostedAsset['mimeType'], remotePath: `${profile.remoteRoot === '/' ? '' : profile.remoteRoot}/${relativePath}`, publicUrl: new URL(relativePath, profile.publicBaseUrl).href,
-        status: 'PENDING', attempts: 0, history: [], errorCode: null, createdAt: date, updatedAt: date });
+        status: 'PENDING', attempts: 0, history: [], errorCode: null, createdAt: date, updatedAt: date };
     }
     // The persisted path and profile generation remain fixed for retries and restart recovery.
     for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
+      const identity=this.effectIdentity(asset.id,profile,asset.sha256,asset.byteSize,asset.mimeType,record.remotePath,record.publicUrl,record.id,record.batchId,mayUpload),permit=await this.prepareUpload?.(identity,Buffer.from(bytes),signal);
+      throwIfAborted(signal);this.assertProfile(profile.id,profile.generation);
+      if(JSON.stringify(identity)!==JSON.stringify(this.effectIdentity(asset.id,profile,asset.sha256,asset.byteSize,asset.mimeType,record.remotePath,record.publicUrl,record.id,record.batchId,mayUpload)))throw new HostingError('LOCAL_FILE_CHANGED');
       const startedAt = this.timestamp();
-      record = this.saveUpload({ ...record, status: 'UPLOADING', attempts: record.attempts + 1, errorCode: null, updatedAt: startedAt });
+      record=transaction(this.db,()=>{if(permit?.constructor.name==='AsyncFunction')throw new HostingError('INVALID_CONFIG');const permitted=permit?.(this.db) as unknown;if(permitted&&typeof(permitted as PromiseLike<unknown>).then==='function')throw new HostingError('INVALID_CONFIG');this.checkEffect(identity,'intent',this.db);return this.saveUpload({...record!,status:'UPLOADING',attempts:record!.attempts+1,errorCode:null,updatedAt:startedAt});});
       try {
         throwIfAborted(signal); this.assertProfile(profile.id, profile.generation);
+        this.checkEffect(identity,'size');
         let size = await abortable(this.transport.size(profile, credentials, record.remotePath, signal), signal);
         if (size !== bytes.length) {
           if (!mayUpload) throw new HostingError(size === null ? 'REMOTE_SIZE_UNAVAILABLE' : 'SIZE_MISMATCH');
+          this.checkEffect(identity,'upload');
           size = await abortable(this.transport.upload(profile, credentials, record.remotePath, bytes, signal), signal);
         }
         if (size !== bytes.length) throw new HostingError('SIZE_MISMATCH');
         throwIfAborted(signal); this.assertProfile(profile.id, profile.generation);
         record = this.saveUpload({ ...record, status: 'VERIFYING', updatedAt: this.timestamp() });
+        this.checkEffect(identity,'public-get');
         await abortable(this.probe({ url: record.publicUrl, sha256: record.sha256, byteSize: record.byteSize, mimeType: record.mimeType }, signal), signal);
         throwIfAborted(signal); this.assertProfile(profile.id, profile.generation);
         const current = this.eligibleAsset(asset.id);

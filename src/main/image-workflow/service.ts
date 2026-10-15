@@ -220,6 +220,7 @@ export class ImageWorkflowService {
   getAppearanceReviewSettings(){this.ensureOpen();return readAppearanceReviewSettings(this.db);}
   saveAppearanceReviewSettings(raw:unknown){this.ensureOpen();return writeAppearanceReviewSettings(this.db,raw);}
   get busy(): boolean { return this.retryPending || this.active.size > 0 || this.activeSources.size > 0; }
+  private admissionFull(draftId?:string):boolean{return this.retryPending||this.active.size+this.activeSources.size>=2||!!draftId&&this.active.has(draftId);}
   getRiskSettings(){this.ensureOpen();return readImageRiskSettings(this.db);}
   saveRiskSettings(raw:unknown){
     this.ensureOpen();if(this.busy)throw new UserFacingError('请先暂停当前自动图片流程，再切换风险拦截');
@@ -428,7 +429,7 @@ export class ImageWorkflowService {
   prepareSources(raw: unknown): Promise<AutomaticSourcesResult> {
     this.ensureOpen();const input=parseAutomaticSources(raw),scope=listingFingerprint(input),pending=this.activeSources.get(input.productId);
     if(pending?.scope===scope)return pending.promise;
-    if(this.busy)throw new UserFacingError('另一个商品正在自动准备，请等待完成');
+    if(pending||this.activeSources.size>0||this.admissionFull())throw new UserFacingError('最多同时准备两个SKU，请等待原步骤完成');
     const controller=new AbortController();
     const promise=Promise.resolve().then(()=>prepareImageWorkflowSources(this.store,this.db,this.sources,input,controller.signal)).finally(()=>this.activeSources.delete(input.productId));
     this.activeSources.set(input.productId,{scope,controller,promise});return promise;
@@ -445,8 +446,8 @@ export class ImageWorkflowService {
       if(active.operation!=='complete')throw new UserFacingError('当前商品正在复核已有图片，请等待完成');
       return active.promise;
     }
-    if (this.busy) throw new UserFacingError('另一个商品正在自动准备，请等待完成');
-    const draft = this.amazon.getDraft(draftId);this.assertReviewSafety(draft);
+    if (this.admissionFull(draftId)) throw new UserFacingError('最多同时准备两个SKU，请等待原步骤完成');
+    const draft = this.amazon.getDraft(draftId);if(this.activeSources.has(draft.productId))throw new UserFacingError('本商品来源图片正在自动准备，请等待完成');this.assertReviewSafety(draft);
     if(this.db.prepare("SELECT 1 FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE json_extract(i.value,'$.draftId')=? AND json_type(i.value,'$.unitRecheck')='object' LIMIT 1").get(draft.id))throw new UserFacingError('原SKU已绑定任务计量复核标记，请从原任务接续；未另建图片流程');
     this.assertSourceConsistency(draftId);
     if (draft.revision !== revision || draft.productRevision !== this.store.getProduct(draft.productId).revision) throw new AiError('SOURCE_CHANGED');
@@ -523,7 +524,7 @@ export class ImageWorkflowService {
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId);
     integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);uuid(input.sourceWorkflowId);
     this.assertSourceConsistency(draftId);
-    if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
+    if(this.admissionFull(draftId))throw new UserFacingError('最多同时准备两个SKU，请等待原步骤完成');
     const controller=new AbortController();
     const promise=Promise.resolve().then(async()=>{
       const reused=await this.tryReuseApproval(draftId,Number(input.draftRevision),String(input.sourceWorkflowId),controller.signal);
@@ -624,7 +625,7 @@ export class ImageWorkflowService {
   /** Main-only unit-adoption command. No renderer flag can grant partial reuse. */
   recheckUnitAdoption(raw:unknown,signal:AbortSignal,authorize:()=>boolean):Promise<CompleteAutomaticProductResult>{
     this.ensureOpen();const v=keys(raw,['taskId','itemKey','draftId','draftRevision','sourceWorkflowId']),input:UnitImageRecheckInput={taskId:uuid(v.taskId),itemKey:typeof v.itemKey==='string'?v.itemKey:'',draftId:uuid(v.draftId),draftRevision:integer(v.draftRevision,1,Number.MAX_SAFE_INTEGER),sourceWorkflowId:uuid(v.sourceWorkflowId)};
-    if(typeof authorize!=='function'||authorize()!==true)throw new UserFacingError('原任务执行授权已撤销，未继续计量图片复核');throwIfAborted(signal);if(this.busy)throw new UserFacingError('已有图片步骤正在执行，请等待原步骤');
+    if(typeof authorize!=='function'||authorize()!==true)throw new UserFacingError('原任务执行授权已撤销，未继续计量图片复核');throwIfAborted(signal);if(this.admissionFull(input.draftId))throw new UserFacingError('最多同时准备两个SKU，请等待原步骤完成');
     const draft=this.amazon.getDraft(input.draftId),{source,proof}=readUnitImageAuthority(this.db,draft,input),runs=workflowRuns(this.db,draft.id),existing=runs.find(r=>r.unitAdoptionReview?.adoptionSha256===proof.adoptionSha256);
     if(input.draftRevision!==draft.revision||draft.revision!==proof.adoptedDraftRevision&&!this.canResumeUnitRecheckDraft(input)||draft.revision===proof.adoptedDraftRevision&&imageWorkflowDraftStamp(draft)!==proof.adoptedDraftStamp)throw new UserFacingError('计量采用后的草稿不属于原受控字段检查点，未重画');
     this.assertReviewSafety(draft);assertApprovalReviewsResolved(this.db,this.directory,source,runs,this.ai.listCalls?.(),existing?.id);
@@ -639,7 +640,7 @@ export class ImageWorkflowService {
   private recheckWithFreshEvidence(raw: unknown): Promise<CompleteAutomaticProductResult> {
     this.ensureOpen();
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId),revision=integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
-    if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
+    if(this.admissionFull(draftId))throw new UserFacingError('最多同时准备两个SKU，请等待原步骤完成');
     const runs=workflowRuns(this.db,draftId),prior=runs.find(value=>value.id===uuid(input.sourceWorkflowId)),draft=this.amazon.getDraft(draftId);
     const originalRecheck=runs[0]?.recheckedFromRunId===prior?.id&&runs[0].status!=='COMPLETED'&&runs[0].draftSha256===imageWorkflowDraftStamp(draft)?runs[0]:undefined;
     if(prior)assertApprovalReviewsResolved(this.db,this.directory,prior,runs,this.ai.listCalls?.(),originalRecheck?.id);

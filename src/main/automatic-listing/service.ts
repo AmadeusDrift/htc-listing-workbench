@@ -165,6 +165,7 @@ export class AutomaticListingService {
   private controlledGrants=new Map<string,ControlledRunGrant>();
   private confirming = new Set<string>();
   private worker: Promise<void> | null = null;
+  private wakeRows?:()=>void;
   private observing: Promise<void> | null = null;
   private previewFlights = new Map<string, Promise<ReturnType<AutomaticListingService['previewAdaptation']>>>();
   private controller: AbortController | null = null;
@@ -257,6 +258,7 @@ export class AutomaticListingService {
     }
     });this.checkpoints.remember(task,savedChange);if(!partialPersistedCheck)this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
     }catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
+    this.wakeRows?.();
   }
   private saveItem(task:AutomaticListingTask,row:AutomaticListingItem,db:DatabaseSync=this.db):void{this.save(task,db,[],undefined,[row.key]);}
   listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
@@ -992,33 +994,52 @@ export class AutomaticListingService {
         if (!task || this.closed || this.closing) break;
         this.activeId = task.id; this.controller = new AbortController(); task.status = 'RUNNING'; this.save(task,this.db,[],undefined,[]);
         try {
-          for (const row of task.items) {
-            // Immediately settled promises do not service Electron's window/IPC loop.
-            // Yield between SKUs, then recheck pause/cancel before touching the next one.
-            await yieldToEventLoop();
-            if (!this.running(task)) break;
-            if (!rowSelected(task.resumeScope,row.key)||task.adaptation?.blockedKeys.includes(row.key)||['DONE','SCREENED'].includes(row.status) ||row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state)) continue;
+          const pending=new Set(task.items.filter(row=>rowSelected(task.resumeScope,row.key)&&!task.adaptation?.blockedKeys.includes(row.key)&&!['DONE','SCREENED'].includes(row.status)&&!(row.schemaRetry&&['WAITING','IN_FLIGHT','EXHAUSTED'].includes(row.schemaRetry.state))));
+          const active=new Map<AutomaticListingItem,Promise<void>>();
+          let wake:Promise<void>,notify!:()=>void;
+          const listen=()=>{wake=new Promise<void>(resolve=>{notify=resolve;});this.wakeRows=notify;};listen();
+          const prepareRow=async(row:AutomaticListingItem)=>{
             try {
               this.prepareContinuedRow(task,row);
-              if(['FAILED','DONE','SCREENED'].includes(row.status)||['READBACK','LABELS'].includes(row.stage))continue;
+              if(['FAILED','DONE','SCREENED'].includes(row.status)||['READBACK','LABELS'].includes(row.stage))return;
               const execute=()=>rowSelected(task.resumeScope,row.key)?this.prepareItem(task,row):Promise.resolve();
               await this.runTaskAiScope(task,row,execute);
               delete row.batchWait;
             }
             catch (error) {
-              if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.saveItem(task,row);continue;}
+              if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.saveItem(task,row);return;}
               if(row.batchWait&&this.deps.batch?.find(row.batchWait.operationId)?.adoption)delete row.batchWait;
               recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,requestId:row.stage==='CLASSIFY'?categoryFailureRequestId(this.db,row.productId,error):undefined,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
-              if (!this.running(task)) { row.status = 'PENDING'; this.saveItem(task,row); break; }
-              if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
+              if (!this.running(task)) { row.status = 'PENDING'; this.saveItem(task,row); return; }
+              if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))return;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
               rememberFailure(row,new Date().toISOString(),undefined,'local-check');
               const classified=structuredClone(row);await this.classifyFailure(task,classified,error);
-              if(!this.running(task))break;
+              if(!this.running(task))return;
               Object.assign(row,classified);this.saveItem(task,row);
-              try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.saveItem(task,row); break; }
+              try { this.assertConnections(task); } catch (scopeError) { task.status = 'NEEDS_ATTENTION'; task.error = errorMessage(scopeError); this.saveItem(task,row); return; }
             }
-          }
+          };
+          try{
+            while(this.running(task)&&(pending.size||active.size)){
+              // A saved stage change can release a sibling without waiting for
+              // seven images. Shared source/classification/family work stays one
+              // owner at a time; each admitted SKU then owns its own workflow.
+              await yieldToEventLoop();if(!this.running(task))break;
+              for(const row of pending){
+                if(active.size>=2)break;
+                // The existing source downloader is single-owner. Start the next
+                // SKU after shared preparation yields to its image phase.
+                if([...active.keys()].some(other=>!['IMAGES','EXECUTION','READBACK','LABELS','COMPLETE'].includes(other.stage)))continue;
+                const siblings=[...active.keys()].filter(other=>other.productId===row.productId);
+                if(siblings.some(other=>!row.sourcesPrepared||!other.sourcesPrepared||!['IMAGES','EXECUTION','READBACK','LABELS','COMPLETE'].includes(other.stage)||row.salesPlan?.parentage==='CHILD'||other.salesPlan?.parentage==='CHILD'))continue;
+                pending.delete(row);
+                const work=prepareRow(row).finally(()=>{active.delete(row);notify();});active.set(row,work);
+              }
+              if(active.size){await Promise.race([...active.values(),wake!]);listen();}
+              else break;
+            }
+          }finally{this.wakeRows=undefined;await Promise.allSettled(active.values());}
           if(this.running(task)&&this.deps.batch){try{await this.deps.batch.flush(task.id);}catch(error){for(const row of task.items.filter(r=>rowSelected(task.resumeScope,r.key)&&r.batchWait))row.error=errorMessage(error);}}
           if (this.running(task)) await this.summarize(task);
         } finally { if(!task.items.some(row=>rowSelected(task.resumeScope,row.key)&&row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }

@@ -203,7 +203,7 @@ test('busy, cancel and late provider completion cannot save a candidate', async 
   const started = new Promise<void>(resolve => { start = resolve; }), response = new Promise<Response>(resolve => { release = resolve; });
   const f = await fixture(t, { fetch: async () => { start(); return response; } }); f.enable();
   const pending = f.service.generate(f.input); await started;
-  await assert.rejects(f.service.generate(f.input), code('BUSY')); f.service.cancel();
+  await assert.rejects(f.service.generate(f.input), code('INTERRUPTED')); f.service.cancel();
   await assert.rejects(pending, code('CANCELLED'));
   release(new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] })));
   await new Promise(resolve => setImmediate(resolve));
@@ -272,7 +272,7 @@ test('workflow cancellation interrupts generation using its caller signal with n
   const rejected = assert.rejects(pending, code('CANCELLED'));
   await started; controller.abort(); await rejected;
   assert.equal(f.calls.length, 1); assert.equal(f.service.busy, true);
-  await assert.rejects(f.service.generate(f.input),code('BUSY'));
+  await assert.rejects(f.service.generate(f.input),code('INTERRUPTED'));
   await assert.rejects(f.service.generate(f.input, controller.signal), code('CANCELLED')); assert.equal(f.calls.length, 1);
 });
 
@@ -403,4 +403,45 @@ test('background candidate decode failure preserves paid files and sends no new 
  let fail=false;const f=await fixture(t,{processPreview:async bytes=>{if(fail)throw Error('local decode failed');return bytes;}});f.enable();const original=await f.service.generate(f.input);
  fail=true;await assert.rejects(f.service.readCandidate(original.id),code('OUTPUT_INVALID'));assert.equal(f.calls.length,1);
  fail=false;assert.equal((await f.service.readCandidate(original.id)).candidate.sha256,original.sha256);assert.equal(f.calls.length,1);
+});
+
+test('P06 generation admits two products, queues third and binds reversed replies to original identity',async t=>{
+ const releases:((value:Response)=>void)[]=[];
+ const f=await fixture(t,{timeoutMs:1000,fetch:async()=>new Promise<Response>(resolve=>releases.push(resolve))});f.enable();
+ const products=[f.product,f.store.createProduct(),f.store.createProduct()];
+ const requests=products.map(product=>f.service.generateForWorkflow({...f.input,productId:product.id,productRevision:product.revision},{requestId:randomUUID()}));
+ requests.forEach(p=>p.catch(()=>{}));
+ for(let n=0;n<50&&releases.length<2;n++)await new Promise(resolve=>setTimeout(resolve,5));
+ assert.equal(releases.length,2,'exactly two generation POSTs may be active');
+ releases[1](Response.json({id:'reply-second',data:[{b64_json:png.toString('base64')}]}));
+ const second=await requests[1];assert.equal(second.productId,products[1].id);assert.equal(second.requestId,'reply-second');
+ for(let n=0;n<50&&releases.length<3;n++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(releases.length,3);
+ releases[2](Response.json({id:'reply-third',data:[{b64_json:png.toString('base64')}]}));releases[0](Response.json({id:'reply-first',data:[{b64_json:png.toString('base64')}]}));
+ const results=await Promise.all(requests);assert.deepEqual(results.map(r=>r.productId),products.map(p=>p.id));assert.equal(f.calls.length,3);
+});
+
+test('P06 duplicate request joins in-flight original, conflicting input is refused and cancel stays scoped',async t=>{
+ const releases:((value:Response)=>void)[]=[];
+ const f=await fixture(t,{timeoutMs:1000,fetch:async()=>new Promise<Response>(resolve=>releases.push(resolve))});f.enable();
+ const id=randomUUID(),controller=new AbortController();
+ const first=f.service.generateForWorkflow(f.input,{requestId:id},controller.signal);first.catch(()=>{});
+ for(let n=0;n<50&&!releases.length;n++)await new Promise(resolve=>setTimeout(resolve,5));
+ const joined=f.service.generateForWorkflow(f.input,{requestId:id});joined.catch(()=>{});
+ await assert.rejects(f.service.generateForWorkflow({...f.input,prompt:'Different'},{requestId:id}),code('SOURCE_CHANGED'));
+ const other=f.store.createProduct(),otherRequest=f.service.generateForWorkflow({...f.input,productId:other.id,productRevision:other.revision},{requestId:randomUUID()});otherRequest.catch(()=>{});
+ for(let n=0;n<50&&releases.length<2;n++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(releases.length,2);
+ controller.abort();await assert.rejects(first,code('CANCELLED'));await assert.rejects(joined,code('CANCELLED'));
+ releases[1](Response.json({data:[{b64_json:png.toString('base64')}]}));assert.equal((await otherRequest).productId,other.id);
+ releases[0](Response.json({data:[{b64_json:png.toString('base64')}]}));
+ await new Promise(resolve=>setImmediate(resolve));await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:id}),code('INTERRUPTED'));assert.equal(f.calls.length,2);
+});
+
+test('P06 queued generation cancellation reserves no request and queue capacity is bounded',async t=>{
+ const f=await fixture(t,{timeoutMs:1000,fetch:async()=>new Promise<Response>(()=>{})});f.enable();
+ const products=Array.from({length:19},()=>f.store.createProduct()),promises=products.map(p=>f.service.generateForWorkflow({...f.input,productId:p.id,productRevision:p.revision},{requestId:randomUUID()}));
+ promises.forEach(p=>p.catch(()=>{}));
+ for(let n=0;n<50&&f.calls.length<2;n++)await new Promise(resolve=>setTimeout(resolve,5));
+ assert.equal(f.calls.length,2);await assert.rejects(promises[18],(e:any)=>e.code==='BUSY'&&e.notSent===true);
+ const db=openDatabase(f.directory);try{assert.equal(db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,2);}finally{db.close();}
+ f.service.cancel();const results=await Promise.allSettled(promises);assert.ok(results.every(r=>r.status==='rejected'));assert.equal(f.calls.length,2);
 });

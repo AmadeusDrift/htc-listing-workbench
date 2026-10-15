@@ -1449,3 +1449,22 @@ test('direct vision basic retires only proven legacy OCR dependency while retain
  const second=await f.run();assert.equal(second.workflow.status,'COMPLETED',second.workflow.error??'');assert.equal(second.workflow.slots![0].attempts[0].candidateId,candidate.id);assert.equal(f.calls.filter(c=>c==='generate').length,7);assert.equal(second.workflow.retiredOcrDependencies?.[0].callId,callId);assert.equal(second.workflow.pendingRequest,undefined);assert.equal(second.workflow.reviewRequests?.find(r=>r.requestId===callId)?.state,'SENT_UNKNOWN');
  const saved=openDatabase(f.root);try{assert.equal(saved.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(callId)!.record_json,rawCall);assert.equal(saved.prepare('SELECT record_json FROM ai_usage_ledger WHERE id=?').get(callId)!.record_json,rawHold);assert.equal(saved.prepare('SELECT record_json FROM image_review_journal WHERE id=?').get(callId)!.record_json,rawLedger);}finally{saved.close();}
 });
+
+test('P06 two draft workflow runs retain independent set plans, slots and scoped cancellation',async t=>{
+ const f=await fixture(t),p=(f.amazon as unknown as {persistence:AmazonPersistence}).persistence;
+ const record=p.record(f.draft.id);record.draft.id=randomUUID();p.putRecord(record);const secondDraft=record.draft;
+ (f.listing as any).complete=async(input:{draftId:string})=>({draft:f.amazon.getDraft(input.draftId),aiCalls:0,previewAttempts:0,remaining:[]});
+ const review=f.listing.reviewCurrentForImages;
+ (f.listing as any).reviewCurrentForImages=async(input:{draftId:string})=>{const result=await review(),draft=f.amazon.getDraft(input.draftId);result.context=buildListingContext(draft,f.store.getProduct(draft.productId),f.amazon.executionTargetScope(draft.targetId).generation);return result;};
+ const generation=f.generation.generateForWorkflow,started:string[]=[],releases=new Map<string,()=>void>();
+ f.generation.generateForWorkflow=async(input,attempt:any,...rest)=>{if(attempt.owner.slot===1){started.push(attempt.owner.draftId);await new Promise<void>(resolve=>{releases.set(attempt.owner.draftId,resolve);setTimeout(resolve,1500);});}return generation(input,attempt,...rest);};
+ const first=f.run(),second=f.service.complete({draftId:secondDraft.id,draftRevision:secondDraft.revision});
+ first.catch(()=>{});second.catch(()=>{});
+ for(let n=0;n<60&&started.length<2;n++)await new Promise(resolve=>setTimeout(resolve,5));
+ assert.equal(started.length,2);const firstRun=f.service.getProgress(f.draft.id)!,secondRun=f.service.getProgress(secondDraft.id)!;
+ assert.notEqual(firstRun.id,secondRun.id);assert.ok(firstRun.setPlan&&secondRun.setPlan);assert.equal(firstRun.activeSlot,1);assert.equal(secondRun.activeSlot,1);
+ assert.notEqual(firstRun.slots![0].attempts[0].requestId,secondRun.slots![0].attempts[0].requestId);
+ f.service.cancel(secondDraft.id);releases.get(secondDraft.id)?.();assert.equal((await second).workflow.status,'CANCELLED');assert.equal(f.service.getProgress(f.draft.id)!.status,'RUNNING');
+ releases.get(f.draft.id)?.();const result=await first;assert.equal(result.workflow.status,'COMPLETED',result.workflow.error??'');assert.equal(result.workflow.slots!.filter(s=>s.status==='PASSED').length,7);
+ assert.equal(f.service.getProgress(secondDraft.id)!.sku,secondDraft.sku);
+});

@@ -2332,3 +2332,20 @@ test('P06 actual source fact change still blocks sibling revision rebinding',asy
  assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.deepEqual(f.service.get(task.id).items.map(r=>r.sourceStamp),before);assert.ok(f.service.get(task.id).items.every(r=>!r.sourcesPrepared));
  assert.match(f.service.get(task.id).items[0].error??'',/商品资料变化/);
 });
+
+test('P06 two sibling SKUs reach independent image work before either completes and pause starts no third',async t=>{
+ const f=fixture(t);for(let i=2;i<=3;i++)f.product.variants.push({...f.product.variants[0],id:randomUUID(),sku:'SKU-'+i});
+ materializeSourceSnapshot(f.directory,f.product,f.product.variants.map(v=>v.id));
+ const task=await f.create(),started:string[]=[],releases=new Map<string,()=>void>();
+ const complete=f.dependencies.images.complete;
+ f.dependencies.images.complete=async(...args)=>{const id=(args[0] as any).draftId;started.push(id);await new Promise<void>(resolve=>{releases.set(id,resolve);setTimeout(resolve,2000);});return complete(...args);};
+ f.dependencies.images.cancel=id=>{releases.get(String(id))?.();return {cancelled:true};};
+ f.service.startAuthorized(f.service.prepareStart(task.id));
+ for(let n=0;n<100&&started.length<2;n++)await new Promise(resolve=>setTimeout(resolve,10));
+ assert.equal(started.length,2,'second SKU must reach images before first seven-slot workflow finishes: '+JSON.stringify(f.service.get(task.id).items.map(r=>[r.stage,r.error])));
+ assert.notEqual(started[0],started[1]);assert.equal(f.calls.sources,1,'shared source group prepared once');
+ f.service.pause(task.id);for(const release of releases.values())release();await f.service.waitForIdle();
+ assert.equal(started.length,2);assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.submissions,0);
+ await f.service.close();const resumed=new AutomaticListingService(f.directory,f.dependencies);
+ try{resumed.startAuthorized(resumed.prepareStart(task.id));await resumed.waitForIdle();assert.equal(f.calls.images,3,'restarting reuses the first two completed image workflows');assert.equal(f.calls.submissions,3);assert.equal(started.length,3);assert.deepEqual(resumed.get(task.id).items.slice(0,2).map(r=>r.draftId),started.slice(0,2));}finally{await resumed.close();}
+});

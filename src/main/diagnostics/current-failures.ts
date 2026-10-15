@@ -1,7 +1,7 @@
 import { sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { RunFailureSummary } from '../../shared/run-report-contracts.ts';
 
-interface FailureRow { productId: unknown; status: unknown; stage: unknown; kind: unknown; code: unknown; reason: unknown }
+type FailureRow = Record<string, unknown>;
 /** Presentation of saved current rows only: no history recovery, request or write. */
 export function summarizeCurrentFailures(rows: FailureRow[]): RunFailureSummary {
   const groups = new Map<string, { stage: string; kind: string; code: string; reason: string; products: Set<string>; salesItemCount: number }>();
@@ -19,3 +19,4 @@ export function summarizeCurrentFailures(rows: FailureRow[]): RunFailureSummary 
   }
   return { affectedProducts: products.size, failedSalesItems, groups: [...groups.values()].map(({ products, ...group }) => ({ ...group, productCount: products.size })).sort((a,b) => b.productCount - a.productCount || b.salesItemCount - a.salesItemCount || a.code.localeCompare(b.code) || a.reason.localeCompare(b.reason)) };
 }
+

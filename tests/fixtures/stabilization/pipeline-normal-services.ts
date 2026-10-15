@@ -39,7 +39,7 @@ export function createNormalServices(dataRoot:string,storage:SecretStorage,fetch
   const generation=new ImageGenerationService(dataRoot,store,storage,{fetch:fetcher,decodePreview,normalizeImage:normalizeGeneratedImage,downloadDependencies:{nativeFetch:fetcher,lookup}}),generationService=generation;
   let automatic:AutomaticListingService;
   const batchReferences=createBatchReferencePort({directory:dataRoot,store,generation,hosting,task:id=>automatic.get(id),probe:createPublicImageProbe({nativeFetch:fetcher,lookup})});
-  const ai=new AiService(dataRoot,store,hosting,storage,{fetch:fetcher,now,nonce:()=>'s10-normal-nonce',batchReferences,imageGenerationCapability:()=>generation.capability()});
+  const ai=new AiService(dataRoot,store,hosting,storage,{fetch:fetcher,nonce:()=>'s10-normal-nonce',batchReferences,imageGenerationCapability:()=>generation.capability()});
   generation.attachOpenRouterConnection({read:()=>ai.openRouterApiKey(),save:key=>ai.saveConnection({id:'openrouter',apiKey:key}),disconnect:()=>ai.disconnectConnection('openrouter')});
   const source=new MiaoshouService(dataRoot,store,storage,{fetch:fetcher,now}),miaoshouService=source;
   const sourceImages=new MiaoshouImageService(dataRoot,store,id=>source.getReceipt(id),decodePreview,{getSourceUpdate:id=>source.getSourceUpdate(id),download:createSourceImageDownloader({nativeFetch:fetcher,lookup})});

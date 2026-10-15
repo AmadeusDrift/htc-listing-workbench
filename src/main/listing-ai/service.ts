@@ -1,5 +1,6 @@
 import { programRelationField } from '../amazon/program-relations.ts';
 import { skuObservationImages } from '../../shared/source-observation-authority.ts';
+import { retainAdoptedObservationEvidence } from './observation-evidence.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { taskAiContext } from '../ai/batch/task-context.ts';
 import { appendRunEvidence, evidenceSku } from '../diagnostics/run-evidence.ts';
@@ -129,7 +130,10 @@ export class ListingAiService {
   currentAuthorizationContext(draft:AmazonDraft,product:ProductDetail,generation:number,legacyImage?:ListingAiContext):ListingAiContext {
     const context=this.currentContext(draft,product,generation);
     if(!isFullSchema(context))return context;
-    if((!legacyImage||isFullSchema(legacyImage))&&!draft.fieldAdoptions?.some(adoption=>{const result=this.ai.getResult(adoption.suggestionResultId);return result?.listingContext&&!isFullSchema(result.listingContext);}))return context;
+    const adoptedResults=new Map<string,AiResult|undefined>();
+    const adoptedResult=(id:string)=>{if(!adoptedResults.has(id))adoptedResults.set(id,this.ai.getResult(id));return adoptedResults.get(id);};
+    retainAdoptedObservationEvidence(draft,context,adoptedResult,id=>this.ai.getCall(id));
+    if((!legacyImage||isFullSchema(legacyImage))&&!draft.fieldAdoptions?.some(adoption=>{const result=adoptedResult(adoption.suggestionResultId);return result?.listingContext&&!isFullSchema(result.listingContext);}))return context;
     const legacy=this.currentContext(draft,product,generation,true);
     for(const evidence of legacy.evidence)if(!context.evidence.some(item=>item.id===evidence.id))context.evidence.push(evidence);
     return context;

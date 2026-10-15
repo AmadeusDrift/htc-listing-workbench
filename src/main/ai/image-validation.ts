@@ -480,7 +480,10 @@ export function assertImageTextReview(review: ImageTextReviewOutput, context: Pr
 export function assertImageTextReviewDirect(review:ImageTextReviewOutput,context:ProductImageContext,plan:AiResult,candidate:CandidateImageIdentity,options:ImageEvidenceOptions={}):void {
   if(review.method!=='candidate-vision/v1'||review.ocrResultId!==null||plan.output.kind!=='image-plan'||review.planResultId!==plan.id||listingFingerprint(review.candidate)!==listingFingerprint(candidate))fail();
   assertImagePlan(plan.output,context,options);
-  if(review.expectedTextChecks.length!==plan.output.expectedText.length||review.noTextVerified!==(review.checks.length===0))fail();
+  if(review.expectedTextChecks.length!==plan.output.expectedText.length||review.noTextVerified&&review.checks.length>0)fail();
+  // Unreadable visible text may have no reliable transcription. Only PASS can
+  // infer an empty list means a verified text-free candidate.
+  if(review.verdict==='PASS'&&review.noTextVerified!==(review.checks.length===0))fail();
   for(const [index,check] of review.checks.entries()){
     if(check.source!=='line'||check.index!==index||check.evidenceIds.some(id=>!imageEvidence(context).some(e=>e.id===id)))fail();
     if(check.verdict==='SUPPORTED')assertImageMeasurements(check.text,{evidence:imageEvidence(context)},true);

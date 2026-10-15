@@ -502,6 +502,10 @@ for(const version of [undefined,'listing-evidence/v1','listing-evidence/v2'] as 
       const now=new Date(Date.now()+1).toISOString(),pending={...structuredClone(prior),id:randomUUID(),status:'INTERRUPTED' as const,stage:'content' as const,attempt:0,maxAttempts:1,contextSha256:null,draftSha256:null,referenceAssets:[],planResultIds:[],candidateIds:[],ipReviewResultIds:[],ocrResultIds:[],reviewResultIds:[],approvedAssetId:null,approvedSha256:null,createdAt:now,updatedAt:now,error:'Interrupted before current context',recheckedFromRunId:prior.id};
       pending.slots=pending.slots!.map(slot=>({...slot,status:'PENDING',contextSha256:null,attempts:[],approvedAssetId:null,approvedSha256:null,error:null}));
       delete pending.imageContext;delete pending.activeSlot;delete pending.copyRepairAttempts;delete pending.approvalReuse;delete pending.contentPreparation;delete pending.copyReviewResultId;delete pending.categoryFieldRepair;
+      const effects=f.requests.length;db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(pending.id,JSON.stringify(pending));await assert.rejects(async()=>(workflow as any).recheckWithFreshEvidence(input),/原请求身份|所属图位/);assert.equal(f.requests.length,effects);assert.equal(posts(),7);db.prepare('DELETE FROM image_workflow_runs WHERE id=?').run(pending.id);
+      // This models a legacy empty checkpoint before any review existed. An
+      // original journal cannot move to a different run or candidate identity.
+      delete pending.reviewRequests;delete pending.pendingRequest;
       db.prepare('INSERT INTO image_workflow_runs VALUES (?,?)').run(pending.id,JSON.stringify(pending));pendingId=pending.id;
     }
     const beforeCancel=f.requests.length;
@@ -927,12 +931,14 @@ test('a saved generated candidate resumes only its missing text review after inv
   await workflow.close();
   const restarted = new ImageWorkflowService(f.directory, f.store, f.amazon, f.ai, generation, options);
   f.cleanup(() => restarted.close());
-  const resumed = await restarted.complete({ draftId: f.draft.id, draftRevision: f.draft.revision });
+  const textRequest=first.workflow.reviewRequests!.findLast(r=>r.step==='text')!,originalCall=structuredClone(f.ai.getCall(textRequest.requestId));const unsigned=await restarted.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(unsigned.workflow.status,'FAILED');assert.equal(f.requests.length,requestCount);assert.equal(imageCount,1);assert.deepEqual(f.ai.getCall(textRequest.requestId),originalCall);
+  const resumed = await withManualImageReviewCommand(f.draft.id,()=>restarted.complete({ draftId: f.draft.id, draftRevision: f.draft.revision }));
   assert.equal(resumed.workflow.status, 'COMPLETED', resumed.workflow.error ?? ''); assert.equal(resumed.workflow.id, first.workflow.id);
   assert.equal(f.requests[requestCount].operation, 'image-text-review');
   const kept = resumed.workflow.slots![0].attempts[0];
   for (const key of ['requestId', 'planResultId', 'candidateId', 'ipReviewResultId', 'ocrResultId'] as const) assert.equal(kept[key], saved[key]);
   assert.ok(kept.reviewResultId); assert.equal(resumed.workflow.slots![0].attempts.length, 1);
+  assert.equal(imageSlotConsumedAttempts(resumed.workflow,1),2,'the paid review repair consumes the original slot allowance without a redraw');
   assert.equal(imageCount, 7); assert.equal(f.requests.filter(item => item.operation === 'ImageModeration').length, 7);
   assert.equal(f.requests.filter(item => item.operation === 'ocr').length, 2); // One source OCR plus the main image.
   assert.equal(f.requests.filter(item => item.operation === 'image-text-review').length, 2);

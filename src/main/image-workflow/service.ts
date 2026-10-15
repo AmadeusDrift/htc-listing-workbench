@@ -975,7 +975,7 @@ export class ImageWorkflowService {
             stage('adopting');await this.adoptSlot(run,slot,attempt,local,fresh,signal,priorSlot?.approvedAssetId??undefined);break;
           }
           if(local.bytes.length>10*1024*1024)throw new UserFacingError('生成图超过 OCR 大小预算，候选和次数已保留');
-          stage('ocr');const ocr=attempt.ocrResultId?this.ai.getResult(attempt.ocrResultId):await this.reviewStep(run,'ocr',context,plan,identity,undefined,owner=>this.ai.recognizeGeneratedImage(context,identity,local.bytes,fresh,signal,owner),()=>result.aiCalls++);if(!attempt.ocrResultId)result.aiCalls++;
+          stage('ocr');const ocr=attempt.ocrResultId?this.ai.getResult(attempt.ocrResultId):await this.reviewStep(run,'ocr',context,plan,identity,undefined,owner=>this.ai.recognizeGeneratedImage(context,identity,local.bytes,fresh,signal,owner),()=>result.aiCalls++);
           if(!ocr)throw new AiError('SOURCE_CHANGED');attempt.ocrResultId=ocr.id;this.save(run);await fresh();
           stage('reviewing');
           const sendReview=reviewOnly||!attempt.reviewResultId;

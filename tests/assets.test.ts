@@ -21,6 +21,13 @@ test('图片导入不改原文件且重复内容只生成一条素材记录', as
   const repeat = await importImageFiles(store, dir, { productId: p.id, revision: saved.revision }, [source], bytes => bytes);
   assert.equal(repeat.assets.length, 1); assert.equal(repeat.revision, saved.revision);
 });
+
+test('source import awaits background preview bytes and preserves the original image',async t=>{
+ const {dir,store,source,png}=await fixture(t),product=store.createProduct();let processed=false;
+ const saved=await importImageFiles(store,dir,{productId:product.id,revision:product.revision},[source],async bytes=>{await Promise.resolve();processed=true;return bytes;});
+ assert.equal(processed,true);assert.equal(saved.assets.length,1);
+ assert.deepEqual(await readFile(source),png);assert.deepEqual(await readFile(join(dir,'assets',saved.assets[0].id+'.preview.png')),png);
+});
 test('图片解码期间商品被修改时，数据库拒绝过期写入并清理本次新文件', async t => {
   const { dir, store, source, png } = await fixture(t); const p = store.createProduct();
   await assert.rejects(importImageFiles(store, dir, { productId: p.id, revision: p.revision }, [source], bytes => {

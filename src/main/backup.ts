@@ -4,6 +4,7 @@ import {SPEND_TABLES,assertSpendHistory,retainSpendHistory} from './ai/spend-bud
 import {assertRecordTable} from './storage/record-table.ts';
 import {CONTROLLED_RUN_TABLES,assertControlledRunHistory,retainControlledRunHistory,pauseControlledRunScopes} from './application/controlled-run-scope.ts';
 import {retainCategoryRepairs} from './ai/category-recovery.ts';
+import {CATEGORY_OPERATION_TABLES,assertCategoryOperationHistory} from './ai/category-operations.ts';
 import { retainConfirmedForbiddenRetries } from './ai/confirmed-forbidden-retry.ts';
 import { WORK_BATCH_TABLES, assertWorkBatches, retainWorkBatches } from './automatic-listing/work-batches.ts';
 import { IMAGE_RETRY_TABLES,assertImageRetryHistory,retainImageRetryHistory } from './image-workflow/retry-allowance.ts';
@@ -212,6 +213,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     if(version>=27){Object.assign(approved,FIELD_GROUP_TABLES);assertFieldGroupHistory(database);}
     if(version>=28){Object.assign(approved,{image_reference_pins:['id','record_json']});referencePinHistory(database);}
     if(version>=35)Object.assign(approved,IMAGE_REVIEW_TABLES);
+    if(version>=36){Object.assign(approved,CATEGORY_OPERATION_TABLES);assertCategoryOperationHistory(database);}
     if(version>=31){Object.assign(approved,IMAGE_RETRY_TABLES);assertImageRetryHistory(database);}
     if(version>=29){Object.assign(approved,COPY_REVIEW_TABLES);assertCopyReviewHistory(database);}
     for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {

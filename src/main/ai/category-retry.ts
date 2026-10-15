@@ -1,3 +1,4 @@
+import {validCategoryDecisionAnswers} from './category-decision-receipt.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiCall} from '../../shared/ai-contracts.ts';
 import {readCallReceiptSync} from './receipts.ts';
@@ -18,7 +19,7 @@ export function categoryFailureKind(db:DatabaseSync,directory:string,call:AiCall
  if(call.errorCode!=='OUTPUT_INVALID')return 'UNKNOWN';if(state==='invalid')return 'INVALID_OUTPUT';
  try{
   if(record.endpoint==='/api/alpha/decisions'){
-   if(!body?.answers||Object.keys(body.answers).sort().join()!=='category,review'||body.answers.category?.type!=='choice'||typeof body.answers.category.choice!=='string'||!body.answers.category.choice||body.answers.review?.type!=='choice'||!['clear','review'].includes(body.answers.review.choice))return 'INVALID_OUTPUT';
+   if(!validCategoryDecisionAnswers(body?.answers))return 'INVALID_OUTPUT';
    const choice=body.answers.category.choice;
    const sameCandidates=identity&&(call.categoryContext.version===2?call.categoryContext.candidateSnapshotSha256===categoryCandidateSnapshot(identity.candidates):call.categoryContext.requestSha256===identity.requestSha256);
    return sameCandidates&&choice!=='$NO_SUITABLE'&&!identity.candidates.some(candidate=>candidate.name===choice)?'INVALID_OUTPUT':'VALID_OUTPUT';

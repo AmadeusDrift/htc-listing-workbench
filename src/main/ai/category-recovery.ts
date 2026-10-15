@@ -37,7 +37,7 @@ export async function recoverCategoryPhase(options:{db:DatabaseSync;directory:st
   if(!calls.some(call=>call.id===marker.callId&&call.productRevision===marker.productRevision))fail('恢复备份前存在类目请求记录，当前备份缺少完整请求结果；本次未重发，请核对历史记录');
  }
  const owned=(result:AiResult,call:AiCall)=>{try{assertReceiptRecovery(db,directory,result,call);return result.output.kind==='category-decision'&&resultHasOwner(result,call);}catch{return false;}};
- const exact=(call:AiCall)=>call.model===options.model&&call.purposeSnapshot?.effectiveEffort===options.effort&&(!call.categoryContext||call.categoryContext.requestSha256===context.requestSha256);
+ const exact=(call:AiCall)=>call.model===options.model&&(!options.current||call.providerId===options.current.providerId)&&call.purposeSnapshot?.effectiveEffort===options.effort&&(!call.categoryContext||call.categoryContext.requestSha256===context.requestSha256&&(call.categoryContext.version!==2||context.version===2&&call.categoryContext.operationId===context.operationId&&call.categoryContext.inputVersion===context.inputVersion&&call.categoryContext.candidateSnapshotSha256===context.candidateSnapshotSha256&&call.categoryContext.expansion===context.expansion));
  const saved=results.find(result=>result.output.kind==='category-decision'&&result.output.phase===context.phase&&result.productId===options.productId&&result.productRevision===options.productRevision&&result.sourceSha256===options.payloadHash&&calls.some(call=>call.id===result.callId&&exact(call)&&owned(result,call)));
  // A failure in another phase must not hide an exact successful phase. A
  // pending request in this same phase still outranks an older cached result.

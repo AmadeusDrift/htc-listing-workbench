@@ -16,8 +16,22 @@ import {transaction} from '../application/transaction.ts';
 import {date,uuid} from './primitives.ts';
 import {AiError} from './errors.ts';
 import type {ProductTypeOption} from '../../shared/amazon-contracts.ts';
+import {assertRecordTable} from '../storage/record-table.ts';
 
 export const CATEGORY_OPERATION_TABLES={ai_category_operations:['id','record_json']};
+export function initializeCategoryOperations(db:DatabaseSync):void {
+ db.exec('CREATE TABLE ai_category_operations(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');
+}
+/** Safety references may outlive older business snapshots; missing evidence
+ * never becomes dispatch permission. Present references must still be owned. */
+export function assertCategoryOperationHistory(db:DatabaseSync):void {
+ assertRecordTable(db,'ai_category_operations');
+ for(const row of db.prepare('SELECT id,record_json FROM ai_category_operations').all()){
+  const operation=parseJson(db,String(row.record_json));if(operation.id!==row.id)blocked('CATEGORY_OPERATION_RECORD_INVALID');
+  for(const claim of operation.repairs)for(const id of [...claim.originalCallIds,claim.retryCallId]){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id);if(!row)continue;const call=validateAiCall(JSON.parse(String(row.record_json)));if(call.id!==id||call.productId!==operation.productId||call.categoryContext?.phase!==claim.phase)blocked('CATEGORY_REPAIR_IDENTITY_INVALID');if(id===claim.retryCallId&&(call.categoryContext.version!==2||call.categoryContext.operationId!==operation.id||call.categoryContext.inputVersion!==claim.inputVersion||call.categoryContext.candidateSnapshotSha256!==claim.candidateSnapshotSha256))blocked('CATEGORY_REPAIR_IDENTITY_INVALID');}
+  if(operation.expansion){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(operation.expansion.originalCallId);if(row){const call=validateAiCall(JSON.parse(String(row.record_json)));if(call.productId!==operation.productId||call.categoryContext?.version!==2||call.categoryContext.operationId!==operation.id||call.categoryContext.inputVersion!==operation.expansion.inputVersion||call.categoryContext.candidateSnapshotSha256!==operation.expansion.fromCandidateSnapshotSha256)blocked('CATEGORY_EXPANSION_ORIGINAL_REQUIRED');}}
+ }
+}
 function blocked(reason:string):never {const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;error.message='类目阶段接续许可不可用；原调用、费用和成果保留，本次未发送';throw error;}
 function parseJson(db:DatabaseSync,json:string):CategoryOperationRecord {
  if(Buffer.byteLength(json)>4*1024*1024||db.prepare("SELECT 1 FROM json_tree(?) WHERE parent IS NOT NULL GROUP BY parent,key COLLATE BINARY HAVING count(*)>1 LIMIT 1").get(json))blocked('CATEGORY_OPERATION_RECORD_INVALID');return parseCategoryOperation(JSON.parse(json));

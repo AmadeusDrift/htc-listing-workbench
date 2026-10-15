@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {fixture} from './fixtures/ai-control.ts';
+import {fixture,storage} from './fixtures/ai-control.ts';
+import {AiService} from '../src/main/ai/service.ts';
+import {WorkspaceStore} from '../src/main/store.ts';
+import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
 import {slowHttp} from './fixtures/stabilization/slow-http.ts';
 import {taskAiContext} from '../src/main/ai/batch/task-context.ts';
 import {AiError} from '../src/main/ai/errors.ts';
@@ -91,7 +94,7 @@ test('a cached older phase cannot hide a later real unknown retained across an o
 });
 
 test('known invalid judge repairs once through the actual call/usage transaction without resetting a daily limit',async t=>{
- const f=await categoryFixture(t,'judge',false);f.db.exec('CREATE TABLE ai_category_operations(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');await assert.rejects(f.service.decideCategory(f.input));
+ const f=await categoryFixture(t,'judge',false);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_category_operations').get()!.n,0);await assert.rejects(f.service.decideCategory(f.input));
  const original=f.service.listCalls()[0],receipt=await f.service.readProviderReceipt(original.id),continuedAt=new Date(Date.parse(original.finishedAt!)+1).toISOString(),scope={...f.scope,explicitContinueAt:continuedAt};
  const valid=await slowHttp({body:envelope(output('judge'))});t.after(()=>valid.close());f.respond(async(_url,init)=>fetch(valid.url,init));
  await assert.rejects(f.service.decideCategory(f.input));assert.equal(valid.posts,0);assert.equal(readCategoryOperation(f.db,f.product.id).repairs.length,0);
@@ -104,7 +107,7 @@ test('known invalid judge repairs once through the actual call/usage transaction
 });
 
 test('another invalid repair cannot gain an allowance from a new key, task or source revision',async t=>{
- const f=await categoryFixture(t,'judge',false);f.db.exec('CREATE TABLE ai_category_operations(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');await assert.rejects(f.service.decideCategory(f.input));
+ const f=await categoryFixture(t,'judge',false);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_category_operations').get()!.n,0);await assert.rejects(f.service.decideCategory(f.input));
  const first=f.service.listCalls()[0],scope={...f.scope,explicitContinueAt:new Date(Date.parse(first.finishedAt!)+1).toISOString()};await assert.rejects(taskAiContext.run(scope,()=>f.service.decideCategory(f.input)));assert.equal(f.http.posts,2);
  const before=f.service.listCalls(),oldOperation=readCategoryOperation(f.db,f.product.id),p=f.store.getProduct(f.product.id)!;
  const changed=f.store.saveProduct({id:p.id,revision:p.revision,title:p.title+' updated',sourceUrl:p.sourceUrl,description:p.description,status:p.status,variants:p.variants.map(({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})=>({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})),facts:p.facts});
@@ -124,7 +127,7 @@ test('an original missing-call backup marker cannot be hidden by an older succes
 });
 
 for(const status of [401,403,400] as const)test(`complete category HTTP ${status} continuation keeps the original receipt and bounded permit`,async t=>{
- const f=await categoryFixture(t);f.db.exec('CREATE TABLE ai_category_operations(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');
+ const f=await categoryFixture(t);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_category_operations').get()!.n,0);
  const denied=await slowHttp({status,body:JSON.stringify({error:{code:status,message:status===401?'Invalid API key':status===403?'Forbidden':'Synthetic invalid parameter'}})});t.after(()=>denied.close());f.respond(async(_url,init)=>fetch(denied.url,init));await assert.rejects(f.service.decideCategory(f.input));
  const original=f.service.listCalls()[0],receipt=await f.service.readProviderReceipt(original.id),valid=await slowHttp({body:envelope(output('judge'))});t.after(()=>valid.close());f.respond(async(_url,init)=>fetch(valid.url,init));
  let scope={...f.scope,explicitContinueAt:new Date(Date.parse(original.finishedAt!)+1).toISOString()};
@@ -158,4 +161,31 @@ for(const fault of ['missing-raw','foreign-output','result-insert-failure'] as c
   if(fault==='result-insert-failure')assert.throws(()=>retainCategoryRepairs(f.db,snapshot),/synthetic result write/);else retainCategoryRepairs(f.db,snapshot);
   assert.equal(snapshot.prepare('SELECT count(*) n FROM ai_calls').get()!.n,0);assert.equal(snapshot.prepare('SELECT count(*) n FROM ai_results').get()!.n,0);assert.equal(snapshot.prepare('SELECT count(*) n FROM ai_provider_receipts').get()!.n,0);assert.equal(f.http.posts,1);
  }finally{snapshot.close();}
+});
+
+for(const metadata of [{confidence:2},{probabilities:null},{probabilities:[]},{probabilities:{CLEANING_CLOTH:2}}])test('received invalid Decisions metadata can use the original bounded category repair '+JSON.stringify(metadata),async t=>{
+ const f=await categoryFixture(t),input={...f.input,phase:'select' as const},body=(invalid:boolean)=>JSON.stringify({id:'s03-decisions-metadata',answers:{category:{type:'choice',choice:'CLEANING_CLOTH',...(invalid?metadata:{})},review:{type:'choice',choice:'clear'}},usage:{input_tokens:2,output_tokens:3}});
+ const denied=await slowHttp({body:body(true)}),valid=await slowHttp({body:body(false)});t.after(()=>denied.close());t.after(()=>valid.close());f.respond(async(_url,init)=>fetch(denied.url,init));
+ await assert.rejects(f.service.decideCategory(input),(e:any)=>e.code==='OUTPUT_INVALID'&&e.certainty==='RECEIVED_INVALID');const prior=f.service.listCalls()[0],raw=await f.service.readProviderReceipt(prior.id);
+ f.respond(async(_url,init)=>fetch(valid.url,init));const scope={...f.scope,explicitContinueAt:new Date(Date.parse(prior.finishedAt!)+1).toISOString()};
+ const result=await taskAiContext.run(scope,()=>f.service.decideCategory(input));assert.notEqual(result.callId,prior.id);assert.equal(denied.posts,1);assert.equal(valid.posts,1);assert.equal(readCategoryOperation(f.db,f.product.id).repairs.length,1);assert.deepEqual(f.service.getCall(prior.id),prior);assert.deepEqual(await f.service.readProviderReceipt(prior.id),raw);
+});
+
+test('encrypted older backup retains original category calls, raw, consumed repair and cumulative usage after restart',async t=>{
+ const f=await categoryFixture(t,'judge',false),file=join(f.directory,'before-category.htcbackup'),passphrase='s03 synthetic category backup';await createWorkspaceBackup(f.directory,file,passphrase);
+ await assert.rejects(f.service.decideCategory(f.input));const prior=f.service.listCalls()[0],scope={...f.scope,explicitContinueAt:new Date(Date.parse(prior.finishedAt!)+1).toISOString()};
+ const valid=await slowHttp({body:envelope(output('judge'))});t.after(()=>valid.close());f.respond(async(_url,init)=>fetch(valid.url,init));const result=await taskAiContext.run(scope,()=>f.service.decideCategory(f.input));
+ const calls=f.service.listCalls(),operation=readCategoryOperation(f.db,f.product.id),usage=f.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),raw=await f.service.readProviderReceipt(prior.id);
+ await f.service.close();await f.hosting.close();f.closeStore();const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase);await commitWorkspaceRestore(f.directory,prepared);
+ const store=new WorkspaceStore(f.directory);let newRequests=0;const service=new AiService(f.directory,store,f.hosting,storage,{fetch:async()=>{newRequests++;throw Error('No new call after old restore');}});
+ try{const db=(service as unknown as {db:DatabaseSync}).db;assert.deepEqual(service.listCalls(),calls);assert.deepEqual(readCategoryOperation(db,f.product.id),operation);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.deepEqual(await service.readProviderReceipt(prior.id),raw);assert.equal((await service.decideCategory(f.input)).id,result.id);
+ const p=store.getProduct(f.product.id),changed=store.saveProduct({id:p.id,revision:p.revision,title:p.title+' different source',sourceUrl:p.sourceUrl,description:p.description,status:p.status,variants:p.variants.map(({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})=>({id,sku,originalSpec,normalizedSpec,purchasePrice,inventory})),facts:p.facts});
+ await assert.rejects(taskAiContext.run({...scope,taskId:randomUUID(),explicitContinueAt:new Date(Date.now()+1).toISOString()},()=>service.decideCategory({...f.input,productRevision:changed.revision})));assert.equal(newRequests,0);assert.equal(f.http.posts,1);assert.equal(valid.posts,1);assert.deepEqual(readCategoryOperation(db,f.product.id),operation);
+ }finally{await service.close();store.close();}
+});
+
+for(const mismatch of ['provider','expansion'] as const)test('successful category reuse rejects a foreign '+mismatch+' identity',async t=>{
+ const f=await categoryFixture(t),saved=await f.service.decideCategory(f.input),call=f.service.getCall(saved.callId)!;assert.ok(call.categoryContext?.version===2);
+ const context=mismatch==='expansion'?{...call.categoryContext,expansion:1 as const}:call.categoryContext;
+ const recovery=await recoverCategoryPhase({db:f.db,directory:f.directory,calls:[call],results:[saved],productId:f.product.id,productRevision:f.product.revision,model:call.model,effort:call.purposeSnapshot!.effectiveEffort,context,payloadHash:saved.sourceSha256!,current:{providerId:mismatch==='provider'?'deepseek-review':call.providerId,generation:call.generation}});assert.equal(recovery.saved,undefined);assert.equal(f.http.posts,1);
 });

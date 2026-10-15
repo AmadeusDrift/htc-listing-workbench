@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {createServer,get} from 'node:http';
-import {fixture} from './fixtures/ai-control.ts';
+import {fixture,storage} from './fixtures/ai-control.ts';
+import {join} from 'node:path';
+import {AiService} from '../src/main/ai/service.ts';
+import {WorkspaceStore} from '../src/main/store.ts';
+import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
 import {slowHttp} from './fixtures/stabilization/slow-http.ts';
 import {AiUsageLedger} from '../src/main/ai/usage.ts';
 import {taskAiContext} from '../src/main/ai/batch/task-context.ts';
@@ -17,7 +21,7 @@ const ddl='CREATE TABLE ai_category_operations(id TEXT PRIMARY KEY NOT NULL,reco
 async function owned(t:test.TestContext,noSuitable=false){
  const snapshot=categoryCandidateSnapshot(candidates),body={id:'s03-owned',choices:[{finish_reason:'stop',message:{content:JSON.stringify({kind:'category-decision',phase:'judge',keywords:[],productType:null,reason:'Synthetic only.',ambiguous:false,...(noSuitable?{selection:{version:1,outcome:'NO_SUITABLE',candidateSnapshotSha256:snapshot}}:{})})}}],usage:{prompt_tokens:2,completion_tokens:3,total_tokens:5,cost:.002}};
  const http=await slowHttp({body:JSON.stringify(body)});t.after(()=>http.close());const f=await fixture(t,{fetch:async(_url,init)=>fetch(http.url,init)});f.service.saveConnection({id:'openrouter',apiKey:'s03-operation-only'});f.service.setEnabled({id:'openrouter-review',enabled:true});
- const db=(f.service as unknown as {db:DatabaseSync}).db;db.exec(ddl);
+ const db=(f.service as unknown as {db:DatabaseSync}).db;assert.equal(db.prepare('SELECT count(*) n FROM ai_category_operations').get()!.n,0);
  const pending=f.service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates});const result=noSuitable?await pending:await pending.catch(error=>{assert.equal(error.certainty,'RECEIVED_INVALID');return null;});
  const prior=f.service.listCalls()[0],context=prior.categoryContext;assert.ok(context?.version===2);const continuedAt=new Date(Date.parse(prior.finishedAt!)+1).toISOString();
  const scope={taskId:randomUUID(),rowKey:f.product.id+':'+f.product.variants[0].id,phase:'CATEGORY',mode:'immediate' as const,explicitContinueAt:continuedAt,authorize:()=>true};
@@ -85,4 +89,20 @@ test('main-only expansion ports keep one actual loopback GET and a separately bo
  const choice=await taskAiContext.run(f.scope,()=>f.service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates:expanded,expansion:1}));assert.equal(choice.output.productType,'DISH');const call=f.service.getCall(choice.callId)!;assert.ok(call.categoryContext?.version===2);assert.equal(call.categoryContext.expansion,1);assert.equal(call.categoryContext.operationId,claim.operationId);assert.equal(call.categoryContext.inputVersion,claim.inputVersion);assert.equal(call.categoryContext.candidateSnapshotSha256,snapshot.candidateSnapshotSha256);
  assert.equal((await taskAiContext.run(f.scope,()=>f.service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates:expanded,expansion:1}))).id,choice.id);assert.equal(valid.posts,1);assert.equal(f.http.posts,1);assert.equal(gets,1);assert.equal(f.service.getUsageSummary('openrouter-review').attempts,2);
  await assert.rejects(taskAiContext.run(f.scope,()=>f.service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates,expansion:1})));assert.equal(valid.posts,1);
+});
+
+for(const completed of [false,true])test('encrypted old backup preserves one expansion effect and '+(completed?'exact expanded snapshot':'permitted-null stop')+' after restart',async t=>{
+ const f=await owned(t,true);assert.ok(f.result);const file=join(f.directory,'before-expansion.htcbackup'),passphrase='s03 synthetic expansion backup';await createWorkspaceBackup(f.directory,file,passphrase);
+ const input={productId:f.product.id,productRevision:f.product.revision,originalCallId:f.prior.id,originalDecisionId:f.result.id,targetId:'s03-backup-target',query:'cloth'};
+ const claim=taskAiContext.run(f.scope,()=>f.service.reserveCategoryCandidateExpansion(input));taskAiContext.run(f.scope,()=>f.service.permitCategoryCandidateExpansion({productId:f.product.id,productRevision:f.product.revision,requestId:claim.requestId}));
+ let gets=0;const expanded=[{name:'DISH',displayName:'Dish'}],bytes=Buffer.from(JSON.stringify({candidates:expanded})),server=createServer((_request,response)=>{gets++;response.end(bytes);});await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise<void>(resolve=>{server.closeAllConnections();server.close(()=>resolve());}));const address=server.address();assert.ok(address&&typeof address==='object');
+ const received=await new Promise<Buffer>((resolve,reject)=>get('http://127.0.0.1:'+address.port,response=>{const chunks:Buffer[]=[];response.on('data',chunk=>chunks.push(chunk));response.on('end',()=>resolve(Buffer.concat(chunks)));response.on('error',reject);}).on('error',reject));
+ if(completed){const evidence=expanded.map(candidate=>({name:candidate.name,hitKeywords:['cloth'],sources:['platform' as const]}));f.service.retainCategoryCandidateExpansion(f.product.id,{version:1,candidates:expanded,evidence,candidateSnapshotSha256:categoryCandidateSnapshot(expanded),sha256:listingFingerprint({candidates:expanded,evidence}),requestId:claim.requestId,receiptSha256:createHash('sha256').update(received).digest('hex'),receivedAt:new Date().toISOString()});}
+ const before=readCategoryOperation(f.db,f.product.id),usage=f.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),call=f.service.getCall(f.prior.id),raw=await f.service.readProviderReceipt(f.prior.id);await f.service.close();await f.hosting.close();f.closeStore();
+ const prepared=await prepareWorkspaceRestore(f.directory,file,passphrase);await commitWorkspaceRestore(f.directory,prepared);const store=new WorkspaceStore(f.directory);let newRequests=0;const service=new AiService(f.directory,store,f.hosting,storage,{fetch:async()=>{newRequests++;throw Error('No restored expansion retry');}});
+ try{const db=(service as unknown as {db:DatabaseSync}).db;assert.deepEqual(readCategoryOperation(db,f.product.id),before);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.deepEqual(service.getCall(f.prior.id),call);assert.deepEqual(await service.readProviderReceipt(f.prior.id),raw);assert.equal((await service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates})).id,f.result.id);
+ assert.equal(taskAiContext.run(f.scope,()=>service.reserveCategoryCandidateExpansion(input)).requestId,claim.requestId);assert.throws(()=>taskAiContext.run(f.scope,()=>service.permitCategoryCandidateExpansion({productId:f.product.id,productRevision:f.product.revision,requestId:claim.requestId})));
+ if(!completed)await assert.rejects(taskAiContext.run(f.scope,()=>service.decideCategory({productId:f.product.id,productRevision:f.product.revision,phase:'judge',candidates:expanded,expansion:1})));
+ assert.equal(gets,1);assert.equal(newRequests,0);assert.equal(f.http.posts,1);assert.deepEqual(readCategoryOperation(db,f.product.id),before);
+ }finally{await service.close();store.close();}
 });

@@ -1,3 +1,4 @@
+import {validCategoryDecisionAnswers} from './category-decision-receipt.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import {dirname} from 'node:path';
 import type {AiCall,AiResult} from '../../shared/ai-contracts.ts';
@@ -22,7 +23,7 @@ function matchesReceipt(result:AiResult,call:AiCall,saved:NonNullable<ReturnType
  const body=saved.capture.body as any,output=result.output;if(call.categoryContext&&output.phase!==call.categoryContext.phase)return false;
  try{
   if(saved.record.endpoint==='/api/alpha/decisions'){
-   const answers=body?.answers;if(!answers||Object.keys(answers).sort().join()!=='category,review'||answers.category?.type!=='choice'||typeof answers.category.choice!=='string'||answers.review?.type!=='choice'||!['clear','review'].includes(answers.review.choice))return false;
+   const answers=body?.answers;if(!validCategoryDecisionAnswers(answers))return false;
    if(answers.category.choice==='$NO_SUITABLE')return output.productType===null&&output.selection?.outcome==='NO_SUITABLE'&&call.categoryContext?.version===2&&output.selection.candidateSnapshotSha256===call.categoryContext.candidateSnapshotSha256;
    return output.productType===answers.category.choice&&output.keywords.length===0&&output.ambiguous===(output.phase==='select'&&answers.review.choice==='review')&&(!output.selection||call.categoryContext?.version===2&&output.selection.outcome==='SELECTED'&&output.selection.candidateSnapshotSha256===call.categoryContext.candidateSnapshotSha256);
   }

@@ -311,7 +311,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     if(version>=35)assertImageReviewLedgerReceipts(database,receiptRoot);
     if(version>=35)for(const f of reviewLedgerFiles(database)){const old=artifactChecks.get(f.path);if(old&&(old.sha256!==f.sha256||old.byteSize!==f.byteSize))throw new UserFacingError('图片审核安全账文件版本冲突');paths.add(f.path);artifactChecks.set(f.path,f);}
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
-    if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
+    if(version>=20)for(const asset of assertConsistencyHistory(database,undefined,receiptRoot))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if(version>=19)for(const asset of assertSourceImageHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});
     if (version >= 16) {
       const batches = new Map(database.prepare('SELECT record_json FROM procurement_batches').all().map(row => {

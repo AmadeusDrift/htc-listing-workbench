@@ -47,7 +47,7 @@ export async function createFakeProvider({directory,routes,responders={},ftp=fal
     const parts=[];let size=0;
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
       const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
-      const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true}:{})});
+      const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true,publicUrlSha256:digest(route.publicUrl)}:{})});
       const output=responders[route.id]?await responders[route.id]({body:input,headers:new Headers(request.headers),requestId:row.requestId}):route.response??{};let json=output.json??{};
       if(output.issueTokenFor){const target=known.find(row=>row.id===output.issueTokenFor);assert.equal(target?.protocol?.kind,'oss4');assert.equal(route.protocol?.action,'DescribeUploadToken');const p=target.protocol;
         json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};
@@ -89,6 +89,7 @@ export async function createFakeProvider({directory,routes,responders={},ftp=fal
     });ftpPort=await listen(controlServer);
   }
   return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>structuredClone(route)),directory,ledgerPath:ledger.path,
+    register(route,respond){assert.ok(!closed&&typeof respond==='function','S10_REGISTRATION_CLOSED');const copy=verifyRoutes([...known,route]).at(-1);known.push(copy);responders[copy.id]=respond;ledger.append({event:'route-registered',routeId:copy.id,method:copy.method,path:copy.path,publicUrlSha256:digest(copy.publicUrl)});return structuredClone(copy);},
     ftp:ftp?{host:'127.0.0.1',port:ftpPort,dataPort,user:'s10-user',password:'s10-password'}:null,
     ledger:()=>structuredClone(ledger.rows),release(id){const releases=held.get(id)??[];held.delete(id);releases.forEach(fn=>fn());},readFtp:path=>readFile(ftpPath(path)),
     async close(){if(closed)return;closed=true;held.clear();for(const socket of [...sockets,...ftpSockets])socket.destroy();await Promise.all([server,controlServer,dataServer].filter(Boolean).map(value=>new Promise(done=>value.close(done))));}

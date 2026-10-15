@@ -24,10 +24,12 @@ import { automaticRuleOutcome } from '../../shared/automatic-status-projection.t
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertAutomaticRejectionHistory } from './rejection-history.ts';
 import { readSourceImageReceipt, sourceImageReceipt } from '../source-images.ts';
+import {validateSourceImageProvenance,assertSourceImageProvenance} from '../source-image-provenance.ts';
+import {validateConsistencyBinding} from '../source-image-consistency/history.ts';
 import { assertProductConsistency,sourceConsistencyUnknown,sourceConsistencyPresentation,SourceConsistencyError } from '../source-image-consistency/proof.ts';
 import { assertCurrentPricingForPaid } from './outcomes.ts';
 import { pricingQualificationIssue } from '../pricing/qualification.ts';
-import { freezeSourceForProduct } from '../products/source-adoption.ts';
+import { freezeSourceForProduct,readSourceAdoption } from '../products/source-adoption.ts';
 import { transaction } from '../application/transaction.ts';
 import { readSchemaOperation, saveSchemaOperation, planSchemaAttempt, reserveSchemaAttempt } from '../catalog/schema-operations.ts';
 import { FACT_AUTHORITY_REQUIRED, FACT_SOURCE_CONFLICT } from '../amazon/fact-authority.ts';
@@ -450,16 +452,67 @@ export class AutomaticListingService {
     return task.items.filter(sibling=>sibling.productId===row.productId&&sibling.sourcesPrepared).every(sibling=>
       ['READBACK','LABELS','COMPLETE'].includes(sibling.stage)&&!!sibling.draftId&&submitted(this.deps.amazon.getDraft(sibling.draftId)));
   }
+  /** Narrow compatibility for the old partial sibling save after initial source
+   * delivery. A sourceStamp alone cannot prove that original images are intact. */
+  private canRebaseMaterializedSources(task:AutomaticListingTask,row:AutomaticListingItem,product:ProductDetail,proofs?:Map<string,boolean>):boolean {
+    if(row.sourcesPrepared||row.stage!=='SOURCES'||row.draftId||row.imageStarted||row.executionTaskIds.length||row.outcome?.kind==='UNKNOWN'
+      ||![1,product.revision].includes(row.productRevision)||product.revision<=1||sourceStamp(product)!==row.sourceStamp)return false;
+    const variants=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
+    if(variants.some(id=>!product.assets.some(a=>a.variantIds.includes(id))))return false;
+    if(proofs?.has(product.id))return proofs.get(product.id)!;
+    const prove=()=>{
+      try{
+        const source=readSourceImageReceipt(this.db,product.id),adoption=readSourceAdoption(this.db,product.id);
+        if(source?.kind!=='miaoshou'||!adoption?.frozen||adoption.productRevision!==1||adoption.adoptedSnapshotId!==adoption.latestSnapshotId)return false;
+        const audits=this.db.prepare('SELECT action,detail_json,created_at FROM audit_events WHERE product_id=? ORDER BY rowid').all(product.id);
+        const allowed=new Set(['miaoshou.imported','assets.imported','workspace.moved','run.evidence','operation.failed','automatic-listing.source-materialization-rebased']);
+        if(audits.some(a=>!allowed.has(String(a.action))))return false;
+        const imports=audits.filter(a=>a.action==='miaoshou.imported');if(imports.length!==1)return false;
+        const initial=JSON.parse(String(imports[0].detail_json));
+        if(initial.receiptId!==source.receipt.id||initial.sourceSnapshotId!==adoption.adoptedSnapshotId||initial.adopted!==true||String(imports[0].created_at)>task.createdAt)return false;
+        const deliveries=audits.filter(a=>a.action==='assets.imported'),delivered=new Set<string>();
+        if(!deliveries.length||product.revision!==1+2*deliveries.length||product.assets.length!==deliveries.length)return false;
+        for(const event of deliveries){
+          const ids=JSON.parse(String(event.detail_json)).assetIds;
+          if(!Array.isArray(ids)||ids.length!==1||typeof ids[0]!=='string'||delivered.has(ids[0])||String(event.created_at)<task.createdAt)return false;
+          delivered.add(ids[0]);
+        }
+        const anchors=this.db.prepare("SELECT id,record_json FROM source_image_provenance WHERE json_extract(record_json,'$.productId')=?").all(product.id)
+          .map(a=>{const anchor=validateSourceImageProvenance(JSON.parse(String(a.record_json)));if(anchor.id!==a.id)throw Error('Invalid anchor');return anchor;});
+        if(anchors.length!==product.assets.length||new Set(anchors.map(a=>a.assetId)).size!==anchors.length)return false;
+        const epochs=this.db.prepare("SELECT id,record_json FROM source_consistency_bindings WHERE json_extract(record_json,'$.productId')=?").all(product.id)
+          .map(b=>{const binding=validateConsistencyBinding(JSON.parse(String(b.record_json)));if(binding.id!==b.id)throw Error('Invalid binding');return binding;});
+        const bindings=this.db.prepare('SELECT va.* FROM variant_assets va JOIN assets a ON a.id=va.asset_id WHERE a.product_id=?').all(product.id);
+        if(bindings.length!==epochs.length)return false;
+        for(const asset of product.assets){
+          const anchor=anchors.find(a=>a.assetId===asset.id);
+          if(!delivered.has(asset.id)||asset.createdAt<task.createdAt||!anchor||anchor.observedAt<asset.createdAt||!asset.variantIds.length)return false;
+          assertSourceImageProvenance(this.db,anchor,this.directory);
+          if(asset.variantIds.some(id=>!anchor.mappings.some(m=>m.localVariantId===id)))return false;
+          for(const id of asset.variantIds){
+            const current=bindings.filter(b=>b.asset_id===asset.id&&b.variant_id===id),history=epochs.filter(b=>b.assetId===asset.id&&b.variantId===id);
+            if(current.length!==1||current[0].confirmed!==1||history.length!==1||history[0].createdAt<asset.createdAt)return false;
+          }
+        }
+        // No request may be reassigned from the old pre-image scope, and a
+        // sibling's unknown observation must remain bound to its original send.
+        if(this.db.prepare("SELECT 1 FROM ai_calls WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.productRevision')=1 LIMIT 1").get(product.id)
+          ||sourceConsistencyUnknown(this.db,product.id,product.variants.map(v=>v.id)))return false;
+        return true;
+      }catch{return false;}
+    };
+    const proved=prove();proofs?.set(product.id,proved);return proved;
+  }
   private assertScope(task: AutomaticListingTask, row?: AutomaticListingItem, allowSourceRecovery=false,selection?:AutomaticResumeSelection): void {
     const selected=selection?task.items.filter(item=>rowSelected(selection,item.key)):task.items;
     const rows = row ? [row] : task.items.filter(value => (!selection||selected.some(item=>item.key===value.key||item.productId===value.productId||item.salesPlan?.sourceGroupKey&&item.salesPlan.sourceGroupKey===value.salesPlan?.sourceGroupKey))&&!adaptationBlocked(task,value.key)&&value.status!=='SCREENED'&&!['PLAN','READBACK','LABELS','COMPLETE'].includes(value.stage));
     if (!rows.length) return;
     this.assertConnections(task);
-    const sources=new Map<string,{source:ProductDetail;stamp:string}>();
+    const sources=new Map<string,{source:ProductDetail;stamp:string}>(),materializationProofs=new Map<string,boolean>();
     for (const item of rows) {
       if(!sources.has(item.productId)){const source=this.deps.store.getProduct(item.productId);sources.set(item.productId,{source,stamp:sourceStamp(source)});}
       const {source,stamp}=sources.get(item.productId)!,product=projectSalesProduct(source,item.salesPlan,item.variantId), variant = product.variants.find(value => value.id === item.variantId);
-      if (!variant || variant.sku !== item.sku || stamp !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
+      if (!variant || variant.sku !== item.sku || stamp !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&(this.canRebaseSources(task,item)||this.canRebaseMaterializedSources(task,item,source,materializationProofs)))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
     }
   }
   private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask,categoryCache?:Map<string,string|null>):string|null {
@@ -907,12 +960,25 @@ export class AutomaticListingService {
       if(row.draftId&&row.imageStarted)for(const slot of this.deps.images.getProgress(row.draftId)?.slots??[]){const attempt=slot.attempts?.at(-1);if(attempt?.error||slot.error){const snapshot={...row,error:attempt?.error??slot.error};rememberFailure(snapshot,attempt?.failureProof?.at??null,slot.index,attempt?.failureProof?'request-proof':undefined);row.failureHistory=snapshot.failureHistory;}}
     }
     row.lastContinuedAt=continuation.at;
-    if(row.outcome?.kind!=='UNKNOWN'&&this.canRebaseSources(task,row)){const revision=this.deps.store.getProduct(row.productId).revision;if(revision!==row.productRevision){row.productRevision=revision;delete row.outcome;}}
+    let materializedFrom:number|undefined,materializedOutcome:AutomaticListingItem['outcome'];
+    if(row.outcome?.kind!=='UNKNOWN'&&!row.sourcesPrepared&&row.stage==='SOURCES'&&!row.draftId&&!row.imageStarted&&!row.executionTaskIds.length){
+      const source=this.deps.store.getProduct(row.productId);
+      if(source.revision!==row.productRevision){
+        const materialized=this.canRebaseMaterializedSources(task,row,source);
+        if(materialized||this.canRebaseSources(task,row)){if(materialized){materializedFrom=row.productRevision;materializedOutcome=row.outcome;}row.productRevision=source.revision;delete row.outcome;}
+      }
+    }
     this.migrateRepairPolicy(task,row);
     this.assertScope(task,row,true);
     // Persist this SKU's original-request permission before any costly owner work.
     // No other SKU timestamp or counter is changed here.
-    this.saveItem(task,row);
+    if(materializedFrom!==undefined){
+      const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
+      try{transaction(this.db,()=>{
+        appendAuditEvent(this.db,randomUUID(),row.productId,'automatic-listing.source-materialization-rebased','原SKU仅同步已证明的来源图片落地版本；历史与未知请求保留',JSON.stringify({version:1,taskId:task.id,itemKey:row.key,fromRevision:materializedFrom,toRevision:row.productRevision,sourceStamp:row.sourceStamp}),continuation.at);
+        this.saveItem(task,row);
+      });}catch(error){row.productRevision=materializedFrom;if(materializedOutcome)row.outcome=materializedOutcome;task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
+    }else this.saveItem(task,row);
     continuation.prepared.add(row.key);
     if(row.draftId){const draft=this.deps.amazon.getDraft(row.draftId);if(submitted(draft)){row.stage='READBACK';row.status='WAITING';this.deps.followup.schedule(draft.id);this.saveItem(task,row);return;}}
     if((!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status==='FAILED'&&row.stage!=='PLAN'&&!adaptationBlocked(task,row.key)) {
@@ -1177,7 +1243,8 @@ export class AutomaticListingService {
         if(!(error instanceof SourceConsistencyError))throw error;
         // A retained format failure already has its exact source scope. Recover it
         // before frozen-sibling delivery guards; recovery never needs another download.
-        if(['SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(error.code)){
+        if(['SOURCE_CONSISTENCY_INVALID_OUTPUT','SOURCE_CONSISTENCY_SENT_UNKNOWN','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(error.code)
+          ||error.code==='SOURCE_CONSISTENCY_NEEDS_INPUT'&&this.canRebaseMaterializedSources(task,row,this.deps.store.getProduct(row.productId))){
           if(!this.deps.prepareSourceConsistency)throw error;
           const variantIds=row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId];
           await this.deps.prepareSourceConsistency({productId:row.productId,productRevision:row.productRevision,variantIds},this.controller!.signal,()=>this.checkpoint(task,row));

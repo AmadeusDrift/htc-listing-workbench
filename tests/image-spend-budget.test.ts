@@ -10,11 +10,13 @@ import { ImageGenerationService } from '../src/main/image-generation/service.ts'
 import { DEFAULT_OPENROUTER_IMAGE_MODEL as model } from '../src/shared/image-generation-contracts.ts';
 import {AiSpendBudget} from '../src/main/ai/spend-budget.ts';
 import {createWorkspaceBackup,prepareWorkspaceRestore,commitWorkspaceRestore} from '../src/main/backup.ts';
-import {ControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
+import {ControlledRunScopes,pauseControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
 import {imageSpendBound,priceEvidence} from '../src/main/ai/spend-records.ts';
+import {sanitizeFailureReason} from '../src/shared/automatic-resume.ts';
 
 const png=Buffer.alloc(33);Buffer.from('89504e470d0a1a0a','hex').copy(png);png.writeUInt32BE(13,8);png.write('IHDR',12);png.writeUInt32BE(256,16);png.writeUInt32BE(256,20);
 const storage={isEncryptionAvailable:()=>true,encryptString:(value:string)=>Buffer.from(value),decryptString:(value:Buffer)=>value.toString()};
+function concurrentFailure(error:any){return{name:String(error?.name??'UnknownError').slice(0,80),code:error?.code,reason:error?.diagnosticReason,certainty:error?.certainty,message:sanitizeFailureReason(String(error?.message??'')).replaceAll('s08-synthetic-key-only','[synthetic-key]'),stack:typeof error?.stack==='string'?error.stack.split(/\r?\n/).slice(1).filter((line:string)=>/^\s+at /.test(line)).slice(0,8).join('\n').replaceAll('s08-synthetic-key-only','[synthetic-key]'):null};}
 
 async function fixture(t:test.TestContext,pricing:unknown[],limitUsdMicros:number|null,options:{cost?:number|null;disconnect?:boolean;body?:unknown;previewFailures?:number;onPriceRead?:()=>void}={}){
  await mkdir(resolve('.test-data'),{recursive:true});const directory=await mkdtemp(resolve('.test-data/s08-')),store=new WorkspaceStore(directory),product=store.createProduct(),db=openDatabase(directory);
@@ -70,7 +72,7 @@ test('actual old backup prepare and commit keep a later image intent and monetar
 });
 test('two actual image services share the SQLite money lock instead of spending the same remaining amount twice',async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],50_000),second=f.store.createProduct(),other=new ImageGenerationService(f.directory,f.store,storage,{decodePreview:bytes=>bytes,fetch:f.fetcher});
- try{const results=await Promise.allSettled([f.service.generate(f.input),other.generate({...f.input,productId:second.id,productRevision:second.revision})]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(results.filter(r=>r.status==='rejected'&&(r.reason as any).diagnosticReason==='SPEND_LIMIT_EXCEEDED').length,1);assert.equal(f.posts,1);assert.equal(new AiSpendBudget(f.db).list().length,1);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,1);}finally{await other.close();}
+ try{const results=await Promise.allSettled([f.service.generate(f.input),other.generate({...f.input,productId:second.id,productRevision:second.revision})]);t.diagnostic(JSON.stringify(results.map(r=>r.status==='fulfilled'?{status:r.status}:{status:r.status,...concurrentFailure(r.reason)})));assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(results.filter(r=>r.status==='rejected'&&(r.reason as any).diagnosticReason==='SPEND_LIMIT_EXCEEDED').length,1);assert.equal(f.posts,1);assert.equal(new AiSpendBudget(f.db).list().length,1);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,1);}finally{await other.close();}
 });
 for(const cost of [0,.01])test(`actual processing-error receipt with reported cost ${cost} retains the remaining upper liability`,async t=>{
  const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],100_000,{body:{id:'gen_s08_pending',error:{code:502,message:'Synthetic upstream processing failure'},usage:{cost}}});await assert.rejects(f.service.generate(f.input));assert.equal(f.posts,1);const budget=new AiSpendBudget(f.db),record=budget.list()[0],summary=budget.summary('image-generation-daily');assert.equal(record.state,'UNKNOWN');assert.equal(record.actualUsdMicros,cost*1_000_000);assert.equal(summary.reportedUsdMicros,cost*1_000_000);assert.equal(summary.heldUsdMicros,40_000-cost*1_000_000);await assert.rejects(f.service.generate(f.input));assert.equal(f.posts,1);
@@ -123,4 +125,9 @@ for(const limit of [null,1_000_000])test(`actual controlled cost anomaly preserv
  const original=budget.list()[0];assert.equal(original.state,'COST_ANOMALY');assert.equal(original.actualUsdMicros,80_000);assert.equal(original.receiptIds.length,1);assert.equal(budget.summary('controlled-live-lifetime').anomaly,true);
  const body=f.bodies[0],hash=(s:string)=>createHash('sha256').update(s).digest('hex'),{transaction}=await import('../src/main/application/transaction.ts');assert.throws(()=>transaction(f.db,()=>budget.reserveInTransaction(f.db,{id:randomUUID(),businessKey:hash('next-controlled'),requestSha256:hash(body),model,purpose:'image_generation',scopeId:c.scope.id},body,original.bound)),(e:any)=>e.diagnosticReason==='SPEND_COST_ANOMALY');
  const next=f.store.createProduct(),ordinary=()=>f.service.generate({...f.input,productId:next.id,productRevision:next.revision});if(limit===null)await ordinary();else await assert.rejects(ordinary(),(e:any)=>e.diagnosticReason==='SPEND_COST_ANOMALY');assert.equal(f.posts,limit===null?2:1);assert.equal(budget.list().length,limit===null?2:1);assert.deepEqual(budget.list().find(r=>r.id===original.id),original);assert.equal(budget.summary('image-generation-daily').anomaly,true);
+});
+
+test('actual image quote cannot dispatch when the same-revision controlled authority is revoked during pricing',async t=>{
+ let revoke=()=>{};const f=await fixture(t,[{billable:'output_image',unit:'image',cost_usd:.04}],null,{onPriceRead:()=>revoke()}),c=controlledImage(f,null);revoke=()=>pauseControlledRunScopes(f.db);
+ await assert.rejects(c.run(()=>f.service.generateForWorkflow(f.input,{requestId:randomUUID(),owner:c.owner})),(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');assert.equal(f.posts,0);assert.equal(new AiSpendBudget(f.db).list().length,0);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_image_requests').get()!.n,0);assert.equal(f.db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks").get()!.revision,1);
 });

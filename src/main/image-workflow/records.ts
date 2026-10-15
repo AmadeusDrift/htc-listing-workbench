@@ -34,6 +34,9 @@ import { buildListingContext } from '../listing-ai/context.ts';
 import { assertCurrentCopyEvidence, assertCurrentImageCategoryExclusions, CONTRACT_ADOPTION_FIELDS, currentDraftEvidenceIssues } from '../listing-ai/current-evidence.ts';
 
 
+function validatePlanningUnknown(raw:unknown,run:ImageWorkflowRun):NonNullable<ImageWorkflowRun['planningUnknown']>{
+ const p=keys(raw,['version','callId','certainty']);if(p.version!==1||p.certainty!=='SENT_UNKNOWN'||run.status==='COMPLETED'||run.stage!=='planning'||!run.imageContext||!run.contextSha256)throw new UserFacingError('旧图片规划待核对引用不完整');return {version:1,callId:uuid(p.callId),certainty:'SENT_UNKNOWN'};
+}
 function validateImagePendingRequest(raw:unknown,run:ImageWorkflowRun):NonNullable<ImageWorkflowRun['pendingRequest']>{
  const p=keys(raw,['version','callId','step','slot','certainty']),slot=integer(p.slot,0,7);if(p.version!==1||p.certainty!=='SENT_UNKNOWN'||!['planning','risk','ocr','text'].includes(String(p.step))||run.status==='COMPLETED'||!run.slots&&slot!==0||p.step!=='planning'&&run.slots&&!run.slots[slot-1]?.attempts.length)throw new UserFacingError('图片未决操作身份不一致');return {version:1,callId:uuid(p.callId),step:p.step as NonNullable<ImageWorkflowRun['pendingRequest']>['step'],slot,certainty:'SENT_UNKNOWN'};
 }
@@ -74,7 +77,7 @@ function validateLegacyImageWorkflowRun(raw: unknown): ImageWorkflowRun {
 
 export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={}):ImageWorkflowRun {
   if(!raw||typeof raw!=='object'||!('slots' in raw))return validateLegacyImageWorkflowRun(raw);
-  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['unitAdoptionReview','pendingRequest','reviewRequests','retryAllowance','appearanceReviewEnabled','sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
+  const o=keys(raw,['id','draftId','productId','productRevision','variantId','sku','status','stage','attempt','maxAttempts','contextSha256','draftSha256','referenceAssets','planResultIds','candidateIds','ocrResultIds','reviewResultIds','approvedAssetId','approvedSha256','createdAt','updatedAt','error','imagePolicyVersion','ipReviewResultIds','slotPolicy','slots'],['unitAdoptionReview','planningUnknown','pendingRequest','reviewRequests','retryAllowance','appearanceReviewEnabled','sourceReuse','legacyImageAttempts','policyReevaluation','rejection','listingEvidenceContractVersion','activeSlot','imageContext','recheckedFromRunId','setPlan','setPlanResultId','copyRepairAttempts','copyReviewResultId','contentPreparation','approvalReuse','imageRecipeSha256','riskInterceptionEnabled','copyReviewEnabled','categoryFieldPolicyVersion','categoryFieldRepair']);
   const invalid=():never=>{throw new UserFacingError('逐图流程状态或复核记录不完整');};
   if(o.riskInterceptionEnabled!==undefined&&typeof o.riskInterceptionEnabled!=='boolean')invalid();
   if(o.copyReviewEnabled!==undefined&&typeof o.copyReviewEnabled!=='boolean')invalid();
@@ -145,6 +148,7 @@ export function validateImageWorkflowRun(raw:unknown,options:{stored?:boolean}={
   for(const slot of run.slots??[])if(slot.status==='PASSED'&&slot.attempts.at(-1)?.riskBypass?.candidate.sha256!==undefined&&slot.attempts.at(-1)!.riskBypass!.candidate.sha256!==slot.approvedSha256)invalid();
   if(o.approvalReuse!==undefined)run.approvalReuse=validateApprovalReuse(o.approvalReuse,run);
   if(o.rejection!==undefined)run.rejection=validateWorkflowRejection(o.rejection);
+  if(o.planningUnknown!==undefined)run.planningUnknown=validatePlanningUnknown(o.planningUnknown,run);
   if(o.pendingRequest!==undefined)run.pendingRequest=validateImagePendingRequest(o.pendingRequest,run);
   if(o.reviewRequests!==undefined)run.reviewRequests=validateImageReviewRequests(o.reviewRequests,run);
   return run;

@@ -85,6 +85,7 @@ export interface AutomaticListingDependencies {
   hosting: Pick<HostingService, 'getProfile'> & Partial<Pick<HostingService,'listUploads'|'checkLocalAssets'>>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     inspectApproval?:ImageWorkflowService['inspectApproval'];
+    getPlanningUnknown?:ImageWorkflowService['getPlanningUnknown'];
     canResumeUnitRecheckDraft?:ImageWorkflowService['canResumeUnitRecheckDraft'];
     hasHistoricalRetryAllowance?: (draftId:string)=>boolean;
     getRiskSettings?: () => {enabled:boolean};
@@ -480,7 +481,7 @@ export class AutomaticListingService {
     if(pendingSubmission??(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&(this.deps.execution.hasPendingSubmission?.(draft.id)??this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))))return 'SUBMISSION_UNKNOWN';
     const run=this.deps.images.getProgress(row.draftId);
     if(run?.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||journal.unknown(run.contentPreparation.operationId)))return 'FIELD_RESULT_UNKNOWN';
-    if(run?.pendingRequest||run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
+    if(run?.pendingRequest||run?.status==='RUNNING'||(this.deps.images.getPlanningUnknown?this.deps.images.getPlanningUnknown(row.draftId,run):run?.planningUnknown)||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
     return this.categoryUnknown(row,task,categoryCache);
   }
@@ -1172,9 +1173,10 @@ export class AutomaticListingService {
         const product=this.deps.store.getProduct(row.productId);
         const receipt=readSourceImageReceipt(this.db,row.productId)??sourceImageReceipt(null,this.deps.sourceReceipt?.(row.productId));
         const issue=receipt&&(row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]).map(id=>sourceImageMappingDiagnosis(product,id,receipt)).find(Boolean);
-        if(issue)row.outcome={version:1,kind:AUTOMATIC_SOURCE_ISSUES[issue.code],code:issue.code,message:issue.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:null,draftRevision:null};
-        const reason = issue?.message || row.error || '该 SKU 的来源图片尚未准备完成';
-        throw new UserFacingError(reason.includes(frozenSourcesMessage) ? reason : `${reason}；${frozenSourcesMessage}`);
+        const bindingIssue=issue&&(!row.outcome||Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,row.outcome.code));
+        if(issue&&bindingIssue)row.outcome={version:1,kind:AUTOMATIC_SOURCE_ISSUES[issue.code],code:issue.code,message:issue.message.slice(0,2000),classifiedAt:new Date().toISOString(),scope:outcomeScope(task,row),draftId:null,draftRevision:null};
+        const reason = (issue&&bindingIssue?issue.message:null) || row.error || '该 SKU 的来源图片尚未准备完成';
+        throw new UserFacingError(!bindingIssue||reason.includes(frozenSourcesMessage) ? reason : `${reason}；${frozenSourcesMessage}`);
       }
       const siblings = task.items.filter(value => rowSelected(task.resumeScope,value.key)&&value.status!=='SCREENED'&&value.productId === row.productId && !value.sourcesPrepared && value.stage === 'SOURCES');
       row.status = 'RUNNING'; row.stage = 'SOURCES'; this.saveItem(task,row);
@@ -1206,7 +1208,7 @@ export class AutomaticListingService {
         if(consistencyError)sibling.outcome={version:1,kind:consistencyError.kind,code:consistencyError.code,message:consistencyError.message,classifiedAt:new Date().toISOString(),scope:outcomeScope(task,sibling),draftId:null,draftRevision:null};
       }
       if (siblings.some(sibling => sibling.sourcesPrepared)) {
-        for (const sibling of siblings) if (!sibling.sourcesPrepared) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));
+        for (const sibling of siblings) if (!sibling.sourcesPrepared&&sibling.outcome?.kind==='NEEDS_INPUT'&&(!sibling.outcome.code||Object.hasOwn(AUTOMATIC_SOURCE_ISSUES,sibling.outcome.code))) sibling.error = errorMessage(new UserFacingError(`${sibling.error}；${frozenSourcesMessage}`));
       }
       this.save(task,this.db,siblings.filter(sibling=>sibling.sourcesPrepared).map(sibling=>({key:sibling.key,stage:'SOURCES'})),undefined,siblings.map(sibling=>sibling.key)); this.checkpoint(task, row);
       if (!row.sourcesPrepared) throw new UserFacingError(row.error!);
@@ -1278,7 +1280,7 @@ export class AutomaticListingService {
           for(const slot of selected){const before=prior?.slots?.find(old=>old.index===slot.index);if(slot.status!=='PASSED'&&fingerprint(slot)!==fingerprint(before??null)){const snapshot={...row,error:slot.error??result.workflow.error??'所选图位处理未完成'};rememberFailure(snapshot,new Date().toISOString(),slot.index,'local-check');row.failureHistory=snapshot.failureHistory;}}
           this.saveItem(task,row);return;
         }
-        if (!this.imageReady(result.workflow)){const pending=result.workflow.pendingRequest;if(pending){const error=new AiError('INTERRUPTED');error.callId=pending.callId;error.certainty=pending.certainty;error.diagnosticReason=pending.step==='planning'?'IMAGE_PLAN_RESULT_UNKNOWN':'IMAGE_REVIEW_RESULT_UNKNOWN';error.message=result.workflow.error||'原图片操作结果待核对，未发送新请求';throw error;}throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');}
+        if (!this.imageReady(result.workflow)){const pending=result.workflow.pendingRequest;const legacy=result.workflow.planningUnknown;if(pending||legacy){const error=new AiError('INTERRUPTED');error.callId=(pending??legacy)!.callId;error.certainty=(pending??legacy)!.certainty;error.diagnosticReason=legacy||pending?.step==='planning'?'IMAGE_PLAN_RESULT_UNKNOWN':'IMAGE_REVIEW_RESULT_UNKNOWN';error.message=result.workflow.error||'原图片操作结果待核对，未发送新请求';throw error;}throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');}
         draft = result.draft;
       }
       this.checkpoint(task, row);

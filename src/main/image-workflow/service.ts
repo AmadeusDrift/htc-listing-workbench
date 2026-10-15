@@ -31,7 +31,8 @@ import {productReferenceImages} from './reference-purpose.ts';
 import { evaluateImageRisk, describeImageRisk } from '../../shared/image-risk-policy.ts';
 import { needsPlainColorRefresh } from '../listing-ai/plain-colors.ts';
 import { isProductReference } from "../source-reference-query.ts";
-import { imageListingCopyMatches } from './context-compatibility.ts';
+import { imageListingCopyMatches,imageListingContextChanges } from './context-compatibility.ts';
+import { ownsLegacyPlanningCall } from './planning-unknown.ts';
 import { LOCAL_LISTING_POLICY,currentPolicyRemaining,needsBusinessAuthorityRefresh } from './policy-reevaluation.ts';
 import { presentRejection } from '../../shared/rejection-presentation.ts';
 import { assertWorkflowRejectionOwner,readCompletionForRejection } from './rejection.ts';
@@ -193,12 +194,16 @@ export class ImageWorkflowService {
   }
   private capturePendingReview(run:ImageWorkflowRun,error:unknown):void {
     if(!(error instanceof AiError)||!error.callId)return;const call=this.ai.getCall(error.callId),p=call?.presentationContext,s=call?.requestScope;
+    if(call&&error.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'&&ownsLegacyPlanningCall(run,call)&&!localAiRequestResolved(this.db,this.directory,call.id,call)){
+      run.planningUnknown={version:1,callId:call.id,certainty:'SENT_UNKNOWN'};return;
+    }
     if(!call||!p||!s||p.kind!=='image'||p.draftId!==run.draftId||p.variantId!==run.variantId||call.productId!==run.productId||call.productRevision!==run.productRevision||s.sku!==run.sku||(s.slot??0)!==p.slot||localAiRequestResolved(this.db,this.directory,call.id,call))return;
     const steps={'image-plan':'planning','image-ip-review':'risk','generated-image-ocr':'ocr','image-text-review':'text'} as const,step=steps[s.operation as keyof typeof steps];
     if(!step||step==='planning'&&(p.workflowId!==run.id||p.sourceSha256!==(p.slot?run.slots?.[p.slot-1]?.contextSha256:run.contextSha256))||step!=='planning'&&!run.reviewRequests?.some(r=>r.requestId===call.id&&r.contextSha256===p.sourceSha256&&r.slot===p.slot))return;
     run.pendingRequest={version:1,callId:call.id,step,slot:p.slot,certainty:'SENT_UNKNOWN'};
   }
   private save(run: ImageWorkflowRun): void {
+    if(run.planningUnknown){const call=this.ai.getCall(run.planningUnknown.callId);if(call&&localAiRequestResolved(this.db,this.directory,call.id,call))delete run.planningUnknown;else if(!call||!ownsLegacyPlanningCall(run,call))throw new UserFacingError('旧图片规划待核对调用归属不一致');}
     if(run.pendingRequest){const call=this.ai.getCall(run.pendingRequest.callId);if(call&&localAiRequestResolved(this.db,this.directory,call.id,call))delete run.pendingRequest;}
     if(run.slots){const attempts=run.slots.flatMap(slot=>slot.attempts);run.attempt=attempts.length;
       for(const [plural,singular] of [['planResultIds','planResultId'],['candidateIds','candidateId'],['ipReviewResultIds','ipReviewResultId'],['ocrResultIds','ocrResultId'],['reviewResultIds','reviewResultId']] as const)run[plural]=[...new Set(attempts.flatMap(attempt=>attempt[singular]?[attempt[singular]!]:[]))];
@@ -331,9 +336,21 @@ export class ImageWorkflowService {
     return run;
   }
   getProgress(rawId: unknown): ImageWorkflowRun | null { this.ensureOpen(); return workflowRuns(this.db, uuid(rawId))[0] ?? null; }
+  getPlanningUnknown(rawId:unknown,knownRun?:ImageWorkflowRun|null):ImageWorkflowRun['planningUnknown']|null {
+    const run=knownRun===undefined?this.getProgress(rawId):knownRun;if(!run||run.draftId!==rawId||run.pendingRequest||!['FAILED','CANCELLED','INTERRUPTED'].includes(run.status)||run.stage!=='planning'||!run.imageContext)return null;
+    // Product-indexed historical lookup, only for this workflow; no task-wide scan,
+    // repair, backfill or network call occurs in this presentation query.
+    const ids=run.planningUnknown?[run.planningUnknown.callId]:this.db.prepare("SELECT id FROM ai_calls WHERE json_extract(record_json,'$.productId')=? AND json_extract(record_json,'$.presentationContext.workflowId')=? AND json_extract(record_json,'$.requestScope') IS NULL ORDER BY json_extract(record_json,'$.startedAt') DESC").all(run.productId,run.id).map(row=>String(row.id));
+    // Display stays conservative until an execution/recovery path validates the
+    // original receipt. Refresh never reads receipt files or repairs a result.
+    for(const id of ids){const call=this.ai.getCall(id);if(call&&call.status!=='SUCCEEDED'&&ownsLegacyPlanningCall(run,call))return {version:1,callId:call.id,certainty:'SENT_UNKNOWN'};}
+    return null;
+  }
   getProgressPresentation(rawId:unknown):ImageWorkflowProgress|null {
     const run=this.getProgress(rawId);if(!run)return null;
+    const planningUnknown=this.getPlanningUnknown(rawId,run);if(planningUnknown)run.planningUnknown=planningUnknown;
     const pendingCall=run.pendingRequest?this.ai.getCall(run.pendingRequest.callId):undefined;let resultUnknown=!!run.pendingRequest&&(!pendingCall||!localAiRequestResolved(this.db,this.directory,pendingCall.id,pendingCall));
+    resultUnknown ||=!!planningUnknown;
     if(run.contentPreparation?.operationId){
       const journal=new CompletionJournal(this.db,this.directory),operation=journal.get(run.contentPreparation.operationId),owner=operation.safetyIdentity;
       if(operation.draftId!==run.draftId||owner.productId!==run.productId||owner.productRevision!==run.productRevision||owner.variantId!==run.variantId||owner.sku!==run.sku)throw new UserFacingError('字段请求进度归属不一致，请核对已有记录');
@@ -738,7 +755,10 @@ export class ImageWorkflowService {
         sourceColorEvidenceSha256=prepared.evidenceSha256;
         result.aiCalls+=prepared.aiCalls;throwIfAborted(signal);
       }
-      if(run.imageContext&&!this.currentContextMatches(run,initial))throw new UserFacingError('来源颜色证据已变化，原图片上下文与已付费请求已保留；请复核现有图片，不能替换未完成的规划');
+      if(run.imageContext&&!this.currentContextMatches(run,initial)){
+        const current=currentImageListingSnapshot(initial,this.currentContext(initial,this.store.getProduct(run.productId),this.amazon.executionTargetScope(initial.targetId).generation)).context;
+        throw new UserFacingError(`图片上下文不一致（${imageListingContextChanges(run.imageContext.listing,current).join('、')}）；原上下文与已付费请求已保留，请复核现有图片，不能替换未完成的规划`);
+      }
       if(!run.imageContext){
         if(run.contentPreparation?.draftRevision===initial.revision)result.remaining=run.contentPreparation.remaining;
         result.remaining=withoutHistoricalPricingRemaining(result.draft,result.remaining,readListingRules(this.db));

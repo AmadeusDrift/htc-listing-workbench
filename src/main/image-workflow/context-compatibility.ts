@@ -5,6 +5,7 @@ import { compatibleApprovalRecipe } from './approval-reuse.ts';
 import type { ListingAiContext } from '../../shared/listing-ai-contracts.ts';
 import { listingFingerprint } from "../json-fingerprint.ts";
 import { isFullSchema } from "../listing-ai/native-values.ts";
+import { generalObservationEvidence } from '../listing-ai/general-observations.ts';
 
 /** Image requests do not consume field-card labels/help. Ignore only those two
  * metadata keys for compatibility; retain field order and source/schema rules.
@@ -19,6 +20,14 @@ export function imageListingContextsMatch(stored:ListingAiContext,current:Listin
     return value;
   };
   const left=structuredClone(comparable(stored)),right=structuredClone(comparable(current));
+  // A projection is not a source change. Only remove exact general citations
+  // proven by the same original assessment/images/values on both sides.
+  if(isFullSchema(stored)&&isFullSchema(current)&&stored.sourceProduct?.observations?.length&&stored.sourceProduct.observations.every(source=>!!source.assessmentId)
+    &&listingFingerprint(stored.sourceProduct.observations)===listingFingerprint(current.sourceProduct?.observations??[])){
+    const proven=new Set(stored.sourceProduct.observations.flatMap(generalObservationEvidence).filter(item=>!/color|colour|颜[色]|色彩/i.test(item.name)).map(item=>listingFingerprint(item)));
+    left.evidence=left.evidence.filter(item=>!proven.has(listingFingerprint(item)));
+    right.evidence=right.evidence.filter(item=>!proven.has(listingFingerprint(item)));
+  }
   if(isFullSchema(stored)&&isFullSchema(current)&&stored.listingProgram==='haul'&&current.listingProgram==='haul'){
     const managed=['brand','manufacturer','country_of_origin','import_designation','model_number','model_name','part_number','condition_type','list_price','purchasable_offer','gpsr_safety_attestation','batteries_required','supplier_declared_dg_hz_regulation','required_product_compliance_certificate',...DIMENSION_FIELDS,'item_weight','item_package_weight'];
     const same=(a:unknown,b:unknown)=>a===undefined||b===undefined?a===b:listingFingerprint(a)===listingFingerprint(b);
@@ -34,6 +43,21 @@ export function imageListingContextsMatch(stored:ListingAiContext,current:Listin
     for(const field of HAUL_UNSUPPORTED_FIELDS){delete left.currentAttributes?.[field];delete right.currentAttributes?.[field];delete left.businessValues?.[field];delete right.businessValues?.[field];}
   }
   return listingFingerprint(left)===listingFingerprint(right);
+}
+
+/** Bounded diagnostic labels only; never used as request/adoption authority. */
+export function imageListingContextChanges(stored:ListingAiContext,current:ListingAiContext):string[] {
+  const same=(a:unknown,b:unknown)=>listingFingerprint(a??null)===listingFingerprint(b??null),changes:string[]=[];
+  if(!same([stored.schemaChecksum,stored.schemaVersion,stored.schemaSha256,stored.fullSchema],[current.schemaChecksum,current.schemaVersion,current.schemaSha256,current.fullSchema]))changes.push('Schema');
+  const identity=(c:ListingAiContext)=>[c.draftId,c.productId,c.productRevision,c.variantId,c.sku,c.targetId,c.targetGeneration,c.marketplaceId,c.productType,c.listingProgram];
+  if(!same(identity(stored),identity(current)))changes.push('来源或卖家站点身份');
+  if(!same(stored.sourceProduct?.assets,current.sourceProduct?.assets))changes.push('原图');
+  if(!same(stored.sourceProduct?.observations,current.sourceProduct?.observations))changes.push('原始图片观察');
+  if(!same(stored.sourceProduct?.facts,current.sourceProduct?.facts)||!same(stored.sourceProduct?.selectedSku,current.sourceProduct?.selectedSku)||!same(stored.currentAttributes,current.currentAttributes))changes.push('商品属性或人工事实');
+  const colors=(c:ListingAiContext)=>c.evidence.filter(item=>item.meaning==='color'||/color|colour|颜[色]|色彩/i.test(item.name));
+  if(!same(colors(stored),colors(current)))changes.push('颜色依据');
+  if(!same(stored.evidence,current.evidence))changes.push('字段依据投影');
+  return changes.length?changes:['其他图片上下文'];
 }
 /** Source attributes remain covered by context comparison; newly filled rule
  * labels are not new image prose. Never relax actual title/bullet/description copy. */

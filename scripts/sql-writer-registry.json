@@ -1007,6 +1007,19 @@
         "retainCategoryPhaseHistory|a9456050e74f18bc08d762c949cfd54eb5cd44a923b793dc2db00f32f6238eac": 1,
         "retainCategoryPhaseHistory|69d42ce27c3df1bcb0dfcf497a5743d4f6dc12273f218db6cb34d927cb65012b": 1
       }
+    },
+    "main/automatic-listing/checkpoints.ts": {
+      "role": "tasks",
+      "review": "Task owner checkpoint only. Fixed full JSON CAS or json_set paths derived solely from validated integer item indices; all dynamic values bound. No schema or history mutation. Complete legacy JSON remains readable.",
+      "commands": [
+        "prepare|UPDATE|automatic_listing_tasks",
+        "write|INSERT|automatic_listing_tasks"
+      ],
+      "statements": {
+        "prepare|4a1f576372fc5a3d855557b3d96cedf57a2ef2cb99921aeb21048b40a983dc0f": 1,
+        "prepare|80ee47694f80c29af0c26f5ce50600f1d46f2372770d2d0d6f7b9bee930456f2": 1,
+        "write|f6a5f4a9f5a9af7d33431d8d0e70d058fe6ba3f1ccb3713d82450a517f40bed5": 1
+      }
     }
   },
   "opaque": [
@@ -1219,6 +1232,18 @@
       "command": "usdMicrosCeil",
       "expression": "value",
       "review": "RegExp.exec(value) decimal parser; not a DatabaseSync SQL sink."
+    },
+    {
+      "file": "main/automatic-listing/checkpoints.ts",
+      "command": "write",
+      "expression": "change.sql",
+      "review": "Owner-generated exact fixed task UPDATE or json_set CAS, assembled by prepare from checked item array indices only. Every value is bound; no caller-supplied SQL or table."
+    },
+    {
+      "file": "main/automatic-listing/service.ts",
+      "command": "save",
+      "expression": "task",
+      "review": "AutomaticTaskCheckpoints.prepare(task) builds a typed checkpoint change; this receiver is not DatabaseSync.prepare and never executes task as SQL."
     }
   ],
   "tableSets": [

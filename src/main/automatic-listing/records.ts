@@ -22,6 +22,7 @@ import type { AmazonDraft } from '../../shared/amazon-contracts.ts';
 import { ACTUAL_OFFER_CODES } from '../pricing/offer.ts';
 import type { AutomaticListingOutcome } from '../../shared/automatic-listing-contracts.ts';
 import { DECLARATION_SOURCE_CONFLICT } from '../amazon/declaration-safety.ts';
+import { isDeepStrictEqual } from 'node:util';
 
 export const sourceStamp = (product: ProductDetail): string => fingerprint({
   id: product.id, title: product.title, sourceUrl: product.sourceUrl, description: product.description,
@@ -196,10 +197,23 @@ function validateOutcome(raw:unknown,row:AutomaticListingItem):AutomaticListingO
 }
 const taskKeys = ['id','revision','status','targetId','targetName','sellerId','marketplaceId','mode','targetStamp','profileId','profileStamp','rulesStamp','ruleRevision','productType','locale','labelFormat','items','createdAt','updatedAt','error'];
 export function validateAutomaticListingTask(raw: unknown): AutomaticListingTask {
+  return validateTask(raw);
+}
+/** Only the owner checkpoint writer supplies a detached, previously validated snapshot.
+ * Unchanged rows keep their validation proof; every cross-row and task-scope rule below
+ * still runs. This is not a persisted-data or API input validation shortcut. */
+export function validateAutomaticTaskCheckpoint(raw: AutomaticListingTask, prior: AutomaticListingTask, changedKeys?:ReadonlySet<string>): AutomaticListingTask {
+  return validateTask(raw,prior,changedKeys);
+}
+function validateTask(raw: unknown, prior?: AutomaticListingTask, changedKeys?:ReadonlySet<string>): AutomaticListingTask {
   const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan','resumeScope']);
   if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1)+(value.resumeScope===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
     || !['demo','live'].includes(String(value.mode)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 5000) fail();
-  const items = (value.items as unknown[]).map(item);
+  const previous=new Map(prior?.items.map(row=>[row.key,row]));
+  const items = (value.items as unknown[]).map(raw=>{
+    const old=raw&&typeof raw==='object'?previous.get(String((raw as {key?:unknown}).key)):undefined;
+    return old&&(changedKeys?!changedKeys.has(old.key):isDeepStrictEqual(raw,old))?old:item(raw);
+  });
   const planned=items.filter(row=>row.stage!=='PLAN');
   if (new Set(items.map(row => row.key)).size !== items.length || new Set(planned.map(row => row.sku)).size !== planned.length) fail();
   if (value.status === 'COMPLETED' && items.some(row => !['DONE','SCREENED'].includes(row.status))) fail();

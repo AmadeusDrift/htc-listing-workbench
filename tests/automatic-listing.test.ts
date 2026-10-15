@@ -2169,3 +2169,30 @@ for(const interruption of ['none','unknown','pause','cancel','revision'] as cons
  const result=f.service.get(task.id);if(['pause','cancel','revision'].includes(interruption)){assert.equal(sends,2,'revoked task never sends a retry');return;}assert.equal(sends,interruption==='unknown'?3:4,JSON.stringify(result.items.map(i=>({sku:i.sku,error:i.error}))));
  assert.equal(result.items[0].status,'FAILED');if(interruption==='unknown')assert.equal(result.items[1].outcome?.kind,'UNKNOWN');else assert.equal(result.items[1].status,'DONE',result.items[1].error??'');assert.equal(result.items[2].status,'DONE',result.items[2].error??'');
 });
+
+test('checkpoint rejects same-revision external edits instead of covering another SKU history', async t=>{
+  const f=fixture(t),task=await f.create(),db=openDatabase(f.directory);
+  const saved=JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json));
+  saved.items[0].stockSets=99;
+  db.prepare('UPDATE automatic_listing_tasks SET record_json=? WHERE id=?').run(JSON.stringify(saved),task.id);
+  try{assert.throws(()=>f.service.pause(task.id),/检查点已变化/);assert.equal(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json)).items[0].stockSets,99);}finally{db.close();}
+});
+
+test('start progress yields before dispatch and a pause revokes the entire preparation',async t=>{
+  const f=fixture(t),task=await f.create(),progress:unknown[]=[];
+  const unsubscribe=f.service.onOperationProgress(value=>{
+    progress.push(value);
+    if(value?.taskId===task.id&&value.phase==='PREPARING')setImmediate(()=>{if(f.service.get(task.id).status!=='PAUSED')f.service.pause(task.id);});
+  });
+  await assert.rejects(()=>f.service.confirmStart(task.id,async()=>true),/暂停或变化/);
+  unsubscribe();assert.equal(f.service.get(task.id).status,'PAUSED');assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);assert.equal(f.service.getOperationProgress(),null);assert.ok(progress.length>1);
+});
+
+test('item change stamps preserve unrelated SKU details and final verification is announced',async t=>{
+  const f=fixture(t),task=await f.create(),seen:string[]=[];
+  const unsub=f.service.onOperationProgress(value=>{if(value)seen.push(value.phase);});
+  f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();await f.service.refreshWaiting();
+  assert.ok(f.service.getItemChangeStamp(task.id,task.items[0].key));
+  if(f.service.get(task.id).status==='COMPLETED')assert.ok(seen.includes('VERIFYING'));
+  assert.equal(f.service.getOperationProgress(),null);unsub();
+});

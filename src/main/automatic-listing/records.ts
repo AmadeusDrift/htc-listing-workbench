@@ -23,6 +23,7 @@ import { ACTUAL_OFFER_CODES } from '../pricing/offer.ts';
 import type { AutomaticListingOutcome } from '../../shared/automatic-listing-contracts.ts';
 import { DECLARATION_SOURCE_CONFLICT } from '../amazon/declaration-safety.ts';
 import { isDeepStrictEqual } from 'node:util';
+import {parseHostingRoute} from '../hosting/validation.ts';
 
 export const sourceStamp = (product: ProductDetail): string => fingerprint({
   id: product.id, title: product.title, sourceUrl: product.sourceUrl, description: product.description,
@@ -206,8 +207,8 @@ export function validateAutomaticTaskCheckpoint(raw: AutomaticListingTask, prior
   return validateTask(raw,prior,changedKeys);
 }
 function validateTask(raw: unknown, prior?: AutomaticListingTask, changedKeys?:ReadonlySet<string>): AutomaticListingTask {
-  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan','resumeScope']);
-  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1)+(value.resumeScope===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
+  const value = record(raw, '自动上架任务', [...taskKeys,'adaptation','executionMode','batchPlan','resumeScope','hostingRoute']);
+  if (Object.keys(value).length !== taskKeys.length + (value.adaptation===undefined?0:1)+(value.executionMode===undefined?0:1)+(value.batchPlan===undefined?0:1)+(value.resumeScope===undefined?0:1)+(value.hostingRoute===undefined?0:1) || !['CREATED','QUEUED','RUNNING','WAITING','PAUSED','NEEDS_ATTENTION','COMPLETED','CANCELLED'].includes(String(value.status))
     || !['demo','live'].includes(String(value.mode)) || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 5000) fail();
   const previous=new Map(prior?.items.map(row=>[row.key,row]));
   const items = (value.items as unknown[]).map(raw=>{
@@ -223,6 +224,7 @@ function validateTask(raw: unknown, prior?: AutomaticListingTask, changedKeys?:R
     targetStamp: hash(value.targetStamp), profileId: text(value.profileId, '图床', 30, true), profileStamp: hash(value.profileStamp), rulesStamp: hash(value.rulesStamp),
     ruleRevision: counter(value.ruleRevision), productType: text(value.productType, '商品类型', 100, true), locale: text(value.locale, '语言', 30, true), items,
     labelFormat: validateItemLabelFormat(value.labelFormat), createdAt: date(value.createdAt), updatedAt: date(value.updatedAt), error: optional(value.error, 2000) };
+  if(value.hostingRoute!==undefined)result.hostingRoute=parseHostingRoute(value.hostingRoute);
   if(value.resumeScope!==undefined)result.resumeScope=validateResumeSelection(value.resumeScope,items.map(row=>row.key));
   if(value.executionMode!==undefined){if(!['immediate','deferred_batch'].includes(String(value.executionMode)))fail();result.executionMode=value.executionMode as AutomaticListingTask['executionMode'];}
   if(value.batchPlan!==undefined){

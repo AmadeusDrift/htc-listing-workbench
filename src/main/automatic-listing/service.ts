@@ -55,6 +55,7 @@ import { UserFacingError } from '../../shared/errors.ts';
 import { publicError } from '../security.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
 import { fingerprint } from '../execution/records.ts';
+import {DIRECT_HOSTING_ROUTE,profileWithHostingRoute} from '../../shared/hosting-contracts.ts';
 import { sourceStamp, validateAutomaticListingTask } from './records.ts';
 import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
 import type { ProductClassification } from '../../shared/category-ai-contracts.ts';
@@ -116,7 +117,7 @@ export interface AutomaticListingDependencies {
   previewSales?: (productId:string) => SalesListingPlan['recipe'][];
   existingSale?: (productId:string,plan:SalesListingPlan,targetId:string) => AmazonDraft|undefined;
   resolveFamily?: (input:{plans:SalesListingPlan[];targetId:string;productType:string;locale:string},signal:AbortSignal) => Promise<SalesListingPlan[]>;
-  ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
+  ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal,hostingRoute?:import('../../shared/hosting-contracts.ts').HostingRoute) => Promise<{draftId:string;ready:boolean}>;
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
 const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','CATEGORY_RESULT_UNKNOWN','CATEGORY_EXPANSION_RESULT_UNKNOWN'].includes(code);
@@ -359,7 +360,7 @@ export class AutomaticListingService {
   private previewScope(task:AutomaticListingTask):string {
     // data_version covers writes by other service connections; total_changes covers this one.
     return fingerprint({revision:task.revision,busy:this.busy,rules:this.deps.rules(),
-      target:this.deps.amazon.executionTargetScope(task.targetId),profile:this.deps.hosting.getProfile(task.profileId),
+      target:this.deps.amazon.executionTargetScope(task.targetId),profile:profileWithHostingRoute(this.deps.hosting.getProfile(task.profileId),task.hostingRoute),
       data:this.db.prepare('PRAGMA data_version').get(),local:this.db.prepare('SELECT total_changes() n').get()});
   }
   previewAdaptationForUi(id:string){
@@ -439,7 +440,7 @@ export class AutomaticListingService {
   private assertConnections(task: AutomaticListingTask): void {
     const target = this.deps.amazon.executionTargetScope(task.targetId), profile = this.deps.hosting.getProfile(task.profileId);
     if (!target.target.configured || target.target.paused || fingerprint(target) !== task.targetStamp) throw new UserFacingError('目标店铺授权或范围发生变化，请重新建立任务');
-    if (!profile.enabled || !profile.configured || fingerprint(profile) !== task.profileStamp) throw new UserFacingError('图床配置发生变化，请重新建立任务');
+    if (!profile.enabled || !profile.configured || fingerprint(profileWithHostingRoute(profile,task.hostingRoute)) !== task.profileStamp) throw new UserFacingError('图床配置发生变化，请重新建立任务');
     if (fingerprint(this.deps.rules()) !== task.rulesStamp) throw new UserFacingError('上架规则发生变化，请重新建立任务');
   }
   private canRebaseSources(task: AutomaticListingTask,row: AutomaticListingItem): boolean {
@@ -736,7 +737,7 @@ export class AutomaticListingService {
     if(regroupedSkus.size)throw new UserFacingError(`销售 SKU ${[...regroupedSkus].slice(0,5).join('、')} 已有旧分组草稿，请从原草稿或原自动任务继续；不能以新 SKU 建立重复任务`);
     const now = new Date().toISOString();
     const task: AutomaticListingTask = { executionMode:executionMode as 'immediate'|'deferred_batch',...(batchPlan?{batchPlan}:{}), id: randomUUID(), revision: 0, status: 'CREATED', targetId, targetName: target.target.name, sellerId: target.target.sellerId,
-      marketplaceId: target.target.marketplaceId, mode: target.target.mode, targetStamp: fingerprint(target), profileId, profileStamp: fingerprint(profile),
+      marketplaceId: target.target.marketplaceId, mode: target.target.mode, targetStamp: fingerprint(target), profileId, hostingRoute:profile.route??DIRECT_HOSTING_ROUTE, profileStamp: fingerprint(profileWithHostingRoute(profile,profile.route??DIRECT_HOSTING_ROUTE)),
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
     for(const row of items)if(row.stage==='PLAN')row.outcome={version:1,kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED',message:row.error!,classifiedAt:now,scope:outcomeScope(task,row),draftId:null,draftRevision:null};
@@ -1292,7 +1293,7 @@ export class AutomaticListingService {
       if(row.salesPlan?.parentage==='CHILD'){
         if(!this.deps.ensureParent)throw new UserFacingError('父体建档服务尚未初始化');
         row.stage='PARENT';this.save(task,this.db,[{key:row.key,stage:'IMAGES'}]);
-        const parent=await this.deps.ensureParent(this.deps.amazon.getDraft(draft.id),task.profileId,this.controller!.signal);
+        const parent=await this.deps.ensureParent(this.deps.amazon.getDraft(draft.id),task.profileId,this.controller!.signal,task.hostingRoute??DIRECT_HOSTING_ROUTE);
         row.parentDraftId=parent.draftId;this.checkpoint(task,row);
         if(!parent.ready){row.status='WAITING';this.saveItem(task,row);return;}
       }
@@ -1514,13 +1515,16 @@ export class AutomaticListingService {
     const existing = this.deps.execution.list().filter(child => !['CANCELLED','COMPLETED'].includes(child.status) && child.items.some(item => item.draftId === draft.id));
     if (existing.length) {
       const child = existing[0], item = child.items[0];
-      if (existing.length !== 1 || !['CREATED','PAUSED','NEEDS_ATTENTION'].includes(child.status) || child.items.length !== 1 || child.profileId !== task.profileId || child.profileStamp !== task.profileStamp
+      const profile=this.deps.hosting.getProfile(task.profileId);
+      if (existing.length !== 1 || !['CREATED','PAUSED','NEEDS_ATTENTION'].includes(child.status) || child.items.length !== 1 || child.profileId !== task.profileId
+        ||fingerprint(child.hostingRoute??DIRECT_HOSTING_ROUTE)!==fingerprint(task.hostingRoute??DIRECT_HOSTING_ROUTE)
+        ||child.profileStamp!==fingerprint(profileWithHostingRoute(profile,child.hostingRoute))||task.profileStamp!==fingerprint(profileWithHostingRoute(profile,task.hostingRoute))
         || item.draftId !== draft.id || item.draftRevision !== draft.revision || item.attributesHash !== fingerprint(draft.attributes) || item.schemaHash !== fingerprint(draft.schema)
         || item.productId !== draft.productId || item.productRevision !== draft.productRevision || item.variantId !== draft.variantId || item.sku !== draft.sku
         || item.targetStamp !== task.targetStamp || item.submitStarted) throw new UserFacingError('草稿已有不同范围的执行任务，请先核对原任务');
       return child;
     }
-    return this.deps.execution.create({ draftIds: [draft.id], profileId: task.profileId, concurrency: 1 });
+    return this.deps.execution.create({ draftIds: [draft.id], profileId: task.profileId, concurrency: 1, hostingRoute:task.hostingRoute??DIRECT_HOSTING_ROUTE });
   }
   private async summarize(task: AutomaticListingTask, observedBefore?: string): Promise<void> {
     if (['PAUSED','CANCELLED'].includes(task.status)) return;

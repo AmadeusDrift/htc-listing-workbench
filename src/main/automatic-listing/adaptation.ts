@@ -1,3 +1,4 @@
+import {profileWithHostingRoute} from '../../shared/hosting-contracts.ts';
 import { currentRiskRecheck } from './risk-adaptation.ts';
 import { readImageRiskSettings } from '../image-workflow/risk-settings.ts';
 import { imageWorkflowDraftStamp } from "../image-workflow/approval-reuse.ts";
@@ -37,7 +38,7 @@ export function* adaptationSteps(task:AutomaticListingTask,deps:AutomaticListing
   const blockers:string[]=[];
   if(busy||['RUNNING','QUEUED'].includes(task.status)||runs.some(r=>r?.status==='RUNNING')||executions.some(e=>['RUNNING','QUEUED'].includes(e.status)&&e.items.some(i=>drafts.has(i.draftId))))blockers.push('请求正在进行，请等待结果保存后重新检查；不会中断或取消请求');
   if(task.status==='CANCELLED')blockers.push('已取消任务仅保留历史');
-  if(fingerprint(target)!==task.targetStamp||fingerprint(profile)!==task.profileStamp)blockers.push('店铺授权或图床范围变化，不能作为规则适配');
+  if(fingerprint(target)!==task.targetStamp||fingerprint(profileWithHostingRoute(profile,task.hostingRoute))!==task.profileStamp)blockers.push('店铺授权或图床范围变化，不能作为规则适配');
   const changes:AutomaticAdaptationChange[]=[];
   const add=(row:AutomaticListingItem,kind:AutomaticAdaptationChange['kind'],message:string,steps:string[]=[],fields:string[]=[])=>changes.push({key:row.key,productId:row.productId,sku:row.sku,kind,message,steps,fields});
   const projections=new Map<string,AmazonDraft>();

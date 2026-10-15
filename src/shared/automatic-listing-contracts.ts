@@ -83,6 +83,7 @@ export interface AutomaticListingItem {
   familyTransition?: { phase:'BIND'|'RECHECK'|'READY'; plan:import('./sales-plan-contracts.ts').SalesListingPlan; sourceWorkflowId:string; draftRevision:number; draftStamp:string };
 }
 export interface AutomaticListingTask {
+  hostingRoute?:import('./hosting-contracts.ts').HostingRoute;
   resumeScope?:import('./automatic-resume.ts').AutomaticResumeSelection;
   executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode;
   batchPlan?:import('./ai-batch-contracts.ts').TaskBatchPlan;

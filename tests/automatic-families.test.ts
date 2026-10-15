@@ -28,6 +28,14 @@ test('parent continuation never starts an execution containing unrelated drafts 
     await assert.rejects(ensureFamilyParent(f.deps,f.child,'alpha',new AbortController().signal),/不同范围/);assert.equal(f.starts,0);
   }
 });
+
+test('automatic parent execution receives the same frozen hosting route as its child task',async()=>{
+ const f=fixture(),original=f.deps.execution.create;let captured:any;
+ f.deps.execution.create=((input:any)=>{captured=structuredClone(input);return original();}) as typeof original;
+ const route={mode:'socks5',host:'127.0.0.1',port:1080,dns:'proxy'} as const;
+ await ensureFamilyParent(f.deps,f.child,'alpha',new AbortController().signal,route);
+ assert.deepEqual(captured.hostingRoute,route);
+});
 test('parent repairs only failed fields with a durable three-attempt ceiling and one shared image',async()=>{
   const f=fixture(1),result=await ensureFamilyParent(f.deps,f.child,'alpha',new AbortController().signal);
   assert.equal(result.ready,false);assert.equal(f.starts,2);assert.equal(f.images,1);assert.equal(f.repairs,2);

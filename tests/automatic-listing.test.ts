@@ -31,6 +31,8 @@ import { applyBusinessRules } from '../src/main/amazon/business-rules.ts';
 import { realAmazonSchema } from './fixtures/amazon/schema-fixture.ts';
 import { currentFactAuthority } from '../src/main/amazon/fact-authority.ts';
 import { inheritLegacyPurposeSettings } from '../src/main/ai/purpose-routing.ts';
+import {DIRECT_HOSTING_ROUTE,profileWithHostingRoute} from '../src/shared/hosting-contracts.ts';
+import type {HostingProfile} from '../src/shared/hosting-contracts.ts';
 
 function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   mkdirSync(resolve('.test-data'), { recursive: true });
@@ -40,7 +42,7 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
     { id: randomUUID(), sku: 'SKU-ONE', originalSpec: 'red', normalizedSpec: 'red', purchasePrice: '1', inventory: null, sourceSpec: 'red', sourcePurchasePrice: '1' },
   ] };
   const target: AmazonTarget = { id: 'store-one', name: 'Test store', mode, sellerId: 'seller', marketplaceId: 'ATVPDKIKX0DER', marketplaceName: 'US', region: 'na', locale: 'en_US', paused: false, configured: true, credentialUpdatedAt: now, lastError: null };
-  const profile = { id: 'alpha' as const, name: 'Alpha' as const, generation: 1, enabled: true, configured: true, host: 'ftp.example.test', port: 21, secure: true, remoteRoot: '/', publicBaseUrl: 'https://images.example.test/' };
+  const profile:HostingProfile = { id: 'alpha' as const, name: 'Alpha' as const, generation: 1, enabled: true, configured: true, host: 'ftp.example.test', port: 21, secure: true, remoteRoot: '/', publicBaseUrl: 'https://images.example.test/' };
   const rules = defaultListingRules();
   const drafts = new Map<string, AmazonDraft>(), executions = new Map<string, ExecutionTask>();
   const calls = { sources: 0, images: 0, submissions: 0, batches: 0, labels: 0 };
@@ -90,7 +92,8 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
     execution: {
       create(input) {
         const id = randomUUID(), draft = drafts.get((input as any).draftIds[0])!;
-        const task = { id, status: 'CREATED', profileId: profile.id, profileStamp: fingerprint(profile), items: [{ draftId: draft.id, draftRevision: draft.revision, attributesHash: fingerprint(draft.attributes), schemaHash: fingerprint(draft.schema),
+        const hostingRoute=(input as any).hostingRoute??(profile as any).route??DIRECT_HOSTING_ROUTE;
+        const task = { id, status: 'CREATED', profileId: profile.id, hostingRoute, profileStamp: fingerprint(profileWithHostingRoute(profile,hostingRoute)), items: [{ draftId: draft.id, draftRevision: draft.revision, attributesHash: fingerprint(draft.attributes), schemaHash: fingerprint(draft.schema),
           productId: draft.productId, productRevision: draft.productRevision, variantId: draft.variantId, sku: draft.sku, targetStamp: fingerprint({ target, generation: 1 }), status: 'PENDING', submitStarted: false, steps: [] }] } as unknown as ExecutionTask;
         executions.set(id, task); return structuredClone(task);
       },
@@ -136,6 +139,33 @@ function legacyV2Pricing(f:ReturnType<typeof fixture>,draft:AmazonDraft) {
   draft.businessRules={revision:f.rules.revision,fields:{},notices:[],quote,bundleQuantity:1,pricingBasis:{kind:'source_sale_unit',sourceCostCny:2.4,quantity:1,saleUnitCostCny:2.4},pricingDecision:{version:2,status:'quoted',code:'QUOTE_VALID',quoteError:null,inputs,attributeInputs,evidence:{cost:'confirmed_cny',dimensions:'business_default',weight:'business_default',packageScope:'source_sale_unit',saleUnit:'confirmed',sourcePackage:{dimensionsInches:null,weightPounds:null}}}};
   assert.equal(pricingQualificationIssue(draft,f.rules),null,'v2 fixture must qualify before the test mutates its evidence');
 }
+
+test('FTP route defaults are frozen by automatic tasks while real profile changes still block',async t=>{
+ const f=fixture(t),proxy={mode:'socks5',host:'127.0.0.1',port:1080,dns:'proxy'} as const;
+ Object.assign(f.profile,{route:proxy});const task=await f.create();
+ assert.deepEqual(task.hostingRoute,proxy);const original=JSON.stringify(task);
+ Object.assign(f.profile,{route:DIRECT_HOSTING_ROUTE});
+ assert.doesNotThrow(()=>(f.service as any).assertConnections(task));
+ assert.equal(JSON.stringify(task),original);f.profile.host='changed.example.test';
+ assert.throws(()=>(f.service as any).assertConnections(task),/图床配置/);
+});
+
+test('legacy automatic tasks and newer direct child execution share original route identity after default change',async t=>{
+ const f=fixture(t),task:any=await f.create();delete task.hostingRoute;task.profileStamp=fingerprint(profileWithHostingRoute(f.profile,undefined));
+ assert.equal(Object.hasOwn(validateAutomaticListingTask(task),'hostingRoute'),false);
+ const prepared=await f.dependencies.amazon.prepareDrafts({targetId:f.target.id,productType:'BOX',items:[{productId:f.product.id,variantId:f.product.variants[0].id}]} as any);
+ const draft=prepared.items[0].draft!;let creation:any;const create=f.dependencies.execution.create;
+ f.dependencies.execution.create=input=>{creation=structuredClone(input);return create(input);};
+ Object.assign(f.profile,{route:{mode:'socks5',host:'127.0.0.1',port:1081,dns:'proxy'}});
+ assert.doesNotThrow(()=>(f.service as any).assertConnections(task));
+ const child=(f.service as any).childFor(task,draft);
+ assert.deepEqual(creation.hostingRoute,DIRECT_HOSTING_ROUTE);
+ assert.deepEqual(child.hostingRoute,DIRECT_HOSTING_ROUTE);
+ assert.equal((f.service as any).childFor(task,draft).id,child.id);
+ const wrong=f.executions.get(child.id)!;wrong.hostingRoute={mode:'socks5',host:'127.0.0.1',port:1081,dns:'proxy'};
+ wrong.profileStamp=fingerprint(profileWithHostingRoute(f.profile,wrong.hostingRoute));
+ assert.throws(()=>(f.service as any).childFor(task,draft),/不同范围/);
+});
 test('automatic stage evidence follows actual transitions while repeated reads stay read-only', async t => {
   const f = fixture(t), task = await f.create();
   f.service.startAuthorized(f.service.prepareStart(task.id)); await f.service.waitForIdle();

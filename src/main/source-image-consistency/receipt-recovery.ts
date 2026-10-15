@@ -30,11 +30,20 @@ export function recoverableSourceReceipt(db: DatabaseSync, directory: string | u
   } catch { return null; }
 }
 
+/** Structural staged-database validation is not evidence that an observation is usable. */
+export function assertSourceRecoveryOwner(result: AiResult, call: AiCall | undefined): void {
+  if (!result.providerReceiptRecovery || result.output.kind !== 'source-image-consistency') return;
+  if (!call || result.providerReceiptRecovery.version !== 1 || !resultHasOwner(result, call)
+    || call.requestScope?.operation !== 'source-observation' || call.requestScope.variantId !== call.sourceConsistencyContext?.variantId
+    || listingFingerprint(result.sourceConsistencyContext) !== listingFingerprint(call.sourceConsistencyContext)) throw new AiError('INVALID_CONFIG');
+  sourceReferenceAliasesForCall(call);
+}
+
 /** Read consumers must prove the canonical output against the original raw too. */
 export function assertSourceReceiptRecovery(db: DatabaseSync, directory: string | undefined, result: AiResult, call: AiCall | undefined): void {
   if (!result.providerReceiptRecovery || result.output.kind !== 'source-image-consistency') return;
-  if (!call || result.providerReceiptRecovery.version !== 1 || !resultHasOwner(result, call)
-    || listingFingerprint(result.sourceConsistencyContext) !== listingFingerprint(call.sourceConsistencyContext)) throw new AiError('INVALID_CONFIG');
+  assertSourceRecoveryOwner(result, call);
+  if (!call) throw new AiError('INVALID_CONFIG');
   const recovered = recoverableSourceReceipt(db, directory, call);
   if (!recovered || listingFingerprint(recovered.output) !== listingFingerprint(result.output)) throw new AiError('INVALID_CONFIG');
   assertReceiptRecovery(db, recovered.directory, result, call);

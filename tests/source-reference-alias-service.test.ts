@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { consistencyFixture } from './helpers/source-consistency.ts';
 import { mockStorage, saveInput } from './fixtures/listing-ai.ts';
@@ -36,7 +36,7 @@ test('actual AiService and production adapter send only short refs and keep raw 
   const payload=JSON.parse(f.wire().messages[1].content[0].text);assert.deepEqual(payload.referenceAssets.map((a:any)=>a.assetId),['ref_1','ref_2']);for(const ref of c.referenceAssets)assert.equal(JSON.stringify(f.wire()).includes(ref.assetId),false);
   assert.deepEqual((result.output as ReturnType<typeof output>).assets.map(a=>a.assetId),c.referenceAssets.map(a=>a.assetId));assert.ok('sourceSha256' in result);assert.equal(result.sourceSha256,call.sourceReferenceAliases?.contextSha256);
   const saved=readCallReceiptSync(f.db,f.directory,call)!;assert.deepEqual(saved.capture.body,JSON.parse(f.literal));assert.equal(saved.capture.body.choices[0].message.content,JSON.stringify(f.raw));assertConsistencyHistory(f.db,f.directory);
-  const before=Object.fromEntries(['ai_calls','ai_results','ai_usage_ledger','source_consistency_attempts','source_consistency_assessments'].map(table=>[table,row(f.db,table)])),changes=f.db.prepare('SELECT total_changes() n').get()!.n;
+  const before=Object.fromEntries(['ai_calls','ai_results','ai_usage_ledger','automatic_listing_tasks','source_consistency_attempts','source_consistency_assessments'].map(table=>[table,row(f.db,table)])),changes=f.db.prepare('SELECT total_changes() n').get()!.n;
   for(let i=0;i<100;i++){f.ai.getCall(call.id);f.ai.getSourceConsistency({productId:c.productId,productRevision:c.productRevision,variantId:c.variantId});f.ai.sourceObservationEvidence(c);}
   assert.equal(f.db.prepare('SELECT total_changes() n').get()!.n,changes);for(const [table,value]of Object.entries(before))assert.deepEqual(row(f.db,table),value);assert.equal(f.http.posts,1);
 });
@@ -78,11 +78,34 @@ test('recovered canonical source result requires the original complete private r
   const f=await fixture(t);f.db.exec("CREATE TRIGGER alias_read_failure BEFORE INSERT ON ai_results BEGIN SELECT RAISE(ABORT,'synthetic result interruption'); END");await assert.rejects(f.observe());f.db.exec('DROP TRIGGER alias_read_failure');const result=await f.observe(),call=f.ai.getCall(result.callId)!,receipt=readCallReceiptSync(f.db,f.directory,call)!;
   assert.equal(f.ai.getResult(result.id)!.id,result.id);const old=String(f.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json),forged=JSON.parse(old);forged.output.assets[0].colors=['Red'];f.db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(forged),result.id);
   assert.throws(()=>f.ai.getResult(result.id));assert.throws(()=>assertConsistencyHistory(f.db,f.directory));f.db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(old,result.id);
-  const path=join(f.directory,receipt.record.relativePath),bytes=readFileSync(path);writeFileSync(path,Buffer.alloc(bytes.length,32));assert.throws(()=>f.ai.getResult(result.id));await assert.rejects(f.observe());assert.equal(f.http.posts,1);writeFileSync(path,bytes);
+  const path=join(f.directory,receipt.record.relativePath),bytes=readFileSync(path);writeFileSync(path,Buffer.alloc(bytes.length,32));assert.throws(()=>f.ai.getResult(result.id));await assert.rejects(f.observe());await assert.rejects(createWorkspaceBackup(f.directory,join(f.directory,'bad-source-raw.htcbackup'),'synthetic-bad-source-raw'));assert.equal(f.http.posts,1);writeFileSync(path,bytes);
+  renameSync(path,path+'.held');try{assert.throws(()=>f.ai.getResult(result.id));await assert.rejects(createWorkspaceBackup(f.directory,join(f.directory,'missing-source-raw.htcbackup'),'synthetic-missing-source-raw'));}finally{renameSync(path+'.held',path);}
   assert.equal(f.ai.getResult(result.id)!.id,result.id);
 });
 
 test('source aliases keep the selected model, effective reasoning and injected production network boundary',async t=>{
   const f=await fixture(t,{openrouter:true}),result=await f.observe(),call=f.ai.getCall(result.callId)!;
   assert.equal(f.wire().model,'openai/gpt-6.1-sol');assert.equal(f.wire().reasoning.effort,'high');assert.equal(call.model,'openai/gpt-6.1-sol');assert.equal(call.purposeSnapshot!.purposeId,'source_understanding');assert.equal(call.purposeSnapshot!.effectiveEffort,'high');assert.equal(f.http.posts,1);assert.equal(f.ai.getUsageSummary('openrouter').attempts,1);
+});
+
+test('source original receipt recovery and alias snapshot survive encrypted older restore without changing paid history',async t=>{
+  const f=await fixture(t),file=join(f.directory,'alias-recovery-before.htcbackup'),pass='synthetic-alias-recovery-backup';await createWorkspaceBackup(f.directory,file,pass);
+  f.db.exec("CREATE TRIGGER alias_backup_failure BEFORE INSERT ON ai_results BEGIN SELECT RAISE(ABORT,'synthetic alias association interruption'); END");await assert.rejects(f.observe());f.db.exec('DROP TRIGGER alias_backup_failure');const call=f.ai.listCalls()[0],usage=row(f.db,'ai_usage_ledger'),result=await f.observe();assert.equal(result.callId,call.id);
+  await createWorkspaceBackup(f.directory,join(f.directory,'alias-recovered.htcbackup'),pass);
+  const snapshot=await prepareWorkspaceRestore(f.directory,file,pass);await f.ai.close();await f.hosting.close();f.closeStorage();await commitWorkspaceRestore(f.directory,snapshot);
+  const store=new WorkspaceStore(f.directory),db=openDatabase(f.directory),hosting=new HostingService(f.directory,store,mockStorage),ai=new AiService(f.directory,store,hosting,mockStorage,f.dependencies);
+  try{assert.deepEqual(ai.getCall(call.id),call);assert.deepEqual(row(db,'ai_usage_ledger'),usage);assert.equal(ai.getResult(result.id)!.id,result.id);const p=store.getProduct(f.p.id),c=ai.sourceConsistencyContext({productId:p.id,productRevision:p.revision,variantId:p.variants[0].id});assert.equal((await ai.observeSourceConsistency(c,()=>{})).id,result.id);assert.equal(f.http.posts,1);assertConsistencyHistory(db,f.directory);}finally{await ai.close();await hosting.close();db.close();store.close();}
+});
+
+test('missing original raw, wrong original scope or v1 context forged on a new map never recover or create another send',async t=>{
+  const f=await fixture(t);f.db.exec("CREATE TRIGGER alias_scope_failure BEFORE INSERT ON ai_results BEGIN SELECT RAISE(ABORT,'synthetic alias interruption'); END");await assert.rejects(f.observe());f.db.exec('DROP TRIGGER alias_scope_failure');const call=f.ai.listCalls()[0],saved=readCallReceiptSync(f.db,f.directory,call)!,path=join(f.directory,saved.record.relativePath),bytes=readFileSync(path),usage=row(f.db,'ai_usage_ledger');
+  writeFileSync(path,Buffer.alloc(bytes.length,32));await assert.rejects(f.observe());assert.equal(f.http.posts,1);writeFileSync(path,bytes);
+  for(const mutate of [(c:any)=>c.requestScope.variantId=randomUUID(),(c:any)=>c.sourceConsistencyContext.version='source-image-consistency/v1',(c:any)=>c.sourceReferenceAliases.entries[0].sha256='c'.repeat(64)]){const bad=structuredClone(call);mutate(bad);f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(bad),call.id);await assert.rejects(f.observe());assert.equal(f.http.posts,1);assert.deepEqual(row(f.db,'ai_usage_ledger'),usage);f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);}
+  assert.equal(row(f.db,'ai_results').length,0);assert.equal(f.ai.listCalls().length,1);assert.equal((await f.observe()).callId,call.id);assert.equal(f.http.posts,1);
+});
+
+test('source receipt recovery checks cancellation after the awaited task freshness callback',async t=>{
+  const f=await fixture(t);f.db.exec("CREATE TRIGGER alias_cancel_failure BEFORE INSERT ON ai_results BEGIN SELECT RAISE(ABORT,'synthetic source association interruption'); END");await assert.rejects(f.observe());f.db.exec('DROP TRIGGER alias_cancel_failure');const call=f.ai.listCalls()[0],usage=row(f.db,'ai_usage_ledger'),controller=new AbortController();
+  await assert.rejects(f.ai.observeSourceConsistency(f.context(),async()=>{controller.abort();},controller.signal));assert.equal(row(f.db,'ai_results').length,0);assert.deepEqual(f.ai.getCall(call.id),call);assert.deepEqual(row(f.db,'ai_usage_ledger'),usage);assert.equal(f.http.posts,1);
+  assert.equal((await f.observe()).callId,call.id);assert.equal(f.http.posts,1);
 });

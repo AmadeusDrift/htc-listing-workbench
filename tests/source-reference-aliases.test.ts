@@ -28,7 +28,7 @@ test('snapshot rejects version, context, asset hash, binding, variant, foreign, 
   const c=context(),original=createSourceReferenceAliases(c);
   const mutations=[(m:any)=>m.version='source-reference-aliases/v2',(m:any)=>m.contextSha256='f'.repeat(64),(m:any)=>m.entries[0].sha256='f'.repeat(64),(m:any)=>m.entries[0].assetId=randomUUID(),(m:any)=>m.entries[1].alias='ref_1',(m:any)=>m.entries[1].alias='ref_3',(m:any)=>m.entries.reverse(),(m:any)=>m.entries.pop(),(m:any)=>m.extra=true];
   for(const mutate of mutations){const m=structuredClone(original);mutate(m);assert.throws(()=>validateSourceReferenceAliases(m,c));}
-  for(const mutate of [(v:any)=>v.variantId=randomUUID(),(v:any)=>v.referenceAssets[0].bindingEpoch='c'.repeat(64),(v:any)=>v.referenceAssets[0].scope='product',(v:any)=>v.referenceAssets.reverse()]){const other=structuredClone(c);mutate(other);assert.throws(()=>validateSourceReferenceAliases(original,other));}
+  for(const mutate of [(v:any)=>v.version='source-image-consistency/v1',(v:any)=>v.variantId=randomUUID(),(v:any)=>v.referenceAssets[0].bindingEpoch='c'.repeat(64),(v:any)=>v.referenceAssets[0].scope='product',(v:any)=>v.referenceAssets.reverse()]){const other=structuredClone(c);mutate(other);assert.throws(()=>validateSourceReferenceAliases(original,other));}
 });
 
 test('new call marker and map must survive strict roundtrip together; legacy calls stay UUID only',()=>{
@@ -38,4 +38,11 @@ test('new call marker and map must survive strict roundtrip together; legacy cal
   const wrong:any=structuredClone(v);wrong.sourceConsistencyContext.variantId=randomUUID();assert.throws(()=>validateAiCall(wrong));
   const result={id:randomUUID(),callId:v.id,providerId:v.providerId,productId:c.productId,productRevision:c.productRevision,variantId:c.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:v.model,createdAt:v.startedAt,reviewState:'unreviewed',sourceSha256:listingFingerprint(c),sourceConsistencyContext:c,sourceConsistencyRequestBytes:100,output:normalizeSourceObservations(response(['ref_1','ref_2']),c,v.sourceReferenceAliases)};
   assert.deepEqual(validateStoredAiResult(result),result); // Stored canonical UUIDs never re-enter the wire parser.
+});
+
+test('alias snapshots reject same-length holes, accessor arrays and extra non-JSON properties without evaluating getters',()=>{
+  const c=context(),original=createSourceReferenceAliases(c);let getters=0;
+  const mutations=[(m:any)=>{delete m.entries[0];},(m:any)=>m.entries=new Array(2),(m:any)=>Object.defineProperty(m.entries,'0',{get(){getters++;return original.entries[0];},enumerable:true,configurable:true}),(m:any)=>m.entries.extra=true,(m:any)=>m.entries[Symbol('extra')]=true,(m:any)=>Object.defineProperty(m.entries,'extra',{value:true}),(m:any)=>Object.setPrototypeOf(m.entries,Object.create(Array.prototype)),(m:any)=>Object.defineProperty(m.entries[0],'alias',{get(){getters++;return 'ref_1';},enumerable:true}),(m:any)=>Object.defineProperty(m,'entries',{get(){getters++;return original.entries;},enumerable:true})];
+  for(const mutate of mutations){const m=structuredClone(original);mutate(m);assert.throws(()=>validateSourceReferenceAliases(m,c));}
+  assert.equal(getters,0);const persisted:any=structuredClone(original);persisted.entries[0]=null;assert.throws(()=>validateSourceReferenceAliases(persisted,c));
 });

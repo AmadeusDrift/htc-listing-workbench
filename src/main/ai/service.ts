@@ -714,6 +714,7 @@ export class AiService {
         if(!call)throw new UserFacingError('来源观察请求归属记录缺失，历史次数保留；无法安全重试');
         const recovered=recoverableSourceReceipt(this.db,this.directory,call);
         if(recovered){
+          throwIfAborted(signal??new AbortController().signal);
           const original=call.sourceConsistencyContext!;
           if(consistencyScopeKey(original)!==consistencyScopeKey(context))throw new AiError('SOURCE_CHANGED');
           const createdAt=this.finishedAt(call.finishedAt??call.startedAt);

@@ -23,14 +23,25 @@ import { reserveConsistencyAttempt,assertConsistencyHistory } from '../src/main/
 import { readConsistencyView,assertProductConsistency } from '../src/main/source-image-consistency/proof.ts';
 import { randomUUID } from 'node:crypto';
 import { recordInvalidAiOutput } from '../src/main/ai/output-diagnostics.ts';
+import { requestSourceConsistency } from '../src/main/source-image-consistency/adapter.ts';
+import { readManagedImageSync } from '../src/main/ai/source.ts';
+import { listingFingerprint } from '../src/main/json-fingerprint.ts';
+import type { AiResult } from '../src/shared/ai-contracts.ts';
+import { readCallReceiptSync } from '../src/main/ai/receipts.ts';
 
-async function fixture(t:test.TestContext){
+async function fixture(t:test.TestContext,legacyUuidWire=false){
   const f=consistencyFixture(t),hosting=new HostingService(f.directory,f.store,mockStorage);let count=0;
   let respond=(p:any):Response|Promise<Response>=>chat({kind:'source-image-consistency',assets:p.referenceAssets.map((a:any)=>({assetId:a.assetId,quality:'clear',visibility:'complete',lighting:'neutral',presentation:'single-product',colors:['Blue'],appearance:['Round'],claims:p.claims.map((c:any)=>({claimId:c.id,value:c.axis==='color'?'Blue':'Round',visibility:'visible'}))}))});
   const dependencies={fetch:async(_url:any,options?:RequestInit)=>{count++;const content=JSON.parse(String(options?.body)).messages[1].content;return respond(JSON.parse(content[0].text));}};
   const ai=new AiService(f.directory,f.store,hosting,mockStorage,dependencies);ai.saveConnection({id:'deepseek',apiKey:'consistency-synthetic-key'});ai.saveFunctionSettings({id:'deepseek',model:'deepseek-flash',enabled:true});inheritLegacyPurposeSettings((ai as any).db,'deepseek','deepseek-flash',false);
   f.cleanup.push(async()=>{await ai.close();await hosting.close();});
-  return{...f,hosting,ai,dependencies,count:()=>count,respond:(fn:typeof respond)=>{respond=fn;},observe:()=>ai.observeSourceConsistency(f.context(),()=>{})};
+  // Historical producer fixture: original AiService reservation/receipt pipeline
+  // and original production UUID adapter, without new protocol metadata.
+  const observeLegacy=():Promise<AiResult>=>{const context=f.context(),profile=(ai as any).activePurpose('source_understanding',true);return (ai as any).start(profile,context,{operation:'source-image-consistency',context},async(signal:AbortSignal)=>{
+    const images=context.referenceAssets.map(ref=>{const asset=f.store.getAssetRecord(ref.assetId)!;return {assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes:readManagedImageSync(f.directory,asset)};});
+    return {variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceConsistencyContext:context,assertFresh:async()=>{},invoke:(credentials:any,adapter:any)=>requestSourceConsistency(context,credentials,signal,adapter,images)};
+  });};
+  return{...f,hosting,ai,dependencies,count:()=>count,respond:(fn:typeof respond)=>{respond=fn;},observe:()=>legacyUuidWire?observeLegacy():ai.observeSourceConsistency(f.context(),()=>{})};
 }
 test('new consistency request persists strict successful AI/assessment and reuses across restart/title/model changes',async t=>{
   const f=await fixture(t),before=f.store.getProduct(f.p.id),first=await f.observe();assert.equal(first.output.kind,'source-image-consistency');assert.equal(f.count(),1);assert.equal(f.ai.getUsageSummary('deepseek').attempts,1);assert.ok(first.sourceConsistencyRequestBytes!>100);
@@ -96,11 +107,11 @@ test('midflight pause and managed-byte replacement retain liability without acce
   }
 });
 
-test('assessment write failure rolls back success atomically and preserves unknown result protection',async t=>{
+test('assessment write failure rolls back success atomically and restores only its complete original receipt without another send',async t=>{
   const f=await fixture(t);f.db.exec("CREATE TRIGGER synthetic_assessment_failure BEFORE INSERT ON source_consistency_assessments BEGIN SELECT RAISE(ABORT,'synthetic storage failure'); END");
   await assert.rejects(f.observe());f.db.exec('DROP TRIGGER synthetic_assessment_failure');
   assert.equal(f.db.prepare('SELECT count(*) n FROM ai_results').get()!.n,0);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_assessments').get()!.n,0);assert.equal(f.count(),1);
-  await assert.rejects(f.observe());assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);
+  const call=f.ai.listCalls()[0],usage=f.ai.getUsageSummary('deepseek'),result=await f.observe();assert.equal(result.callId,call.id);assert.equal(f.count(),1);assert.equal(f.db.prepare('SELECT count(*) n FROM source_consistency_attempts').get()!.n,1);assert.deepEqual(f.ai.getCall(call.id),call);assert.deepEqual(f.ai.getUsageSummary('deepseek'),usage);assert.equal(call.status,'FAILED');assert.equal(assertConsistencyHistory(f.db,f.directory).length,1);
 });
 
 test('actual older encrypted restore retains unknown send guard without restoring positive proof',async t=>{
@@ -144,8 +155,10 @@ test('pricing-only midflight changes retain a paid source result and block the n
 });
 
 test('saved OUTPUT_INVALID diagnostics recover observations offline without changing failed call or usage',async t=>{
-  const f=await fixture(t);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
+  const f=await fixture(t,true);f.respond(()=>chat({bad:true}));await assert.rejects(f.observe());
   const call=f.ai.listCalls()[0],usage=f.ai.getUsageSummary('deepseek');
+  assert.equal(call.sourceReferenceProtocol,undefined);assert.equal(call.sourceReferenceAliases,undefined);
+  assert.deepEqual((readCallReceiptSync(f.db,f.directory,call)!.capture.body as any).choices[0].message.content,JSON.stringify({bad:true}));
   call.sourceConsistencyContext!.version='source-image-consistency/v1';
   f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
   const attemptRow=f.db.prepare('SELECT record_json FROM source_consistency_attempts').get()!,attempt=JSON.parse(String(attemptRow.record_json));attempt.context.version='source-image-consistency/v1';
@@ -164,13 +177,13 @@ test('saved OUTPUT_INVALID diagnostics recover observations offline without chan
 });
 
 test('v1 successful uncertain history remains intact while current use merges its observations locally',async t=>{
-  const f=await fixture(t),p=f.store.getProduct(f.p.id);f.store.saveProduct({...saveInput(p),variants:saveInput(p).variants.map(v=>({...v,originalSpec:'XZ-190',normalizedSpec:'XZ-190'}))});
+  const f=await fixture(t,true),p=f.store.getProduct(f.p.id);f.store.saveProduct({...saveInput(p),variants:saveInput(p).variants.map(v=>({...v,originalSpec:'XZ-190',normalizedSpec:'XZ-190'}))});
   const result=await f.observe();assert.ok(!('recovered' in result));
   const old=JSON.parse(String(f.db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(result.id)!.record_json));
   old.sourceConsistencyContext.version='source-image-consistency/v1';delete old.output.version;
   const {listingFingerprint}=await import('../src/main/listing-ai/validation.ts');old.sourceSha256=listingFingerprint(old.sourceConsistencyContext);
   f.db.prepare('UPDATE ai_results SET record_json=? WHERE id=?').run(JSON.stringify(old),old.id);
-  const call=f.ai.listCalls()[0];call.sourceConsistencyContext!.version='source-image-consistency/v1';f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
+  const call=f.ai.listCalls()[0];assert.equal(call.sourceReferenceProtocol,undefined);assert.equal(call.sourceReferenceAliases,undefined);assert.deepEqual(JSON.parse((readCallReceiptSync(f.db,f.directory,call)!.capture.body as any).choices[0].message.content).assets.map((a:any)=>a.assetId),f.context().referenceAssets.map(a=>a.assetId));call.sourceConsistencyContext!.version='source-image-consistency/v1';f.db.prepare('UPDATE ai_calls SET record_json=? WHERE id=?').run(JSON.stringify(call),call.id);
   const attempt=JSON.parse(String(f.db.prepare('SELECT record_json FROM source_consistency_attempts').get()!.record_json));attempt.context.version='source-image-consistency/v1';f.db.prepare('UPDATE source_consistency_attempts SET record_json=? WHERE id=?').run(JSON.stringify(attempt),attempt.id);
   f.db.exec('DELETE FROM source_consistency_assessments');
   const {recordConsistencyAssessment}=await import('../src/main/source-image-consistency/history.ts');recordConsistencyAssessment(f.db,old);

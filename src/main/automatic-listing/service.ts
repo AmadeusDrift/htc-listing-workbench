@@ -1486,9 +1486,10 @@ export class AutomaticListingService {
   close(): Promise<void> {
     if (this.closing) return this.closing; if (this.closed) return Promise.resolve();
     if (this.timer) clearTimeout(this.timer); this.timer = null;
+    for(const grant of this.controlledGrants.values())revokeControlledRunGrant(grant);
     for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
     this.grants.clear();
-    for(const grant of this.controlledGrants.values())revokeControlledRunGrant(grant);this.controlledGrants.clear();pauseControlledRunScopes(this.db);
+    this.controlledGrants.clear();pauseControlledRunScopes(this.db);
     this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });
     return this.closing;
   }

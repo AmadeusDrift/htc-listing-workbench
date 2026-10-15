@@ -1,4 +1,5 @@
 import { candidateRetryEvidence } from './retry-evidence.ts';
+import {assertApprovalReviewsResolved} from './approval-pending.ts';
 import { randomUUID as retryCommandId } from 'node:crypto';
 import { imageSlotAttemptLimit } from '../../shared/image-workflow-contracts.ts';
 import { planningRetryExhausted,assertRetryAllowanceRun,grantImageRetry,historicalRetryEligible,retryGrants,retryHistoryGap,saveRetryConsumption } from './retry-allowance.ts';
@@ -83,7 +84,7 @@ type ListingStage = Pick<ListingAiService, 'complete' | 'reviewCurrentForImages'
   prepareSourceColors?(input:{draftId:string;draftRevision:number},signal?:AbortSignal):Promise<{aiCalls:number;evidenceChanged:boolean;evidenceSha256?:string}>;
   currentContext?(draft:AmazonDraft,product:ProductDetail,targetGeneration:number):ListingAiContext;
 };
-type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'hasPendingCopyReview'|'sourceObservationEvidence'|'purposeProfile'|'reviewGeneratedImageAppearance'>>;
+type AiStages = Pick<AiService, 'getProfile' | 'getResult' | 'getCall' | 'listResults' | 'recognize' | 'imagePlan' | 'recognizeGeneratedImage' | 'reviewGeneratedImage' | 'reviewGeneratedImageRisk'> & Partial<Pick<AiService,'listCalls'|'hasPendingCopyReview'|'sourceObservationEvidence'|'purposeProfile'|'reviewGeneratedImageAppearance'>>;
 type Generator = Pick<ImageGenerationService, 'getConnection' | 'configurationScope' | 'generate' | 'readCandidate' | 'generateForWorkflow' | 'reconcileWorkflowGeneration'>;
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const remaining = (draft: AmazonDraft) => (draft.previewIssues.some(issue => issue.severity === 'ERROR') ? draft.previewIssues : draft.localIssues).filter(issue => issue.severity === 'ERROR').map(issue => issue.message);
@@ -487,6 +488,7 @@ export class ImageWorkflowService {
     this.assertSourceConsistency(draftId);
     const runs=workflowRuns(this.db,draftId),requested=runs.find(run=>run.id===sourceId),prior=requested?.approvalReuse?runs.find(run=>run.id===requested.approvalReuse!.sourceRunId):requested;
     const draft=this.amazon.getDraft(draftId),base=prior?.imageContext;
+    if(prior)assertApprovalReviewsResolved(this.db,this.directory,prior,runs,this.ai.listCalls?.());
     this.assertApprovedRiskPolicy(prior);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(base&&prior)this.assertCurrentEvidence(draft,base,prior.setPlan,currentWorkflowPlanIds(prior));
@@ -499,7 +501,7 @@ export class ImageWorkflowService {
     const stamp=imageWorkflowDraftStamp(draft),product=this.store.getProduct(draft.productId),target=this.amazon.executionTargetScope(draft.targetId);
     const previous=runs[0];
     if(previous?.id!==prior.id&&previous?.approvalReuse?.sourceRunId!==prior.id){
-      // A failed transport recheck adds no contrary image evidence. A newer content/IP rejection does.
+      // Only resolved transport failures add no contrary evidence; unresolved requests were checked above.
       const copy=previous?.imageContext?.listingReviewResultId?this.ai.getResult(previous.imageContext.listingReviewResultId):undefined;
       if(!previous?.slots||previous.recheckedFromRunId!==prior.id||!['FAILED','CANCELLED','INTERRUPTED'].includes(previous.status)||previous.stage==='content'
         ||previous.productId!==prior.productId||previous.productRevision!==prior.productRevision||previous.variantId!==prior.variantId||previous.sku!==prior.sku
@@ -543,7 +545,7 @@ export class ImageWorkflowService {
     // Actual managed bytes, not only persisted hashes, must still match every approved/source image.
     const assets=[...prior.referenceAssets,...prior.slots!.map(slot=>({id:slot.approvedAssetId!,sha256:slot.approvedSha256!}))];
     for(const ref of assets){throwIfAborted(signal);const asset=this.store.getAssetRecord(ref.id);if(!asset||asset.productId!==prior.productId||asset.sha256!==ref.sha256)throw new AiError('SOURCE_CHANGED');await readManagedImage(this.directory,asset,signal);}
-    const assertCurrent=()=>{throwIfAborted(signal);if(!compatible()||prior.slots!.some(slot=>!confirmed(slot.approvedAssetId!,prior.variantId))||base.referenceAssets.some(ref=>ref.variantId!==null&&!confirmed(ref.assetId,ref.variantId)))throw new AiError('SOURCE_CHANGED');};
+    const assertCurrent=()=>{throwIfAborted(signal);assertApprovalReviewsResolved(this.db,this.directory,prior,workflowRuns(this.db,draftId),this.ai.listCalls?.());if(!compatible()||prior.slots!.some(slot=>!confirmed(slot.approvedAssetId!,prior.variantId))||base.referenceAssets.some(ref=>ref.variantId!==null&&!confirmed(ref.assetId,ref.variantId)))throw new AiError('SOURCE_CHANGED');};
     assertCurrent();
     const latest=workflowRuns(this.db,draftId)[0];
     if(latest?.approvalReuse?.sourceRunId===prior.id&&latest.draftSha256===stamp)return {draft,aiCalls:0,previewAttempts:0,remaining:remaining(draft),workflow:latest};
@@ -560,6 +562,7 @@ export class ImageWorkflowService {
     const input=keys(raw,['draftId','draftRevision','sourceWorkflowId']),draftId=uuid(input.draftId),revision=integer(input.draftRevision,1,Number.MAX_SAFE_INTEGER);
     if(this.busy)throw new UserFacingError('另一个商品正在准备或复核，请等待完成');
     const runs=workflowRuns(this.db,draftId),prior=runs.find(value=>value.id===uuid(input.sourceWorkflowId)),draft=this.amazon.getDraft(draftId);
+    if(prior)assertApprovalReviewsResolved(this.db,this.directory,prior,runs,this.ai.listCalls?.());
     this.assertApprovedRiskPolicy(prior);
     if(prior)this.reevaluatePolicy(prior,draft);
     if(prior)this.assertCurrentEvidence(draft,prior.imageContext,prior.setPlan,currentWorkflowPlanIds(prior));

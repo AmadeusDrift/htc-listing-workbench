@@ -1,5 +1,5 @@
 import type { AiUsage } from '../../shared/ai-contracts.ts';
-import { AiError, abortable, httpError, throwIfAborted,receivedDeepSeekRejection } from './errors.ts';
+import { AiError, abortable, httpError, throwIfAborted,receivedDeepSeekRejection,networkFailure } from './errors.ts';
 import type { ReasoningEffort,AiPurposeSnapshot } from '../../shared/ai-purpose-contracts.ts';
 import { responseCollection, transportEvidence } from './response-lifecycle.ts';
 import type { TransportRunEvidence } from '../../shared/run-evidence-contracts.ts';
@@ -89,14 +89,23 @@ export async function postJson(url: string, headers: Record<string, string>, bod
   const captureRaw=context.captureRawResponse?async(status:number,text:string)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:Buffer.byteLength(text)});await context.captureRawResponse!(status,text);}:undefined;
   const captureBytes=context.captureRawBytes?async(status:number,bytes:Buffer)=>{complete=true;transportEvidence(context,{event:'BODY_COMPLETED',httpStatus:status,receivedBytes:bytes.length});await context.captureRawBytes!(status,bytes);}:undefined;
   try {
+  // ACS3 signs host, but Electron supplies the wire Host from the URL itself.
+  // Validate that binding before any reservation; never mutate signing inputs.
+  let wireHeaders=headers;
+  if(Object.entries(headers).some(([name,value])=>name.toLowerCase()==='authorization'&&value.startsWith('ACS3-HMAC-SHA256 '))){
+    let target:URL;try{target=new URL(url);}catch{throw new AiError('INVALID_CONFIG');}
+    const hosts=Object.entries(headers).filter(([name])=>name.toLowerCase()==='host');
+    if(target.protocol!=='https:'||target.username||target.password||target.port||hosts.length!==1||hosts[0][1]!==target.host)throw new AiError('INVALID_CONFIG');
+    wireHeaders=Object.fromEntries(Object.entries(headers).filter(([name])=>name.toLowerCase()!=='host'));
+  }
   if(context.beforePaidEffect){const action=new Headers(headers).get('x-acs-action'),host=new URL(url).hostname,service:PaidAdapterEffect['service']=action==='DescribeUploadToken'?'aliyun-upload-token':action==='ImageModeration'?'aliyun-image-risk':action==='RecognizeAllText'?'aliyun-ocr':action==='ImageMatting'?'aliyun-segmentation':host==='api.deepseek.com'?'deepseek-chat':'provider-result-download';checkPaidAdapterEffect(context,{service,url,method:'POST',body});}
   context.beforeSend?.(body);
   dispatched=true;
   transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});
   try {
-    const request=context.fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal:transportSignal });
+    const request=context.fetch(url, { method: 'POST', headers:wireHeaders, body: typeof body === 'string' ? body : new Uint8Array(body), redirect: 'error', signal:transportSignal });
     response = await abortable(request,transportSignal);
-  } catch { throwIfAborted(transportSignal); throw new AiError('NETWORK_ERROR'); }
+  } catch(error) { throwIfAborted(transportSignal); throw networkFailure(error,'connect'); }
   collection?.headers();transportEvidence(context,{event:'HEADERS_RECEIVED',httpStatus:response.status,certainty:'SENT_UNKNOWN'});
   if(!context.captureRawResponse)throwIfAborted(signal);
   const captureSignal=transportSignal;

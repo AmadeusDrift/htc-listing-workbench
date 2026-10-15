@@ -31,6 +31,8 @@ function mapped(input,init={},transport='fetch'){
   if([...headers.keys()].some(name=>name.startsWith('x-s10-native-')))return deny('native-capability:'+transport);
   const permit=permitScope.getStore(),dynamic=permit?.route,route=(dynamic&&dynamic.method===method&&dynamic.publicUrl===raw?dynamic:null)??policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
   if(route===dynamic&&(permitApi.headerHash(headers)!==permit.headersSha256||permitApi.sha(wireBody(init.body))!==permit.bodySha256))return deny('permit-input');
+  if(headers.has('host')&&headers.get('host')!==url.host)return deny('host-header');
+  if(route.native===true&&transport!=='electron.net.fetch')return deny('native-private-lease');
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
     const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText'||route.native===true&&['public-source','public-bytes','public-image','lwa','amazon','acs3','oss4','openrouter-price'].includes(route.protocol.kind);

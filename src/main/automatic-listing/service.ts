@@ -1,5 +1,5 @@
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
-import {ControlledRunScopes,pauseControlledRunScopes,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
@@ -165,7 +165,8 @@ export class AutomaticListingService {
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = [], at?:string): void {
-    transaction(db,()=>{
+    const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
+    try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
     const priorStages = new Map(db.prepare("SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.status') status FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?").all(task.id).map(row => [String(row.key), { stage: String(row.stage), status: String(row.status) }]));
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
@@ -186,7 +187,7 @@ export class AutomaticListingService {
         if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
       } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
     }
-    });
+    });}catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
   }
   listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
   addWorkBatchProducts(raw:unknown) {
@@ -785,7 +786,7 @@ export class AutomaticListingService {
         const saved=this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id);
         if(saved)restored=validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
       } catch { /* Keep the last known valid pre-start state if storage is unreadable. */ }
-      this.tasks.set(task.id,restored);this.grants.delete(task.id);this.controlledGrants.delete(task.id);
+      this.tasks.set(task.id,restored);this.grants.delete(task.id);revokeControlledRunGrant(this.controlledGrants.get(task.id));this.controlledGrants.delete(task.id);
       throw error;
     }
     this.deps.batch?.resume(task.id);this.grants.add(task.id);this.pump();return structuredClone(task);
@@ -1464,11 +1465,11 @@ export class AutomaticListingService {
   }
   pause(id: string): AutomaticListingTask {
     const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
-    task.status = 'PAUSED'; this.grants.delete(id); this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
+    task.status = 'PAUSED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
   }
   cancel(id: string): AutomaticListingTask {
     const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
-    task.status = 'CANCELLED'; this.grants.delete(id); this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
+    task.status = 'CANCELLED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
   }
   private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
     if (this.activeId === task.id) this.controller?.abort();
@@ -1487,7 +1488,7 @@ export class AutomaticListingService {
     if (this.timer) clearTimeout(this.timer); this.timer = null;
     for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
     this.grants.clear();
-    pauseControlledRunScopes(this.db);this.controlledGrants.clear();
+    for(const grant of this.controlledGrants.values())revokeControlledRunGrant(grant);this.controlledGrants.clear();pauseControlledRunScopes(this.db);
     this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });
     return this.closing;
   }

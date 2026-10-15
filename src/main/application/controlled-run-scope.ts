@@ -16,6 +16,9 @@ export interface ControlledRunItem {itemKey:string;sku:string;productId:string;v
 export interface ControlledRunScope {version:1;id:typeof CONTROLLED_RUN_ID;workspaceId:string;taskId:string;expectedTaskRevision:number;targetId:string;sellerId:string;marketplaceId:string;items:ControlledRunItem[];activeItemKey:string;authorityEpoch:number;authorityNonce?:string;createdAt:string;status:'PAUSED'|'ACTIVE'}
 const authority=new AsyncLocalStorage<{scopeId:string;fingerprint:string;grant:object}>(),grants=new WeakSet<object>();
 export type ControlledRunGrant=<T>(work:()=>T)=>T;
+const grantObjects=new WeakMap<ControlledRunGrant,object>();
+/** Revoke the actual in-flight process capability before attempting durable pause. */
+export function revokeControlledRunGrant(grant:ControlledRunGrant|undefined):void{const token=grant&&grantObjects.get(grant);if(token)grants.delete(token);}
 export interface ControlledEffect {kind:'source'|'schema'|'classification'|'planning'|'ai'|'image'|'hosting'|'platform-write'|'platform-read'|'lwa'|'task-stage';taskId?:string;itemKey?:string;productId?:string;sku?:string;targetId?:string;sellerId?:string;marketplaceId?:string;variantIds?:string[];recipeKey?:string|null;parentage?:string}
 // Only the original TaskOwner may advance the expected revision in its active
 // physical transaction. That progress is separate from revocable dispatch authority.
@@ -56,7 +59,7 @@ export class ControlledRunScopes {
  }
  private activateScope(id:string,allowedStatuses:string[]):ControlledRunGrant{
   const scope=transaction(this.db,()=>{const r=readControlledRunScope(this.db);if(!r||r.id!==id)blocked();this.assertTask(r);const task=JSON.parse(String(this.db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(r.taskId)!.record_json));if(!allowedStatuses.includes(task.status))blocked();const active={...r,status:'ACTIVE' as const,authorityEpoch:spendInteger(r.authorityEpoch+1),authorityNonce:randomUUID()};writeScope(this.db,active);return active;});
-  const grant={};grants.add(grant);const context={scopeId:scope.id,fingerprint:grantFingerprint(scope),grant};return <T>(work:()=>T):T=>authority.run(context,work);
+  const grant={};grants.add(grant);const context={scopeId:scope.id,fingerprint:grantFingerprint(scope),grant},run:ControlledRunGrant=<T>(work:()=>T):T=>authority.run(context,work);grantObjects.set(run,grant);return run;
  }
  activate(id:string):ControlledRunGrant{return this.activateScope(id,['RUNNING']);}
  /** Main-only original TaskOwner admission. The returned closure cannot cross IPC. */

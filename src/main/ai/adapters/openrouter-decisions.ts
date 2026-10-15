@@ -1,3 +1,4 @@
+import {validDecisionAnswerMetadata} from './decision-answer-metadata.ts';
 import { AiError } from '../errors.ts';
 import { emptyUsage } from '../transport.ts';
 import type { AdapterContext,ProviderMetadata } from '../transport.ts';
@@ -19,8 +20,7 @@ export async function requestOpenRouterDecisions(model:string,state:unknown,ques
   if(!raw?.answers||typeof raw.answers!=='object'||Array.isArray(raw.answers)||Object.keys(raw.answers).sort().join()!==Object.keys(questions).sort().join())throw invalidOutput();
   const probability=(n:unknown)=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1;
   for(const [id,q] of Object.entries(questions)){
-    const a=raw.answers[id];if(!a||a.type!==q.type||q.type==='choice'&&(typeof a.choice!=='string'||!Object.hasOwn(q.criteria,a.choice))||q.type==='noul'&&!probability(a.noul)||q.type==='score'&&(typeof a.score!=='number'||!Number.isFinite(a.score)||a.score<0||a.score>q.criteria.length-1)||a.confidence!==undefined&&!probability(a.confidence))throw invalidOutput();
-    if(a.probabilities!==undefined&&(typeof a.probabilities!=='object'||Array.isArray(a.probabilities)||Object.values(a.probabilities).some(n=>!probability(n))))throw invalidOutput();
+    const a=raw.answers[id];if(!a||a.type!==q.type||q.type==='choice'&&(typeof a.choice!=='string'||!Object.hasOwn(q.criteria,a.choice))||q.type==='noul'&&!probability(a.noul)||q.type==='score'&&(typeof a.score!=='number'||!Number.isFinite(a.score)||a.score<0||a.score>q.criteria.length-1)||!validDecisionAnswerMetadata(a))throw invalidOutput();
   }
   return{...metadata,answers:raw.answers};
 }

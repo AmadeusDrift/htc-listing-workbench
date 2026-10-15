@@ -35,11 +35,32 @@ export function imageEvidence(context:ProductImageContext):ListingAiContext['evi
   return [...sourceImageEvidence(context),...(context.referenceMeasurements??[]).filter(item=>selected.has(item.id)).map(item=>({id:item.id,name:'Printed dimensions in source image (OCR + visual reading)',value:item.text,meaning:'general' as const,source:'source_confirmed' as const}))];
 }
 function sourceImageEvidence(context:ProductImageContext):ListingAiContext['evidence']{return [...context.listing.evidence.filter(item=>!isDefaultMeasurement(item.name)&&!(describesOtherObject(item.name+' '+item.value)&&imageMeasurements(item.value).length)),...(context.sourceMeasurements??[]).map(({id,name,value})=>({id,name,value,meaning:'general' as const,source:'source_confirmed' as const}))];}
-export function sourceDimensionEvidence(context:ProductImageContext){return sourceImageEvidence(context).filter(item=>{
+/** Scope is read from retained source labels/identity, never inferred from numeric values. */
+export function imageMeasurementScope(item:{id:string;name?:string;value?:string;text?:string}):'product'|'package'|'component'|'unknown'{
+  const text=[item.name,item.value,item.text].filter(Boolean).join(' ');
+  if(/^measurement:[^:]+:package\./.test(item.id)||/(?:包装|箱规|外箱|\bpackag(?:e|ing)\b|\bcarton\b)/i.test(text))return 'package';
+  if(/(?:组件|配件|\bcomponent\b)/i.test(text))return 'component';
+  if(/^measurement:[^:]+:item\./.test(item.id)||/(?:商品|产品|本体|\b(?:product|item|body)\b|Selected SKU specification)/i.test(text))return 'product';
+  return 'unknown';
+}
+/** Optional size diagrams may cite scoped packaging; only body measurements require one. */
+export function availableDimensionEvidence(context:ProductImageContext){return sourceImageEvidence(context).filter(item=>{
   if(isDefaultMeasurement(item.name+' '+item.value)||describesOtherObject(item.name+' '+item.value))return false;
   return /尺寸|长|宽|高|厚|直径|length|width|height|diameter|dimensions?|\bsize\b|Selected SKU specification/i.test(item.name+' '+item.value)&&imageMeasurements(item.value).some(value=>value.kind==='length'&&value.value>0);
 });}
+export function sourceDimensionEvidence(context:ProductImageContext){return availableDimensionEvidence(context).filter(item=>imageMeasurementScope(item)==='product');}
 const equivalent=(a:Measurement,b:Measurement)=>a.kind===b.kind&&Math.abs(a.value-b.value)<=Math.max(0.01,Math.abs(b.value)*0.015);
+/** A package/component number cannot silently become a body size in a caption or prompt.
+ * Check individual clauses so a distant package label cannot bless an unrelated claim. */
+export function imageMeasurementScopeValid(text:string,evidence:ListingAiContext['evidence']):boolean{
+  return text.split(/[;；。\n]|(?<!\d)\.(?!\d)/).every(clause=>imageMeasurements(clause).every(measurement=>{
+    const matches=evidence.filter(item=>imageMeasurements(item.value).some(actual=>equivalent(measurement,actual)));
+    if(!matches.length||matches.some(item=>['product','unknown'].includes(imageMeasurementScope(item))))return true; // Numeric support and corroborated OCR selection are checked separately.
+    const scopes=matches.map(imageMeasurementScope);
+    return scopes.includes('package')&&/\bpackag(?:e|ing)\b|\bcarton\b|包装|箱规|外箱/i.test(clause)&&!/(?:\b(?:product|item|body)\s+(?:size|dimensions?|length|width|height|diameter)|(?:产品|商品|本体)(?:尺寸|长|宽|高|直径))/i.test(clause)
+      ||scopes.includes('component')&&/\bcomponent\b|组件|配件/i.test(clause)&&!/(?:\b(?:product|item|body)\s+(?:size|dimensions?|length|width|height|diameter)|(?:产品|商品|本体)(?:尺寸|长|宽|高|直径))/i.test(clause);
+  }));
+}
 export function assertImageMeasurements(text:string,context:Pick<ListingAiContext,'evidence'>,onlyContradictions=false):void {
   const source=context.evidence.flatMap(item=>imageMeasurements(item.value));
   if(imageMeasurements(text).some(value=>(!onlyContradictions||source.some(actual=>actual.kind===value.kind))&&!source.some(actual=>equivalent(value,actual))))throw new AiError('OUTPUT_INVALID','UNSUPPORTED_MEASUREMENT');

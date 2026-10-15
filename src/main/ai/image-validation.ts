@@ -15,14 +15,15 @@ import { listingFingerprint } from "../json-fingerprint.ts";
 import { AiError } from './errors.ts';
 import { boundedText, date, integer, keys, sha256, uuid } from "./primitives.ts";
 import { validateBasicOutput as validateOutput } from "./basic-output-validation.ts";
-import { assertImageMeasurements, assertImagePromptMeasurements, imageEvidence, imageMeasurements, sourceDimensionEvidence, withoutImageMeasurements } from '../image-workflow/image-facts.ts';
+import { assertImageMeasurements, assertImagePromptMeasurements, availableDimensionEvidence, imageEvidence, imageMeasurements, imageMeasurementScopeValid, sourceDimensionEvidence, withoutImageMeasurements } from '../image-workflow/image-facts.ts';
 import { isFullSchema } from "../listing-ai/native-values.ts";
 import { parseFullReview } from "../listing-ai/full-schema.ts";
 import { explicitCategoryConflicts } from '../listing-ai/full-schema-conflicts.ts';
 
 function fail(): never { throw new AiError('OUTPUT_INVALID'); }
+function planFailure(reason:string,path:string):never{throw Object.assign(new AiError('OUTPUT_INVALID'),{diagnosticReason:reason,validationPath:path});}
 /** Omission is current authorization; an explicit null selects unmarked stored v0 evidence. */
-export type ImageEvidenceOptions={storedVersion?:string|null};
+export type ImageEvidenceOptions={storedVersion?:string|null;enforceDimensionScope?:boolean};
 function list<T>(raw: unknown, max: number, parse: (raw: unknown) => T): T[] { return Array.isArray(raw) && raw.length <= max ? raw.map(parse) : fail(); }
 function ids(raw: unknown): string[] { const values = list(raw, 200, value => boundedText(value, 150)); if (new Set(values).size !== values.length) fail(); return values; }
 function flag(raw: unknown): boolean { return typeof raw === 'boolean' ? raw : fail(); }
@@ -188,6 +189,7 @@ export function validateImagePlan(raw: unknown): ImagePlanOutput {
 }
 export function validateImageSetPlan(raw:unknown,refusal=false):ImageSetPlan{
   const value=keys(raw,['style','dimensionEvidenceIds','dimensionReason','slots']);
+  if(!Array.isArray(value.slots)||value.slots.length!==7)planFailure('IMAGE_PLAN_SLOT_COUNT','setPlan.slots.length');
   const slots=list(value.slots,7,raw=>{
     const item=keys(raw,['index','role','focus','evidenceIds','scene','prompt','textMode','expectedText'],['cameraFocalLength']);
     if(!['main_scene','selling_point','dimensions','scene'].includes(String(item.role)))fail();
@@ -195,19 +197,22 @@ export function validateImageSetPlan(raw:unknown,refusal=false):ImageSetPlan{
     if(text.expectedText.length>3||text.expectedText.some(line=>line.text.length>100))fail();
     return {...(item.cameraFocalLength===undefined?{}:{cameraFocalLength:cameraFocalLength(item.cameraFocalLength)}),index:integer(item.index,1,7),role:item.role as ImageSetSlot['role'],focus:boundedText(item.focus,200),evidenceIds:ids(item.evidenceIds),scene:boundedText(item.scene,500,refusal),prompt:boundedText(text.prompt,2000,refusal),textMode:text.textMode,expectedText:text.expectedText};
   });
-  if(slots.length!==7||slots.some((slot,index)=>slot.index!==index+1))fail();
+  if(slots.some((slot,index)=>slot.index!==index+1))planFailure('IMAGE_PLAN_SLOT_ORDER','setPlan.slots');
   return {style:boundedText(value.style,1000),dimensionEvidenceIds:ids(value.dimensionEvidenceIds),dimensionReason:boundedText(value.dimensionReason,1000),slots};
 }
 export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext,options:ImageEvidenceOptions={},refusal=false):void{
-  const sourceSizes=sourceDimensionEvidence(context),available=[...sourceSizes.map(item=>item.id),...(context.referenceMeasurements??[]).map(item=>item.id)];
-  if(plan.dimensionEvidenceIds.some(id=>!available.includes(id))||!refusal&&sourceSizes.length&&!plan.dimensionEvidenceIds.length)fail();
+  const currentScope=options.enforceDimensionScope===true&&!Object.hasOwn(options,'storedVersion');
+  const sourceSizes=sourceDimensionEvidence(context),available=[...availableDimensionEvidence(context).map(item=>item.id),...(context.referenceMeasurements??[]).map(item=>item.id)];
+  if(plan.dimensionEvidenceIds.some(id=>!available.includes(id)))planFailure('IMAGE_PLAN_DIMENSION_EVIDENCE','setPlan.dimensionEvidenceIds');
+  if(!refusal&&sourceSizes.length&&(currentScope?!plan.dimensionEvidenceIds.some(id=>sourceSizes.some(item=>item.id===id)):!plan.dimensionEvidenceIds.length))planFailure('IMAGE_PLAN_DIMENSION_REQUIRED','setPlan.dimensionEvidenceIds');
   const dimensions=plan.slots.filter(slot=>slot.role==='dimensions');
-  if(!refusal&&dimensions.length!==(plan.dimensionEvidenceIds.length?1:0))fail();
+  if(!refusal&&dimensions.length!==(plan.dimensionEvidenceIds.length?1:0))planFailure('IMAGE_PLAN_DIMENSION_SLOT','setPlan.slots');
+  if(currentScope&&!refusal&&sourceSizes.length&&!dimensions.some(slot=>slot.expectedText.some(line=>imageMeasurements(line.text).some(value=>value.kind==='length')&&line.evidenceIds.some(id=>plan.dimensionEvidenceIds.includes(id)&&slot.evidenceIds.includes(id)&&sourceSizes.some(item=>item.id===id)))))planFailure('IMAGE_PLAN_DIMENSION_REQUIRED','setPlan.slots');
   const effective={...context,setPlan:plan},evidence=imageEvidence(effective);
   const focuses=new Set<string>(),scenes=new Set<string>();
   for(const [index,slot] of plan.slots.entries()){
     if(index===0?slot.role!=='main_scene'||slot.textMode!=='none':slot.role==='main_scene')fail();
-    if(slot.evidenceIds.some(id=>!evidence.some(item=>item.id===id)))fail();
+    if(slot.evidenceIds.some(id=>!evidence.some(item=>item.id===id)))planFailure('IMAGE_PLAN_SLOT_EVIDENCE',`setPlan.slots[${index}].evidenceIds`);
     if(!refusal&&slot.role==='selling_point'){
       const focus=normalizeText(slot.focus);
       if(slot.textMode!=='planned'||!slot.evidenceIds.length||focuses.has(focus))fail();
@@ -217,12 +222,14 @@ export function assertImageSetPlan(plan:ImageSetPlan,context:ProductImageContext
       const scene=normalizeText(slot.scene);if(scenes.has(scene))fail();scenes.add(scene);
     }
     if(!refusal&&slot.role==='dimensions'&&(slot.textMode!=='planned'||!slot.evidenceIds.some(id=>plan.dimensionEvidenceIds.includes(id))||!slot.expectedText.some(line=>imageMeasurements(line.text).some(value=>value.kind==='length'))))fail();
-    for(const line of slot.expectedText){
+    for(const [lineIndex,line] of slot.expectedText.entries()){
       if(['selling_point','dimensions'].includes(slot.role)&&!line.evidenceIds.length)fail();
       if(line.evidenceIds.some(id=>!slot.evidenceIds.includes(id)))fail();
+      if(currentScope&&!imageMeasurementScopeValid(line.text,evidence.filter(item=>line.evidenceIds.includes(item.id))))planFailure('IMAGE_PLAN_DIMENSION_SCOPE',`setPlan.slots[${index}].expectedText[${lineIndex}]`);
       assertTextEvidence(line.text,line.evidenceIds,effective,options);
     }
     assertImagePromptMeasurements(slot.prompt,{evidence});
+    for(const field of ['prompt','focus','scene'] as const)if(currentScope&&!imageMeasurementScopeValid(slot[field],evidence))planFailure('IMAGE_PLAN_DIMENSION_SCOPE',`setPlan.slots[${index}].${field}`);
     assertImageMeasurements([slot.focus,slot.scene,...slot.expectedText.map(line=>line.text)].join('\n'),{evidence});
   }
   assertImageMeasurements(plan.style,{evidence});
@@ -367,6 +374,7 @@ function assertTextEvidence(text: string, evidenceIds: string[], context: Produc
   englishText(text);
   if(!context.setPolicy&&!evidenceIds.length)fail();
   const evidence=context.setPolicy?imageEvidence(context):context.listing.evidence;
+  if(context.setPolicy&&options.enforceDimensionScope===true&&!Object.hasOwn(options,'storedVersion')&&!imageMeasurementScopeValid(text,evidence.filter(item=>evidenceIds.includes(item.id))))planFailure('IMAGE_PLAN_DIMENSION_SCOPE','expectedText');
   if(context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
   if(!Object.hasOwn(options,'storedVersion')||options.storedVersion==='listing-evidence/v4'||options.storedVersion==='listing-evidence/v5'){
     if(!context.setPolicy)assertImageMeasurements(text,{evidence:evidence.filter(item=>evidenceIds.includes(item.id))});
@@ -397,6 +405,7 @@ export function assertImagePlan(plan: ImagePlanOutput, context: ProductImageCont
   if(context.slot||context.setPolicy){
     const evidence=imageEvidence(evidenceContext);
     assertImagePromptMeasurements(plan.prompt,{evidence});
+    if(options.enforceDimensionScope===true&&!Object.hasOwn(options,'storedVersion')&&!imageMeasurementScopeValid(plan.prompt,evidence))planFailure('IMAGE_PLAN_DIMENSION_SCOPE','prompt');
     // Observations/uncertainties are not render requirements or measured facts.
     assertImageMeasurements(plan.expectedText.map(line=>line.text).join('\n'),{evidence});
   }
@@ -469,7 +478,7 @@ export function assertImageTextReview(review: ImageTextReviewOutput, context: Pr
 export function parseImagePlanResponse(raw:unknown,context:ProductImageContext):ImagePlanOutput {
   const envelope=raw&&typeof raw==='object'&&!Array.isArray(raw)&&'type' in raw&&raw.type==='json_object'?Object.fromEntries(Object.entries(raw).filter(([key])=>key!=='type')):raw;
   const plan=repairImagePlanCaptions(validateImagePlan(fillSetPlanPrompt(normalizeImagePlanStructure(envelope),context)),context);
-  assertImagePlan(plan,context);return plan;
+  assertImagePlan(plan,context,{enforceDimensionScope:true});return plan;
 }
 
 /** Escape only unescaped control characters inside JSON strings. No structural repair. */

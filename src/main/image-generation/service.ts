@@ -188,7 +188,11 @@ export class ImageGenerationService {
     if(!existsSync(join(this.directory,'image-generation','candidates',id))){
       const intent=readImageRequestIntent(this.db,id);if(!intent)return null;
       const receipt=await readProviderReceipt(this.db,this.directory,id) as any;if(!receipt)return null;
-      if(this.spend.list().some(r=>r.id===id)){const saved=readImageReceiptSync(this.db,this.directory,intent);if(saved){const proof=prepareImageSpendReceiptProof(saved.record,saved.capture),settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,id,saved.record.id,proof));if(settled.state==='COST_ANOMALY')throw Object.assign(new SpendBudgetError('SPEND_COST_ANOMALY'),{requestId:id,certainty:proof.certainty});}}
+      if(this.spend.list().some(r=>r.id===id)){const saved=readImageReceiptSync(this.db,this.directory,intent);if(saved){
+        // A verified durable pointer can survive the receipt-index INSERT. Rebuild
+        // only this original receipt through its owner, never a generation POST.
+        if(!this.db.prepare('SELECT 1 FROM ai_provider_receipts WHERE id=?').get(saved.record.id)){const indexed=await saveProviderReceipt(this.db,this.directory,id,saved.capture,undefined);if(indexed.id!==saved.record.id||indexed.sha256!==saved.record.sha256)throw new SpendBudgetError('SPEND_IDENTITY_CONFLICT');}
+        const proof=prepareImageSpendReceiptProof(saved.record,saved.capture),settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,id,saved.record.id,proof));if(settled.state==='COST_ANOMALY')throw Object.assign(new SpendBudgetError('SPEND_COST_ANOMALY'),{requestId:id,certainty:proof.certainty});}}
       const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
       const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
       const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);

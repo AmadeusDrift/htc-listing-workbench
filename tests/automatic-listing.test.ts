@@ -47,7 +47,7 @@ function fixture(t: test.TestContext, mode: 'live' | 'demo' = 'demo') {
   let ready = mode === 'demo', imageFailure = false, started: (() => void) | undefined, release: (() => void) | undefined;
   const workflow = new Map<string, any>();
   const dependencies: AutomaticListingDependencies = {
-    store: { getProduct: () => structuredClone(product),hasProducts:ids=>ids.every(id=>id===product.id) },
+    store: { getProduct: () => structuredClone(product),getProductSnapshot: id => dependencies.store.getProduct(id),hasProducts:ids=>ids.every(id=>id===product.id) },
     prepareSourceConsistency:async input=>{materializeSourceSnapshot(directory,product,input.variantIds);const store=new WorkspaceStore(directory);try{await confirmSourceConsistencyFixture(directory,store,product.id,input.variantIds);}finally{store.close();}},
     rules: () => structuredClone(rules),
     previewSales: () => buildSalesRecipes(product,null,rules),

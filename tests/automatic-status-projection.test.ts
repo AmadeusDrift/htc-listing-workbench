@@ -21,6 +21,7 @@ test('stable reason codes distinguish profit, packaging and other rules independ
  assert.equal(automaticItemOutcome(row('AI_RECEIVED_INVALID_OUTPUT','SYSTEM_REPAIR','FAILED')),'invalidOutput');
  assert.equal(automaticItemOutcome(row('AI_OUTPUT_INVALID','SYSTEM_REPAIR','FAILED')),'systemRepair','a generic old error code carries no response certainty');
  assert.match(automaticItemReason(row('EVIDENCE_READ_FAILED','UNKNOWN','FAILED')),/暂不可读，结果仍未知/);
+ const missing=row('EVIDENCE_READ_FAILED','UNKNOWN','FAILED');missing.rejection={workflowId:'00000000-0000-4000-8000-000000000001',detail:{version:'rejection-presentation/v1',code:'FIELD_FORMAT_INVALID',callId:'00000000-0000-4000-8000-000000000002',resultId:null,contextSha256:'a'.repeat(64),stage:'content',slot:0}};assert.match(automaticItemReason(missing),/暂不可读，结果仍未知/,'the current missing-evidence projection must not be hidden by an older rejection code');
  assert.doesNotMatch(automaticItemReason(row('EVIDENCE_READ_FAILED','SYSTEM_REPAIR','FAILED')),/结果仍未知/,'an ordinary evidence error does not assert a request became unknown');
 });
 test('failure timestamps distinguish request proof, local checks and unknown historical time without refresh clock',()=>{

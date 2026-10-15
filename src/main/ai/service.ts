@@ -1011,21 +1011,43 @@ export class AiService {
         invoke:(credentials,adapterContext)=>reviewProductImageTextDirect(context,plan,candidate,{assetId:candidate.id,sha256:candidate.sha256,mimeType:raster.mimeType,width:candidate.width,height:candidate.height,bytes:image},profile.model as DeepSeekModel,credentials as DeepSeekCredentials,activeSignal,adapterContext)};
     },signal,undefined,undefined,owner);
   }
-  async reviewGeneratedImageAppearance(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,snapshot?:import('../../shared/ai-purpose-contracts.ts').AiPurposeSnapshot,previousResultId?:string|null):Promise<AiResult> {
+  async reviewGeneratedImageAppearance(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,snapshot?:import('../../shared/ai-purpose-contracts.ts').AiPurposeSnapshot,previousResultId?:string|null,policy?:import('../../shared/appearance-review-contracts.ts').AppearanceReviewPolicy):Promise<AiResult> {
     this.ensureOpen(); const context=validateProductImageContext(rawContext),candidate=validateCandidateImageIdentity(rawCandidate),plan=this.imageResult(rawPlan,context,'image-plan');
     const routing=validateAppearancePurposeSnapshot(snapshot??this.activePurpose('appearance_review',true,true).routing);
     if(!routing.capability.vision||!routing.capability.json||!['appearance_review','appearance_review_difficult'].includes(routing.purposeId))throw new AiError('INVALID_CONFIG');
     const id=routing.gateway==='openrouter'?'openrouter-review':'deepseek-review',connection=this.assertProfile(id),profile={...connection,model:routing.model,thinking:!['none','not_applicable'].includes(routing.effectiveEffort),routing};
     const previous=previousResultId?this.getResult(uuid(previousResultId)):undefined;
-    if(previousResultId&&(!previous||previous.output.kind!=='image-appearance-review'||previous.output.verdict!=='UNCERTAIN'||previous.output.previousResultId!==null||previous.output.planResultId!==plan.id||listingFingerprint(previous.output.candidate)!==listingFingerprint(candidate)||previous.sourceSha256!==listingFingerprint(context)))throw new AiError('SOURCE_CHANGED');
+    const same=(r:AiResult|undefined):r is AiResult&{output:import('../../shared/appearance-review-contracts.ts').AppearanceReviewOutput}=>!!r&&r.output.kind==='image-appearance-review'&&r.output.planResultId===plan.id&&listingFingerprint(r.output.candidate)===listingFingerprint(candidate)&&r.sourceSha256===listingFingerprint(context);
+    if(policy){
+      keys(policy,['policyVersion'],['basePreviousResultId']);if(policy.policyVersion!=='appearance-review/v2')throw new AiError('INVALID_INPUT');
+      const base=policy.basePreviousResultId?this.getResult(uuid(policy.basePreviousResultId)):undefined;
+      if(base){
+        if(!same(base)||base.output.policyVersion||base.output.verdict==='PASS')throw new AiError('SOURCE_CHANGED');
+        const first=base.output.previousResultId?this.getResult(base.output.previousResultId):undefined;
+        if(first&&(!same(first)||first.output.policyVersion||first.output.previousResultId!==null||first.output.verdict!=='UNCERTAIN')||base.output.previousResultId&&!first)throw new AiError('SOURCE_CHANGED');
+        for(const result of [first,base])if(result){const call=this.getCall(result.callId);if(!call||call.status!=='SUCCEEDED'||!resultHasOwner(result,call)||!readCallReceiptSync(this.db,this.directory,call))throw new AiError('SOURCE_CHANGED');}
+        if(!same(previous)||previous.id!==base.id&&(previous.output.policyVersion!==policy.policyVersion||previous.output.previousResultId!==base.id||previous.output.verdict!=='UNCERTAIN'))throw new AiError('SOURCE_CHANGED');
+      }else if(policy.basePreviousResultId||previousResultId&&(!same(previous)||previous.output.policyVersion!==policy.policyVersion||previous.output.previousResultId!==null||previous.output.verdict!=='UNCERTAIN'))throw new AiError('SOURCE_CHANGED');
+    }else if(previousResultId&&(!same(previous)||previous.output.policyVersion||previous.output.verdict!=='UNCERTAIN'||previous.output.previousResultId!==null))throw new AiError('SOURCE_CHANGED');
     const image=Buffer.from(bytes),raster=inspectRaster(image);if(createHash('sha256').update(image).digest('hex')!==candidate.sha256||raster.width!==candidate.width||raster.height!==candidate.height)throw new AiError('IMAGE_INVALID');
-    return this.start(profile,context.listing,{operation:'image-appearance-review',context,plan,candidate,previousResultId:previous?.id??null},async activeSignal=>{
+    const source={operation:'image-appearance-review',context,plan,candidate,previousResultId:previous?.id??null,...(policy?{reviewPolicy:policy}:{})};
+    if(policy){
+      // The retained M07 call consumes this exact policy/parent allowance even
+      // if its complete response was invalid and an older checkpoint returns.
+      const original=this.matchingInvocations(requestScope(profile,context.listing,source)).find(call=>call.requestFingerprint===this.invocationFingerprint(this.originalProfile(call),context.listing,source));
+      if(original){
+        const saved=this.listResults(context.listing.productId).find(result=>result.callId===original.id&&resultHasOwner(result,original));
+        if(saved){await this.assertImageFresh(context,assertContextFresh,signal??new AbortController().signal);return saved;}
+        const error=new AiError('INTERRUPTED');error.callId=original.id;error.certainty=localAiRequestResolved(this.db,this.directory,original.id,original)?'RECEIVED_INVALID':'SENT_UNKNOWN';error.message='原新版外观复核已有调用但尚无可安全采用结果；原回执、费用与一次审核许可保留，未重复发送';throw error;
+      }
+    }
+    return this.start(profile,context.listing,source,async activeSignal=>{
       const assertFresh=async()=>{await this.assertImageFresh(context,assertContextFresh,activeSignal);this.imageResult(plan,context,'image-plan');};await assertFresh();
       const images:DeepSeekReferenceImage[]=[];
       for(const asset of this.imageSources(context)){const data=await this.readSource({productId:context.listing.productId,productRevision:context.listing.productRevision,assetId:asset.id},asset,activeSignal);images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes:data});}
       images.push({assetId:candidate.id,sha256:candidate.sha256,mimeType:raster.mimeType,width:candidate.width,height:candidate.height,bytes:image});await assertFresh();
       return{variantId:context.listing.variantId,assetId:null,assetSha256:null,sourceResultIds:[...imageCopySourceIds(context),plan.id,...(previous?[previous.id]:[])],sourceSha256:listingFingerprint(context),imageContext:context,assertFresh,
-        invoke:(credentials,adapterContext)=>reviewProductAppearance(context,plan,candidate,images,previous,profile.model as DeepSeekModel,credentials as DeepSeekCredentials,activeSignal,adapterContext)};
+        invoke:(credentials,adapterContext)=>reviewProductAppearance(context,plan,candidate,images,previous,profile.model as DeepSeekModel,credentials as DeepSeekCredentials,activeSignal,adapterContext,policy)};
     },signal);
   }
   async reviewGeneratedImageRisk(rawContext:ProductImageContext,rawPlan:AiResult,rawCandidate:CandidateImageIdentity,bytes:Buffer,assertContextFresh:()=>void|Promise<void>,signal?:AbortSignal,owner?:AiDurableRequestPort):Promise<AiResult> {

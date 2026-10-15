@@ -1913,6 +1913,62 @@ function enableAppearance(f:Awaited<ReturnType<typeof fixture>>){
  for(const purposeId of ['appearance_review','appearance_review_difficult'] as const){const previous=f.ai.getPurposeProfiles().find(p=>p.purposeId===purposeId)!;f.ai.savePurposeProfile({purposeId,expectedRevision:previous.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
 }
 function appearanceReply(payload:any,verdict='PASS'){return chat({verdict,checks:[{aspect:'color',expected:'Blue coaster',observed:verdict==='MISMATCH'?'Red coaster':'Blue coaster',reason:'Product body compared; table props excluded',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)}]});}
+
+test('appearance policy v2 explicit continue reuses legacy twice-uncertain candidates without generation or rewriting paid history',async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});let current=false,reviews=0;
+ for(const purposeId of ['source_understanding','copy_review','image_text_review'] as const){const profile=f.ai.purposeProfile(purposeId).routing!;f.ai.savePurposeProfile({purposeId,expectedRevision:profile.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
+ const candidateSlots=new Map<string,number>();
+ f.respond((operation,payload)=>{if(operation==='ip-upload')return new Response(null,{status:200});if(operation==='image-appearance-review'){reviews++;if(!candidateSlots.has(payload.candidate.id))candidateSlots.set(payload.candidate.id,candidateSlots.size+1);return chat({verdict:current||[2,7].includes(candidateSlots.get(payload.candidate.id)!)?'PASS':'UNCERTAIN',checks:[{aspect:'count',expected:'50 bags per sales pack',observed:'One representative bag in use',reason:'Legacy review could not prove all 50 from one scene.',referenceAssetIds:payload.referenceImages.map((r:any)=>r.assetId)}]});}return undefined;});
+ let interruptPolicy=true;const save=(workflow as any).save.bind(workflow);(workflow as any).save=(run:any)=>{if(!current)for(const slot of run.slots??[]){const cp=slot.attempts.at(-1)?.appearanceReview;if(cp)delete cp.policyVersion;}save(run);if(current&&interruptPolicy&&run.slots?.[0]?.attempts[0]?.appearanceReview?.policyVersion&&run.slots[0].attempts[0].appearanceReview.resultIds.length){interruptPolicy=false;workflow.cancel(f.draft.id);}};
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(first.workflow.status,'BLOCKED');assert.equal(posts(),7,first.workflow.error??'');assert.equal(reviews,12);
+ const db=openDatabase(f.directory);try{
+  const legacy=JSON.parse(String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json));
+  for(const slot of legacy.slots){delete slot.attempts[0].appearanceReview.policyVersion;delete slot.attempts[0].appearanceReview.previousPolicy;delete slot.attempts[0].appearanceReview.basePreviousResultId;}
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(legacy),legacy.id);
+  const passed=legacy.slots.filter((slot:any)=>slot.status==='PASSED').map((slot:any)=>{const asset=db.prepare('SELECT original_path FROM assets WHERE id=?').get(slot.approvedAssetId)!;return {slot:structuredClone(slot),path:join(f.directory,String(asset.original_path)),bytes:readFileSync(join(f.directory,String(asset.original_path))) };});assert.equal(passed.length,2);
+  const history=db.prepare('SELECT record_json FROM ai_results ORDER BY id').all().map(r=>String(r.record_json)),paid=db.prepare('SELECT record_json FROM ai_calls ORDER BY id').all().map(r=>String(r.record_json));
+  current=true;const interrupted=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(interrupted.workflow.status,'CANCELLED');assert.equal(reviews,13);assert.equal(posts(),7);
+  // Model an old checkpoint restored while M07 retains every newer paid call/result.
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(JSON.stringify(legacy),legacy.id);
+  const next=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});
+  assert.equal(next.workflow.status,'COMPLETED',next.workflow.error??'');assert.equal(next.workflow.id,legacy.id);assert.equal(posts(),7);assert.equal(reviews,17);
+  for(const [i,slot] of next.workflow.slots!.entries()){assert.equal(slot.attempts.length,1);assert.equal(slot.attempts[0].candidateId,legacy.slots[i].attempts[0].candidateId);if(legacy.slots[i].status==='PASSED'){assert.deepEqual(slot,legacy.slots[i]);continue;}const cp=slot.attempts[0].appearanceReview as any;assert.equal(cp.policyVersion,'appearance-review/v2');assert.deepEqual(cp.previousPolicy,legacy.slots[i].attempts[0].appearanceReview);assert.equal(cp.basePreviousResultId,cp.previousPolicy.resultIds.at(-1));assert.equal((f.ai.getResult(cp.resultIds[0])!.output as any).previousResultId,cp.basePreviousResultId);}
+  for(const saved of passed){assert.deepEqual(next.workflow.slots![saved.slot.index-1],saved.slot);assert.deepEqual(readFileSync(saved.path),saved.bytes);}
+  for(const raw of history){const id=JSON.parse(raw).id;assert.equal(String(db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id)!.record_json),raw);}
+  for(const raw of paid){const id=JSON.parse(raw).id;assert.equal(String(db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id)!.record_json),raw);}
+  assertImageWorkflowHistory(db,new Map(f.ai.listResults(f.product.id).map(r=>[r.id,r])),new Map(f.ai.listCalls().map(c=>[c.id,c])));
+  const before=f.requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision});assert.equal(f.requests.length,before);assert.equal(posts(),7);
+  await createWorkspaceBackup(f.directory,join(f.directory,'appearance-policy-v2.htcbackup'),'synthetic appearance policy history');
+ }finally{db.close();}
+});
+
+for(const maxAttempts of [1,3] as const)test(`appearance policy v2 legacy mismatch is re-reviewed without drawing with generation limit ${maxAttempts}`,async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});
+ for(const purposeId of ['source_understanding','copy_review','image_text_review'] as const){const profile=f.ai.purposeProfile(purposeId).routing!;f.ai.savePurposeProfile({purposeId,expectedRevision:profile.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
+ let legacy=true,reviews=0,stopped=false;f.respond((op,payload)=>op==='ip-upload'?new Response(null,{status:200}):op==='image-appearance-review'?(reviews++,appearanceReply(payload,'MISMATCH')):undefined);
+ const save=(workflow as any).save.bind(workflow);(workflow as any).save=(run:any)=>{if(legacy)for(const slot of run.slots??[]){const cp=slot.attempts.at(-1)?.appearanceReview;if(cp)delete cp.policyVersion;}save(run);if(legacy&&!stopped&&run.slots?.[0]?.status==='FAILED'){stopped=true;workflow.cancel(f.draft.id);}};
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision},{maxImageAttempts:maxAttempts});assert.equal(posts(),1,first.workflow.error??'');assert.equal(reviews,1);legacy=false;
+ const next=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.equal(posts(),1);assert.equal(reviews,2);assert.equal(next.workflow.slots![0].status,'BLOCKED');assert.equal(next.workflow.slots![0].attempts.length,1);assert.equal(next.workflow.slots![0].attempts[0].candidateId,first.workflow.slots![0].attempts[0].candidateId);assert.equal(next.workflow.maxAttempts,maxAttempts);
+ const before=f.requests.length;await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.equal(f.requests.length,before);assert.equal(posts(),1);
+});
+
+for(const outcome of ['unknown','invalid'] as const)test(`appearance policy v2 missing receipt and ${outcome} stay locked including an old checkpoint restore and changed model`,async t=>{
+ const f=await fixture(t),{workflow,posts}=productionWorkflow(f);enableAppearance(f);workflow.saveAppearanceReviewSettings({enabled:true});
+ for(const purposeId of ['source_understanding','copy_review','image_text_review'] as const){const profile=f.ai.purposeProfile(purposeId).routing!;f.ai.savePurposeProfile({purposeId,expectedRevision:profile.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});}
+ let legacy=true,reviews=0,stopped=false;f.respond((op,payload)=>{if(op==='ip-upload')return new Response(null,{status:200});if(op==='image-appearance-review'){reviews++;if(!legacy){if(outcome==='unknown')throw Error('synthetic lost appearance response');return chat({verdict:'UNCERTAIN',checks:[]});}return appearanceReply(payload,'UNCERTAIN');}return undefined;});
+ const save=(workflow as any).save.bind(workflow);(workflow as any).save=(run:any)=>{if(legacy)for(const slot of run.slots??[]){const cp=slot.attempts.at(-1)?.appearanceReview;if(cp)delete cp.policyVersion;}save(run);if(legacy&&!stopped&&run.slots?.[0]?.attempts[0]?.appearanceReview?.resultIds.length===2){stopped=true;workflow.cancel(f.draft.id);}};
+ const first=await workflow.complete({draftId:f.draft.id,draftRevision:f.draft.revision});assert.equal(posts(),1);assert.equal(reviews,2);legacy=false;
+ const db=openDatabase(f.directory);try{
+  const old=String(db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(first.workflow.id)!.record_json),last=first.workflow.slots![0].attempts[0].appearanceReview!.resultIds.at(-1)!,call=f.ai.getCall(f.ai.getResult(last)!.callId)!,path=join(f.directory,'ai-receipts',call.providerReceiptId!+'.json'),bytes=readFileSync(path);rmSync(path);
+  const before=f.requests.length,blocked=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.match(blocked.workflow.error??'',/回执|不完整/);assert.equal(f.requests.length,before);assert.equal(blocked.workflow.slots![0].attempts[0].appearanceReview!.policyVersion,undefined);writeFileSync(path,bytes);
+  const pending=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.equal(reviews,3);assert.equal(posts(),1);if(outcome==='unknown')assert.equal(pending.workflow.pendingRequest?.step,'appearance');assert.equal(pending.workflow.slots![0].attempts[0].appearanceReview!.state,'PENDING');
+  const original=f.ai.listCalls().filter(call=>call.requestScope?.operation==='image-appearance-review').at(-1)!,fees=db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),count=f.requests.length;
+  const p=f.ai.purposeProfile('appearance_review').routing!;f.ai.savePurposeProfile({purposeId:'appearance_review',expectedRevision:p.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+  await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.equal(f.requests.length,count);assert.equal(posts(),1);
+  db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=?').run(old,first.workflow.id);
+  const restored=await workflow.complete({draftId:f.draft.id,draftRevision:f.amazon.getDraft(f.draft.id).revision},{selectedSlots:[1]});assert.equal(f.requests.length,count);assert.equal(posts(),1);if(outcome==='unknown'){assert.equal(restored.workflow.pendingRequest?.callId,original.id);assert.equal(restored.workflow.slots![0].attempts[0].appearanceReview!.policyVersion,undefined);}else assert.match(restored.workflow.error??'',/原.*结果|回执/);assert.deepEqual(f.ai.getCall(original.id),original);assert.deepEqual(db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),fees);
+ }finally{db.close();}
+});
 test('W07 appearance sends actual source plus candidate and preserves raw receipt with independent purpose',async t=>{
  const f=await fixture(t);enableAppearance(f);f.respond((operation,payload)=>operation==='image-appearance-review'?appearanceReply(payload):undefined);
  const plan=await f.ai.imagePlan(f.context,()=>{}),review=await f.ai.reviewGeneratedImageAppearance(f.context,plan,f.candidate,f.bytes,()=>{});

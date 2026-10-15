@@ -76,11 +76,15 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
           const appearance=attempt.appearanceReview;
           if(appearance){
             if(appearance.state==='NOT_PERFORMED'&&run.appearanceReviewEnabled!==false)invalid();
-            for(const [i,id] of appearance.resultIds.entries()){
-              const result=owned(id,'image-appearance-review'),expectedSnapshot=i===0?appearance.snapshot:appearance.snapshot?.upgrade?{...appearance.snapshot.upgrade,upgradePurposeId:null,upgrade:null}:null;
-              if(!expectedSnapshot||listingFingerprint(calls.get(result.callId)?.purposeSnapshot)!==listingFingerprint(expectedSnapshot))invalid();
-              if(result.output.kind!=='image-appearance-review'||result.output.planResultId!==plan?.id||listingFingerprint(result.output.candidate)!==listingFingerprint(appearance.candidate)||result.output.previousResultId!==(appearance.resultIds[i-1]??null)||i>0&&results.get(appearance.resultIds[i-1])?.output.kind==='image-appearance-review'&&(results.get(appearance.resultIds[i-1])!.output as import('../../shared/appearance-review-contracts.ts').AppearanceReviewOutput).verdict!=='UNCERTAIN')invalid();
+            for(const checkpoint of [appearance.previousPolicy,appearance])if(checkpoint){
+              const current=checkpoint===appearance,policy=current?appearance.policyVersion:undefined,base=current?appearance.basePreviousResultId:null;
+              for(const [i,id] of checkpoint.resultIds.entries()){
+                const result=owned(id,'image-appearance-review'),expectedSnapshot=i===0?checkpoint.snapshot:checkpoint.snapshot?.upgrade?{...checkpoint.snapshot.upgrade,upgradePurposeId:null,upgrade:null}:null;
+                if(!expectedSnapshot||listingFingerprint(calls.get(result.callId)?.purposeSnapshot)!==listingFingerprint(expectedSnapshot))invalid();
+                if(result.output.kind!=='image-appearance-review'||result.output.policyVersion!==policy||result.output.planResultId!==plan?.id||listingFingerprint(result.output.candidate)!==listingFingerprint(appearance.candidate)||result.output.previousResultId!==(checkpoint.resultIds[i-1]??base??null)||i>0&&results.get(checkpoint.resultIds[i-1])?.output.kind==='image-appearance-review'&&(results.get(checkpoint.resultIds[i-1])!.output as import('../../shared/appearance-review-contracts.ts').AppearanceReviewOutput).verdict!=='UNCERTAIN')invalid();
+              }
             }
+            if(appearance.previousPolicy){const last=results.get(appearance.basePreviousResultId!)?.output;if(last?.kind!=='image-appearance-review'||last.verdict==='PASS'||last.verdict==='UNCERTAIN'&&appearance.previousPolicy.resultIds.length===1&&appearance.previousPolicy.snapshot?.upgrade)invalid();}
             if(attempt.state==='PASSED'&&run.appearanceReviewEnabled){const last=appearance.resultIds.at(-1),output=last?results.get(last)?.output:undefined;if(appearance.state!=='DONE'||output?.kind!=='image-appearance-review'||output.verdict!=='PASS'||appearance.candidate.sha256!==slot.approvedSha256)invalid();}
           }
           const ip=attempt.ipReviewResultId?owned(attempt.ipReviewResultId,'image-ip-review'):undefined;

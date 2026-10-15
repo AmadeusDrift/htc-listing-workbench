@@ -29,7 +29,8 @@ function mapped(input,init={},transport='fetch'){
   const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
-    if(!['fetch','electron.net.fetch'].includes(transport)||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
+    const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText';
+    if(!['fetch','electron.net.fetch'].includes(transport)||transport==='electron.net.fetch'&&!nativeSupported||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');
     try{verifyProtocol(route,headers,wireBody(init.body));}catch{return deny('protocol-auth');}
     state.allowed++;return {url:origin.origin+route.path,method,headers,route};

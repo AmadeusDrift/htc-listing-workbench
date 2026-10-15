@@ -1,0 +1,15 @@
+import {build} from 'esbuild';
+import {mkdir,mkdtemp,copyFile} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {spawn} from 'node:child_process';
+import {createRequire} from 'node:module';
+import {buildElectron} from './build-electron.mjs';
+const require=createRequire(import.meta.url);
+await buildElectron();
+await mkdir(resolve('.test-data'),{recursive:true});
+const directory=await mkdtemp(resolve('.test-data/image-background-'));
+await build({entryPoints:['tests/fixtures/image-processing-electron.ts'],outfile:join(directory,'harness.cjs'),bundle:true,platform:'node',target:'node24',format:'cjs',external:['electron']});
+for(const file of ['main.cjs','image-worker.cjs'])await copyFile(join('dist-electron',file),join(directory,file));
+const child=spawn(require('electron'),[join(directory,'harness.cjs')],{stdio:'inherit',windowsHide:true});
+const timer=setTimeout(()=>{child.kill();process.exitCode=1;},15000);
+child.once('exit',code=>{clearTimeout(timer);process.exitCode=code??1;});

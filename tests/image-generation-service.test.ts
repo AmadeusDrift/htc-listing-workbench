@@ -372,3 +372,22 @@ for(const failure of [400,'safe400',502,'network','notSent'] as const)test(`gene
   assert.equal(detail.httpStatus,typeof failure==='number'?failure:failure==='safe400'?400:undefined);
   assert.equal(f.calls.length,failure==='notSent'?0:1);assert.doesNotMatch(JSON.stringify(detail),/sk-private|private.test|sk-fixture-image-secret/);
 });
+
+test('background preview is awaited before candidate save and preserves image output',async t=>{
+  let enter!:()=>void,release!:()=>void;
+  const entered=new Promise<void>(resolve=>{enter=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+  const f=await fixture(t,{processPreview:async bytes=>{enter();await gate;return bytes;}});f.enable();
+  const work=f.service.generate(f.input);await entered;
+  assert.equal((await readdir(join(f.directory,'image-generation','candidates')).catch(()=>[])).length,0);
+  release();const candidate=await work;
+  assert.equal(candidate.previewUrl,'data:image/png;base64,'+png.toString('base64'));
+  assert.equal(candidate.width,256);assert.equal(candidate.height,256);assert.equal(f.calls.length,1);
+});
+test('failed local background preview recovers the original raw result without another image POST',async t=>{
+  let previews=0;
+  const f=await fixture(t,{processPreview:async bytes=>{await Promise.resolve();if(++previews===1)throw Error('local image worker unavailable');return bytes;}});f.enable();
+  const id=randomUUID();await assert.rejects(f.service.generateForWorkflow(f.input,{requestId:id}));
+  const candidate=await f.service.reconcileWorkflowGeneration(id);
+  assert.equal(candidate?.id,id);assert.equal(candidate?.previewUrl,'data:image/png;base64,'+png.toString('base64'));
+  assert.equal(previews,2);assert.equal(f.calls.length,1);
+});

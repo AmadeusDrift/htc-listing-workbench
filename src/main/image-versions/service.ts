@@ -21,7 +21,7 @@ import type { ImageWriteCheckpoint } from './recovery.ts';
 
 export interface DecodedArtifact { width: number; height: number; transparentPixels: number; subjectPixels: number; preview: Buffer }
 export interface ImageVersionDependencies {
-  decode: (bytes: Buffer) => DecodedArtifact; download?: ArtifactDownloader; timeoutMs?: number;
+  decode: (bytes: Buffer) => DecodedArtifact | Promise<DecodedArtifact>; download?: ArtifactDownloader; timeoutMs?: number;
   /** Main-process fault injection only; it is never exposed through IPC. */
   checkpoint?: (point: ImageWriteCheckpoint, candidate: ImageVersion) => void | Promise<void>;
 }
@@ -109,7 +109,7 @@ export class ImageVersionService {
       const bytes = await abortable(this.download((result.output as { imageUrl: string }).imageUrl, signal), signal); throwIfAborted(signal);
       if (bytes.length < 1 || bytes.length > 20 * 1024 * 1024) throw new AiError('IMAGE_INVALID');
       const raster = inspectRaster(bytes); if (raster.mimeType !== 'image/png' || raster.width !== asset.width || raster.height !== asset.height) throw new AiError('IMAGE_INVALID');
-      let decoded: DecodedArtifact; try { decoded = this.dependencies.decode(bytes); } catch { throw new AiError('IMAGE_INVALID'); }
+      let decoded: DecodedArtifact; try { decoded = await this.dependencies.decode(bytes); } catch { throw new AiError('IMAGE_INVALID'); }
       if (decoded.width !== asset.width || decoded.height !== asset.height || !Buffer.isBuffer(decoded.preview)) throw new AiError('IMAGE_INVALID');
       const id = randomUUID(), candidate = validateImageVersion({ id, productId, productRevision: revision, sourceAssetId: asset.id, sourceSha256: asset.sha256, resultId,
         version: 1, width: decoded.width, height: decoded.height, byteSize: bytes.length, sha256: hash(bytes), originalPath: `assets/${id}.png`, previewPath: `assets/${id}.preview.png`, previewSha256: hash(decoded.preview), previewByteSize: decoded.preview.length,

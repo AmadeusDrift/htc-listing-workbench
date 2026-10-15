@@ -376,7 +376,7 @@ test('legacy planning UNKNOWN remains structured through image return and read-o
     const workflow={id:randomUUID(),draftId:draft.id,status:'FAILED',stage:'planning',attempt:0,slots:[],planningUnknown:{version:1,callId,certainty:'SENT_UNKNOWN'},error:'原图片规划调用待核对'};
     f.workflow.set(draft.id,workflow);return {draft,aiCalls:0,previewAttempts:0,remaining:[],workflow} as any;
   };
-  f.dependencies.images.getPlanningUnknown=id=>f.workflow.get(id)?.planningUnknown??null;
+  f.dependencies.images.getPlanningUnknown=id=>f.workflow.get(String(id))?.planningUnknown??null;
   const task=await f.create();f.service.startAuthorized(f.service.prepareStart(task.id));await f.service.waitForIdle();
   const row=f.service.get(task.id).items[0];assert.equal(row.outcome?.kind,'UNKNOWN');assert.equal(row.outcome?.code,'IMAGE_RESULT_UNKNOWN');assert.match(row.error??'',/原图片规划/);
   const before=JSON.stringify(f.service.get(task.id));await f.service.queue({productIds:[f.product.id],targetId:f.target.id});

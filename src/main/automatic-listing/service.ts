@@ -1,5 +1,6 @@
 import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
+import { readItemDiagnostic } from './item-diagnostic.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import {categoryUnknownCode,categoryFailureRequestId} from '../ai/category-knowledge.ts';
@@ -258,8 +259,8 @@ export class AutomaticListingService {
   list(): AutomaticListingTask[] { this.ensureOpen(); return [...this.tasks.values()].reverse().map(task => structuredClone(task)); }
   get(id: string): AutomaticListingTask { return structuredClone(this.task(id)); }
   queryTaskSummaries(raw:unknown) { this.ensureOpen(); return queryTaskSummaries(this.tasks,raw,this.db,this.displayPresenter()); }
-  queryTaskGroups(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize','search']); return queryTaskGroups(this.db,this.task(id),input,this.displayPresenter()); }
-  getTaskItem(raw:unknown) { const {input,id}=taskQueryId(raw,['itemKey']); return getTaskItem(this.task(id),input,(row,task)=>this.displayItem(row,task)); }
+  queryTaskGroups(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize','search']); return queryTaskGroups(this.db,this.task(id),input,this.displayPresenter(),key=>this.getItemChangeStamp(id,key)); }
+  getTaskItem(raw:unknown) { const {input,id}=taskQueryId(raw,['itemKey']),task=this.task(id),result=getTaskItem(task,input,(row,owner)=>this.displayItem(row,owner));return result.kind==='item'?{...result,diagnostic:readItemDiagnostic(this.db,task,result.item)}:result; }
   queryResumeItems(raw:unknown) { const {input,id}=taskQueryId(raw,['page','pageSize']); return queryResumeItems(this.task(id),input); }
   /** Owner query includes original rows whose draft was never created. */
   readSalesPlans(productId:string,targetId:string){

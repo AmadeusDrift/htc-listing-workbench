@@ -18,6 +18,8 @@ import { validateAiUsageRecord } from '../ai/usage.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { validateConsistencyContext, consistencyScopeKey, consistencyDecisionKey } from "./contracts.ts";
 import { assertConsistencyOutput,reduceSourceConsistency,normalizeSourceObservations } from './comparison.ts';
+import { assertSourceReceiptRecovery, assertSourceRecoveryOwner } from './receipt-recovery.ts';
+import { sourceReferenceAliasesForCall } from './reference-aliases.ts';
 
 export const CONSISTENCY_TABLES={source_consistency_attempts:['id','record_json'],source_consistency_assessments:['id','record_json'],source_consistency_decisions:['id','record_json'],source_consistency_bindings:['id','record_json']};
 export const CONSISTENCY_SCHEMA=Object.keys(CONSISTENCY_TABLES).map(table=>`CREATE TABLE ${table} (id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)`);
@@ -69,6 +71,10 @@ export function latestConsistencyAttempt(db:DatabaseSync,context:SourceConsisten
 export function consistencyAttemptUnknown(db:DatabaseSync,attempt:ConsistencyAttempt):boolean {
  const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
  if(!call||call.id!==attempt.callId||call.productId!==attempt.context.productId||call.productRevision!==attempt.context.productRevision||call.startedAt!==attempt.sentAt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(attempt.context))return true;
+ for(const resultRow of db.prepare("SELECT record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=?").all(call.id)){
+   const result=validateStoredAiResult(JSON.parse(String(resultRow.record_json)));
+   if(result.output.kind==='source-image-consistency'&&result.providerReceiptRecovery){assertSourceReceiptRecovery(db,undefined,result,call);return false;}
+ }
  if(call.status==='SUCCEEDED'||confirmedAuthenticationRejection(db,call)||confirmedForbiddenRejection(db,call))return false;
  if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID')return true;
  if(call.responseReceived===true)return false;
@@ -109,6 +115,7 @@ export function recordConsistencyAssessment(db:DatabaseSync,result:AiResult):Con
 /** Stores a new interpretation, not an ai_result. The paid FAILED call and its ledger remain untouched. */
 export function recordRecoveredConsistency(db:DatabaseSync,call:AiCall,rawOutput:unknown):ConsistencyAssessment {
   if(call.status!=='FAILED'||call.errorCode!=='OUTPUT_INVALID'||!call.sourceConsistencyContext)invalid();
+  sourceReferenceAliasesForCall(call);
   const existing=db.prepare("SELECT record_json FROM source_consistency_assessments WHERE json_extract(record_json,'$.callId')=?").get(call.id);
   if(existing)return validateConsistencyAssessment(JSON.parse(String(existing.record_json)));
   const context=call.sourceConsistencyContext!,output=normalizeSourceObservations(rawOutput,context);
@@ -159,7 +166,7 @@ function historicalAssets(db:DatabaseSync,context:SourceConsistencyContext,direc
     return{relativePath:String(a!.original_path),sha256:ref.sha256,byteSize:ref.byteSize};
   });
 }
-export function assertConsistencyHistory(db:DatabaseSync,directory?:string):{relativePath:string;sha256:string;byteSize:number}[]{
+export function assertConsistencyHistory(db:DatabaseSync,directory?:string,receiptDirectory=directory):{relativePath:string;sha256:string;byteSize:number}[]{
   for(const table of Object.keys(CONSISTENCY_TABLES)){
     const columns=db.prepare(`PRAGMA table_xinfo(${table})`).all(),indexes=db.prepare(`PRAGMA index_list(${table})`).all();
     const shape=db.prepare('PRAGMA table_list').all().find(r=>r.name===table&&r.schema==='main');
@@ -189,7 +196,8 @@ export function assertConsistencyHistory(db:DatabaseSync,directory?:string):{rel
     if(!resultRow)invalid();const result=validateStoredAiResult(JSON.parse(String(resultRow!.record_json)));
     const context=result.sourceConsistencyContext,attempt=attempts.find(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId);
     if(!attempt||listingFingerprint(call.sourceConsistencyContext)!==listingFingerprint(a.context)||listingFingerprint(attempt.context)!==listingFingerprint(a.context)||call.productRevision!==a.context.productRevision||attempt.sentAt!==call.startedAt)invalid();
-    if(result.id!==a.resultId||result.callId!==a.callId||call.id!==a.callId||call.status!=='SUCCEEDED'||call.productId!==a.context.productId||call.finishedAt!==a.createdAt||result.createdAt!==a.createdAt||result.providerId!==call.providerId||result.model!==call.model||listingFingerprint(context)!==listingFingerprint(a.context)||!attempts.some(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId))invalid();
+    if(result.providerReceiptRecovery){assertSourceRecoveryOwner(result,call);if(receiptDirectory)assertSourceReceiptRecovery(db,receiptDirectory,result,call);}
+    if(result.id!==a.resultId||result.callId!==a.callId||call.id!==a.callId||(!result.providerReceiptRecovery&&(call.status!=='SUCCEEDED'||call.finishedAt!==a.createdAt))||call.productId!==a.context.productId||result.createdAt!==a.createdAt||result.providerId!==call.providerId||result.model!==call.model||listingFingerprint(context)!==listingFingerprint(a.context)||!attempts.some(t=>consistencyScopeKey(t.context)===consistencyScopeKey(a.context)&&t.callId===a.callId))invalid();
     if((result.output.kind as string)!=='source-image-consistency')invalid();
     const output=result.output as unknown as import('../../shared/source-image-consistency-contracts.ts').SourceConsistencyOutput;
     assertConsistencyOutput(output,a.context);const reduced=reduceSourceConsistency(a.context,output);

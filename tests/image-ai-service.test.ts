@@ -79,7 +79,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
   let draft = await amazon.createDraft({ productId: product.id, variantId: product.variants[0].id, targetId: target.id, productType: 'HTC_DEMO_STORAGE_BAG', parentageLevel: 'NONE', requirements: 'LISTING', locale: 'en_US' });
   draft = amazon.saveDraft({ id: draft.id, revision: draft.revision, attributes: { item_name: [{ value: 'Blue Silicone Coaster' }], material: [{ value: 'Silicone' }], color: [{ value: 'Blue' }] } });
   if(withAge)draft=amazon.saveDraft({id:draft.id,revision:draft.revision,attributes:{...draft.attributes,age_range_description:[{value:'Adult'}]}});
-  const requests: { operation: string; payload: any; body: any }[] = [];
+  const requests: { operation: string; payload: any; body: any; url?:string }[] = [];
   let respond: ((operation: string, payload: any) => Response | Promise<Response> | undefined) | undefined;
   const ai = new AiService(directory, store, hosting, mockStorage, { fetch: async (url,options) => {
     if (String(url).includes('green-cip.') || String(url).includes('.oss-cn-shanghai.')) {
@@ -93,7 +93,7 @@ async function fixture(t: test.TestContext, extraReference=false, withAge=false,
     }
     const ocr = String(url).includes('ocr-api.'), body = ocr ? null : JSON.parse(String(options?.body)), content = body?.messages[1].content;
     const payload = ocr ? null : JSON.parse(Array.isArray(content) ? content[0].text : content), operation = ocr ? 'ocr' : payload.operation;
-    requests.push({ operation, payload, body }); const custom = await respond?.(operation,payload); if (custom) return custom;
+    requests.push({ operation, payload, body, url:String(url) }); const custom = await respond?.(operation,payload); if (custom) return custom;
     if (ocr) return new Response(JSON.stringify({ Code: 'success', RequestId: 'ocr-fixture', Data: { Width: 256, Height: 256, Content: '', SubImageCount: 0, SubImages: [] } }));
     if (operation === 'listing-current-review') return chat(currentReview(payload));
     if (operation === 'image-plan') return chat({...(payload.setPolicy&&!payload.slot?{setPlan:sceneSet()}:{}), kind: 'image-plan', prompt: 'Preserve the selected SKU in supplied references on white, without added text.', textMode: 'none', expectedText: [], ipRisk:{verdict:'PASS',findings:[]}, productUnderstanding: understanding(payload) });
@@ -2124,6 +2124,53 @@ test('direct candidate vision rejects invisible or mismatched candidate bytes be
  assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
  for(const bytes of [Buffer.alloc(0),Buffer.from('not an image'),Buffer.from(f.bytes).fill(1)])await assert.rejects((f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,bytes,()=>{}));
  assert.equal(f.requests.length,before);
+});
+
+test('direct candidate vision honors current Luna route and medium effort over frozen task settings',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),frozen=f.ai.purposeProfile('image_text_review').routing!;
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-direct-luna-key'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:frozen.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ const profile=f.ai.directImageReviewProfile();assert.equal(profile.id,'openrouter-review');assert.equal(profile.routing!.effectiveEffort,'medium');
+ const fileId=randomUUID();let reserved=0,linked=0,authorized=0;
+ const scope={taskId:randomUUID(),rowKey:f.context.listing.productId+':'+f.context.listing.variantId,phase:'IMAGES',mode:'immediate' as const,purposes:[frozen],authorize:()=>{authorized++;return true;}};
+ const owner={fileId,reserve:()=>{reserved++;},resultStored:()=>{linked++;}};
+ const result=await taskAiContext.run(scope,()=>f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));
+ const wire=f.requests.at(-1)!,call=f.ai.getCall(fileId)!;
+ assert.equal(wire.url,'https://openrouter.ai/api/v1/chat/completions');assert.equal(wire.body.model,'openai/gpt-6-luna');assert.deepEqual(wire.body.reasoning,{effort:'medium'});
+ assert.equal(wire.body.messages[1].content[1].image_url.url,`data:image/png;base64,${f.bytes.toString('base64')}`);
+ assert.equal(call.providerId,'openrouter-review');assert.deepEqual(call.purposeSnapshot,profile.routing);assert.equal(result.output.method,'candidate-vision/v1');assert.equal(result.output.ocrResultId,null);
+ assert.deepEqual(result.sourceResultIds,[f.context.listingReviewResultId,plan.id]);assert.deepEqual(validateAiResult(result),result);assert.equal(reserved,1);assert.equal(linked,1);assert.ok(authorized>0);
+ // A later current-role change must not retarget recovery of this original owner.
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:profile.routing!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+ const before=f.requests.length,recovered=await taskAiContext.run(scope,()=>f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));
+ assert.equal(recovered.id,result.id);assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(fileId),call);
+});
+
+test('direct candidate vision rejects nonvision current configuration and mismatched route before wire',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),before=f.requests.length;
+ await assert.rejects(f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{}));
+ const snapshot=f.ai.purposeProfile('image_text_review').routing!;
+ (f.ai as any).reviewProfile=()=>({...f.ai.getProfile('deepseek-review'),model:'deepseek-flash',routing:{...snapshot,model:'deepseek-flash'}});
+ await assert.rejects(f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{}));assert.equal(f.requests.length,before);
+ const {reviewProductImageTextDirect}=await import('../src/main/ai/image-adapters.ts');let wires=0;
+ const image={assetId:f.candidate.id,sha256:f.candidate.sha256,mimeType:'image/png' as const,width:f.candidate.width,height:f.candidate.height,bytes:f.bytes};
+ for(const [model,routing,gateway] of [
+  ['deepseek-flash',{...snapshot,model:'deepseek-flash'},'deepseek'],
+  ['deepseek-v4-pro',{...snapshot,capability:{...snapshot.capability,vision:true}},'deepseek'],
+  ['deepseek-v4-pro',snapshot,'openrouter'],
+ ] as const)await assert.rejects(reviewProductImageTextDirect(f.context,plan,f.candidate,image,model,{apiKey:'offline-unused-key'},new AbortController().signal,{gateway,purposeSnapshot:routing,fetch:async()=>{wires++;throw Error('must not send');},now:()=>new Date(),nonce:randomUUID,maxResponseBytes:100000}));
+ assert.equal(wires,0);
+});
+
+test('direct candidate vision never retargets an original UNKNOWN owner after changing current model',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),old=f.ai.purposeProfile('image_text_review').routing!,fileId=randomUUID(),owner={fileId,reserve:()=>{},resultStored:()=>{}};
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:old.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+ f.respond(op=>{if(op==='image-text-review')throw Error('synthetic unknown');return undefined;});
+ await assert.rejects(f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));const call=f.ai.getCall(fileId),before=f.requests.length;
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-direct-unknown-key'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:old.revision+1,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ await assert.rejects(f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner),(e:any)=>e.callId===fileId&&e.certainty==='SENT_UNKNOWN');
+ assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(fileId),call);
 });
 
 test('direct candidate vision cannot pass visible main text or missing planned captions',async t=>{

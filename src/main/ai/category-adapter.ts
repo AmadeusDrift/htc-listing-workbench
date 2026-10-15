@@ -13,12 +13,12 @@ import {categoryCandidateSnapshot} from './category-context.ts';
 function invalidCategory(reason:string):never { const error=new AiError('OUTPUT_INVALID');error.diagnosticReason=reason;throw error; }
 export function validateCategoryDecision(raw: unknown): CategoryDecision {
   const value = keys(raw, ['kind','phase','keywords','productType','reason','ambiguous'],['selection']);
-  if (value.kind !== 'category-decision' || !['keywords','select','judge'].includes(String(value.phase)) || typeof value.ambiguous !== 'boolean'
+  if (value.kind !== 'category-decision' || typeof value.phase !== 'string' || !['keywords','select','judge'].includes(value.phase) || typeof value.ambiguous !== 'boolean'
     || !Array.isArray(value.keywords) || value.phase === 'keywords' && !value.keywords.length || value.keywords.length > 8) throw new AiError('OUTPUT_INVALID');
   const keywords = value.keywords.map(word => boundedText(word, 100));
   let selection:CategoryDecision['selection'];
   if(value.selection!==undefined){
-   try{const s=keys(value.selection,['version','outcome','candidateSnapshotSha256']);if(s.version!==1||!['SELECTED','NO_SUITABLE'].includes(String(s.outcome))||typeof s.candidateSnapshotSha256!=='string'||!/^[a-f0-9]{64}$/.test(s.candidateSnapshotSha256)||value.phase==='keywords')invalidCategory('CATEGORY_SELECTION_INVALID');selection={version:1,outcome:s.outcome as 'SELECTED'|'NO_SUITABLE',candidateSnapshotSha256:s.candidateSnapshotSha256};}
+   try{const s=keys(value.selection,['version','outcome','candidateSnapshotSha256']);if(s.version!==1||typeof s.outcome!=='string'||!['SELECTED','NO_SUITABLE'].includes(s.outcome)||typeof s.candidateSnapshotSha256!=='string'||!/^[a-f0-9]{64}$/.test(s.candidateSnapshotSha256)||value.phase==='keywords')invalidCategory('CATEGORY_SELECTION_INVALID');selection={version:1,outcome:s.outcome as 'SELECTED'|'NO_SUITABLE',candidateSnapshotSha256:s.candidateSnapshotSha256};}
    catch{invalidCategory('CATEGORY_SELECTION_INVALID');}
   }
   const productType = value.productType === null ? null : boundedText(value.productType, 100);

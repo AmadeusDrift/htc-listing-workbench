@@ -28,6 +28,7 @@ test('explicit no-suitable outcome is distinct from a legacy missing category',(
 const validDomain={kind:'category-decision',phase:'judge',keywords:[],productType:'CLEANING_CLOTH',reason:'Synthetic source matched.',ambiguous:false};
 const invalidDomains:readonly [string,unknown][]=[
  ['wrong-kind',{...validDomain,kind:'other'}],['wrong-phase',{...validDomain,phase:'wrong'}],
+ ['phase-array',{...validDomain,phase:['judge']}],['selection-outcome-array',{...validDomain,selection:{version:1,outcome:['SELECTED'],candidateSnapshotSha256}}],
  ['null-keywords',{...validDomain,keywords:null}],['keyword-element-number',{...validDomain,keywords:[4]}],
  ['keyword-element-empty',{...validDomain,keywords:['']}],['keyword-element-control',{...validDomain,keywords:['bad\u0001word']}],
  ['too-many-keywords',{...validDomain,keywords:Array(9).fill('cloth')}],
@@ -128,6 +129,19 @@ test('category operation is stable while input and candidate snapshots remain ex
  assert.throws(()=>contract.validateCategoryPhaseContext({...current,model:'replacement'},productId),isCode('INVALID_INPUT'));
  assert.throws(()=>contract.validateCategoryPhaseContext({...current,version:'2'},productId),isCode('INVALID_INPUT'));
  assert.notEqual(contract.categoryCandidateSnapshot([...candidates,{name:'DISH',displayName:'Dish'}]),candidateSnapshotSha256);
+});
+
+test('category enum readers reject coercible arrays without invoking user code',()=>{
+ assert.ok(contract);
+ const productId=randomUUID(),context={version:2,phase:'judge',requestSha256:'a'.repeat(64),operationId:contract.categoryOperationId(productId),inputVersion:'b'.repeat(64),candidateSnapshotSha256,expansion:0};
+ let conversions=0;const coercible={toString(){conversions++;return 'judge';}};
+ for(const phase of [['judge'],coercible]){
+  assert.throws(()=>validateCategoryDecision({...validDomain,phase}),isCode('OUTPUT_INVALID'));
+  assert.throws(()=>contract.validateCategoryPhaseContext({version:1,phase,requestSha256:context.requestSha256}),isCode('INVALID_INPUT'));
+  assert.throws(()=>contract.validateCategoryPhaseContext({...context,phase},productId),isCode('INVALID_INPUT'));
+ }
+ assert.throws(()=>validateCategoryDecision({...decision('SELECTED'),selection:{...decision('SELECTED').selection,outcome:['SELECTED']}}),isCode('OUTPUT_INVALID'));
+ assert.equal(conversions,0);
 });
 
 for(const outcome of ['SELECTED','NO_SUITABLE','bad-snapshot','legacy-null'] as const)test(`actual AiService HTTP category contract ${outcome}`,async t=>{

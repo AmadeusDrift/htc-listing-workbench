@@ -21,7 +21,7 @@ export function validateCategoryPhaseContext(raw:unknown,productId?:string):Cate
   if(!raw||typeof raw!=='object'||Reflect.ownKeys(raw).some(key=>typeof key!=='string')||Object.values(Object.getOwnPropertyDescriptors(raw)).some(descriptor=>!('value' in descriptor)))invalid('INVALID_INPUT');
   const version=(raw as {version?:unknown}).version;
   const c=keys(raw,version===1?['version','phase','requestSha256']:['version','phase','requestSha256','operationId','inputVersion','candidateSnapshotSha256','expansion']);
-  if(version!==1&&version!==2||!['keywords','select','judge'].includes(String(c.phase)))invalid('INVALID_INPUT');
+  if(version!==1&&version!==2||typeof c.phase!=='string'||!['keywords','select','judge'].includes(c.phase))invalid('INVALID_INPUT');
   const phase=c.phase as CategoryPhaseContext['phase'],requestSha256=sha256(c.requestSha256);
   if(version===1)return {version:1,phase,requestSha256};
   if(!productId||c.operationId!==categoryOperationId(productId)||![0,1].includes(Number(c.expansion))||typeof c.expansion!=='number'||phase==='keywords'&&c.expansion!==0)invalid('INVALID_INPUT');

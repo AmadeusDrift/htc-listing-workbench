@@ -209,7 +209,7 @@ async function start() {
       } finally { signal.removeEventListener('abort', cancel); }
     },
   });
-  await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
+  if(!controlledAcceptanceMode)await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
   const buildRoot = resolve(__dirname, '../dist');
   // Only files present in the renderer build are addressable by the app protocol.
   const routes = new Map<string, string>();

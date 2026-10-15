@@ -25,6 +25,6 @@ export async function createNormalProvider({directory,fixtureDirectory}){
   ];
   const responders=Object.fromEntries(['normal-openrouter-chat','normal-deepseek-chat'].map(id=>[id,({body,requestId})=>normalChatResponse(body,requestId)]));
   responders['normal-decisions']=({body,requestId})=>normalDecisionResponse(body,requestId);
-  const provider=await createFakeProvider({directory,routes,responders,ftp:true,maxRequestBytes:32*1024*1024});
+  const provider=await createFakeProvider({directory,routes:routes.map(route=>({...route,native:true})),responders,ftp:true,maxRequestBytes:32*1024*1024});
   return Object.assign(provider,{normalConfig:{version:1,clock,nonce:'s10-normal-nonce',keys,remoteId:source.remoteId,ftp:provider.ftp,amazon:{name:'S10 synthetic U2',sellerId,marketplaceId,region:'na',locale,clientId:'s10-normal-client',clientSecret:'s10-normal-client-secret',refreshToken:'s10-normal-refresh'}}});
 }

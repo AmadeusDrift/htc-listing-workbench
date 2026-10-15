@@ -31,7 +31,7 @@ export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
 export interface ImageRetryGrantRef {id:string;slot:number;afterAttempt:number;requestId:string;scope:'generation'|'planning'}
 export interface ImageRetryAllowance {version:1;grants:ImageRetryGrantRef[]}
 export function imageSlotAttemptLimit(run:Pick<ImageWorkflowRun,'maxAttempts'|'retryAllowance'>,slot:number):number{return run.maxAttempts+3*(run.retryAllowance?.grants.filter(grant=>grant.slot===slot&&grant.scope==='generation').length??0);}
-export function imageSlotConsumedAttempts(run:Pick<ImageWorkflowRun,'slots'|'attempt'|'reviewRequests'|'sourceReuse'>,slot:number):number{return (run.slots?.[slot-1]?.attempts.length??run.attempt)+(run.sourceReuse?.reviewRepairCounts?.[slot-1]??0)+(run.reviewRequests?.filter(r=>r.version===2&&r.slot===slot&&r.repair&&r.reservedAt!==null).length??0);}
+export function imageSlotConsumedAttempts(run:Pick<ImageWorkflowRun,'slots'|'attempt'|'reviewRequests'|'sourceReuse'|'unitAdoptionReview'>,slot:number):number{return Math.max(run.slots?.[slot-1]?.attempts.length??run.attempt,run.unitAdoptionReview?.sourceSlotAttempts[slot-1]??0)+(run.unitAdoptionReview?.sourceRepairCounts[slot-1]??0)+(run.sourceReuse?.reviewRepairCounts?.[slot-1]??0)+(run.reviewRequests?.filter(r=>r.version===2&&r.slot===slot&&r.repair&&r.reservedAt!==null).length??0);}
 export interface ImageSlotAttempt {
   planReuse?:{version:1;fromRequestId:string};
   /** Main-process proof captured only from a definitive provider rejection. Old FAILED strings are not proof. */
@@ -53,7 +53,9 @@ export interface ImageWorkflowSlot {
   index:number;purpose:'main'|'detail';status:'PENDING'|'RUNNING'|'PASSED'|'FAILED'|'BLOCKED'|'UNKNOWN';
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
+export interface UnitAdoptionImageReview {version:1;taskId:string;itemKey:string;sourceRunId:string;sourceRunHash:string;adoptionSha256:string;adoptedDraftRevision:number;adoptedDraftStamp:string;sourceSlotAttempts:number[];sourceSlotContexts:(string|null)[];sourceRepairCounts:number[]}
 export interface ImageWorkflowRun {
+  unitAdoptionReview?:UnitAdoptionImageReview;
   pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text';slot:number;certainty:'SENT_UNKNOWN'};
   reviewRequests?:ImageReviewRequest[];
   retryAllowance?:ImageRetryAllowance;

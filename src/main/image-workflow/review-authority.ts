@@ -1,3 +1,4 @@
+import {canRetryConfirmedForbidden} from '../ai/confirmed-forbidden-retry.ts';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {randomUUID} from 'node:crypto';
 import type {DatabaseSync} from 'node:sqlite';
@@ -13,8 +14,9 @@ const commands=new AsyncLocalStorage<ManualCommand>();
 /** Called only by the existing authorized main IPC handler, never by workflow retries. */
 export function withManualImageReviewCommand<T>(draftId:string,work:()=>Promise<T>):Promise<T>{const c={draftId,at:new Date().toISOString(),id:randomUUID(),active:true};return commands.run(c,async()=>{try{return await work();}finally{c.active=false;}});}
 const fail=():never=>{throw new UserFacingError('已收无效审核须有当前明确继续授权及原图位剩余额度；原候选、次数与费用保留');};
+export const imageReviewForbiddenScope=(run:ImageWorkflowRun,request:ImageReviewRequestV2)=>listingFingerprint({kind:'image-review',draftId:run.draftId,sku:run.sku,slot:request.slot,step:request.step,rootRequestId:request.repair?.rootRequestId??request.requestId});
 export function imageReviewRepairAuthorization(db:DatabaseSync,directory:string,run:ImageWorkflowRun,request:ImageReviewRequestV2,prior:AiCall):NonNullable<ImageReviewRequestV2['repair']>{
- const receipt=readCallReceiptSync(db,directory,prior);if(request.state!=='RECEIVED_INVALID'||prior.id!==request.requestId||prior.status!=='FAILED'||prior.errorCode!=='OUTPUT_INVALID'||!prior.finishedAt||!localAiRequestResolved(db,directory,prior.id,prior)||!receipt||receipt.capture.body==='[omitted: credential echo]')fail();
+ const receipt=readCallReceiptSync(db,directory,prior);const invalid=request.state==='RECEIVED_INVALID'&&prior.errorCode==='OUTPUT_INVALID',forbidden=request.state==='DEFINITIVE_REJECTION'&&canRetryConfirmedForbidden(db,prior,imageReviewForbiddenScope(run,request));if(!invalid&&!forbidden||prior.id!==request.requestId||prior.status!=='FAILED'||!prior.finishedAt||!localAiRequestResolved(db,directory,prior.id,prior)||!receipt||receipt.capture.body==='[omitted: credential echo]')fail();
  const manual=commands.getStore(),scope=taskAiContext.getStore();let repair:NonNullable<ImageReviewRequestV2['repair']>;
  if(manual?.active&&manual.draftId===run.draftId&&manual.at>prior.finishedAt!){repair={priorRequestId:prior.id,rootRequestId:request.repair?.rootRequestId??prior.id,commandSha256:listingFingerprint({kind:'manual',id:manual.id,draftId:manual.draftId}),authorizedAt:manual.at,owner:{kind:'manual',draftId:manual.draftId}};}
  else if(scope?.explicitContinueAt&&scope.explicitContinueAt>prior.finishedAt!&&scope.authorize()===true){

@@ -61,13 +61,18 @@ export async function readProviderReceipt(db:DatabaseSync,directory:string,callI
 }
 /** Read-only synchronous evidence at a local command boundary; never repairs the index. */
 export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import('../../shared/ai-contracts.ts').AiCall):{record:ProviderReceipt;capture:ProviderReceiptCapture}|null {
-  if(!call.providerReceiptId)return null;
   try{
-    const row=db.prepare('SELECT id,record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return null;
-    const record=parse(JSON.parse(String(row.record_json)));
+    let selectedId=call.providerReceiptId,record:ProviderReceipt;
+    if(selectedId){const row=db.prepare('SELECT id,record_json FROM ai_provider_receipts WHERE id=?').get(selectedId);if(!row)return null;record=parse(JSON.parse(String(row.record_json)));if(record.id!==row.id)return null;}
+    else{
+      if(!call.requestFingerprint||!call.requestScope||!['generated-image-ocr','image-text-review','image-ip-review'].includes(call.requestScope.operation))return null;validateRequestScope(call.requestScope);
+      const indexed=db.prepare("SELECT id,record_json FROM ai_provider_receipts WHERE json_extract(record_json,'$.callId')=?").all(call.id);if(indexed.length>1)return null;let pointer:ProviderReceipt|undefined;const pointerPath=join(directory,'ai-receipts',call.id+'.receipt.json');
+      if(existsSync(pointerPath)){const stat=lstatSync(pointerPath);if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.size<1||stat.size>8192)return null;pointer=parse(JSON.parse(readFileSync(pointerPath,'utf8')));if(pointer.callId!==call.id)return null;}
+      if(indexed.length){record=parse(JSON.parse(String(indexed[0].record_json)));if(record.id!==indexed[0].id||pointer&&listingFingerprint(pointer)!==listingFingerprint(record))return null;}else if(pointer)record=pointer;else return null;selectedId=record.id;
+    }
     const gateway=call.providerId.startsWith('openrouter')?'openrouter':call.providerId.startsWith('deepseek')?'deepseek':call.providerId==='aliyun-ocr'||call.providerId==='aliyun-image-risk'?'aliyun':null;
     const endpoint=gateway==='aliyun'?(call.providerId==='aliyun-ocr'?'/?Type=Commerce':'/'):gateway==='deepseek'?'/chat/completions':call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions';
-    if(record.id!==row.id||record.id!==call.providerReceiptId||record.callId!==call.id||record.model!==call.model||record.gateway!==gateway||record.endpoint!==endpoint||record.id!==hash(call.id+':'+record.sha256))return null;
+    if(record.id!==selectedId||record.callId!==call.id||record.model!==call.model||record.gateway!==gateway||record.endpoint!==endpoint||record.id!==hash(call.id+':'+record.sha256))return null;
     if(record.version===2&&(record.gateway!==gateway||record.requestFingerprint!==call.requestFingerprint||record.scopeSha256!==listingFingerprint(call.requestScope)||record.aliyun.candidateSha256!==call.requestScope?.candidateSha256||record.aliyun.action!==(call.providerId==='aliyun-ocr'?'RecognizeAllText':'ImageModeration')))return null;
     const folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
     const path=join(directory,record.relativePath),before=lstatSync(path);
@@ -77,6 +82,7 @@ export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import
     const capture=JSON.parse(bytes.toString('utf8'));
     assertOpaqueResponse(capture.body);
     if(!Object.hasOwn(capture,'body')||capture.version!==record.version||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    if((call.providerReceiptId===undefined||record.version===2)&&listingFingerprint(capture.purpose??null)!==listingFingerprint(call.purposeSnapshot??null))return null;
     if(record.version===2&&(listingFingerprint(capture.aliyun)!==listingFingerprint(record.aliyun)||capture.requestFingerprint!==record.requestFingerprint||capture.scopeSha256!==record.scopeSha256))return null;
     return {record,capture};
   }catch{return null;}

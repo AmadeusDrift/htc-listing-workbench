@@ -37,7 +37,7 @@ export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,a
   const matches=owned.filter(run=>{
    if(!p||!s||s.sku!==run.sku||p.variantId!==run.variantId||s.variantId!==run.variantId||slot===undefined||call.productRevision!==run.productRevision||call.startedAt<run.createdAt||s.targetId!==run.imageContext?.listing.targetId||s.marketplaceId!==run.imageContext?.listing.marketplaceId)return false;
    const image=run.slots?.[slot-1],attempt=image?.attempts.at(-1),source=owned.find(source=>source.id===run.recheckedFromRunId),approved=source?.slots?.[slot-1];
-   const candidateId=attempt?.candidateId,hash=image?.approvedSha256??(approved?.attempts.at(-1)?.candidateId===candidateId?approved?.approvedSha256:null);
+   const candidateId=attempt?.candidateId,journal=run.reviewRequests?.find(r=>r.requestId===call.id&&r.slot===slot&&r.candidate.id===candidateId&&r.contextSha256===p.sourceSha256&&r.requestFingerprint===call.requestFingerprint),hash=image?.approvedSha256??journal?.candidate.sha256??(approved?.attempts.at(-1)?.candidateId===candidateId?approved?.approvedSha256:null);
    return !!candidateId&&!!hash&&p.sourceSha256===image?.contextSha256&&s.candidateSha256===hash;
   });
   throw new ImageReviewPendingError({callId:call.id,...(matches.length===1?{workflowId:matches[0].id}:{}),...(slot===undefined?{}:{slot}),step:reviewStep(call)!});

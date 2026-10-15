@@ -994,7 +994,7 @@ export class AiService {
   }
   get reviewRequestJournalVersion():2 {this.ensureOpen();return 2;}
   private linkDurableResult(owner:AiDurableRequestPort|undefined,result:AiResult):AiResult {
-    if(owner){if(owner.fileId!==result.callId)throw new AiError('INVALID_CONFIG');transaction(this.db,()=>owner.resultStored(this.db,result));}return result;
+    if(owner){if(owner.fileId!==result.callId)throw new AiError('INVALID_CONFIG');try{transaction(this.db,()=>owner.resultStored(this.db,result));}catch{const error=new AiError('INTERRUPTED');error.callId=result.callId;error.certainty='RECEIVED_VALID';error.diagnosticReason='DURABLE_RESULT_LINK_FAILED';error.message='已收到原有效审核结果，本地关联未完成；保留原回执与费用，请按原请求恢复，未重发';throw error;}}return result;
   }
   private start(profile: AiProfile, input: { productId: string; productRevision: number }, source: unknown, prepare: (signal: AbortSignal) => Promise<PreparedRequest>, signal?: AbortSignal, completion?:CompletionRequest,durable?:DurableFieldCall,owner?:AiDurableRequestPort): Promise<AiResult> {
     this.ensureOpen();
@@ -1019,12 +1019,13 @@ export class AiService {
         const error=new AiError('CANCELLED');error.abortSource='USER';error.certainty=sent?'SENT_UNKNOWN':'NOT_SENT';throw error;
       };
       assertTaskAuthorized();
+      let replay:ReturnType<typeof readCallReceiptSync>|undefined,replayCall:AiCall|undefined;
       if(owner){
         const original=this.getCall(owner.fileId);
         if(original){
           if(!original.requestScope||!sameRequestBusiness(scope,original.requestScope)||original.requestFingerprint!==this.invocationFingerprint(this.originalProfile(original),input,source))throw this.unknownInvocation(original);
           for(const result of this.listResults(original.productId).filter(result=>result.callId===original.id))if(resultHasOwner(result,original)){if(pending.some(call=>call.id!==original.id))throw this.unknownInvocation(pending.find(call=>call.id!==original.id)!);assertReceiptRecovery(this.db,this.directory,result,original);return this.linkDurableResult(owner,result);}
-          if(localAiRequestResolved(this.db,this.directory,original.id,original)){const known=new AiError(original.errorCode??'OUTPUT_INVALID');known.callId=original.id;known.certainty=original.errorCode==='OUTPUT_INVALID'?'RECEIVED_INVALID':'DEFINITIVE_REJECTION';throw known;}
+          if(localAiRequestResolved(this.db,this.directory,original.id,original)){const saved=original.errorCode==='OUTPUT_INVALID'?verifiedRecoveryReceipt(this.db,this.directory,original):null;if(saved){if(pending.some(call=>call.id!==original.id))throw this.unknownInvocation(pending.find(call=>call.id!==original.id)!);replay=saved;replayCall=original;Object.assign(profile,this.originalProfile(original));}else{const known=new AiError(original.errorCode??'OUTPUT_INVALID');known.callId=original.id;known.certainty=original.errorCode==='OUTPUT_INVALID'?'RECEIVED_INVALID':'DEFINITIVE_REJECTION';throw known;}}
         }
       }
       // An unresolved Batch call is still protected. Only its own immutable item
@@ -1054,7 +1055,7 @@ export class AiService {
         }
       }
       // This guard precedes preparation, reference hosting and paid reservation.
-      let replay:ReturnType<typeof readCallReceiptSync>|undefined,replayCall:AiCall|undefined;
+
       if(pending.length){
         if(pending.length!==1)throw this.unknownInvocation(pending[0]);
         const original=pending[0],frozen=this.originalProfile(original);
@@ -1154,7 +1155,7 @@ export class AiService {
         rejectionStage = 'result-record-validation';
         if(durable?.part&&reply.output.kind==='amazon-fields'&&[...reply.output.candidates,...reply.output.missing].some(f=>!durable.part!.fields.includes(f.field)))throw new AiError('OUTPUT_INVALID');
         const resultAt=this.finishedAt(call.startedAt);
-        const result = validateAiResult({ ...(replay?{providerReceiptRecovery:{version:1 as const,receiptId:replay.record.id,requestFingerprint:call.requestFingerprint!,scopeSha256:listingFingerprint(call.requestScope!),recoveredAt:resultAt}}:{}), ...(durable?.part?{fieldGroupPart:durable.part}:{}), id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: resultAt, reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
+        const result = validateAiResult({ ...(replay?{providerReceiptRecovery:{...(call.providerReceiptId?{version:1 as const}:{version:2 as const,receiptSha256:replay.record.sha256}),receiptId:replay.record.id,requestFingerprint:call.requestFingerprint!,scopeSha256:listingFingerprint(call.requestScope!),recoveredAt:resultAt}}:{}), ...(durable?.part?{fieldGroupPart:durable.part}:{}), id: randomUUID(), callId: id, providerId: profile.id, productId: input.productId, productRevision: input.productRevision, variantId: prepared.variantId, assetId: prepared.assetId, assetSha256: prepared.assetSha256, sourceResultIds: prepared.sourceResultIds, model: profile.model, createdAt: resultAt, reviewState: 'unreviewed', output: reply.output, ...(reply.fieldRejections?{fieldRejections:reply.fieldRejections}:{}), ...(reply.listingNormalization ? { listingNormalization: reply.listingNormalization } : {}), ...(prepared.sourceSha256 === undefined ? {} : { sourceSha256: prepared.sourceSha256 }), ...(prepared.listingContext ? { listingEvidenceContractVersion:evidenceVersion(prepared.listingContext), listingContext: prepared.listingContext, listingRequestBytes: requestBytes } : {}), ...(prepared.imageContext ? { listingEvidenceContractVersion:imageEvidenceVersion(prepared.imageContext.listing), imageContext: prepared.imageContext, imageRequestBytes: requestBytes } : {}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext,sourceColorRequestBytes:requestBytes}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext,sourceConsistencyRequestBytes:requestBytes}:{}) });
         this.db.exec('BEGIN IMMEDIATE');
         try {
           assertTaskAuthorized(!!call);
@@ -1167,7 +1168,7 @@ export class AiService {
               if(!saved||saved.callId!==call.id||saved.sourceSha256!==prepared.sourceSha256)throw new AiError('INVALID_CONFIG');
               // Another authorized context won this original item's CAS. Do not
               // create a second result or rewrite its call time and settlement.
-              preserveStoredCall=true;this.linkDurableResult(owner,saved);this.db.exec('COMMIT');return saved;
+              preserveStoredCall=!!owner;this.linkDurableResult(owner,saved);this.db.exec('COMMIT');return saved;
             }
           }
           this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id, JSON.stringify(result));

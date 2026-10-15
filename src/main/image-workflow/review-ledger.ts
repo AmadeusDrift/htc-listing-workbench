@@ -1,3 +1,4 @@
+import {assertReceiptRecovery} from '../ai/receipt-recovery.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {existsSync,readFileSync} from 'node:fs';
@@ -21,7 +22,7 @@ export interface ImageReviewLedger {version:1;id:string;request:ImageReviewReque
 const invalid=():never=>{throw new UserFacingError('图片审核安全账身份、许可或原始成果不一致，未发送或覆盖');};
 const has=(db:DatabaseSync)=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_review_journal'").get();
 export function initializeImageReviewLedger(db:DatabaseSync):void {db.exec('CREATE TABLE image_review_journal(id TEXT PRIMARY KEY NOT NULL,record_json TEXT NOT NULL)');}
-export function reviewRequestIdentity(r:ImageReviewRequestV2):string {const {state,resultId,reservedAt,requestFingerprint,effects,...identity}=r;return listingFingerprint({...identity,effects:effects.map(e=>({id:e.id,kind:e.kind}))});}
+export function reviewRequestIdentity(r:ImageReviewRequestV2):string {const {state,resultId,reservedAt,requestFingerprint,effects,...identity}=r;return listingFingerprint({...identity,...(identity.repair?{repair:{priorRequestId:identity.repair.priorRequestId,rootRequestId:identity.repair.rootRequestId}}:{}),effects:effects.map(e=>({id:e.id,kind:e.kind}))});}
 function file(raw:unknown):ReviewFile {const v=keys(raw,['path','sha256','byteSize']);if(typeof v.path!=='string'||!(/^(?:assets\/[a-zA-Z0-9_.-]+|image-generation\/candidates\/[a-f0-9-]{36}\/(?:candidate\.json|image\.png|preview\.png))$/.test(v.path)))invalid();return {path:v.path as string,sha256:sha256(v.sha256),byteSize:integer(v.byteSize,1,32*1024*1024)};}
 export function validateImageReviewLedger(raw:unknown):ImageReviewLedger {
  const v=keys(raw,['version','id','request','context','frozenRun','files','call','result','adopted']);if(v.version!==1||!Array.isArray(v.files)||v.files.length<3||v.files.length>20)invalid();
@@ -41,7 +42,7 @@ export function imageReviewLedgerRows(db:DatabaseSync,scope?:{productId:string;v
 /** Writes only the images safety owner on the currently borrowed physical transaction. */
 export function writeImageReviewLedger(db:DatabaseSync,raw:ImageReviewLedger):void {
  if(!db.isTransaction)invalid();const value=validateImageReviewLedger(raw),old=readImageReviewLedger(db,value.id);
- if(old&&(reviewRequestIdentity(old.request)!==reviewRequestIdentity(value.request)||listingFingerprint(old.frozenRun)!==listingFingerprint(value.frozenRun)||listingFingerprint(old.context)!==listingFingerprint(value.context)||listingFingerprint(old.files)!==listingFingerprint(value.files)||old.request.effects.some((e,i)=>e.state!=='UNPERMITTED'&&value.request.effects[i].state==='UNPERMITTED')||old.result&&listingFingerprint(old.result)!==listingFingerprint(value.result)||old.adopted&&listingFingerprint(old.adopted)!==listingFingerprint(value.adopted)))invalid();
+ if(old&&(reviewRequestIdentity(old.request)!==reviewRequestIdentity(value.request)||listingFingerprint(old.frozenRun)!==listingFingerprint(value.frozenRun)||listingFingerprint(old.context)!==listingFingerprint(value.context)||listingFingerprint(old.files)!==listingFingerprint(value.files)||old.request.reservedAt!==null&&listingFingerprint(old.request.repair??null)!==listingFingerprint(value.request.repair??null)||old.request.effects.some((e,i)=>e.state!=='UNPERMITTED'&&value.request.effects[i].state==='UNPERMITTED')||old.result&&listingFingerprint(old.result)!==listingFingerprint(value.result)||old.adopted&&listingFingerprint(old.adopted)!==listingFingerprint(value.adopted)))invalid();
  db.prepare('INSERT INTO image_review_journal(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(value.id,JSON.stringify(value));
 }
 export function reviewEvidenceFile(directory:string,path:string):ReviewFile {const guard=new RestorePathGuard(directory),full=join(directory,path),before=guard.assertFile(full),bytes=readFileSync(full),after=guard.assertFile(full);if(before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||bytes.length!==before.size)invalid();return file({path,sha256:createHash('sha256').update(bytes).digest('hex'),byteSize:bytes.length});}
@@ -60,3 +61,6 @@ export function retainImageReviewLedger(current:DatabaseSync,snapshot:DatabaseSy
   const path=join(snapshotDirectory,f.path);if(existsSync(path)){target.assertFile(path);const old=readFileSync(path);if(old.length!==f.byteSize||createHash('sha256').update(old).digest('hex')!==f.sha256)invalid();}else writeRestoreFile(target,path,bytes);
  }
 }
+
+/** Actual private proof at backup/restore use; structural parsing alone never grants adoption. */
+export function assertImageReviewLedgerReceipts(db:DatabaseSync,directory:string):void {for(const row of imageReviewLedgerRows(db))if(row.result?.providerReceiptRecovery)assertReceiptRecovery(db,directory,row.result,row.call??undefined);}

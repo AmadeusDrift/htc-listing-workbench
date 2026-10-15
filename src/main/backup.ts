@@ -1,4 +1,4 @@
-import {IMAGE_REVIEW_TABLES,validateImageReviewLedger,reviewLedgerFiles,retainImageReviewLedger} from './image-workflow/review-ledger.ts';
+import {assertImageReviewLedgerReceipts,IMAGE_REVIEW_TABLES,validateImageReviewLedger,reviewLedgerFiles,retainImageReviewLedger} from './image-workflow/review-ledger.ts';
 import {retainSalesUnitAdoptions} from './sales-plans/unit-restore-history.ts';
 import {SPEND_TABLES,assertSpendHistory,retainSpendHistory} from './ai/spend-budget.ts';
 import {assertRecordTable} from './storage/record-table.ts';
@@ -306,6 +306,7 @@ function checkDatabase(path: string,receiptRoot=dirname(path)): { productCount: 
     const artifactChecks = new Map<string, { sha256: string; byteSize: number }>();
     for (const asset of assets) artifactChecks.set(String(asset.original_path), { sha256: String(asset.sha256), byteSize: Number(asset.byte_size) });
     if(version>=28)for(const pin of referencePinHistory(database)){for(const file of referencePinArtifactPaths(pin)){managedBackupFile(dirname(path),file);paths.add(file);}artifactChecks.set(pin.originalPath,{sha256:pin.sha256,byteSize:pin.byteSize});}
+    if(version>=35)assertImageReviewLedgerReceipts(database,receiptRoot);
     if(version>=35)for(const f of reviewLedgerFiles(database)){const old=artifactChecks.get(f.path);if(old&&(old.sha256!==f.sha256||old.byteSize!==f.byteSize))throw new UserFacingError('图片审核安全账文件版本冲突');paths.add(f.path);artifactChecks.set(f.path,f);}
     if(version>=25)for(const receipt of providerReceiptFiles(database)){paths.add(receipt.relativePath);artifactChecks.set(receipt.relativePath,{sha256:receipt.sha256,byteSize:receipt.byteSize});const file=managedBackupFile(receiptRoot,receipt.relativePath);if(existsSync(file))assertOpaqueResponse(JSON.parse(readFileSync(file,'utf8')).body);}
     if(version>=20)for(const asset of assertConsistencyHistory(database))artifactChecks.set(asset.relativePath,{sha256:asset.sha256,byteSize:asset.byteSize});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { automaticItemOutcome, automaticQueueOutcome, summarizeAutomaticItems } from '../src/shared/automatic-status-projection.ts';
+import { automaticItemOutcome, automaticItemReason, automaticQueueOutcome, summarizeAutomaticItems } from '../src/shared/automatic-status-projection.ts';
 import { queuePresentation } from '../src/renderer/automatic-queue-view.ts';
 import { buildAutomaticProductGroups } from '../src/renderer/automatic-product-groups.ts';
 import type { AutomaticListingItem } from '../src/shared/automatic-listing-contracts.ts';
@@ -20,6 +20,8 @@ test('stable reason codes distinguish profit, packaging and other rules independ
  assert.equal(automaticItemOutcome(row('SYSTEM_FAILURE','UNKNOWN','FAILED')),'unknown','true UNKNOWN has priority over display code');
  assert.equal(automaticItemOutcome(row('AI_RECEIVED_INVALID_OUTPUT','SYSTEM_REPAIR','FAILED')),'invalidOutput');
  assert.equal(automaticItemOutcome(row('AI_OUTPUT_INVALID','SYSTEM_REPAIR','FAILED')),'systemRepair','a generic old error code carries no response certainty');
+ assert.match(automaticItemReason(row('EVIDENCE_READ_FAILED','UNKNOWN','FAILED')),/暂不可读，结果仍未知/);
+ assert.doesNotMatch(automaticItemReason(row('EVIDENCE_READ_FAILED','SYSTEM_REPAIR','FAILED')),/结果仍未知/,'an ordinary evidence error does not assert a request became unknown');
 });
 test('failure timestamps distinguish request proof, local checks and unknown historical time without refresh clock',()=>{
  const event={version:1 as const,stage:'IMAGES' as const,reason:'synthetic failure',occurredAt:'2026-10-15T01:00:00.000Z'};

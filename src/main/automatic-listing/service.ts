@@ -420,9 +420,15 @@ export class AutomaticListingService {
   }
   private displayItem(row:AutomaticListingItem,task:AutomaticListingTask):AutomaticListingItem {
     if(row.status!=='FAILED'||row.outcome?.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
-    if(sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return row;
-    const unknown=this.nonSourceUnknownCode(row,task);if(unknown)return {...row,outcome:{...row.outcome,code:unknown}};
-    return {...row,outcome:{...row.outcome,kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'}};
+    try{
+      if(sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return row;
+      const unknown=this.nonSourceUnknownCode(row,task);if(unknown)return {...row,outcome:{...row.outcome,code:unknown}};
+      return {...row,outcome:{...row.outcome,kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'}};
+    }catch{
+      // Historical missing dependencies cannot prove the other safety states.
+      // Preserve UNKNOWN in this read-only view, without changing the task/guard.
+      return {...row,outcome:{...row.outcome,code:'EVIDENCE_READ_FAILED'}};
+    }
   }
   private displayPresenter(){
     const cache=new WeakMap<AutomaticListingItem,AutomaticListingItem>();

@@ -24,6 +24,8 @@ test('copy review setting saves independently, refreshes automatic status and pr
     const fixture = window.fixture = { copy: true, risk: true, copySaves: 0, riskSaves: 0, changes: 0, fail: false, hold: false, release: null };
     window.addEventListener('copy-review-settings-changed', () => fixture.changes++);
     window.red = {
+      queryAutomaticTaskSummaries:async()=>({rows:[],total:0,page:1,pageSize:20,active:false,lifecycleSignature:'empty'}),
+      getImageGenerationSpendStatus:async()=>{const empty={reportedUsdMicros:0,heldUsdMicros:0,unboundedCalls:0,anomaly:false,limitUsdMicros:null,policyUpdatedAt:null,remainingUsdMicros:null,pendingCalls:0,unknownCalls:0};return{currency:'USD',unit:'microUSD',daily:empty,controlledLifetime:{...empty,limitUsdMicros:5000000,remainingUsdMicros:5000000},controlledRunStatus:'not-registered',quoteStatus:'not-checked'};},
       getAppearanceReviewSettings:async()=>({enabled:true}), saveAppearanceReviewSettings:async value=>value,
       getAutomaticBatchPlan:async()=>({version:1,credentialScope:'a'.repeat(64),purposes:[],coverage:[]}),
       getCopyReviewSettings: async () => ({enabled: fixture.copy}),

@@ -200,7 +200,7 @@ export class AmazonTransport {
     const generation = this.hooks.generation(target.id); const start = this.now(); const rateKey = `${target.id}:${operation === 'previewListingsItem' ? 'putListingsItem' : operation === 'previewPatchListingsItem' ? 'patchListingsItem' : operation}`;
     let status: number | null = null; let headers = new Headers(); let attempts = 0; let category: string | null = null; let authPaused = false;
     try {
-      const accessToken = await this.token(target, write);
+      const accessToken = await this.token(target, write,undefined,beforeSend);
       for (let attempt = 0; attempt < (write ? 1 : 3); attempt++) {
         const wait = (this.nextAllowed.get(rateKey) ?? 0) - this.now();
         if (wait > 30_000) throw new AmazonTransportError('Amazon 调用速率较低，请稍后再试');
@@ -357,11 +357,12 @@ export class AmazonTransport {
     if (contentType && !['application/pdf','application/octet-stream','binary/octet-stream'].includes(contentType)) throw new UserFacingError('标签响应不是 PDF 文件');
     return result.bytes;
   }
-  async schemaLink(target: AmazonTarget, raw: unknown): Promise<{ schema: JsonObject; checksum: string }> {
+  async schemaLink(target: AmazonTarget, raw: unknown, beforeSend?:()=>void): Promise<{ schema: JsonObject; checksum: string }> {
     if (!isObject(raw) || !isObject(raw.link) || raw.link.verb !== 'GET' || typeof raw.link.resource !== 'string' || typeof raw.checksum !== 'string') throw new UserFacingError('Amazon Schema 下载描述无效');
     let url: URL; try { url = new URL(raw.link.resource); } catch { throw new UserFacingError('Amazon Schema 地址无效'); }
     const trusted = /^(?:[a-z0-9-]+\.)*s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$/.test(url.hostname) || url.hostname === 'schemas.amazon.com';
     if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || !trusted || isIP(url.hostname)) throw new UserFacingError('Amazon Schema 地址不可信，下载已阻止');
+    beforeSend?.();
     const start = this.now(); let status: number | null = null; let headers = new Headers(); let attempts = 0; let category: string | null = null;
     try {
       let addresses:string[];
@@ -370,7 +371,7 @@ export class AmazonTransport {
       if (!addresses.length || addresses.some(address => !publicAddress(address) && !(proxySchema && fakeIpAddress(address)))) throw new UserFacingError('Amazon Schema 地址解析到非公开网络，下载已阻止');
       let result: HttpResult | undefined;
       for (let attempt = 0; attempt < 3; attempt++) {
-        this.hooks.active(target.id); attempts++;
+        beforeSend?.();this.hooks.active(target.id); attempts++;
         try { result = await this.http(url.href, { method: 'GET', headers: { accept: 'application/json' }, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' }, this.maxSchemaBytes, undefined, this.schemaFetcher ?? this.fetcher); }
         catch { if (attempt < 2) { await this.sleep(250 * 2 ** attempt + Math.floor(this.random() * 200)); continue; } throw new SchemaTransientError('NETWORK'); }
         status = result.status; headers = result.headers;

@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash,randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkspaceStore } from '../src/main/store.ts';
 import type { AmazonDraft, JsonObject } from '../src/shared/amazon-contracts.ts';
 import type {AmazonTransport} from '../src/main/amazon/transport.ts';
+import {ControlledRunScopes,pauseControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
 
 const implementation = await import('../src/main/amazon/service.ts').catch(() => null);
 const secretStorage = { isEncryptionAvailable: () => true, encryptString: (s: string) => Buffer.from(Buffer.from(s).map(b => b ^ 0xa5)), decryptString: (b: Buffer) => Buffer.from(b.map(v => v ^ 0xa5)).toString() };
@@ -14,7 +15,7 @@ const creds = { name: 'Fake network test', sellerId: 'SELLER_WITH_SPACE', market
   clientId: 'secret_client_id', clientSecret: 'secret_client_password', refreshToken: 'secret_refresh_token' };
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'x-amzn-requestid': 'request-test-1', ...headers } });
 type Hook = (url: URL, init: RequestInit) => Response | Promise<Response> | undefined;
-function fixture(t: test.TestContext) {
+function fixture(t: test.TestContext,overrides:Record<string,unknown>={}) {
   assert.ok(implementation?.AmazonService, 'AmazonService must be implemented');
   const parent = resolve('.test-data'); mkdirSync(parent, { recursive: true }); const directory = mkdtempSync(join(parent, 'amazon-network-'));
   const store = new WorkspaceStore(directory); let product = store.createProduct(); product = store.saveProduct({ id: product.id, revision: product.revision, title: 'Known source title', sourceUrl: product.sourceUrl,
@@ -35,7 +36,7 @@ function fixture(t: test.TestContext) {
     throw new Error('Unexpected test endpoint');
   };
   const dependencies = { fetch: fetcher, sleep: async (ms: number) => { delays.push(ms); now += ms; }, now: () => now, random: () => 0,
-    resolveAddresses: async () => ['52.0.0.1'], timeoutMs: 100 };
+    resolveAddresses: async () => ['52.0.0.1'], timeoutMs: 100,...overrides };
   let service = new implementation.AmazonService(directory, id => store.getProduct(id), secretStorage, dependencies);
   t.after(() => { service.close(); store.close(); rmSync(directory, { recursive: true, force: true }); });
   return { directory, store, product, requests, delays, schema, advance(ms: number) { now += ms; }, get service() { return service; }, hook(fn: Hook) { hook = fn; }, changeVersion(v: string) { version = v; }, corruptChecksum() { badChecksum = true; },
@@ -46,6 +47,27 @@ async function draft(f: ReturnType<typeof fixture>) {
   return f.service.createDraft({ targetId: target.id, productId: f.product.id, variantId: f.product.variants[0].id, productType: 'STORAGE_BAG', requirements: 'LISTING', parentageLevel: 'NONE', locale: 'en_US' });
 }
 async function preview(f: ReturnType<typeof fixture>): Promise<AmazonDraft> { return f.service.previewDraft(await draft(f)); }
+
+test('actual Amazon controlled scope refusal precedes schema refresh, submit intent and SUBMITTING state',async t=>{
+ let deny=false;const seen:any[]=[];const f=fixture(t,{beforeEffect:(effect:any,db?:DatabaseSync)=>{seen.push({...effect,inTransaction:db?.isTransaction??false});if(deny)throw Error('synthetic controlled scope denied');}}),prepared=await preview(f),db=new DatabaseSync(join(f.directory,'red.sqlite')),before=db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id),calls=f.requests.length;
+ deny=true;await assert.rejects(f.service.submitDraft(prepared,true),/controlled scope denied/);assert.equal(f.requests.length,calls);assert.deepEqual(db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id),before);assert.equal(db.prepare('SELECT count(*) n FROM amazon_write_locks').get()!.n,0);assert.equal(f.service.getDraft(prepared.id).state,'AMAZON_VALIDATED');assert.equal(seen.at(-1).sku,prepared.sku);assert.equal(seen.at(-1).sellerId,prepared.sellerId);db.close();
+});
+
+test('actual Amazon intent guard runs in original physical transaction and cannot leave a new write lock on failure',async t=>{
+ let denyIntent=false,intentTx=false;const f=fixture(t,{beforeEffect:(effect:any,db?:DatabaseSync)=>{if(denyIntent&&effect.phase==='intent'){intentTx=db?.isTransaction===true;throw Error('synthetic intent scope revoked');}}}),prepared=await preview(f),db=new DatabaseSync(join(f.directory,'red.sqlite')),before=db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id);denyIntent=true;
+ await assert.rejects(f.service.submitDraft(prepared,true),/intent scope revoked/);assert.equal(intentTx,true);assert.equal(db.prepare('SELECT count(*) n FROM amazon_write_locks').get()!.n,0);assert.deepEqual(db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id),before);assert.equal(f.requests.filter(r=>r.init.method==='PUT'&&!r.url.searchParams.has('mode')).length,0);db.close();
+});
+
+test('actual Amazon scope revoked during schema response cannot create an intent or send a formal PUT',async t=>{
+ let scopes:ControlledRunScopes|undefined;const f=fixture(t,{beforeEffect:(effect:any,db?:DatabaseSync)=>{if(!scopes)return;const {operation:_operation,phase:_phase,draftId:_draftId,...scope}=effect;(db?new ControlledRunScopes(db):scopes).authorizeEffect(scope);}}),prepared=await preview(f),db=new DatabaseSync(join(f.directory,'red.sqlite')),task={id:randomUUID(),revision:1,status:'RUNNING',mode:'live',targetId:prepared.targetId,sellerId:prepared.sellerId,marketplaceId:prepared.marketplaceId,items:[{key:'first',sku:prepared.sku,productId:prepared.productId,variantId:prepared.variantId}]};db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(task.id,JSON.stringify(task));scopes=new ControlledRunScopes(db);const scope=scopes.register({taskId:task.id,expectedTaskRevision:1,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,items:[{itemKey:'first',sku:prepared.sku,productId:prepared.productId,variantIds:[prepared.variantId],recipeKey:null,parentage:'NONE'}]}),grant=scopes.activate(scope.id),original=db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id);let revoked=false;f.hook(url=>{if(!revoked&&url.pathname.includes('/productTypes/')){revoked=true;pauseControlledRunScopes(db);}});
+ await assert.rejects(grant(()=>f.service.submitDraft(prepared,true)),(e:any)=>e.diagnosticReason==='CONTROLLED_RUN_SCOPE_BLOCKED');assert.equal(revoked,true);assert.equal(db.prepare('SELECT count(*) n FROM amazon_write_locks').get()!.n,0);assert.deepEqual(db.prepare('SELECT * FROM listing_drafts WHERE id=?').get(prepared.id),original);assert.equal(f.requests.filter(r=>r.init.method==='PUT'&&!r.url.searchParams.has('mode')).length,0);db.close();
+});
+
+test('explicit historical-preservation constructor keeps old UNKNOWN locks, drafts and calls byte-identical without new authorization',async t=>{
+ const f=fixture(t),prepared=await preview(f);f.hook((_url,init)=>{if(init.method==='PUT')throw Error('synthetic unknown write');});const unknown=await f.service.submitDraft(prepared,true);assert.equal(unknown.state,'UNKNOWN');f.service.close();const db=new DatabaseSync(join(f.directory,'red.sqlite')),snapshot=()=>['listing_drafts','amazon_calls','amazon_write_locks','amazon_targets','amazon_exchanges'].map(table=>db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),before=snapshot(),count=f.requests.length;
+ const protectedService=new implementation!.AmazonService(f.directory,id=>f.store.getProduct(id),secretStorage,{preserveHistoricalRecords:true,now:()=>Date.parse('2030-01-01T00:00:00Z'),fetch:async()=>{throw Error('must remain local');},beforeEffect:()=>{throw Error('no dispatch grant');}});
+ try{assert.equal(protectedService.getDraft(unknown.id).state,'UNKNOWN');await assert.rejects(protectedService.submitDraft(unknown,true),/未知|回读|未确认/);assert.equal((protectedService as any).persistence.db.prepare('SELECT total_changes() n').get().n,0);assert.deepEqual(snapshot(),before);assert.equal(f.requests.length,count);}finally{protectedService.close();db.close();}
+});
 
 test('PATCH preview uses preview mode and shared PATCH rate window; formal PATCH is one unknown attempt on incomplete body',async t=>{
  const f=fixture(t),target=await f.service.importCredentials(creds),transport=(f.service as unknown as {transport:AmazonTransport}).transport,path=`/listings/2021-08-01/items/${target.sellerId}/SKU`,query={marketplaceIds:target.marketplaceId},body={productType:'STORAGE_BAG',patches:[{op:'delete',path:'/attributes/package_contains_sku',value:[{sku:'SKU',marketplace_id:target.marketplaceId}]}]};

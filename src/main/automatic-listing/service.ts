@@ -1,6 +1,6 @@
 import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
-import {ControlledRunScopes,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
@@ -69,6 +69,9 @@ import { previewSalesRecipes } from '../sales-plans/planning.ts';
 import { selectSalesRecipes } from '../sales-plans/selection.ts';
 
 export interface AutomaticListingDependencies {
+  /** Main-only controlled-window boundary; unrelated persisted tasks stay read-only. */
+  canManageTask?: (taskId:string)=>boolean;
+  admitTask?: (task:AutomaticListingTask)=>void;
   batch?:TaskBatchRuntime;batchPlan?:()=>TaskBatchPlan;
   store: Pick<WorkspaceStore, 'getProduct'> & Partial<Pick<WorkspaceStore,'getProductSnapshot'|'hasProducts'>>;
   rules(): ListingRules;
@@ -151,14 +154,14 @@ export class AutomaticListingService {
     this.deps = dependencies; this.db = openDatabase(directory);
     this.controlledRuns=new ControlledRunScopes(this.db);
     try {
-      pauseControlledRunScopes(this.db);
+      this.pauseManagedControlledScope();
       for (const saved of this.db.prepare('SELECT id,record_json FROM automatic_listing_tasks ORDER BY rowid').all()) {
         const task = validateAutomaticListingTask(JSON.parse(String(saved.record_json)));
         for(const row of task.items)if(row.schemaRetry){const operation=readSchemaOperation(this.db,task.id,row.key,row.schemaRetry.scope);if(operation)Object.assign(row.schemaRetry,operation.budget);}
         assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
-        if (['QUEUED','RUNNING','WAITING'].includes(task.status)) {
+        if (this.canManage(task.id) && ['QUEUED','RUNNING','WAITING'].includes(task.status)) {
           this.deps.batch?.stop(task.id);task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
           for (const row of task.items) { if(row.schemaRetry?.state==='IN_FLIGHT')row.schemaRetry.state='WAITING'; if (row.status === 'RUNNING') row.status = 'PENDING'; }
           this.save(task);
@@ -166,9 +169,14 @@ export class AutomaticListingService {
       }
     } catch (error) { this.db.close(); throw error; }
   }
+  private pauseManagedControlledScope():void{const scope=readControlledRunScope(this.db);if(!scope||this.canManage(scope.taskId))pauseControlledRunScopes(this.db);}
+  private canManage(id:string):boolean{return this.deps.canManageTask?.(id)??true;}
+  private assertManaged(id:string):void{if(!this.canManage(id))throw new UserFacingError('受控验收窗口不能修改或调度其他任务');}
+  private managedTasks():AutomaticListingTask[]{return [...this.tasks.values()].filter(task=>this.canManage(task.id));}
   private ensureOpen(): void { if (this.closed || this.closing) throw new UserFacingError('自动任务服务正在停止'); }
   private task(id: string): AutomaticListingTask { this.ensureOpen(); const result = this.tasks.get(identifier(id)); if (!result) throw new UserFacingError('自动任务不存在'); return result; }
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = [], at?:string): void {
+    if(this.tasks.has(task.id))this.assertManaged(task.id);
     const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
     try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
@@ -341,7 +349,7 @@ export class AutomaticListingService {
   }
   get busy(): boolean { return this.worker !== null || this.observing !== null; }
   private armObservationTimer():void {
-    const active=[...this.tasks.values()].some(task=>['QUEUED','RUNNING','WAITING'].includes(task.status)||task.items.some(row=>row.batchWait));
+    const active=this.managedTasks().some(task=>['QUEUED','RUNNING','WAITING'].includes(task.status)||task.items.some(row=>row.batchWait));
     this.timer=setTimeout(()=>{this.timer=null;void this.refreshWaiting().catch(()=>{}).finally(()=>{
       if(!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.timer)this.armObservationTimer();
     });},active?10_000:30_000);this.timer.unref();
@@ -663,7 +671,7 @@ export class AutomaticListingService {
   getBatchPlan():TaskBatchPlan{if(!this.deps.batchPlan)throw new UserFacingError('Batch运行层未初始化');return structuredClone(this.deps.batchPlan());}
   prepareStart(id: string,selection?:AutomaticResumeSelection): AutomaticListingTask {
     if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
-    const task = this.task(id);
+    this.assertManaged(id);const task = this.task(id);
     if (!['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status) || this.activeId === id) throw new UserFacingError('此任务正在运行、等待平台或已经结束');
     this.assertScope(task,undefined,true,selection); return structuredClone(task);
   }
@@ -737,8 +745,9 @@ export class AutomaticListingService {
     }finally{this.confirming.delete(approved.id);}
   }
   startAuthorized(approved: AutomaticListingTask, scope?:AutomaticResumeSelection): AutomaticListingTask {
-    const task = this.task(approved.id);
+    this.assertManaged(approved.id);const task = this.task(approved.id);
     if (fingerprint(task) !== fingerprint(approved)) throw new UserFacingError('确认期间任务范围发生变化');
+    this.deps.admitTask?.(structuredClone(task));
     scope=this.controlledRuns.taskSelection(task.id,scope);
     this.prepareStart(task.id,scope);
     const previous=structuredClone(task);
@@ -860,7 +869,7 @@ export class AutomaticListingService {
     if (this.worker || this.closed || this.closing) return;
     this.worker = Promise.resolve().then(async () => {
       for (;;) {
-        const task = [...this.tasks.values()].find(value => value.status === 'QUEUED' && this.grants.has(value.id));
+        const task = this.managedTasks().find(value => value.status === 'QUEUED' && this.grants.has(value.id));
         if (!task || this.closed || this.closing) break;
         this.activeId = task.id; this.controller = new AbortController(); task.status = 'RUNNING'; this.save(task);
         try {
@@ -894,7 +903,7 @@ export class AutomaticListingService {
         } finally { if(!task.items.some(row=>rowSelected(task.resumeScope,row.key)&&row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
       }
       await this.refreshWaiting();
-    }).finally(() => { this.worker = null; if([...this.tasks.values()].some(task=>task.status==='QUEUED'&&this.grants.has(task.id)))this.pump(); });
+    }).finally(() => { this.worker = null; if(this.managedTasks().some(task=>task.status==='QUEUED'&&this.grants.has(task.id)))this.pump(); });
   }
   private schemaScope(task:AutomaticListingTask,row:AutomaticListingItem,selected:NonNullable<AutomaticListingItem['schemaRetry']>['selection']):string {
     return fingerprint({taskId:task.id,key:row.key,productRevision:row.productRevision,sourceStamp:row.sourceStamp,targetStamp:task.targetStamp,rulesStamp:task.rulesStamp,profileStamp:task.profileStamp,selection:[selected.targetId,selected.productType,selected.requirements,selected.parentageLevel,selected.locale]});
@@ -1401,17 +1410,17 @@ export class AutomaticListingService {
     if (this.closed || this.closing || this.schedulingSuspended) return Promise.resolve();
     if (this.observing) return this.observing;
     this.observing = Promise.resolve().then(async () => {
-      if(this.deps.batch)for(const task of this.tasks.values())if(task.items.some(row=>row.batchWait)){
+      if(this.deps.batch)for(const task of this.managedTasks())if(task.items.some(row=>row.batchWait)){
         try{await this.deps.batch.reconcile(task.id);}catch{/* Original Batch errors and identities remain available; never POST from observation. */}
       }
       // Global scan failures must stay outside per-SKU error classification.
       // Only observable submitted work can need this expensive view.
-      const needsCandidates = [...this.tasks.values()].some(task => !this.confirming.has(task.id)
+      const needsCandidates = this.managedTasks().some(task => !this.confirming.has(task.id)
         && ['WAITING', 'NEEDS_ATTENTION'].includes(task.status)
         && task.items.some(row => row.draftId && row.status !== 'DONE' && ['READBACK', 'LABELS'].includes(row.stage)));
-      const versions = [...this.tasks.values()].map(task => ({ id: task.id, revision: task.revision, status: task.status, confirming: this.confirming.has(task.id) }));
+      const versions = this.managedTasks().map(task => ({ id: task.id, revision: task.revision, status: task.status, confirming: this.confirming.has(task.id) }));
       const scanCurrent = () => !this.closed && !this.closing && !this.schedulingSuspended
-        && versions.length === this.tasks.size && versions.every(before => {
+        && versions.length === this.managedTasks().length && versions.every(before => {
           const task = this.tasks.get(before.id);
           return task?.revision === before.revision && task.status === before.status && this.confirming.has(before.id) === before.confirming;
         });
@@ -1419,8 +1428,8 @@ export class AutomaticListingService {
         ? await this.deps.procurement.candidatesForObservation(scanCurrent) : this.deps.procurement.candidates();
       if (candidateRows === null || !scanCurrent()) return;
       const candidates = new Map(candidateRows.map(value => [value.draftId, value]));
-      for (const task of this.tasks.values()) {
-        const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
+      for (const task of this.managedTasks()) {
+        const canObserve=()=>!this.closed&&!this.closing&&!this.schedulingSuspended&&this.canManage(task.id)&&!this.confirming.has(task.id)&&['WAITING','NEEDS_ATTENTION'].includes(task.status);
         if (!canObserve()) continue;
         const observedBefore = JSON.stringify(task);
         let resumeParents=false,interrupted=false;
@@ -1498,11 +1507,11 @@ export class AutomaticListingService {
     return this.observing;
   }
   pause(id: string): AutomaticListingTask {
-    const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
+    this.assertManaged(id);const task = this.task(id); if (final(task)) throw new UserFacingError('已结束任务不能暂停');
     task.status = 'PAUSED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, false); this.save(task); return structuredClone(task);
   }
   cancel(id: string): AutomaticListingTask {
-    const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
+    this.assertManaged(id);const task = this.task(id); if (task.status === 'COMPLETED') throw new UserFacingError('已完成任务不能取消');
     task.status = 'CANCELLED'; this.grants.delete(id); revokeControlledRunGrant(this.controlledGrants.get(id));this.controlledGrants.delete(id); this.deps.batch?.stop(id); this.stopChildren(task, true); this.save(task); return structuredClone(task);
   }
   private stopChildren(task: AutomaticListingTask, cancel: boolean): void {
@@ -1521,9 +1530,9 @@ export class AutomaticListingService {
     if (this.closing) return this.closing; if (this.closed) return Promise.resolve();
     if (this.timer) clearTimeout(this.timer); this.timer = null;
     for(const grant of this.controlledGrants.values())revokeControlledRunGrant(grant);
-    for (const task of this.tasks.values()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
+    for (const task of this.managedTasks()) if (['RUNNING','QUEUED'].includes(task.status)) this.pause(task.id);
     this.grants.clear();
-    this.controlledGrants.clear();pauseControlledRunScopes(this.db);
+    this.controlledGrants.clear();this.pauseManagedControlledScope();
     this.closing = Promise.resolve().then(async () => { await this.worker; await this.observing; this.db.close(); this.closed = true; });
     return this.closing;
   }

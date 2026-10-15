@@ -5,7 +5,7 @@ import {listingFingerprint} from '../json-fingerprint.ts';
 
 export class SpendBudgetError extends AiError {
  readonly budgetCode:string;
- constructor(code:string){super('QUOTA_EXCEEDED');this.budgetCode=code;this.diagnosticReason=code;this.message=({SPEND_BOUND_UNAVAILABLE:'费用上界无法可靠核验；未发送新付费请求',SPEND_LIMIT_EXCEEDED:'金额预算不足或仍有未知费用预留；未发送',SPEND_COST_ANOMALY:'已报告费用超过原预留上界；停止新增付费请求',SPEND_IDENTITY_CONFLICT:'费用请求身份不一致；请核对原请求',SPEND_RECORD_INVALID:'费用记录无效；未发送'} as Record<string,string>)[code]??'费用保护阻止了本次操作';}
+ constructor(code:string){super(['SPEND_LIMIT_INVALID','SPEND_POLICY_CONFLICT'].includes(code)?'INVALID_INPUT':'QUOTA_EXCEEDED');this.budgetCode=code;this.diagnosticReason=code;this.message=({SPEND_BOUND_UNAVAILABLE:'费用上界无法可靠核验；未发送新付费请求',SPEND_LIMIT_EXCEEDED:'金额预算不足或仍有未知费用预留；未发送',SPEND_COST_ANOMALY:'已报告费用超过原预留上界；停止新增付费请求',SPEND_IDENTITY_CONFLICT:'费用请求身份不一致；请核对原请求',SPEND_RECORD_INVALID:'费用记录无效；未发送',SPEND_LIMIT_INVALID:'请输入非负USD金额，最多6位小数；未增加金额上限',SPEND_POLICY_CONFLICT:'日金额设置已变化，请刷新后重新保存'} as Record<string,string>)[code]??'费用保护阻止了本次操作';}
 }
 export function spendInvalid():never{throw new SpendBudgetError('SPEND_RECORD_INVALID');}
 /** Strict data descriptors prevent readers from executing accessors before validation. */
@@ -23,6 +23,11 @@ export function spendText(raw:unknown,max=200):string{if(typeof raw!=='string'||
 export function usdMicrosCeil(raw:unknown):number{
  if(typeof raw!=='string'&&typeof raw!=='number')spendInvalid();const value=String(raw),m=/^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(value);if(!m||value.length>60)spendInvalid();
  const scale=(m[2]?.length??0)-Number(m[3]??0)-6;if(Math.abs(scale)>40)spendInvalid();let n=BigInt(m[1]+(m[2]??''));if(scale>0){const d=10n**BigInt(scale);n=(n+d-1n)/d;}else n*=10n**BigInt(-scale);if(n>BigInt(Number.MAX_SAFE_INTEGER))spendInvalid();return Number(n);
+}
+/** User maxima are exact, never rounded upward like provider costs. */
+export function usdLimitMicros(raw:unknown):number|null{
+ if(raw===null)return null;if(typeof raw!=='string'||raw.length>30||!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(raw))throw new SpendBudgetError('SPEND_LIMIT_INVALID');
+ const [whole,fraction='']=raw.split('.'),value=BigInt(whole)*1_000_000n+BigInt(fraction.padEnd(6,'0'));if(value>BigInt(Number.MAX_SAFE_INTEGER))throw new SpendBudgetError('SPEND_LIMIT_INVALID');return Number(value);
 }
 export function validateSpendPolicy(raw:unknown):AiSpendPolicy{
  const r=spendObject(raw,['version','id','period','limitUsdMicros','updatedAt']);if(r.version!==1||!['image-generation-daily','controlled-live-lifetime'].includes(r.id)||r.period!==(r.id==='image-generation-daily'?'UTC_DAY':'LIFETIME'))spendInvalid();

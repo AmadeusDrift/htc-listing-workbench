@@ -145,7 +145,8 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
     audit: (action, summary) => store.recordWorkspaceEvent(action, summary),
   });
   installExecutionIpc(window, hosting, execution, store, handle);
-  if (automatic) installAutomaticListingIpc(automatic, handle, {
+  if (automatic) {const stopProgress=installAutomaticListingIpc(automatic, handle, {
+    notifyProgress:progress=>{if(!window.isDestroyed())window.webContents.send('red:automatic-listing:operation-progress-changed',progress);},
     confirm: async task => {
       if(task.resumeScope){const answer=await dialog.showMessageBox(window,{type:'question',title:'确认所选范围',message:`处理所选 ${task.items.length} 个 SKU？`,detail:task.error??'保留原成果、原请求及预算',buttons:['取消','确认处理所选范围'],defaultId:0,cancelId:0,noLink:true});return answer.response===1;}
       const detail = `执行模式：${task.executionMode==='deferred_batch'?'延迟批量（Batch）':'即时上架'}\n${task.batchPlan?.coverage.map(row=>`${AI_PURPOSE_LABELS[row.purposeId as keyof typeof AI_PURPOSE_LABELS]??({image_generation:'图片生成',aliyun_ocr:'阿里 OCR',aliyun_image_risk:'阿里图片风险检测'} as Record<string,string>)[row.purposeId]??row.purposeId}：${row.mode==='deferred_batch'?'Batch':'普通执行'} · ${row.reason}`).join('\n')??''}\n仅可 Batch 步骤使用批量计价；不承诺整任务 24 小时完成。\n\n${task.targetName} · ${task.sellerId} · ${task.marketplaceId}\n商品类型：${task.productType} · 图床：${task.profileId}\n备货：每个 SKU ${task.items[0].stockSets} 个销售单位\n\n${task.items.slice(0,50).map(row => row.sku).join('\n')}${task.items.length > 50 ? '\n……其余 SKU 见任务清单' : ''}\n\n将自动完成资料、图片、侵权与 OCR 复核、上传、校验${task.mode === 'live' ? '及正式发布' : '及本地演示'}。通过后继续回读并建立备货批次；商品标签在需要时单独准备；异常商品会停止并显示原因。`;
@@ -153,7 +154,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
         buttons: ['取消', task.mode === 'live' ? '启动并自动发布' : '启动本地演示'], defaultId: 0, cancelId: 0, noLink: true });
       return answer.response === 1;
     }, audit: (action, summary) => store.recordWorkspaceEvent(action, summary),
-  });
+  });window.once('closed',stopProgress);}
   if (labelServices) installItemLabelIpc(dataRoot, labelServices, handle, {
     selectFolder: () => dialog.showOpenDialog(window, { title: '导出本批商品标签和数量清单', properties: ['openDirectory','createDirectory'] }),
     selectPdf: () => dialog.showOpenDialog(window, { title: '归档已有货件的箱唛', properties: ['openFile'], filters: [{ name: '箱唛 PDF', extensions: ['pdf'] }] }),

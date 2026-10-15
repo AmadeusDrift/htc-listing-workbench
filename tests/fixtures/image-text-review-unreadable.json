@@ -1,0 +1,11 @@
+{
+  "source": "Luna retained response 2026-10-15T16:20:02.616Z; assistant content only, no product data or encrypted reasoning",
+  "receiptSha256": "4f0acca0d90619b161d4c3d3ad51f190998421b5ecf81709a797446ce6d310e2",
+  "output": {
+    "verdict": "BLOCKED",
+    "checks": [],
+    "expectedTextChecks": [],
+    "noTextVerified": false,
+    "issues": ["Small legends on the laptop keyboard and markings on the ruler are visible, but their text cannot be transcribed and enumerated reliably from the supplied pixels. The image uses textMode none, so visible text also requires changes."]
+  }
+}

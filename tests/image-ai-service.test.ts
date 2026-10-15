@@ -16,7 +16,7 @@ import { HostingService } from '../src/main/hosting/service.ts';
 import { AiService } from '../src/main/ai/service.ts';
 import { inheritLegacyPurposeSettings } from '../src/main/ai/purpose-routing.ts';
 import { ListingAiService } from '../src/main/listing-ai/service.ts';
-import { assertImagePlan, assertImageTextReview, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
+import { assertImagePlan, assertImageTextReview, assertImageTextReviewDirect, validateImageTextReview, imageGenerationPrompt, imageRiskSourceSnapshot, validateProductImageContext } from '../src/main/ai/image-validation.ts';
 import { validateAiResult, validateStoredAiResult } from '../src/main/ai/validation.ts';
 import type { AiResult } from '../src/shared/ai-contracts.ts';
 import type { CandidateImageIdentity, ImageTextReviewOutput, ProductImageContext } from '../src/shared/image-ai-contracts.ts';
@@ -46,6 +46,52 @@ function markLiteralLegacyCall(db: ReturnType<typeof openDatabase>, result: AiRe
 }
 
 const visualSummaryReview = JSON.parse(readFileSync(new URL('./fixtures/image-text-review-visual-summary.json', import.meta.url), 'utf8'));
+const unreadableTextReview = JSON.parse(readFileSync(new URL('./fixtures/image-text-review-unreadable.json', import.meta.url), 'utf8')).output;
+
+test('P02 retained Luna unreadable-text response stays a valid blocking review and reuses its owner',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),profile=f.ai.purposeProfile('image_text_review').routing!;
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-unreadable-review'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:profile.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(op=>op==='image-text-review'?chat(unreadableTextReview):undefined);
+ const fileId=randomUUID();let reserves=0;
+ const owner={fileId,reserve:()=>{reserves++;},resultStored:()=>{}},before=f.requests.length;
+ const result=await f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);
+ assert.equal(result.output.kind,'image-text-review');if(result.output.kind!=='image-text-review')throw Error('Unexpected output');
+ assert.equal(result.output.verdict,'BLOCKED');assert.equal(result.output.noTextVerified,false);assert.deepEqual(result.output.checks,[]);assert.deepEqual(result.output.issues,unreadableTextReview.issues);
+ assert.deepEqual(validateAiResult(result),result);assert.equal(result.output.method,'candidate-vision/v1');assert.equal(result.output.ocrResultId,null);
+ const original=f.ai.getCall(fileId),saved=f.ai.getResult(result.id),wire=f.requests.at(-1)!;
+ assert.equal(wire.body.model,'openai/gpt-6-luna');assert.deepEqual(wire.body.reasoning,{effort:'medium'});assert.equal(f.requests.length,before+1);
+ assert.equal((await f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner)).id,result.id);
+ assert.deepEqual(f.ai.getCall(fileId),original);assert.deepEqual(f.ai.getResult(result.id),saved);assert.equal(f.requests.length,before+1);assert.equal(reserves,1);assert.equal(f.requests.some(r=>r.operation==='ocr'),false);
+});
+
+test('P02 conservative direct reviews allow unreadable text but keep PASS and evidence strict',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{});
+ const parsed=(patch:Record<string,unknown>={})=>validateImageTextReview({...unreadableTextReview,kind:'image-text-review',method:'candidate-vision/v1',candidate:f.candidate,planResultId:plan.id,ocrResultId:null,visualReview:'not_performed',...patch});
+ for(const verdict of ['BLOCKED','NEEDS_CHANGES'])assert.doesNotThrow(()=>assertImageTextReviewDirect(parsed({verdict}),f.context,plan,f.candidate));
+ assert.throws(()=>assertImageTextReviewDirect(parsed({verdict:'PASS',issues:[]}),f.context,plan,f.candidate));
+ assert.doesNotThrow(()=>assertImageTextReviewDirect(parsed({verdict:'PASS',issues:[],noTextVerified:true}),f.context,plan,f.candidate));
+ assert.throws(()=>parsed({issues:[]}),'blocking output must retain a specific reason');
+ const line={source:'line',index:0,text:'SALE',verdict:'SUPPORTED',evidenceIds:[],reason:'Visible word'};
+ for(const verdict of ['PASS','BLOCKED'])assert.throws(()=>assertImageTextReviewDirect(parsed({verdict,issues:verdict==='PASS'?[]:unreadableTextReview.issues,checks:[line],noTextVerified:true}),f.context,plan,f.candidate));
+ assert.throws(()=>assertImageTextReviewDirect(parsed({checks:[{...line,index:1}]}),f.context,plan,f.candidate));
+ assert.throws(()=>assertImageTextReviewDirect(parsed({checks:[{...line,evidenceIds:['invented']}]}),f.context,plan,f.candidate));
+ assert.throws(()=>assertImageTextReviewDirect(parsed({candidate:{...f.candidate,sha256:'a'.repeat(64)}}),f.context,plan,f.candidate));
+});
+
+test('P02 retained blocking reply recovers locally after result-link failure without changing the paid call',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),profile=f.ai.purposeProfile('image_text_review').routing!;
+ f.ai.saveConnection({id:'openrouter',apiKey:'offline-retained-blocking-review'});f.ai.saveFunctionSettings({id:'openrouter-review',model:'openai/gpt-6-luna',enabled:true});
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:profile.revision,patch:{gateway:'openrouter',model:'openai/gpt-6-luna',effort:'medium'}});
+ f.respond(op=>op==='image-text-review'?chat(unreadableTextReview):undefined);
+ const fileId=randomUUID();let links=0,reserves=0;
+ const owner={fileId,reserve:()=>{reserves++;},resultStored:()=>{if(++links===1)throw Error('synthetic result-link failure');}},send=()=>f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);
+ await assert.rejects(send());const original=f.ai.getCall(fileId)!;assert.equal(original.status,'FAILED');assert.ok(original.providerReceiptId);
+ const receipt=await f.ai.readProviderReceipt(fileId),before=f.requests.length,result=await send();
+ assert.equal(result.output.kind,'image-text-review');if(result.output.kind!=='image-text-review')throw Error('Unexpected output');
+ assert.equal(result.output.verdict,'BLOCKED');assert.deepEqual(result.output.issues,unreadableTextReview.issues);assert.equal(result.providerReceiptRecovery?.version,1);
+ assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(fileId),original);assert.deepEqual(await f.ai.readProviderReceipt(fileId),receipt);assert.equal(reserves,1);assert.equal(f.ai.getResult(result.id)?.id,result.id);
+});
 
 const understanding = (payload: any) => ({ summary: 'A blue round coaster with a raised rim.', referenceAssetIds: payload.referenceImages.map((image: any) => image.assetId), uncertainties: ['Exact dimensions cannot be measured from the photo.'], sufficient: true });
 

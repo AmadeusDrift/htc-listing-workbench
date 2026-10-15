@@ -19,7 +19,7 @@ void app.whenReady().then(async()=>{
   async function configure(){if(configured)return;const {keys}=config;
     s.ai.saveConnection({id:'openrouter',apiKey:keys.openrouter});s.ai.setEnabled({id:'openrouter',enabled:true});s.ai.setEnabled({id:'openrouter-review',enabled:true});
     s.ai.saveConnection({id:'deepseek',apiKey:keys.deepseek});s.ai.setEnabled({id:'deepseek',enabled:true});s.ai.setEnabled({id:'deepseek-review',enabled:true});
-    for(const id of ['aliyun-ocr','aliyun-image-risk']){s.ai.saveConnection({id,accessKeyId:keys.accessKeyId,accessKeySecret:keys.accessKeySecret});s.ai.setEnabled({id,enabled:true});}
+    s.ai.saveConnection({id:'aliyun',accessKeyId:keys.accessKeyId,accessKeySecret:keys.accessKeySecret});for(const id of ['aliyun-ocr','aliyun-image-risk'])s.ai.setEnabled({id,enabled:true});
     s.generation.saveConnection({model:'openai/gpt-image-2.5-sunburst',apiKey:keys.openrouter,enabled:true,size:'1024x1024',quality:'auto'});
     s.images.saveRiskSettings({enabled:true});s.images.saveCopyReviewSettings({enabled:true});s.images.saveAppearanceReviewSettings({enabled:true});
     await s.amazon.importCredentials(config.amazon);s.source.importConfig({appKey:keys.appKey,appSecret:keys.appSecret});

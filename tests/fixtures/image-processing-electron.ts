@@ -15,9 +15,13 @@ app.whenReady().then(async()=>{
     clearInterval(interval);
     assert.deepEqual(preview,expectedPreview);assert.deepEqual(artifact,expectedArtifact);assert.ok(ticks>3);
     assert.equal(artifact.transparentPixels,1280*960/2);assert.equal(artifact.subjectPixels,1280*960/2);
+    const queued=Array.from({length:8},()=>decodePreviewInBackground(bytes));
+    await assert.rejects(decodePreviewInBackground(bytes),/本地处理繁忙/);await Promise.all(queued);
     await assert.rejects(decodePreviewInBackground(Buffer.from('invalid image')));
     assert.deepEqual(await decodePreviewInBackground(bytes),expectedPreview);
-    await closeImageProcessing();await assert.rejects(decodePreviewInBackground(bytes));
+    const closingJobs=Promise.allSettled(Array.from({length:8},()=>decodePreviewInBackground(bytes)));
+    await closeImageProcessing();assert.ok((await closingJobs).every(result=>result.status==='rejected'));
+    await assert.rejects(decodePreviewInBackground(bytes));
     console.log(JSON.stringify({ok:true,parentPid:process.pid,width:artifact.width,height:artifact.height,transparentPixels:artifact.transparentPixels,previewSha256:createHash('sha256').update(preview).digest('hex'),parentTicks:ticks,ms:performance.now()-started}));
     app.exit(0);
   }catch(error){console.error(error);await closeImageProcessing();app.exit(1);}

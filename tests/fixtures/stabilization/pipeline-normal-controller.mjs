@@ -33,7 +33,7 @@ assert.equal(input.method,'POST');assert.equal(bytes.length,0);const pending=run
     }else throw Error('S10_DYNAMIC_ROUTE_DENIED');
     assert.equal(candidate.productId,owner.productId);const actual=await readFile(join(folder,candidate.id,'image.png'));assert.equal(sha(actual),candidate.sha256);assert.equal(actual.length,candidate.byteSize);if(protocol.kind==='oss4'||protocol.action==='RecognizeAllText')assert.equal(sha(bytes),candidate.sha256);
     if(protocol.kind==='acs3'){const now=new Date(headers.get('x-acs-date')).toISOString();assert.ok(Date.parse(now)>=Date.parse(config.clock)-1000&&Date.parse(now)<=Date.now()+1000);Object.assign(protocol,{accessKeyId:config.keys.accessKeyId,accessKeySecret:config.keys.accessKeySecret,now,nonce:config.nonce});}
-if(protocol.kind==='oss4'){const raw=headers.get('x-oss-date');assert.match(raw,/^d{8}Td{6}Z$/);const now=raw.slice(0,4)+'-'+raw.slice(4,6)+'-'+raw.slice(6,8)+'T'+raw.slice(9,11)+':'+raw.slice(11,13)+':'+raw.slice(13,15)+'.000Z';assert.ok(Date.parse(now)>=Date.parse(config.clock)-1000&&Date.parse(now)<=Date.now()+1000);protocol.now=now;}
+if(protocol.kind==='oss4'){const raw=headers.get('x-oss-date');assert.match(raw,/^[0-9]{8}T[0-9]{6}Z$/);const now=raw.slice(0,4)+'-'+raw.slice(4,6)+'-'+raw.slice(6,8)+'T'+raw.slice(9,11)+':'+raw.slice(11,13)+':'+raw.slice(13,15)+'.000Z';assert.ok(Date.parse(now)>=Date.parse(config.clock)-1000&&Date.parse(now)<=Date.now()+1000);protocol.now=now;}
   }
   const id='normal-dynamic-'+sha(input.url+input.method+sha(bytes)).slice(0,32);return {route:{id,method:input.method,path:'/normal/dynamic/'+id,publicUrl:input.url,protocol,native:true},response,bytes,headers};
 }

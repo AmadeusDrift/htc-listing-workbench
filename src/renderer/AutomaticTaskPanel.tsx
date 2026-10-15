@@ -43,12 +43,14 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
   const [view,setView]=useState<AutomaticTaskGroupsPage|null>(null),[search,setSearch]=usePageState('automatic:task-search',''),[groupPage,setGroupPage]=usePageState('automatic:group-page',1);
   const [groupSize,setGroupSize]=useListPageSize('task-products'),[taskPage,setTaskPage]=useState(1),[taskTotal,setTaskTotal]=useState(0);
   const readFlight=useRef<Promise<void>|null>(null);
+  // A start resets scope before the next render; reject the previous page effect.
+  const readScope=useRef({taskPage,selectedId});readScope.current={taskPage,selectedId};
   const summarize=(value:AutomaticListingTask):AutomaticTaskSummary=>({id:value.id,revision:value.revision,status:value.status,targetName:value.targetName,mode:value.mode,productType:value.productType,ruleRevision:value.ruleRevision,createdAt:value.createdAt,updatedAt:value.updatedAt,error:value.error,sourceProductIds:[...new Set(value.items.map(row=>row.productId))],sourceProductCount:new Set(value.items.map(row=>row.productId)).size,salesSkuCount:value.items.length,counts:summarizeAutomaticItems(value.items)});
   function adopted(value:AutomaticListingTask){const summary=summarize(value);setTask(summary);setView(null);setTasks(values=>values.map(row=>row.id===value.id?summary:row));setRefresh(v=>v+1);}
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    if (startedTask) { setBatchSummary(null); version.current++; setTask(summarize(startedTask)); setSelectedId(startedTask.id); setTasks(values => [summarize(startedTask), ...values.filter(value => value.id !== startedTask.id)]);
+    if (startedTask) { setBatchSummary(null); version.current++; readScope.current={taskPage:1,selectedId:startedTask.id};setTaskPage(1);setGroupPage(1);setSearch('');setView(null); setTask(summarize(startedTask)); setSelectedId(startedTask.id); setTasks(values => [summarize(startedTask), ...values.filter(value => value.id !== startedTask.id)]);
       // Starting a task moves attention here; scroll to it and pulse once.
       const element = panel.current;
       if (element) { element.classList.remove('jump-highlight'); void element.offsetWidth; element.classList.add('jump-highlight'); element.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
@@ -58,7 +60,7 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
     let active = true, reading=false, timer: ReturnType<typeof setTimeout> | undefined;
     const visible = () => document.visibilityState !== 'hidden';
     const poll = async () => {
-      if (!active || reading || !visible()) return;
+      if (!active || reading || !visible() || readScope.current.taskPage!==taskPage || readScope.current.selectedId!==selectedId) return;
       reading=true;
       if(readFlight.current){await readFlight.current.catch(()=>{});if(!active||!visible()){reading=false;return;}}
       const request = version.current;

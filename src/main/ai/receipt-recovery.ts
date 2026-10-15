@@ -21,5 +21,5 @@ export function assertReceiptRecovery(db:DatabaseSync,directory:string,result:Ai
   if(!result.providerReceiptRecovery)return;
   if(!call||!resultHasOwner(result,call))throw new AiError('INVALID_CONFIG');
   const saved=verifiedRecoveryReceipt(db,directory,call);
-  if(!saved||saved.record.id!==result.providerReceiptRecovery.receiptId)throw new AiError('INVALID_CONFIG');
+  if(!saved||saved.record.id!==result.providerReceiptRecovery.receiptId||result.providerReceiptRecovery.version===2&&(call.providerReceiptId!==undefined||saved.record.sha256!==result.providerReceiptRecovery.receiptSha256))throw new AiError('INVALID_CONFIG');
 }

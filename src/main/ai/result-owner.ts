@@ -4,7 +4,7 @@ import type { AiCall, AiResult } from '../../shared/ai-contracts.ts';
 /** A local parse never changes the paid call's original terminal record. */
 export function resultHasOwner(result:AiResult,call:AiCall|undefined):boolean {
   if(!call||call.id!==result.callId||call.productId!==result.productId||call.productRevision!==result.productRevision||call.providerId!==result.providerId||call.model!==result.model)return false;
-  if(result.providerReceiptRecovery){const r=result.providerReceiptRecovery;return call.status==='FAILED'&&!!call.finishedAt&&call.finishedAt<=result.createdAt&&r.recoveredAt===result.createdAt&&call.requestFingerprint===r.requestFingerprint&&!!call.requestScope&&listingFingerprint(call.requestScope)===r.scopeSha256&&call.providerReceiptId===r.receiptId;}
+  if(result.providerReceiptRecovery){const r=result.providerReceiptRecovery;return call.status==='FAILED'&&!!call.finishedAt&&call.finishedAt<=result.createdAt&&r.recoveredAt===result.createdAt&&call.requestFingerprint===r.requestFingerprint&&!!call.requestScope&&listingFingerprint(call.requestScope)===r.scopeSha256&&(r.version===1?call.providerReceiptId===r.receiptId:call.providerReceiptId===undefined&&/^[a-f0-9]{64}$/.test(r.receiptSha256));}
   if(result.fieldGroupAssembly){const original=result.fieldGroupAssembly.sources[0];return !!original&&!original.fieldGroupAssembly&&original.callId===result.callId&&original.createdAt===result.createdAt&&resultHasOwner(original,call);}
   if(result.imagePlanRecovery){
     const context=result.imageContext,p=call.presentationContext;

@@ -5,6 +5,5 @@ export interface AiRequestScope {
   variantId?:string; variantIds?:string[]; assetId?:string; sku?:string; draftId?:string; targetId?:string; marketplaceId?:string;
   slot?:number; candidateSha256?:string; phase?:'keywords'|'select'|'judge';
 }
-export interface ProviderReceiptRecovery {
-  version:1;receiptId:string;requestFingerprint:string;scopeSha256:string;recoveredAt:string;
-}
+interface ProviderReceiptRecoveryBase {receiptId:string;requestFingerprint:string;scopeSha256:string;recoveredAt:string}
+export type ProviderReceiptRecovery=ProviderReceiptRecoveryBase&({version:1}|{version:2;receiptSha256:string});

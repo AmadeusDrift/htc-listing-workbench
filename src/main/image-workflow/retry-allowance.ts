@@ -1,3 +1,5 @@
+import {assertReceiptRecovery} from '../ai/receipt-recovery.ts';
+import {dirname} from 'node:path';
 import { candidateRetryEvidence } from './retry-evidence.ts';
 import { readImageRiskSettings } from './risk-settings.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
@@ -5,7 +7,7 @@ import { validateStoredAiResult } from '../ai/validation.ts';
 import { validateAiCall } from '../ai/validation.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ImageRetryAllowance, ImageRetryGrantRef, ImageSlotAttempt, ImageWorkflowRun } from '../../shared/image-workflow-contracts.ts';
-import { imageSlotAttemptLimit } from '../../shared/image-workflow-contracts.ts';
+import { imageSlotAttemptLimit,imageSlotConsumedAttempts } from '../../shared/image-workflow-contracts.ts';
 import { date, integer, keys, uuid, uuidList, boundedText } from '../ai/primitives.ts';
 import { UserFacingError } from '../../shared/errors.ts';
 import { listingFingerprint } from '../json-fingerprint.ts';
@@ -50,7 +52,7 @@ export function retryHistoryGap(db:DatabaseSync,run:ImageWorkflowRun):ImageRetry
 }
 export function assertRetryAllowanceRun(db:DatabaseSync,run:ImageWorkflowRun):void {
  if(!run.retryAllowance)return;
- const all=retryGrants(db);for(const r of run.retryAllowance.grants){const grant=all.find(g=>g.id===r.id);if(!grant||listingFingerprint(ref(grant))!==listingFingerprint(r)||grant.draftId!==run.draftId||grant.productId!==run.productId||grant.runId!==run.id&&grant.runId!==run.sourceReuse?.sourceRunId||run.slots?.[r.slot-1]?.attempts[r.afterAttempt-1]?.requestId!==r.requestId)invalid();}
+ const all=retryGrants(db);for(const r of run.retryAllowance.grants){const grant=all.find(g=>g.id===r.id);if(!grant||listingFingerprint(ref(grant))!==listingFingerprint(r)||grant.draftId!==run.draftId||grant.productId!==run.productId||grant.runId!==run.id&&grant.runId!==run.sourceReuse?.sourceRunId&&grant.runId!==run.unitAdoptionReview?.sourceRunId||run.slots?.[r.slot-1]?.attempts[r.afterAttempt-1]?.requestId!==r.requestId)invalid();}
  for(const slot of run.slots??[]){const refs=run.retryAllowance.grants.filter(r=>r.slot===slot.index&&r.scope==='generation');for(const [i,r] of refs.entries())if(r.afterAttempt!==run.maxAttempts+3*i)invalid();
   const scoped=run.retryAllowance.grants.filter(r=>r.slot===slot.index);for(const [i,r] of scoped.entries())if(r.scope==='planning'){const grant=all.find(g=>g.id===r.id)!,prefix=scoped.slice(0,i),expectedLimit=3+3*prefix.filter(g=>g.scope==='planning').length+3*generationBudgetRefs(prefix,r.afterAttempt).filter(g=>all.find(saved=>saved.id===g.id)?.runId===grant.runId).length;if(grant.initialPlanningCallIds?.length!==expectedLimit||listingFingerprint(grant.planningCallIds?.slice(0,grant.initialPlanningCallIds.length))!==listingFingerprint(grant.initialPlanningCallIds)||listingFingerprint(grant.savedPlanningCalls?.map(c=>c.id))!==listingFingerprint(grant.planningCallIds))invalid();const ownerRow=db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(grant.runId);if(!ownerRow)invalid();const owner=JSON.parse(String(ownerRow!.record_json)) as ImageWorkflowRun;if(listingFingerprint(planningCalls(db,owner,grant.slot).slice(0,grant.initialPlanningCallIds!.length).map(c=>c.id))!==listingFingerprint(grant.initialPlanningCallIds))invalid();const exhaustedTail=grant.initialPlanningCallIds!.slice(-3);for(const id of grant.initialPlanningCallIds!){const call=grant.savedPlanningCalls?.find(c=>c.id===id),p=call?.presentationContext;if(!call||!settledPlanningCall(call)||exhaustedTail.includes(id)&&!failedPlanningCall(call)||call.productId!==grant.productId||p?.workflowId!==grant.runId||p.slot!==grant.slot||p.draftId!==grant.draftId||p.variantId!==owner.variantId||call.productRevision!==owner.productRevision||p.sourceSha256!==owner.slots?.[grant.slot-1]?.contextSha256||!isPlanningCall(call))invalid();const originalRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(id);if(!originalRow)invalid();const original=validateAiCall(JSON.parse(String(originalRow!.record_json)));if((call!.status==='FAILED'?!failedPlanningCall(original):original.status!=='SUCCEEDED'&&!(original.status==='FAILED'&&original.errorCode==='INTERRUPTED'))||listingFingerprint(planningIdentity(original))!==listingFingerprint(planningIdentity(call!)))invalid();}}}
 }
@@ -113,6 +115,7 @@ function generationBudgetRefs(refs:ImageRetryGrantRef[],attempt:number):ImageRet
 function ownedRetryResult(db:DatabaseSync,run:ImageWorkflowRun,index:number,id:string){
  const row=db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(id);if(!row)return undefined;
  const result=validateStoredAiResult(JSON.parse(String(row.record_json))),callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(result.callId);
+ if(result.providerReceiptRecovery){const file=String(db.prepare('PRAGMA database_list').all().find(row=>row.name==='main')?.file??'');if(!file||!callRow)return undefined;try{assertReceiptRecovery(db,dirname(file),result,validateAiCall(JSON.parse(String(callRow.record_json))));}catch{return undefined;}}
  if(!callRow||result.productId!==run.productId||result.productRevision!==run.productRevision||result.variantId!==run.variantId||result.sourceSha256!==run.slots?.[index-1]?.contextSha256||!resultHasOwner(result,validateAiCall(JSON.parse(String(callRow.record_json)))))return undefined;
  return result;
 }
@@ -127,7 +130,7 @@ function generationPlanningCredits(db:DatabaseSync,run:ImageWorkflowRun,index:nu
 }
 export function planningRetryExhausted(db:DatabaseSync,run:ImageWorkflowRun,index:number):boolean {
  const last=run.slots?.[index-1]?.attempts.at(-1),previous=run.slots?.[index-1]?.attempts.at(-2);if(!last||last.state!=='PLANNING'||last.planResultId||run.slots?.some(s=>s.status==='BLOCKED'||s.attempts.some(a=>['UNKNOWN','GENERATING'].includes(a.state))))return false;
- const calls=planningCalls(db,run,index),credits=generationPlanningCredits(db,run,index,previous?.planResultId?{previousPlanId:previous.planResultId,issues:['retained candidate failure']}:undefined),limit=3+3*(run.retryAllowance?.grants.filter(g=>g.scope==='planning'&&g.slot===index).length??0)+3*credits;
+ const calls=planningCalls(db,run,index),credits=generationPlanningCredits(db,run,index,previous?.planResultId?{previousPlanId:previous.planResultId,issues:['retained candidate failure']}:undefined),limit=Math.max(0,3+3*(run.retryAllowance?.grants.filter(g=>g.scope==='planning'&&g.slot===index).length??0)+3*credits-(imageSlotConsumedAttempts(run,index)-(run.slots?.[index-1]?.attempts.length??0)));
  return calls.length===limit&&calls.every(settledPlanningCall)&&calls.slice(-3).every(failedPlanningCall);
 }
 /** Paid planner checks the exact repair identity at admission and reservation. */
@@ -135,5 +138,5 @@ export function imagePlanningAllowanceLimit(db:DatabaseSync,workflowId:string,co
  const index=context.slot?.index;if(!index)return 3;
  const row=db.prepare('SELECT record_json FROM image_workflow_runs WHERE id=?').get(workflowId);if(!row)return 3;
  const run=JSON.parse(String(row.record_json)) as ImageWorkflowRun;if(run.productId!==context.listing.productId||run.productRevision!==context.listing.productRevision||run.draftId!==context.listing.draftId||run.slots?.[index-1]?.contextSha256!==listingFingerprint(context))return 3;
- assertRetryAllowanceRun(db,run);return 3+3*(run.retryAllowance?.grants.filter(g=>g.scope==='planning'&&g.slot===index).length??0)+3*generationPlanningCredits(db,run,index,repair);
+ assertRetryAllowanceRun(db,run);return Math.max(0,3+3*(run.retryAllowance?.grants.filter(g=>g.scope==='planning'&&g.slot===index).length??0)+3*generationPlanningCredits(db,run,index,repair)-(imageSlotConsumedAttempts(run,index)-(run.slots?.[index-1]?.attempts.length??0)));
 }

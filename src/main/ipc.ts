@@ -1,3 +1,4 @@
+import {withManualImageReviewCommand} from './image-workflow/review-authority.ts';
 import type {AiNetworkReport} from '../shared/ai-network-contracts.ts';
 import { AI_PURPOSE_LABELS } from '../shared/ai-purpose-contracts.ts';
 import { UserFacingError } from '../shared/errors.ts';
@@ -174,7 +175,7 @@ export function installIpc(window: BrowserWindow, store: WorkspaceStore, dataRoo
     handle('red:automatic-product:unknown-retry',1,async input=>{const run=await imageWorkflow.approveUnknownRetry(input);return imageWorkflow.getProgressPresentation(run.draftId)!;});
     handle('red:automatic-product:sources', 1, input => imageWorkflow.prepareSources(input));
     handle('red:automatic-product:sources-cancel', 1, id => imageWorkflow.cancelSources(id));
-    handle('red:automatic-product:complete', 1, input => imageWorkflow.complete(input));
+    handle('red:automatic-product:complete', 1, input => {const parsed=record(input,'图片准备',['draftId','draftRevision']),draftId=identifier(parsed.draftId);return withManualImageReviewCommand(draftId,()=>imageWorkflow.complete(input));});
     handle('red:automatic-product:progress', 1, id => imageWorkflow.getProgressPresentation(id));
     if (imageGeneration) handle('red:automatic-product:candidate-preview', 1, input => readWorkflowCandidatePreview(input, id => imageWorkflow.getProgress(id), id => imageGeneration.readCandidate(id)));
     handle('red:automatic-product:cancel', 1, id => imageWorkflow.cancel(id));

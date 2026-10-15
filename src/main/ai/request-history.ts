@@ -1,3 +1,4 @@
+import {readCallReceiptSync} from './receipts.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiCall} from '../../shared/ai-contracts.ts';
 import {validateAiCall,validateStoredAiResult} from './validation.ts';
@@ -15,7 +16,8 @@ export function retainRequestCallHistory(current:DatabaseSync,snapshot:DatabaseS
   for(const row of current.prepare('SELECT id,record_json FROM ai_calls').all()){
     const call=validateAiCall(JSON.parse(String(row.record_json)));if(call.id!==row.id)throw new AiError('INVALID_CONFIG');
     const recovered=has(current,'ai_results')?current.prepare("SELECT id,record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=? AND json_type(record_json,'$.providerReceiptRecovery')='object'").all(call.id):[];
-    if(!recovered.length&&localAiRequestResolved(current,currentDirectory,call.id,call))continue;
+    const protectedReviewPointer=call.providerReceiptId===undefined&&!!call.requestScope&&['generated-image-ocr','image-text-review','image-ip-review'].includes(call.requestScope.operation)&&readCallReceiptSync(current,currentDirectory,call)!==null;
+    if(!recovered.length&&localAiRequestResolved(current,currentDirectory,call.id,call)&&!protectedReviewPointer)continue;
     const previous=snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
     if(previous){const selected=validateAiCall(JSON.parse(String(previous.record_json)));if(identity(selected)!==identity(call))throw new AiError('INVALID_CONFIG');if(localAiRequestResolved(snapshot,snapshotDirectory,selected.id,selected))continue;}
     // Preserve the complete producer JSON, including optional future alias

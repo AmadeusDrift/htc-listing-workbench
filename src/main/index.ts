@@ -1,4 +1,8 @@
 import { beginDatabaseStartupValidation } from './startup-database-validation.ts';
+import { consumeStartupReceipt, saveCleanShutdownReceipt, type StartupReceiptCodec } from './startup-session.ts';
+import { createStartupProgress } from './startup-progress.ts';
+import { openDatabase } from './database.ts';
+import { createHash } from 'node:crypto';
 import {BasicFtpTransport,FtpConnectionPool} from './hosting/ftp.ts';
 import {ControlledAcceptanceSession,CONTROLLED_ACCEPTANCE_FLAG} from './application/controlled-acceptance.ts';
 import {verifyControlledCandidate} from './application/controlled-candidate.ts';
@@ -91,12 +95,26 @@ let collection: CollectionHistory | undefined;
 let miaoshou: MiaoshouService | undefined;
 let miaoshouImages: MiaoshouImageService | undefined;
 let window: BrowserWindow | undefined;
+let startupProgress:Awaited<ReturnType<typeof createStartupProgress>>|undefined;
+let startupBuild='';
+let startupCodec:StartupReceiptCodec|undefined;
+let startupCompleted=false;
 
 async function start() {
   if(controlledAcceptanceMode)preflightControlledAcceptance(dataRoot);
   const verifiedCandidate=controlledAcceptanceMode?await verifyControlledCandidate(app.getAppPath(),process.execPath):null;
+  startupProgress=await createStartupProgress(process.env.RED_E2E==='1');
+  const startupTime=performance.now();
+  const phase=async(text:string)=>{console.info('HTC startup phase:',text,Math.round(performance.now()-startupTime)+'ms');await startupProgress?.stage(text);};
+  startupBuild=app.getVersion()+':'+createHash('sha256').update(await readFile(__filename)).digest('hex');
+  if(safeStorage.isEncryptionAvailable())startupCodec={encode:text=>safeStorage.encryptString(text).toString('base64'),decode:text=>safeStorage.decryptString(Buffer.from(text,'base64'))};
+  const startupReceipt=await consumeStartupReceipt(dataRoot,startupBuild,startupCodec);
   const recovered = await recoverInterruptedRestore(dataRoot);
-  await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
+  if(recovered||controlledAcceptanceMode||startupReceipt.mode==='full'){
+    await phase(recovered?'恢复备份后，正在完整检查并保存安全快照…':'首次、异常退出、升级或检查凭据失效，正在完整检查并保存安全快照…');
+    await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
+  }else await phase('正常启动：数据及安全快照已核对，正在进行必要检查…');
+  await phase('正在检查业务历史并初始化服务…');
   const finishStartupValidation=beginDatabaseStartupValidation();
   try {
   store = new WorkspaceStore(dataRoot);
@@ -216,6 +234,7 @@ async function start() {
     },
   });
   finishStartupValidation();
+  await phase('正在加载工作界面…');
   if(!controlledAcceptanceMode)await cleanupManagedBackups(dataRoot, amazon.getDataPolicy().retentionDays).catch(() => db.recordWorkspaceEvent('workspace.backup.cleanup_failed', '自动备份清理未完成，请在设置中重试到期清理'));
   const buildRoot = resolve(__dirname, '../dist');
   // Only files present in the renderer build are addressable by the app protocol.
@@ -319,13 +338,16 @@ async function start() {
   }, imageGeneration, imageWorkflow, automatic, { labels, labelSettings, shipmentDocuments, procurement }, skuNaming, networkDiagnostics, ruleStore);
   mainWindow.once('ready-to-show', () => { if (process.env.RED_E2E !== '1') mainWindow.show(); });
   await mainWindow.loadURL(expectedUrl);
+  startupCompleted=true;
+  startupProgress?.close();startupProgress=undefined;
+  console.info('HTC startup ready:',Math.round(performance.now()-startupTime)+'ms');
   listingFollowup.start();
   if(!controlledAcceptanceMode)labels.resume(); automatic.start();
   } finally { finishStartupValidation(); }
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
+  app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } else startupProgress?.focus(); });
   app.whenReady().then(start).catch(error => {
     console.error('HTC startup:', error instanceof Error ? error.message : 'failed');
     if (process.env.RED_E2E !== '1') dialog.showErrorBox('HTC 启动失败', publicError(error));
@@ -341,10 +363,15 @@ else {
       await automatic?.close(); automatic = undefined;
       skuNaming?.close(); skuNaming = undefined; automaticRules?.close(); automaticRules = undefined;
       await labels?.close(); labels = undefined; labelSettings?.close(); labelSettings = undefined; shipmentDocuments?.close(); shipmentDocuments = undefined;
-      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; }
+      let servicesClosed=false;
+      try { await imageWorkflow?.close(); imageWorkflow = undefined; await miaoshouImages?.close(); miaoshouImages = undefined; await miaoshou?.close(); miaoshou = undefined; await collection?.close(); collection = undefined; await images?.close(); images = undefined; content?.close(); content = undefined; await ai?.close(); ai = undefined; await batchReferences?.close(); batchReferences=undefined; await imageGeneration?.close(); imageGeneration = undefined; await execution?.close(); execution = undefined; await hosting?.close(); hosting = undefined; servicesClosed=true; }
       finally {
         await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; controlledAcceptance?.close();controlledAcceptance=undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
-        try { await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode}); } catch { console.error('HTC: 关闭时数据库安全快照未完成，已有快照和工作区保持原位。'); }
+        try {
+          if(startupCompleted&&servicesClosed){const checked=openDatabase(dataRoot);checked.close();}
+          const snapshot=await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
+          if(startupCompleted&&servicesClosed&&snapshot&&!controlledAcceptanceMode)await saveCleanShutdownReceipt(dataRoot,startupBuild,snapshot,startupCodec);
+        } catch { console.error('HTC: 关闭时数据库检查、安全快照或正常退出凭据未完成，下次将完整检查；已有数据保持原位。'); }
         drained = true; setImmediate(() => app.quit());
       }
     })().catch(() => { app.exit(1); });

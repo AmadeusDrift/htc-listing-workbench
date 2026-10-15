@@ -38,7 +38,8 @@ export function validateApprovalReuse(raw:unknown,run:ImageWorkflowRun):NonNulla
 }
 export function assertApprovalReuseSource(run:ImageWorkflowRun,source:ImageWorkflowRun|undefined):void {
   if(!source||source.approvalReuse||!hasSevenApprovedImages(source)||!run.approvalReuse||source.id!==run.approvalReuse.sourceRunId||source.updatedAt>run.createdAt)throw new UserFacingError('图片审核复用来源无效');
-  const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,...rest}=value;return rest;};
+  if(run.reviewRequests!==undefined||run.unitAdoptionReview!==undefined||source.reviewRequests?.some(r=>r.state!=='RESULT_STORED'))throw new UserFacingError('图片审核复用不能复制未决原请求身份');
+  const evidence=(value:ImageWorkflowRun)=>{const {id,createdAt,updatedAt,draftSha256,approvalReuse,reviewRequests,unitAdoptionReview,...rest}=value;return rest;};
   if(listingFingerprint(evidence(source))!==listingFingerprint(evidence(run)))throw new UserFacingError('图片审核复用记录与原审核证据不一致');
   validateApprovalReuse(run.approvalReuse,run);
 }

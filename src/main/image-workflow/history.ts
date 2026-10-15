@@ -1,3 +1,4 @@
+import {assertUnitImageReviewHistory} from './unit-review.ts';
 import { assertPartialSourceReuse } from './adaptation.ts';
 import { resultHasOwner } from '../ai/result-owner.ts';
 import { evaluateImageRisk } from '../../shared/image-risk-policy.ts';
@@ -32,7 +33,7 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
   for(const run of runs) {
     if(run.approvalReuse){assertApprovalReuseSource(run,byId.get(run.approvalReuse.sourceRunId));continue;}
     if(run.slots){
-      const source=run.sourceReuse?byId.get(run.sourceReuse.sourceRunId):undefined;if(run.sourceReuse)assertPartialSourceReuse(run,source,db);
+      const source=run.sourceReuse?byId.get(run.sourceReuse.sourceRunId):run.unitAdoptionReview?byId.get(run.unitAdoptionReview.sourceRunId):undefined;if(run.sourceReuse)assertPartialSourceReuse(run,source,db);if(run.unitAdoptionReview)assertUnitImageReviewHistory(db,run,source);
       const prior=run.recheckedFromRunId?byId.get(run.recheckedFromRunId):undefined;
       if(run.recheckedFromRunId){
         const seen=new Set([run.id]);let cursor=prior;while(cursor){if(seen.has(cursor.id))invalid();seen.add(cursor.id);cursor=cursor.recheckedFromRunId?byId.get(cursor.recheckedFromRunId):undefined;}
@@ -44,11 +45,11 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
         if(!ref||ocr.output.kind!=='ocr'||ocr.productId!==run.productId||ocr.productRevision!==run.productRevision||ocr.assetId!==ref.id||ocr.assetSha256!==ref.sha256||!referenceMeasurementEvidence(ocr).some(item=>listingFingerprint(item)===listingFingerprint(measurement)))invalid();
       }
       if(run.setPlanResultId){
-        const set=successful(run.setPlanResultId);
+        const set=successful(run.setPlanResultId),setOwner=run.sourceReuse?source!:run;
         if(set.output.kind!=='image-plan'||!set.imageContext||set.imageContext.slot||set.productId!==run.productId||set.productRevision!==(source??run).productRevision||set.variantId!==run.variantId||listingFingerprint(set.output.setPlan)!==listingFingerprint(run.setPlan)||listingFingerprint(set.sourceResultIds)!==listingFingerprint(imageCopySourceIds(set.imageContext)))invalid();
         if(prior){if(run.setPlanResultId!==prior.setPlanResultId||listingFingerprint(run.setPlan)!==listingFingerprint(prior.setPlan))invalid();}
         else {
-          if(listingFingerprint(set.imageContext)!==listingFingerprint((source??run).imageContext))invalid();
+          if(listingFingerprint(set.imageContext)!==listingFingerprint(setOwner.imageContext))invalid();
           assertCopySource(set.imageContext!,run.copyReviewEnabled,set.listingEvidenceContractVersion);
         }
         if(set.output.kind==='image-plan')assertImagePlan(set.output,set.imageContext!,{storedVersion:set.listingEvidenceContractVersion??null});
@@ -62,11 +63,11 @@ export function assertImageWorkflowHistory(db: DatabaseSync, results: Map<string
           assertCopySource(context,run.copyReviewEnabled,result.listingEvidenceContractVersion);return result;
         };
         for(const [index,attempt] of slot.attempts.entries()){
-          historical=!!source&&index<run.sourceReuse!.slotAttempts[slot.index-1];
+          historical=!!source&&(!!run.sourceReuse&&index<run.sourceReuse.slotAttempts[slot.index-1]||!!run.unitAdoptionReview&&index<run.unitAdoptionReview.sourceSlotAttempts[slot.index-1]-1);
           const plan=attempt.planResultId?owned(attempt.planResultId,'image-plan'):undefined;
           if(plan){
             if(plan.output.kind!=='image-plan')invalid();else assertImagePlan(plan.output,plan.imageContext!,{storedVersion:plan.listingEvidenceContractVersion??null});
-            const previous=source&&index===run.sourceReuse!.slotAttempts[slot.index-1]?undefined:slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
+            const previous=run.sourceReuse&&source&&index===run.sourceReuse.slotAttempts[slot.index-1]||run.unitAdoptionReview&&index===run.unitAdoptionReview.sourceSlotAttempts[slot.index-1]-1?undefined:slot.attempts[index-1],expected=[...imageCopySourceIds(plan.imageContext!),...(previous?.planResultId?[previous.planResultId]:[])];
             if(!attempt.planReuse&&listingFingerprint(plan.sourceResultIds)!==listingFingerprint(expected)||attempt.candidateId&&(plan.output.kind!=='image-plan'||!plan.output.productUnderstanding?.sufficient||run.riskInterceptionEnabled!==false&&plan.output.ipRisk?.verdict!=='PASS'))invalid();
           }
           const appearance=attempt.appearanceReview;

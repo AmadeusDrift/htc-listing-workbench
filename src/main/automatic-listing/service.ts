@@ -1,3 +1,4 @@
+import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import {ControlledRunScopes,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
@@ -75,6 +76,7 @@ export interface AutomaticListingDependencies {
   hosting: Pick<HostingService, 'getProfile'> & Partial<Pick<HostingService,'listUploads'|'checkLocalAssets'>>;
   images: Pick<ImageWorkflowService, 'prepareSources' | 'complete' | 'getProgress' | 'cancel' | 'cancelSources'> & {
     inspectApproval?:ImageWorkflowService['inspectApproval'];
+    canResumeUnitRecheckDraft?:ImageWorkflowService['canResumeUnitRecheckDraft'];
     hasHistoricalRetryAllowance?: (draftId:string)=>boolean;
     getRiskSettings?: () => {enabled:boolean};
     isRiskPolicyCompatible?: (run:ImageWorkflowRun) => boolean;
@@ -94,6 +96,7 @@ export interface AutomaticListingDependencies {
   repairFields?: (draftId: string, signal: AbortSignal, operationId?:string) => Promise<AmazonDraft | { draft: AmazonDraft; remaining: string[] }>;
   prepareSourceColors?: (draftId: string, signal: AbortSignal) => Promise<{ aiCalls: number; evidenceChanged: boolean; evidenceSha256?: string }>;
   prepareSourceConsistency?: (input:{productId:string;productRevision:number;variantIds:string[]},signal:AbortSignal,assertFresh:()=>void)=>Promise<void>;
+  recheckUnitImage?:(input:UnitImageRecheckInput,signal:AbortSignal,authorize:()=>boolean)=>Promise<AmazonDraft>;
   recheckImage?: (input: { draftId: string; draftRevision: number; sourceWorkflowId: string }, signal: AbortSignal) => Promise<AmazonDraft>;
   preflight?: () => void;
   sourceReceipt?: (productId: string) => MiaoshouReceipt | null;
@@ -407,7 +410,7 @@ export class AutomaticListingService {
     if(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))return 'SUBMISSION_UNKNOWN';
     const run=this.deps.images.getProgress(row.draftId);
     if(run?.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||journal.unknown(run.contentPreparation.operationId)))return 'FIELD_RESULT_UNKNOWN';
-    if(run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
+    if(run?.pendingRequest||run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
     return null;
   }
@@ -961,20 +964,22 @@ export class AutomaticListingService {
       && draft.sellerId === task.sellerId && draft.marketplaceId === task.marketplaceId && draft.mode === task.mode;
   }
   private imagePolicyCompatible(run:ImageWorkflowRun|null|undefined): boolean {return !!run&&(this.deps.images.isRiskPolicyCompatible?.(run)??true)&&(this.deps.images.isCopyReviewPolicyCompatible?.(run)??true);}
-  /** A unit change can recheck existing pictures, never enter their generation path. */
+  /** Recheck original candidates; partial admission retains the original missing-slot budget. */
   private async finishUnitRecheck(task:AutomaticListingTask,row:AutomaticListingItem):Promise<AmazonDraft>{
-    const proof=row.unitRecheck!,draft=this.deps.amazon.getDraft(row.draftId!);
-    if(!this.matching(task,row,draft)||submitted(draft)||draft.revision!==proof.draftRevision||imageWorkflowDraftStamp(draft)!==proof.draftStamp)throw new UserFacingError('计量采用后草稿检查点已变化，请核对原记录；未重新生图');
+    const proof=row.unitRecheck!,draft=this.deps.amazon.getDraft(row.draftId!),input={taskId:task.id,itemKey:row.key,draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId};
+    if(!this.matching(task,row,draft)||submitted(draft)||(draft.revision!==proof.draftRevision||imageWorkflowDraftStamp(draft)!==proof.draftStamp)&&!this.deps.images.canResumeUnitRecheckDraft?.(input))throw new UserFacingError('计量采用后草稿检查点已变化，请核对原记录；未重新生图');
     const prior=this.deps.images.getProgress(draft.id);
-    if(!this.deps.recheckImage||!prior||!this.imageReady(prior))throw new UserFacingError('计量变化需复核原成功图片；当前原七图或复核服务不完整，未重新生图');
-    const after=await this.deps.recheckImage({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId},this.controller?.signal??new AbortController().signal);
+    if(!prior||(!this.imageReady(prior)||prior.unitAdoptionReview)&&!this.deps.recheckUnitImage||this.imageReady(prior)&&!prior?.unitAdoptionReview&&!this.deps.recheckImage)throw new UserFacingError('计量变化需复核原成功图片；当前原七图或复核服务不完整，未重新生图');
+    const signal=this.controller?.signal??new AbortController().signal,authorize=()=>{try{this.checkpoint(task,row);return true;}catch{return false;}};
+    const after=this.deps.recheckUnitImage?await this.deps.recheckUnitImage(input,signal,authorize):await this.deps.recheckImage!({draftId:draft.id,draftRevision:draft.revision,sourceWorkflowId:proof.sourceWorkflowId},signal);
+    const finalWorkflow=this.deps.images.getProgress(draft.id);if(!this.imageReady(finalWorkflow))throw new UserFacingError('计量复核尚未完成全部原图位；原标记与图片保留');
     this.checkpoint(task,row);
     if(!this.matching(task,row,after)||submitted(after))throw new UserFacingError('原图复核后的草稿身份变化');
     const next=structuredClone(task),checkpoint=next.items.find(item=>item.key===row.key)!;
-    delete checkpoint.unitRecheck;this.save(next);
+    checkpoint.imageAttempts=Math.max(checkpoint.imageAttempts,finalWorkflow!.attempt+(finalWorkflow!.legacyImageAttempts??0));delete checkpoint.unitRecheck;this.save(next);
     // Publish the local checkpoint only after the SQLite write committed. A
     // failed task write keeps both memory and disk pointing at the saved result.
-    delete row.unitRecheck;task.revision=next.revision;task.updatedAt=next.updatedAt;
+    row.imageAttempts=checkpoint.imageAttempts;delete row.unitRecheck;task.revision=next.revision;task.updatedAt=next.updatedAt;
     this.tasks.set(task.id,task);return after;
   }
   private imageReady(run:ImageWorkflowRun|null|undefined): boolean {return imageReady(run)&&this.imagePolicyCompatible(run);}
@@ -1143,7 +1148,7 @@ export class AutomaticListingService {
           for(const slot of selected){const before=prior?.slots?.find(old=>old.index===slot.index);if(slot.status!=='PASSED'&&fingerprint(slot)!==fingerprint(before??null)){const snapshot={...row,error:slot.error??result.workflow.error??'所选图位处理未完成'};rememberFailure(snapshot,new Date().toISOString(),slot.index,'local-check');row.failureHistory=snapshot.failureHistory;}}
           this.save(task);return;
         }
-        if (!this.imageReady(result.workflow)) throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');
+        if (!this.imageReady(result.workflow)){const pending=result.workflow.pendingRequest;if(pending){const error=new AiError('INTERRUPTED');error.callId=pending.callId;error.certainty=pending.certainty;error.diagnosticReason=pending.step==='planning'?'IMAGE_PLAN_RESULT_UNKNOWN':'IMAGE_REVIEW_RESULT_UNKNOWN';error.message=result.workflow.error||'原图片操作结果待核对，未发送新请求';throw error;}throw new UserFacingError(result.workflow.error || '侵权检测或 OCR 复核未通过，尚无可用图片');}
         draft = result.draft;
       }
       this.checkpoint(task, row);

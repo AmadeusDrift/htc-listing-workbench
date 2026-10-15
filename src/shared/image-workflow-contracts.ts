@@ -19,6 +19,7 @@ export interface ImageReviewRequestV1 {
 
 /** Producer-v2 intent exists before credentials/limits/transport. No token or OSS credential is stored. */
 export interface ImageReviewRequestV2 extends Omit<ImageReviewRequestV1,'version'|'reservedAt'|'requestFingerprint'|'state'> {
+ repair?:{priorRequestId:string;rootRequestId:string;commandSha256:string;authorizedAt:string;owner:{kind:'task';taskId:string;itemKey:string}|{kind:'manual';draftId:string}};
  version:2;preparedAt:string;reservedAt:string|null;requestFingerprint:string|null;
  state:'PREPARED'|'SENT_UNKNOWN'|'RESULT_STORED'|'RECEIVED_INVALID'|'DEFINITIVE_REJECTION';
  effects:{id:string;kind:'token'|'upload'|'moderation'|'ocr'|'text';state:'UNPERMITTED'|'PERMITTED'|'RECEIVED';permittedAt:string|null;receivedAt:string|null}[];
@@ -30,6 +31,7 @@ export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];
 export interface ImageRetryGrantRef {id:string;slot:number;afterAttempt:number;requestId:string;scope:'generation'|'planning'}
 export interface ImageRetryAllowance {version:1;grants:ImageRetryGrantRef[]}
 export function imageSlotAttemptLimit(run:Pick<ImageWorkflowRun,'maxAttempts'|'retryAllowance'>,slot:number):number{return run.maxAttempts+3*(run.retryAllowance?.grants.filter(grant=>grant.slot===slot&&grant.scope==='generation').length??0);}
+export function imageSlotConsumedAttempts(run:Pick<ImageWorkflowRun,'slots'|'attempt'|'reviewRequests'|'sourceReuse'>,slot:number):number{return (run.slots?.[slot-1]?.attempts.length??run.attempt)+(run.sourceReuse?.reviewRepairCounts?.[slot-1]??0)+(run.reviewRequests?.filter(r=>r.version===2&&r.slot===slot&&r.repair&&r.reservedAt!==null).length??0);}
 export interface ImageSlotAttempt {
   planReuse?:{version:1;fromRequestId:string};
   /** Main-process proof captured only from a definitive provider rejection. Old FAILED strings are not proof. */
@@ -52,12 +54,13 @@ export interface ImageWorkflowSlot {
   contextSha256:string|null;attempts:ImageSlotAttempt[];approvedAssetId:string|null;approvedSha256:string|null;error:string|null;
 }
 export interface ImageWorkflowRun {
+  pendingRequest?:{version:1;callId:string;step:'planning'|'risk'|'ocr'|'text';slot:number;certainty:'SENT_UNKNOWN'};
   reviewRequests?:ImageReviewRequest[];
   retryAllowance?:ImageRetryAllowance;
   /** Absent means historical, not retroactively reviewed. */
   appearanceReviewEnabled?:boolean;
   /** Derivation under the same task; original context and paid attempt prefixes remain owned by the source run. */
-  sourceReuse?:{derivationRunId:string;sourceRunId:string;sourceRunHash:string;sourceProductRevision:number;sourceContext:ProductImageContext;slotAttempts:number[];slotContexts:(string|null)[]};
+  sourceReuse?:{derivationRunId:string;sourceRunId:string;sourceRunHash:string;sourceProductRevision:number;sourceContext:ProductImageContext;slotAttempts:number[];slotContexts:(string|null)[];reviewRepairCounts?:number[]};
   /** Local authorization receipt; never changes image contexts or paid attempts. */
   policyReevaluation?:{version:'source-union-resume/v1';inputSha256:string;at:string;previousRemaining:string[];repairStarted?:boolean};
   rejection?: {version:'rejection-presentation/v1';code:import('./rejection-presentation.ts').OutputRejection['code']|'SOURCE_OBSERVATION_INSUFFICIENT';callId:string;resultId:string|null;contextSha256:string;stage:'content'|'planning';slot:number};
@@ -102,7 +105,7 @@ export function hasSevenApprovedImages(run:ImageWorkflowRun|null|undefined):bool
 /** Metadata eligibility only; the main process must also verify the saved IP, OCR and negative review. */
 export function needsImageTextPolicyReview(attempt:ImageSlotAttempt|undefined):boolean{return !!attempt&&attempt.state==='RETRYABLE_FAILURE'&&!!attempt.candidateId&&!!attempt.planResultId&&!!attempt.ipReviewResultId&&!!attempt.ocrResultId&&!!attempt.reviewResultId&&attempt.textReviewPolicyVersion!==IMAGE_TEXT_REVIEW_POLICY_VERSION;}
 /** Unknown generation can only reconcile its existing request; complete never resends it. */
-export function canResumeImageWorkflow(run:ImageWorkflowRun|null|undefined):boolean{return !!run?.slots&&run.status!=='COMPLETED'&&!run.slots.some(slot=>slot.status==='BLOCKED')&&run.slots.some(slot=>slot.status!=='PASSED'&&(slot.attempts.length<imageSlotAttemptLimit(run,slot.index)||['GENERATING','GENERATED','UNKNOWN','PLANNING','READY'].includes(slot.attempts.at(-1)?.state??'')||slot.index>1&&slot.attempts.at(-1)?.state==='RETRYABLE_FAILURE'&&!!slot.attempts.at(-1)?.ipReviewResultId&&!!slot.attempts.at(-1)?.reviewResultId||run.slotPolicy==='seven-product-v2'&&needsImageTextPolicyReview(slot.attempts.at(-1))));}
+export function canResumeImageWorkflow(run:ImageWorkflowRun|null|undefined):boolean{return !!run?.slots&&run.status!=='COMPLETED'&&!run.slots.some(slot=>slot.status==='BLOCKED')&&run.slots.some(slot=>slot.status!=='PASSED'&&(imageSlotConsumedAttempts(run,slot.index)<imageSlotAttemptLimit(run,slot.index)||['GENERATING','GENERATED','UNKNOWN','PLANNING','READY'].includes(slot.attempts.at(-1)?.state??'')||slot.index>1&&slot.attempts.at(-1)?.state==='RETRYABLE_FAILURE'&&!!slot.attempts.at(-1)?.ipReviewResultId&&!!slot.attempts.at(-1)?.reviewResultId||run.slotPolicy==='seven-product-v2'&&needsImageTextPolicyReview(slot.attempts.at(-1))));}
 export interface CompleteAutomaticProductInput { draftId: string; draftRevision: number }
 export interface CompleteAutomaticProductResult {
   draft: AmazonDraft; aiCalls: number; previewAttempts: number; remaining: string[]; workflow: ImageWorkflowRun;

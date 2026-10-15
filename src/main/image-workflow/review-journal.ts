@@ -1,3 +1,4 @@
+import {readImageReviewLedger,writeImageReviewLedger} from './review-ledger.ts';
 import {imageCopySourceIds} from '../../shared/image-ai-contracts.ts';
 import {localAiRequestResolved,aliyunFinalOutcome} from '../ai/request-certainty.ts';
 import {readCallReceiptSync} from '../ai/receipts.ts';
@@ -46,7 +47,8 @@ export function pendingImageReviewRequests(requests:readonly ImageReviewRequest[
  return (requests??[]).map(validateImageReviewRequest).filter(request=>request.state==='SENT_UNKNOWN');
 }
 
-function writeReviewRun(db:DatabaseSync,run:ImageWorkflowRun,previous:string):void {
+function writeReviewRun(db:DatabaseSync,run:ImageWorkflowRun,previous:string,requestId:string):void {
+ for(const request of run.reviewRequests??[])if(request.version===2&&request.requestId===requestId){const ledger=readImageReviewLedger(db,request.requestId);if(!ledger)throw new UserFacingError('原图片审核安全账缺失，未发送');const callRow=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(request.requestId),resultRow=request.resultId?db.prepare('SELECT record_json FROM ai_results WHERE id=?').get(request.resultId):null;writeImageReviewLedger(db,{...ledger,request,call:callRow?validateAiCall(JSON.parse(String(callRow.record_json))):ledger.call,result:resultRow?validateStoredAiResult(JSON.parse(String(resultRow.record_json))):ledger.result});}
  const valid=validateStoredImageWorkflowRun(run);
  const saved=db.prepare('UPDATE image_workflow_runs SET record_json=? WHERE id=? AND record_json=?').run(JSON.stringify(valid),valid.id,previous);
  if(saved.changes!==1)throw new UserFacingError('图片审核原工作流已变化，未发送新请求');
@@ -66,13 +68,13 @@ export function reservePreparedImageReview(owner:DatabaseSync,borrowed:DatabaseS
  const original=borrowed.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id),usage=borrowed.prepare('SELECT id FROM ai_usage_ledger WHERE id=?').get(call.id);
  if(!original||!usage||JSON.stringify(validateAiCall(JSON.parse(String(original.record_json))))!==JSON.stringify(call)||request.state!=='PREPARED'||!callMatches(request,call)||!call.requestFingerprint||call.startedAt<request.preparedAt)throw new UserFacingError('图片审核预发送身份不一致');
  if(run.reviewRequests?.some(r=>r.requestId!==request.requestId&&r.slot===request.slot&&r.attempt===request.attempt&&r.step===request.step&&r.state==='SENT_UNKNOWN'))throw new UserFacingError('原图片审核请求仍受保护');
- request.state='SENT_UNKNOWN';request.reservedAt=call.startedAt;request.requestFingerprint=call.requestFingerprint;request.effects[0]={...request.effects[0],state:'PERMITTED',permittedAt:call.startedAt};run.updatedAt=[run.updatedAt,call.startedAt].sort().at(-1)!;writeReviewRun(borrowed,run,previous);
+ request.state='SENT_UNKNOWN';request.reservedAt=call.startedAt;request.requestFingerprint=call.requestFingerprint;request.effects[0]={...request.effects[0],state:'PERMITTED',permittedAt:call.startedAt};run.updatedAt=[run.updatedAt,call.startedAt].sort().at(-1)!;writeReviewRun(borrowed,run,previous,request.requestId);
 }
 /** Later effects use the M07 connection, never a second images connection transaction. */
 export function markImageReviewEffect(owner:DatabaseSync,borrowed:DatabaseSync,runId:string,requestId:string,kind:ImageReviewRequestV2['effects'][number]['kind'],event:'permit'|'received',at:string):void {
  assertBorrowedTransaction(owner,borrowed);const {previous,run,request}=readReview(borrowed,runId,requestId),index=request.effects.findIndex(e=>e.kind===kind),effect=request.effects[index];
  if(request.state!=='SENT_UNKNOWN'||!effect||event==='permit'&&(effect.state!=='UNPERMITTED'||request.effects.slice(0,index).some(e=>e.state!=='RECEIVED'))||event==='received'&&effect.state!=='PERMITTED')throw new UserFacingError('图片审核子请求不可重复发送或越过未决身份');
- if(event==='permit'){effect.state='PERMITTED';effect.permittedAt=at;}else{effect.state='RECEIVED';effect.receivedAt=at;}run.updatedAt=[run.updatedAt,at].sort().at(-1)!;writeReviewRun(borrowed,run,previous);
+ if(event==='permit'){effect.state='PERMITTED';effect.permittedAt=at;}else{effect.state='RECEIVED';effect.receivedAt=at;}run.updatedAt=[run.updatedAt,at].sort().at(-1)!;writeReviewRun(borrowed,run,previous,request.requestId);
 }
 /** Link only an actual M07 result to its exact original candidate in the borrowed result TX. */
 export function storeImageReviewResult(owner:DatabaseSync,borrowed:DatabaseSync,runId:string,raw:AiResult):void {
@@ -83,11 +85,12 @@ export function storeImageReviewResult(owner:DatabaseSync,borrowed:DatabaseSync,
  const singular=request.step==='risk'?'ipReviewResultId':request.step==='ocr'?'ocrResultId':'reviewResultId',plural=request.step==='risk'?'ipReviewResultIds':request.step==='ocr'?'ocrResultIds':'reviewResultIds';
  if(run.slots){const attempt=run.slots[request.slot-1].attempts[request.attempt-1];if(attempt[singular]&&attempt[singular]!==result.id)throw new UserFacingError('图片审核已关联其他原结果');attempt[singular]=result.id;run[plural]=[...new Set(run.slots.flatMap(s=>s.attempts.flatMap(a=>a[singular]?[a[singular]!]:[])))];}
  else{const ids=run[plural]??[];if(ids[request.attempt-1]&&ids[request.attempt-1]!==result.id)throw new UserFacingError('旧单图审核已关联其他原结果');if(ids.length<request.attempt-1)throw new UserFacingError('旧单图审核缺少原结果前缀');ids[request.attempt-1]=result.id;run[plural]=ids;}
- run.updatedAt=[run.updatedAt,result.createdAt].sort().at(-1)!;writeReviewRun(borrowed,run,previous);
+ run.updatedAt=[run.updatedAt,result.createdAt].sort().at(-1)!;writeReviewRun(borrowed,run,previous,request.requestId);
 }
 /** Absence proves nothing for legacy. V2 producer intent proves no grant only with no call/hold. */
 export function imageReviewProvenNotSent(db:DatabaseSync,request:ImageReviewRequest):boolean {
- return request.version===2&&request.state==='PREPARED'&&request.effects.every(e=>e.state==='UNPERMITTED')&&!db.prepare('SELECT id FROM ai_calls WHERE id=?').get(request.requestId)&&!db.prepare('SELECT id FROM ai_usage_ledger WHERE id=?').get(request.requestId);
+ const ledger=readImageReviewLedger(db,request.requestId);
+ return ledger!==null&&listingFingerprint(ledger.request)===listingFingerprint(request)&&request.version===2&&request.state==='PREPARED'&&request.effects.every(e=>e.state==='UNPERMITTED')&&!db.prepare('SELECT id FROM ai_calls WHERE id=?').get(request.requestId)&&!db.prepare('SELECT id FROM ai_usage_ledger WHERE id=?').get(request.requestId);
 }
 
 /** Persist a verified known outcome separately from unknown cost; never grants a successor. */
@@ -97,5 +100,5 @@ export function projectImageReviewOutcome(owner:DatabaseSync,borrowed:DatabaseSy
  if(!callMatches(request,call)||call.requestFingerprint!==request.requestFingerprint||!localAiRequestResolved(borrowed,directory,call.id,call))return;
  const saved=readCallReceiptSync(borrowed,directory,call),ali=aliyunFinalOutcome(call,saved);
  if(ali==='invalid'||saved?.record.version===1&&call.status==='FAILED'&&call.errorCode==='OUTPUT_INVALID')request.state='RECEIVED_INVALID';else if(ali==='rejected'||saved?.record.version===1&&call.status==='FAILED'&&saved.record.status>=400&&saved.record.status<500)request.state='DEFINITIVE_REJECTION';else return;
- const at=call.finishedAt??call.startedAt,last=request.effects.at(-1)!;if(last.state==='PERMITTED'){last.state='RECEIVED';last.receivedAt=at;}run.updatedAt=[run.updatedAt,at].sort().at(-1)!;writeReviewRun(borrowed,run,previous);
+ const at=call.finishedAt??call.startedAt,last=request.effects.at(-1)!;if(last.state==='PERMITTED'){last.state='RECEIVED';last.receivedAt=at;}run.updatedAt=[run.updatedAt,at].sort().at(-1)!;writeReviewRun(borrowed,run,previous,request.requestId);
 }

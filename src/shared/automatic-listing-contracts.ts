@@ -95,7 +95,10 @@ export interface AutomaticListingTask {
 }
 export interface StartAutomaticListingInput { workBatchId?:string; executionMode?:import('./ai-batch-contracts.ts').ListingExecutionMode; productIds: string[]; targetId: string; productType?: string; profileId: string }
 export interface AutomaticOperationProgress {taskId:string|null;phase:'PREPARING'|'VERIFYING'|'SAVING';completed:number;total:number;message:string}
+export interface AutomaticRoundSummary {roundId:string;startedAt:string;mode:'continue'|'from-start';taskRevision:number;fees?:{reportedUsdMicros:number;pendingCalls:number;unknownCostCalls:number;coverage:'EXPLICIT_TASK_AND_DRAFT_LINKS'}}
 export interface AutomaticListingApi extends AutomaticTaskQueryApi {
+  restartAutomaticListingTask?(id:string):Promise<AutomaticListingTask|null>;
+  getAutomaticCurrentRound?(id:string):Promise<AutomaticRoundSummary|null>;
   getAutomaticOperationProgress?():Promise<AutomaticOperationProgress|null>;
   onAutomaticOperationProgress?(listener:(progress:AutomaticOperationProgress|null)=>void):()=>void;
   previewAutomaticSalesUnitAdoption(input:AutomaticSalesUnitInput):Promise<AutomaticSalesUnitPreview>;

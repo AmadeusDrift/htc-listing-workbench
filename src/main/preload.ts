@@ -13,6 +13,8 @@ const api: RedApi = {
   saveSkuNamingSettings: input => invoke('red:sku-naming:save', input),
   previewSkuNaming: input => invoke('red:sku-naming:preview', input),
   startAutomaticListing: input => invoke('red:automatic-listing:start', input),
+  restartAutomaticListingTask:id=>invoke('red:automatic-listing:from-start',id),
+  getAutomaticCurrentRound:id=>invoke('red:automatic-listing:round',id),
   getAutomaticOperationProgress:()=>invoke('red:automatic-listing:operation-progress'),
   onAutomaticOperationProgress:listener=>{const receive=(_event:Electron.IpcRendererEvent,progress:import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null)=>listener(progress);ipcRenderer.on('red:automatic-listing:operation-progress-changed',receive);return()=>ipcRenderer.removeListener('red:automatic-listing:operation-progress-changed',receive);},
   listAutomaticWorkBatches: () => invoke('red:automatic-listing:work-batches'),

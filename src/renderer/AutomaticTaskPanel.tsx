@@ -1,5 +1,6 @@
 import { startVisiblePolling, isReadVisible } from './visible-polling.ts';
 import { AutomaticOperationStatus } from './AutomaticOperationStatus';
+import {AutomaticRoundPanel} from './AutomaticRoundPanel';
 import { AutomaticResumePanel } from './AutomaticResumePanel';
 import { AutomaticBatchStatus } from './AutomaticBatchStatus';
 import type { ListingExecutionMode, TaskBatchSummary } from '../shared/ai-batch-contracts';
@@ -48,7 +49,7 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
   // A start resets scope before the next render; reject the previous page effect.
   const readScope=useRef({taskPage,selectedId});readScope.current={taskPage,selectedId};
   const summarize=(value:AutomaticListingTask):AutomaticTaskSummary=>({id:value.id,revision:value.revision,status:value.status,targetName:value.targetName,mode:value.mode,productType:value.productType,ruleRevision:value.ruleRevision,createdAt:value.createdAt,updatedAt:value.updatedAt,error:value.error,sourceProductIds:[...new Set(value.items.map(row=>row.productId))],sourceProductCount:new Set(value.items.map(row=>row.productId)).size,salesSkuCount:value.items.length,counts:summarizeAutomaticItems(value.items)});
-  function adopted(value:AutomaticListingTask){const summary=summarize(value);setTask(summary);setView(null);setTasks(values=>values.map(row=>row.id===value.id?summary:row));setRefresh(v=>v+1);}
+  function adopted(value:AutomaticListingTask){const summary=summarize(value);setTask(summary);setTasks(values=>values.map(row=>row.id===value.id?summary:row));setRefresh(v=>v+1);}
   const mounted = useRef(true), version = useRef(0), actionPending = useRef(false), panel = useRef<HTMLElement>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -131,11 +132,11 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
     catch(cause){if(mounted.current)setError(errorText(cause));}
     finally{actionPending.current=false;version.current++;if(mounted.current){setPending('');setRefresh(v=>v+1);}}
   }
-  async function act(action: 'pause' | 'resume' | 'cancel') {
+  async function act(action: 'pause' | 'resume' | 'cancel' | 'restart') {
     if (!task || busy || actionPending.current) return;
     actionPending.current = true; version.current++; setPending(action); setError('');
     try {
-      const value = await (action === 'pause' ? api.pauseAutomaticListingTask(task.id) : action === 'resume' ? api.resumeAutomaticListingTask(task.id) : api.cancelAutomaticListingTask(task.id));
+      const value = await (action === 'pause' ? api.pauseAutomaticListingTask(task.id) : action === 'resume' ? api.resumeAutomaticListingTask(task.id) : action==='restart'?api.restartAutomaticListingTask?.(task.id):api.cancelAutomaticListingTask(task.id));
       if (mounted.current && value) { adopted(value); }
     } catch (cause) { if (mounted.current) setError((action==='resume'?'本次未启动，未发送新请求：':'')+errorText(cause)); }
     finally { actionPending.current = false; version.current++; if (mounted.current) { setPending(''); setRefresh(value => value + 1); } }
@@ -162,9 +163,11 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
       <p className="small-copy automatic-task-counts" aria-label="任务待确认分类"><OutcomeCount tone="warning" label="本次未选中" value={outcomes.notSelected} /> · <OutcomeCount tone="warning" label="利润淘汰" value={outcomes.profitFiltered} /> · <OutcomeCount tone="warning" label="包装抛重限制" value={outcomes.packagingFiltered}/> · <OutcomeCount tone="warning" label="其他规则淘汰" value={outcomes.ruleFiltered} /> · <OutcomeCount tone="warning" label="待补资料" value={outcomes.needsInput} /> · <OutcomeCount tone="danger" label="系统待修复" value={outcomes.systemRepair} /> · <OutcomeCount tone="warning" label="已收无效输出" value={outcomes.invalidOutput}/> · <OutcomeCount tone="warning" label="结果待核对" value={outcomes.unknown} /> · <OutcomeCount tone="neutral" label="历史未分类" value={outcomes.unclassified} />；原始原因保留在各 SKU 中。</p>
       {error && <p className="workflow-notice" role="alert">任务操作未完成：{error}</p>}
       <div className="workflow-actions">
+        {api.restartAutomaticListingTask&&['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<button type="button" className="button secondary" disabled={busy||Boolean(pending)} onClick={()=>void act('restart')}>{pending==='restart'?'正在从头检查…':'从头检查并补齐'}</button>}
         {!finished && (task.status === 'PAUSED' || task.status === 'NEEDS_ATTENTION' ? <button type="button" className="button primary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('resume'); }}><Play size={15} />{pending === 'resume' ? '正在继续…' : '继续任务'}</button> : <button type="button" className="button secondary" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('pause'); }}><PauseCircle size={15} />{pending === 'pause' ? '正在暂停…' : '暂停任务'}</button>)}
         {!finished && <button type="button" className="button danger-quiet" disabled={busy || Boolean(pending)} title={busy?'当前有操作进行中':pending?'正在处理任务操作':undefined} onClick={() => { void act('cancel'); }}><XCircle size={15} />{pending === 'cancel' ? '正在取消…' : '取消任务'}</button>}
       </div>
+      <AutomaticRoundPanel taskId={task.id} commandPending={Boolean(pending)}/>
       {!finished && <p className="small-copy">暂停与取消会停止后续处理；已经提交的 Amazon 商品与已保存的文件会保留。</p>}
       {['CREATED','PAUSED','NEEDS_ATTENTION'].includes(task.status)&&<AutomaticResumePanel key={`resume:${task.id}`} task={task} disabled={busy||Boolean(pending)} onUpdated={adopted}/>}
       {adaptationError&&<p role="alert" className="workflow-notice">旧任务检查未完成：{adaptationError}</p>}
@@ -179,7 +182,8 @@ export function AutomaticTaskPanel({ workBatchId,taskIds,products, startedTask, 
       </details>
       {task.error && <p className="workflow-notice" role="alert">任务处理未完成，请查看下方逐 SKU 原因。</p>}
       <label className="automatic-group-search"><Search size={16}/><input type="search" aria-label="搜索任务商品或 SKU" placeholder="搜索商品、颜色、来源或销售 SKU" value={search} onChange={event=>{setSearch(event.target.value);setGroupPage(1);}}/></label>
-      {view&&view.task.id===task.id&&view.task.revision===task.revision&&<AutomaticTaskGroups view={view} search={search} onClearSearch={()=>setSearch('')} products={products} sources={sourceProducts} sourceErrors={sourceErrors} sourceCounts={sourceCounts?.taskId===task.id?sourceCounts.counts:undefined} loadingSources={loadingSources} busy={busy} pending={Boolean(pending)} onUpdated={value=>{version.current++;adopted(value);}} onManual={(id,draftId,context)=>{setSelectedId(task.id);onManual(id,draftId,{...context,taskId:task.id});}} onShipping={onShipping}/>}
+      {view&&view.task.id===task.id&&view.task.revision!==task.revision&&<p className="small-copy" role="status">正在读取当前任务进度，已保留上次详情；更新前暂不可操作旧详情。</p>}
+      {view&&view.task.id===task.id&&<AutomaticTaskGroups view={view} search={search} onClearSearch={()=>setSearch('')} products={products} sources={sourceProducts} sourceErrors={sourceErrors} sourceCounts={sourceCounts?.taskId===task.id?sourceCounts.counts:undefined} loadingSources={loadingSources} busy={busy||view.task.revision!==task.revision} pending={Boolean(pending)} onUpdated={value=>{version.current++;adopted(value);}} onManual={(id,draftId,context)=>{setSelectedId(task.id);onManual(id,draftId,{...context,taskId:task.id});}} onShipping={onShipping}/>}
       <nav aria-label="任务来源商品分页"><PageSizeSelect label="任务商品每页数量" value={groupSize} onChange={value=>{setGroupSize(value);setGroupPage(1);}}/><button type="button" disabled={!view||view.page<=1} onClick={()=>setGroupPage((view?.page??1)-1)}>上一页</button><span>第 {view?.page??1} / {Math.max(1,Math.ceil((view?.total??0)/groupSize))} 页 · 共 {view?.total??0} 个来源商品链接</span><button type="button" disabled={!view||view.page>=Math.ceil(view.total/groupSize)} onClick={()=>setGroupPage((view?.page??1)+1)}>下一页</button></nav>
     </div>}
   </section>;

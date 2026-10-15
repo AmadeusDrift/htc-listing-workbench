@@ -3,11 +3,19 @@ import type { AutomaticListingTask } from '../shared/automatic-listing-contracts
 import type { AutomaticListingService } from './automatic-listing/service.ts';
 import { identifier } from '../shared/validation.ts';
 
-interface Hooks { confirm(task: AutomaticListingTask): Promise<boolean>; audit(action: string, summary: string): void; notifyProgress?:(progress:import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null)=>void }
+interface Hooks { confirm(task: AutomaticListingTask,mode?:'from-start'): Promise<boolean>; audit(action: string, summary: string): void; notifyProgress?:(progress:import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null)=>void }
 export function installAutomaticListingIpc(service: AutomaticListingService, handle: IpcHandler, hooks: Hooks):()=>void {
   const progressService=service as AutomaticListingService & {getOperationProgress?:()=>import('../shared/automatic-listing-contracts.ts').AutomaticOperationProgress|null;onOperationProgress?:(listener:NonNullable<Hooks['notifyProgress']>)=>()=>void};
   const release=hooks.notifyProgress?progressService.onOperationProgress?.(hooks.notifyProgress):undefined;
   handle('red:automatic-listing:operation-progress',0,()=>progressService.getOperationProgress?.()??null);
+  const roundService=service as AutomaticListingService & {confirmStartOver?:(id:string,confirm:(task:AutomaticListingTask)=>Promise<boolean>)=>Promise<AutomaticListingTask|null>;getRoundSummary?:(id:string)=>import('../shared/automatic-listing-contracts.ts').AutomaticRoundSummary|null};
+  handle('red:automatic-listing:round',1,id=>roundService.getRoundSummary?.(identifier(id))??null);
+  handle('red:automatic-listing:from-start',1,async id=>{
+    if(!roundService.confirmStartOver)throw Error('从头开始入口未初始化');
+    const task=await roundService.confirmStartOver(identifier(id),task=>hooks.confirm(task,'from-start'));
+    if(task)hooks.audit('automatic-listing.restarted','从头检查原任务并补齐缺失步骤；本轮费用重新统计，历史账与未知请求保留');
+    return task;
+  });
   const start = async (id: string) => {
     const task = await service.confirmStart(id,hooks.confirm);
     if (!task) return null;

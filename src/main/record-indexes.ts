@@ -1,4 +1,8 @@
 /** Exact declarations shared by migration and the backup schema allowlist. Never infer trust from a name alone. */
+export const WORKFLOW_SCOPE_INDEXES = [
+  { table: 'image_workflow_runs', name: 'record_workflow_product', expressions: 1, sql: "CREATE INDEX record_workflow_product ON image_workflow_runs(json_extract(record_json,'$.productId'))" },
+  { table: 'image_workflow_runs', name: 'record_workflow_draft', expressions: 1, sql: "CREATE INDEX record_workflow_draft ON image_workflow_runs(json_extract(record_json,'$.draftId'))" },
+] as const;
 export const COMPLETION_PRODUCT_INDEXES = [
   { table: 'listing_completion_operations', name: 'record_completion_product', expressions: 1, sql: "CREATE INDEX record_completion_product ON listing_completion_operations(json_extract(record_json,'$.safetyIdentity.productId'))" },
 ] as const;

@@ -57,7 +57,7 @@ test('actual stored listing context rejection preserves local validationReason a
   const f=await fixture(t),result=await f.listing.suggest(f.reference),raw=structuredClone(result);
   raw.listingContext!.schemaSha256='0'.repeat(64);
   assert.throws(()=>validateAiResult(raw),(e:any)=>{
-    assert.ok(e instanceof AiError);assert.equal(safeError(e).code,'OUTPUT_INVALID');assert.equal(e.validationReason,'完整 Schema 与记录的规则指纹不一致');assert.deepEqual(outputRejectionDetails(e),{reason:'RESULT_CONTEXT_INVALID',jsonPath:'$.listingContext.schemaSha256'});return true;
+    assert.ok(e instanceof AiError);assert.equal(safeError(e).code,'OUTPUT_INVALID');assert.equal((e as AiError&{validationReason?:string}).validationReason,'完整 Schema 与记录的规则指纹不一致');assert.deepEqual(outputRejectionDetails(e),{reason:'RESULT_CONTEXT_INVALID',jsonPath:'$.listingContext.schemaSha256'});return true;
   });assert.equal(f.requests.length,1);
 });
 test('group scope rejection records exact allowed fields and original context fingerprint with no resend',async t=>{

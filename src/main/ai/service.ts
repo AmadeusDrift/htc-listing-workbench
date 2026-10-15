@@ -43,6 +43,8 @@ import { resolveConsistencyContext } from "../source-image-consistency/scope.ts"
 import { validateConsistencyContext, consistencyScopeKey } from "../source-image-consistency/contracts.ts";
 import { consistencyAttemptUnknown,listConsistencyAttempts,canRetryConsistencyAuthentication,reserveConsistencyAttempt,recordConsistencyAssessment,recordRecoveredConsistency,latestConsistencyAttempt,MAX_SOURCE_ATTEMPTS,assertConsistencyHistory } from '../source-image-consistency/history.ts';
 import { requestSourceConsistency } from '../source-image-consistency/adapter.ts';
+import { createSourceReferenceAliases } from '../source-image-consistency/reference-aliases.ts';
+import { recoverableSourceReceipt, assertSourceReceiptRecovery } from '../source-image-consistency/receipt-recovery.ts';
 import { assertConsistencyView,readConsistencyView,readSourceObservationEvidence,saveConsistencyDecision,assertProductConsistency } from '../source-image-consistency/proof.ts';
 import { allowSourceUnbound, readSourceImageReceipt } from '../source-images.ts';
 import { assertStoredPricingForPaid } from '../amazon/pricing-guard.ts';
@@ -136,6 +138,7 @@ interface PreparedRequest {
   imageContext?: ProductImageContext;
   sourceColorContext?: SourceColorContext;
   sourceConsistencyContext?: SourceConsistencyContext;
+  sourceReferenceAliases?: AiCall['sourceReferenceAliases'];
   recoverRequestBytes?:number;
   recoverReceipt?(body:unknown,context:AdapterContext):AdapterResult;
   invoke(credentials: AiCredentials, context: AdapterContext): Promise<AdapterResult>;
@@ -349,7 +352,7 @@ export class AiService {
     if (!profile.configured) throw new AiError('NOT_CONFIGURED'); if (!profile.enabled) throw new AiError('DISABLED'); return profile;
   }
   listCalls(): AiCall[] { this.ensureOpen(); return this.records.list('ai_calls', {}, validateAiCall); }
-  private readPresentationResult=(raw:unknown):AiResult=>{const result=validateStoredAiResult(raw);assertReceiptRecovery(this.db,this.directory,result,this.getCall(result.callId));assertPresentationResultOwner(result,this.getCall(result.callId),this.db);return result;};
+  private readPresentationResult=(raw:unknown):AiResult=>{const result=validateStoredAiResult(raw);if(result.sourceConsistencyContext)assertSourceReceiptRecovery(this.db,this.directory,result,this.getCall(result.callId));assertReceiptRecovery(this.db,this.directory,result,this.getCall(result.callId));assertPresentationResultOwner(result,this.getCall(result.callId),this.db);return result;};
   listResults(rawProductId: string): AiResult[] { this.ensureOpen(); return this.records.list('ai_results', { productId: uuid(rawProductId) }, this.readPresentationResult); }
   getCall(id: string): AiCall | undefined { this.ensureOpen(); return this.records.get('ai_calls', id, validateAiCall); }
   /** Main-only local derivative of an already paid, retained field response. */
@@ -709,6 +712,20 @@ export class AiService {
       if(!saved){
         const row=this.db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(attempt.callId),call=row?validateAiCall(JSON.parse(String(row.record_json))):null;
         if(!call)throw new UserFacingError('来源观察请求归属记录缺失，历史次数保留；无法安全重试');
+        const recovered=recoverableSourceReceipt(this.db,this.directory,call);
+        if(recovered){
+          const original=call.sourceConsistencyContext!;
+          if(consistencyScopeKey(original)!==consistencyScopeKey(context))throw new AiError('SOURCE_CHANGED');
+          const createdAt=this.finishedAt(call.finishedAt??call.startedAt);
+          const result=validateAiResult({id:randomUUID(),callId:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,variantId:original.variantId,assetId:null,assetSha256:null,sourceResultIds:[],model:call.model,createdAt,reviewState:'unreviewed',sourceSha256:listingFingerprint(original),sourceConsistencyContext:original,output:recovered.output,providerReceiptRecovery:{version:1,receiptId:recovered.saved.record.id,requestFingerprint:call.requestFingerprint!,scopeSha256:listingFingerprint(call.requestScope!),recoveredAt:createdAt}});
+          this.db.exec('BEGIN IMMEDIATE');
+          try{
+            if(JSON.stringify(this.getCall(call.id))!==JSON.stringify(call))throw new AiError('SOURCE_CHANGED');
+            assertSourceReceiptRecovery(this.db,this.directory,result,call);this.assertConsistencyFresh(context);
+            this.db.prepare('INSERT INTO ai_results(id,record_json) VALUES(?,?)').run(result.id,JSON.stringify(result));
+            recordConsistencyAssessment(this.db,result);assertConsistencyHistory(this.db,this.directory);this.db.exec('COMMIT');return result;
+          }catch(error){this.db.exec('ROLLBACK');throw error;}
+        }
         const view=readConsistencyView(this.db,context);
         if(call?.errorCode==='OUTPUT_INVALID'){
           if(view.observations&&view.assessmentId)return{id:view.assessmentId,callId:call.id,recovered:true,output:view.observations};
@@ -743,8 +760,9 @@ export class AiService {
         const input={productId:context.productId,productRevision:context.productRevision,assetId:ref.assetId},asset=this.source(input),bytes=await this.readSource(input,asset,activeSignal);
         await assertFresh();images.push({assetId:asset.id,sha256:asset.sha256,mimeType:asset.mimeType,width:asset.width,height:asset.height,bytes});
       }
-      return{variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceConsistencyContext:context,assertFresh,assertBeforeSend,
-        invoke:async(credentials,adapter)=>{await assertFresh();return requestSourceConsistency(context,credentials as DeepSeekCredentials,activeSignal,adapter,images);}};
+      const sourceReferenceAliases=createSourceReferenceAliases(context);
+      return{variantId:context.variantId,assetId:null,assetSha256:null,sourceResultIds:[],sourceSha256:listingFingerprint(context),sourceConsistencyContext:context,sourceReferenceAliases,assertFresh,assertBeforeSend,
+        invoke:async(credentials,adapter)=>{await assertFresh();return requestSourceConsistency(context,credentials as DeepSeekCredentials,activeSignal,adapter,images,sourceReferenceAliases);}};
     },signal);
   }
   sourceColorContext(input: {productId:string;productRevision:number;variantId:string}): SourceColorContext {
@@ -1139,7 +1157,7 @@ export class AiService {
             if(prepared.sourceColorContext){this.assertSourceColorIdentity(prepared.sourceColorContext);for(const reference of prepared.sourceColorContext.referenceAssets){const asset=this.source({productId:input.productId,productRevision:input.productRevision,assetId:reference.assetId});if(asset.sha256!==reference.sha256)throw new AiError('SOURCE_CHANGED');readManagedImageSync(this.directory,asset);}}
             if(prepared.sourceConsistencyContext){this.assertConsistencyFresh(prepared.sourceConsistencyContext);this.assertConsistencyPricing(prepared.sourceConsistencyContext);}
             prepared.assertBeforeSend?.();
-            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, requestScope:scope,requestFingerprint:this.invocationFingerprint(profile,input,source), ...(prepared.categoryContext?{categoryContext:prepared.categoryContext}:{}), ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}) }, body, call => { assertTaskAuthorized(); const unresolved=this.pendingInvocation(scope,call.id);if(unresolved.length)throw this.unknownInvocation(unresolved[0]); if(prepared.categoryPriorSnapshot&&listingFingerprint(categoryCalls(this.listCalls().filter(c=>c.id!==call.id),input.productId,input.productRevision))!==prepared.categoryPriorSnapshot)throw new AiError('CONFIG_CHANGED'); if(prepared.categoryRepairPriors?.length)claimCategoryRepair(this.db,prepared.categoryRepairPriors,call); if(prepared.forbiddenRetry)claimConfirmedForbiddenRetry(this.db,prepared.forbiddenRetry.prior,call,prepared.forbiddenRetry.scopeKey); freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(owner)transaction(this.db,()=>owner.reserve(this.db,call)); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); evidence({ event: 'REQUEST_RESERVED', callId: call.id, at: call.startedAt, certainty: 'NOT_SENT' }, true); });
+            call = (reservingBatch?this.usage.attachBatch.bind(this.usage):this.usage.reserve.bind(this.usage))({ id, requestScope:scope,requestFingerprint:this.invocationFingerprint(profile,input,source), ...(prepared.categoryContext?{categoryContext:prepared.categoryContext}:{}), ...(durable?{purposeAssignments:durable.assignments}:{}), ...(profile.routing?{purposeSnapshot:profile.routing}:{}), ...(isChatProvider(profile.id)?{thinking:!!profile.thinking}:{}), providerId: profile.id, productId: input.productId, productRevision: input.productRevision, status: 'RUNNING', errorCode: null, requestId: null, model: profile.model, generation: profile.generation, startedAt: this.timestamp(), finishedAt: null, usage: emptyUsage(), ...(prepared.imageContext||prepared.listingContext?{presentationContext:{...(prepared.imagePlanRequestSha256?{imagePlanRequestSha256:prepared.imagePlanRequestSha256}:{}),...(prepared.workflowId?{workflowId:prepared.workflowId}:{}),kind:prepared.imageContext?'image' as const:'listing' as const,draftId:(prepared.imageContext?.listing??prepared.listingContext)!.draftId,variantId:prepared.variantId!,sourceSha256:prepared.sourceSha256!,slot:prepared.imageContext?.slot?.index??0}}:{}), ...(prepared.sourceColorContext?{sourceColorContext:prepared.sourceColorContext}:{}), ...(prepared.sourceConsistencyContext?{sourceConsistencyContext:prepared.sourceConsistencyContext}:{}), ...(prepared.sourceReferenceAliases?{sourceReferenceProtocol:prepared.sourceReferenceAliases.version,sourceReferenceAliases:prepared.sourceReferenceAliases}:{}) }, body, call => { assertTaskAuthorized(); const unresolved=this.pendingInvocation(scope,call.id);if(unresolved.length)throw this.unknownInvocation(unresolved[0]); if(prepared.categoryPriorSnapshot&&listingFingerprint(categoryCalls(this.listCalls().filter(c=>c.id!==call.id),input.productId,input.productRevision))!==prepared.categoryPriorSnapshot)throw new AiError('CONFIG_CHANGED'); if(prepared.categoryRepairPriors?.length)claimCategoryRepair(this.db,prepared.categoryRepairPriors,call); if(prepared.forbiddenRetry)claimConfirmedForbiddenRetry(this.db,prepared.forbiddenRetry.prior,call,prepared.forbiddenRetry.scopeKey); freezeSourceForProduct(this.db,input.productId); if(prepared.imagePlanRequestSha256&&prepared.workflowId&&prepared.imageContext&&this.imagePlanningAttempts(prepared.imageContext,prepared.workflowId)>imagePlanningAllowanceLimit(this.db,prepared.workflowId,prepared.imageContext,prepared.imagePlanRepair))throw new ImagePlanningLimitError(); if(completion)this.completionJournal.markSent(completion,call);durable?.sent?.(call); if(owner)transaction(this.db,()=>owner.reserve(this.db,call)); if(prepared.sourceConsistencyContext)reserveConsistencyAttempt(this.db,prepared.sourceConsistencyContext,call); evidence({ event: 'REQUEST_RESERVED', callId: call.id, at: call.startedAt, certainty: 'NOT_SENT' }, true); });
           },
           onMetadata: value => { if (!finished && (!metadata.usageKnown || value.usageKnown)) metadata = value; },
           onUntrustedOutput: (value,stage) => { if (call && !finished && !activeSignal.aborted) {untrustedOutput = { value };rejectionStage=stage??'operation-output-validation';} },

@@ -60,6 +60,9 @@ export interface AiCall {
   /** Persisted with the usage reservation to prevent repeating an unknown color request. */
   sourceColorContext?: SourceColorContext;
   sourceConsistencyContext?: SourceConsistencyContext;
+  /** Main-only original wire snapshot; excluded from business/cache fingerprints. */
+  sourceReferenceProtocol?: typeof import('./source-reference-alias-contracts.ts').SOURCE_REFERENCE_PROTOCOL;
+  sourceReferenceAliases?: import('./source-reference-alias-contracts.ts').SourceReferenceAliases;
 }
 /** Confidence is normalized to 0..1; Commerce placement is unknown. */
 export interface OcrLine { text: string; confidence: number | null; box: [number, number, number, number] | null }

@@ -7,7 +7,7 @@ import {listingFingerprint} from '../json-fingerprint.ts';
 import {AiError} from './errors.ts';
 import {localAiRequestResolved} from './request-certainty.ts';
 
-const identity=(call:AiCall)=>listingFingerprint({id:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,model:call.model,generation:call.generation,startedAt:call.startedAt,requestScope:call.requestScope??null,requestFingerprint:call.requestFingerprint??null,purposeSnapshot:call.purposeSnapshot??null,presentationContext:call.presentationContext??null,sourceConsistencyContext:call.sourceConsistencyContext??null,sourceColorContext:call.sourceColorContext??null,categoryContext:call.categoryContext??null});
+const identity=(call:AiCall)=>listingFingerprint({id:call.id,providerId:call.providerId,productId:call.productId,productRevision:call.productRevision,model:call.model,generation:call.generation,startedAt:call.startedAt,requestScope:call.requestScope??null,requestFingerprint:call.requestFingerprint??null,purposeSnapshot:call.purposeSnapshot??null,presentationContext:call.presentationContext??null,sourceConsistencyContext:call.sourceConsistencyContext??null,sourceReferenceProtocol:call.sourceReferenceProtocol??null,sourceReferenceAliases:call.sourceReferenceAliases??null,sourceColorContext:call.sourceColorContext??null,categoryContext:call.categoryContext??null});
 /** M07 writes only its original immutable identities and validated results into
  * the staged restore transaction. A usage ledger alone cannot prevent resend. */
 export function retainRequestCallHistory(current:DatabaseSync,snapshot:DatabaseSync,currentDirectory:string,snapshotDirectory:string):void {
@@ -17,7 +17,7 @@ export function retainRequestCallHistory(current:DatabaseSync,snapshot:DatabaseS
     const call=validateAiCall(JSON.parse(String(row.record_json)));if(call.id!==row.id)throw new AiError('INVALID_CONFIG');
     const recovered=has(current,'ai_results')?current.prepare("SELECT id,record_json FROM ai_results WHERE json_extract(record_json,'$.callId')=? AND json_type(record_json,'$.providerReceiptRecovery')='object'").all(call.id):[];
     const protectedReviewPointer=call.providerReceiptId===undefined&&!!call.requestScope&&['generated-image-ocr','image-text-review','image-ip-review'].includes(call.requestScope.operation)&&readCallReceiptSync(current,currentDirectory,call)!==null;
-    if(!recovered.length&&localAiRequestResolved(current,currentDirectory,call.id,call)&&!protectedReviewPointer)continue;
+    if(!recovered.length&&localAiRequestResolved(current,currentDirectory,call.id,call)&&!protectedReviewPointer&&!call.sourceReferenceProtocol)continue;
     const previous=snapshot.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(call.id);
     if(previous){const selected=validateAiCall(JSON.parse(String(previous.record_json)));if(identity(selected)!==identity(call))throw new AiError('INVALID_CONFIG');if(localAiRequestResolved(snapshot,snapshotDirectory,selected.id,selected))continue;}
     // Preserve the complete producer JSON, including optional future alias

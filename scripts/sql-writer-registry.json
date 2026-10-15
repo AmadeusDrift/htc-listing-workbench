@@ -107,6 +107,7 @@
         "recoverFieldCandidates|INSERT|ai_results",
         "recoverGroupedField|INSERT|ai_results",
         "recoverImagePlan|INSERT|ai_results",
+        "observeSourceConsistency|INSERT|ai_results",
         "runFieldGroups|INSERT|ai_results",
         "saveCall|INSERT|ai_calls",
         "saveProfile|INSERT|ai_profiles",
@@ -119,6 +120,7 @@
         "runFieldGroups|a2f94624e3ba4c8064174edf125a3ce6b421acbb2193e542153944233269355f": 1,
         "recoverGroupedField|a2f94624e3ba4c8064174edf125a3ce6b421acbb2193e542153944233269355f": 1,
         "recoverImagePlan|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1,
+        "observeSourceConsistency|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1,
         "start|09080e7a9793666fc74069575a004ad5dc6dc3901640860ca484fd4acbba6f88": 1
       }
     },

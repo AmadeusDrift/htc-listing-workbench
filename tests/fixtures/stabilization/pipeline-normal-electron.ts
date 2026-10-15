@@ -7,13 +7,18 @@ import {createNormalServices} from './pipeline-normal-services.ts';
 import {createSystemProxyFetch} from '../../../src/main/ai-network.ts';
 import {AiSpendBudget} from '../../../src/main/ai/spend-budget.ts';
 import {openDatabase} from '../../../src/main/database.ts';
-const guard=(globalThis as typeof globalThis&{__s10Guard?:{installedBeforeMain:boolean;blocked:string[];nativeProtocolSent:number;nodeProtocolSent:number}}).__s10Guard;
+const guard=(globalThis as typeof globalThis&{__s10Guard?:{installedBeforeMain:boolean;blocked:string[];nativeProtocolSent:number;nodeProtocolSent:number;withRoutePermit:<T>(permit:unknown,work:()=>T)=>T}}).__s10Guard;
 assert.ok(guard?.installedBeforeMain);assert.ok(process.env.RED_DATA_DIR&&process.env.S10_POLICY_FILE);
 const activeGuard=guard;
 const policy=JSON.parse(readFileSync(process.env.S10_POLICY_FILE,'utf8')),root=process.env.RED_DATA_DIR,config=JSON.parse(readFileSync(join(root,'normal-config.json'),'utf8'));assert.equal(root,policy.dataRoot);
 app.setPath('userData',root);app.setName('S10 real normal synthetic worker');app.enableSandbox();
 void app.whenReady().then(async()=>{
-  const fetcher=createSystemProxyFetch((url,init)=>net.fetch(url,init)),s=createNormalServices(root,safeStorage,fetcher,()=>new Date(config.clock));
+  const fetcher=createSystemProxyFetch(async(url,init={})=>{
+    const frozen={...init,headers:Object.fromEntries(new Headers(init.headers)),...(init.body!==undefined?{body:typeof init.body==='string'?init.body:new Uint8Array(Buffer.from(init.body as Uint8Array))}:{})},method=String(frozen.method??'GET').toUpperCase(),headers=new Headers(frozen.headers);
+    if(config.staticRequests.some((row:{url:string;method:string;action?:string})=>row.url===String(url)&&row.method===method&&(!row.action||row.action===headers.get('x-acs-action'))))return net.fetch(url,frozen);
+    const registration=await net.fetch(config.registerUrl,{method:'POST',headers:{authorization:'Bearer s10-normal-controller','content-type':'application/json'},body:JSON.stringify({url:String(url),method,headers:Object.fromEntries(headers),body:Buffer.from((frozen.body??'') as Uint8Array).toString('base64')}),redirect:'error'});
+    if(registration.status!==200)throw Error('S10_CONTROLLER_REGISTRATION_FAILED: '+await registration.text());const permit=await registration.json();return activeGuard.withRoutePermit(permit,()=>net.fetch(url,frozen));
+  }),s=createNormalServices(root,safeStorage,fetcher,()=>new Date(config.clock));
   const report={normalOnly:true,businessStarted:false,identity:{pid:process.pid,executable:process.execPath,dataRoot:root,userData:app.getPath('userData'),electron:process.versions.electron},blocked:guard.blocked};
   let configured=false,productId:string|undefined,targetId:string|undefined,taskId:string|undefined;
   async function configure(){if(configured)return;const {keys}=config;

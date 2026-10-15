@@ -1,0 +1,36 @@
+// Controller-only authority. Reads the synthetic worker's persisted owners/files;
+// never writes business records or accepts caller-supplied paths/credentials.
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {readFile,readdir} from 'node:fs/promises';
+import {join} from 'node:path';
+import {createRequire} from 'node:module';
+import {listingReply} from './pipeline-normal-draft.mjs';
+const {sha}=createRequire(import.meta.url)('./pipeline-route-permit.cjs');
+const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+export async function authorizeNormalRoute({workspace,config,provider,input}){
+  assert.ok(workspace,'S10_CONTROLLER_NOT_BOUND');assert.deepEqual(Object.keys(input).sort(),['body','headers','method','url']);assert.ok(typeof input.url==='string'&&new URL(input.url).href===input.url&&!/%(?:2e|2f|5c)|\\|\.\./i.test(input.url),'S10_DYNAMIC_URI');
+  const bytes=Buffer.from(input.body,'base64');assert.equal(bytes.toString('base64'),input.body);const url=new URL(input.url),headers=new Headers(input.headers),db=new DatabaseSync(join(workspace,'red.sqlite'),{readOnly:true});
+  let tasks,drafts;try{tasks=db.prepare('SELECT record_json FROM automatic_listing_tasks').all().map(row=>JSON.parse(row.record_json));drafts=db.prepare('SELECT record_json FROM listing_drafts WHERE record_json IS NOT NULL').all().map(row=>JSON.parse(row.record_json));}finally{db.close();}
+  assert.equal(tasks.length,1,'S10_ONE_OWNED_TASK');const task=tasks[0];assert.equal(task.items.length,1);assert.equal(task.sellerId,config.amazon.sellerId);assert.equal(task.mode,'live');const owner=task.items[0];
+  let protocol,response;
+  if(url.origin==='https://sellingpartnerapi-na.amazon.com'){
+    const record=drafts.find(row=>row.draft.id===owner.draftId),draft=record?.draft;assert.ok(draft&&draft.productId===owner.productId&&draft.sku===owner.sku&&draft.sellerId===task.sellerId&&draft.targetId===task.targetId,'S10_DRAFT_OWNER');assert.equal(draft.listingProgram,'haul');
+    const operation=input.method==='GET'?'readback':url.searchParams.has('mode')?'preview':'submit';assert.equal(input.method,operation==='readback'?'GET':'PUT');assert.equal(url.pathname,`/listings/2021-08-01/items/${task.sellerId}/${owner.sku}`);
+    const query={marketplaceIds:task.marketplaceId,issueLocale:'en_US',...(operation==='preview'?{mode:'VALIDATION_PREVIEW',includedData:'issues'}:operation==='submit'?{includedData:'issues'}:{includedData:'summaries,issues,attributes,offers,fulfillmentAvailability,relationships'})};assert.equal(url.search,'?'+new URLSearchParams(query));
+    if(operation==='readback')assert.equal(bytes.length,0);else assert.equal(bytes.toString(),JSON.stringify({productType:draft.schema.productType,requirements:draft.schema.requirements,attributes:draft.attributes}),'S10_DRAFT_WIRE_BODY');
+    protocol={kind:'amazon',operation,sellerId:task.sellerId,sku:owner.sku,accessToken:'s10-normal-amazon-token',now:config.clock,...(operation==='readback'?{}:{bodySha256:sha(bytes)})};response={json:listingReply(operation,{sku:owner.sku})};
+  }else if(url.origin==='https://htc.185858.xyz'){
+    assert.equal(input.method,'GET');assert.equal(bytes.length,0);assert.ok(url.pathname.startsWith('/AAA/'));const remotePath='/s10/'+url.pathname.slice(5),upload=provider.ledger().findLast(row=>row.event==='ftp-upload'&&row.path===remotePath);assert.ok(upload,'S10_PUBLIC_REQUIRES_ACTUAL_STOR');const actual=await provider.readFtp(remotePath);assert.equal(sha(actual),upload.bodySha256);protocol={kind:'public-image',remotePath,sha256:upload.bodySha256};response={fromFtpPath:remotePath,contentType:'image/png'};
+  }else{
+    const folder=join(workspace,'image-generation','candidates'),ids=(await readdir(folder)).filter(id=>uuid.test(id)),candidates=await Promise.all(ids.map(async id=>{const candidate=JSON.parse(await readFile(join(folder,id,'candidate.json'),'utf8'));assert.equal(candidate.id,id);return candidate;}));
+    let candidate;if(url.origin==='https://s10-normal-bucket.oss-cn-shanghai.aliyuncs.com'){assert.equal(input.method,'PUT');const id=url.pathname.slice(5,-4);assert.ok(uuid.test(id));candidate=candidates.find(row=>row.id===id);assert.ok(candidate);assert.equal(url.pathname,'/s10/'+candidate.id+'.png');protocol={kind:'oss4',bucket:'s10-normal-bucket',region:'cn-shanghai',candidateId:candidate.id,objectName:'s10/'+candidate.id+'.png',contentType:'image/png',bodySha256:sha(bytes),accessKeyId:'s10-temporary-id',accessKeySecret:'s10-temporary-secret',securityToken:'s10-temporary-token',now:config.clock};response={bytes:Buffer.alloc(0)};
+    }else if(input.url==='https://ocr-api.cn-hangzhou.aliyuncs.com/?Type=Commerce'){assert.equal(input.method,'POST');candidate=candidates.find(row=>row.sha256===sha(bytes));assert.ok(candidate,'S10_OCR_CANDIDATE');protocol={kind:'acs3',action:'RecognizeAllText',version:'2021-07-07',contentType:'application/octet-stream',bodySha256:sha(bytes)};response={json:{Code:'success',RequestId:'s10-normal-ocr-'+candidate.id,Data:{Width:candidate.width,Height:candidate.height,Content:'',SubImageCount:0,SubImages:[]}}};
+    }else if(input.url==='https://green-cip.cn-shanghai.aliyuncs.com/'&&headers.get('x-acs-action')==='ImageModeration'){
+      assert.equal(input.method,'POST');const parameters=new URLSearchParams(bytes.toString());assert.equal(parameters.get('Service'),'aigcViolationDetection');const values=JSON.parse(parameters.get('ServiceParameters'));candidate=candidates.find(row=>row.id===values.dataId);assert.ok(candidate);assert.equal(bytes.toString(),new URLSearchParams({Service:'aigcViolationDetection',ServiceParameters:JSON.stringify({ossBucketName:'s10-normal-bucket',ossObjectName:'s10/'+candidate.id+'.png',ossRegionId:'cn-shanghai',dataId:candidate.id})}).toString());assert.ok(provider.ledger().some(row=>row.event==='request'&&row.routeId==='normal-dynamic-'+sha('https://s10-normal-bucket.oss-cn-shanghai.aliyuncs.com/s10/'+candidate.id+'.png'+'PUT'+candidate.sha256).slice(0,32)),'S10_MODERATION_REQUIRES_UPLOAD');protocol={kind:'acs3',action:'ImageModeration',version:'2022-03-02',contentType:'application/x-www-form-urlencoded',bodySha256:sha(bytes)};response={json:{Code:200,RequestId:'s10-normal-risk-'+candidate.id,Data:{DataId:candidate.id,RiskLevel:'none',Result:[]}}};
+    }else throw Error('S10_DYNAMIC_ROUTE_DENIED');
+    assert.equal(candidate.productId,owner.productId);const actual=await readFile(join(folder,candidate.id,'image.png'));assert.equal(sha(actual),candidate.sha256);assert.equal(actual.length,candidate.byteSize);if(protocol.kind==='oss4'||protocol.action==='RecognizeAllText')assert.equal(sha(bytes),candidate.sha256);
+    if(protocol.kind==='acs3')Object.assign(protocol,{accessKeyId:config.keys.accessKeyId,accessKeySecret:config.keys.accessKeySecret,now:config.clock,nonce:config.nonce});
+  }
+  const id='normal-dynamic-'+sha(input.url+input.method+sha(bytes)).slice(0,32);return {route:{id,method:input.method,path:'/normal/dynamic/'+id,publicUrl:input.url,protocol,native:true},response,bytes,headers};
+}

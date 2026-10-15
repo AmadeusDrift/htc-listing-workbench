@@ -2,6 +2,7 @@
 const fs=require('node:fs'),path=require('node:path'),{AsyncLocalStorage}=require('node:async_hooks');
 const protocolRequest=require('node:http').request,{Readable}=require('node:stream');
 const httpScope=new AsyncLocalStorage(),electronScope=new AsyncLocalStorage();
+const permitScope=new AsyncLocalStorage(),usedPermits=new Set(),permitApi=require('./pipeline-route-permit.cjs');
 const {worktreeRoot,trustedWithin}=require('./trusted-path.cjs');
 const {validateProtocolRoute,verifyProtocol}=require('./pipeline-protocol.cjs');
 const trusted=(base,target)=>{try{if(!trustedWithin(base,target))throw Error();}catch{throw Error('S10_PATH_UNTRUSTED');}};
@@ -19,6 +20,7 @@ function freezePolicy(value){if(value&&typeof value==='object'){for(const part o
 for(const key of Object.keys(process.env))if(/^(OPENAI|OPENROUTER|DEEPSEEK|ALIYUN|AMAZON|AWS|FTP|MIAOSHOU|RED_|FIRMNESS_SOURCE|SOURCE_)/i.test(key)||/(?:PROXY|API_KEY|ACCESS_KEY|TOKEN|PASSWORD|SECRET)$/i.test(key))delete process.env[key];
 process.env.RED_DATA_DIR=policy.dataRoot;process.env.RED_E2E='1';
 const state={installedBeforeMain:true,blocked:[],allowed:0,nodeProtocolSent:0,nativeProtocolSent:0,dataRoot:policy.dataRoot};Object.defineProperty(state,'require',{value:require});Object.defineProperty(globalThis,'__s10Guard',{value:state});
+if(policy.permitAuthority){if(!/^s10-[a-f0-9-]{36}$/.test(policy.permitAuthority.runId)||!/^s10-[a-f0-9]{64}$/.test(policy.permitAuthority.key))throw Error('S10_POLICY_PERMIT_INVALID');Object.defineProperty(state,'withRoutePermit',{value:(envelope,work)=>{const permit=permitApi.verify(policy.permitAuthority,envelope);if(usedPermits.has(permit.sequence))throw Error('S10_PERMIT_REPLAY');validateProtocolRoute(permit.route);freezePolicy(permit);usedPermits.add(permit.sequence);return permitScope.run(permit,work);}});}
 const deny=transport=>{state.blocked.push(transport);throw Error('S10_NETWORK_BLOCKED: '+transport);};
 function rawPathSafe(value){if(/\\|%2e|%2f|%5c|\/\.\.?(?:\/|$)/i.test(value))deny('path');}
 function mapped(input,init={},transport='fetch'){
@@ -27,10 +29,11 @@ function mapped(input,init={},transport='fetch'){
   if(url.username||url.password||url.hash)return deny(transport);
   const headers=new Headers(init.headers??input?.headers);
   if([...headers.keys()].some(name=>name.startsWith('x-s10-native-')))return deny('native-capability:'+transport);
-  const route=policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
+  const permit=permitScope.getStore(),dynamic=permit?.route,route=(dynamic&&dynamic.method===method&&dynamic.publicUrl===raw?dynamic:null)??policy.routes.find(row=>row.method===method&&(row.publicUrl===raw||raw===origin.origin+row.path)&&(!row.protocol||row.protocol.kind!=='acs3'||headers.get('x-acs-action')===row.protocol.action));if(!route)return deny(transport);
+  if(route===dynamic&&(permitApi.headerHash(headers)!==permit.headersSha256||permitApi.sha(wireBody(init.body))!==permit.bodySha256))return deny('permit-input');
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
-    const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText'||route.native===true&&['public-source','public-bytes','public-image','lwa','amazon'].includes(route.protocol.kind);
+    const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText'||route.native===true&&['public-source','public-bytes','public-image','lwa','amazon','acs3','oss4'].includes(route.protocol.kind);
     if(!['fetch','electron.net.fetch'].includes(transport)||transport==='electron.net.fetch'&&!nativeSupported||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');
     try{verifyProtocol(route,headers,wireBody(init.body));}catch{return deny('protocol-auth');}
@@ -110,7 +113,7 @@ function installElectron(electron){
     const request=mapped(input,init,'session.fetch');return electronScope.run(request,()=>original(request.url,{...init,method:request.method,headers:request.headers,redirect:'error'}));
   };
     session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,done)=>{if(/^(file|data|red|red-asset|devtools):/.test(details.url))return done({});
-      try{rawPathSafe(details.url);const url=new URL(details.url);if(url.origin!==origin.origin||url.search||url.hash||!policy.routes.some(row=>row.method===details.method&&row.path===url.pathname))throw Error();done({});}catch{state.blocked.push('Chromium');done({cancel:true});}});
+      try{rawPathSafe(details.url);const url=new URL(details.url);if(url.origin!==origin.origin||url.search||url.hash||!policy.routes.some(row=>row.method===details.method&&row.path===url.pathname)&&![...nativePending.values()].some(p=>p.request.url===details.url&&p.request.method===details.method))throw Error();done({});}catch{state.blocked.push('Chromium');done({cancel:true});}});
     session.webRequest.onBeforeSendHeaders({urls:[origin.origin+'/*']},(details,done)=>{try{
       const headers=new Headers(details.requestHeaders),capability=headers.get('x-s10-native-capability');
       if(capability){const pending=nativePending.get(capability);if(!pending||pending.sent||pending.request.url!==details.url||pending.request.method!==details.method)throw Error('S10_NATIVE_IDENTITY');

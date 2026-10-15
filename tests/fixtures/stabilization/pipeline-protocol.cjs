@@ -6,7 +6,7 @@ const secret=value=>assert.ok(typeof value==='string'&&/^s10-[a-z0-9-]{4,100}$/.
 const paths=['/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_list','/open/v1/product/common_collect_box/common_collect_box/get_common_collect_box_detail'];
 const amazonMethods={library:'GET',definitions:'GET',preview:'PUT',submit:'PUT',readback:'GET'};
 function amazonUrl(p){
-  const base='https://sellingpartnerapi-na.amazon.com';assert.match(p.sellerId,/^S10[A-Za-z0-9_-]*$/);assert.match(p.sku,/^S10[A-Za-z0-9_-]*$/);
+  const base='https://sellingpartnerapi-na.amazon.com';assert.match(p.sellerId,/^S10[A-Za-z0-9_-]*$/);assert.match(p.sku,/^(?:S10[A-Za-z0-9_-]*|H2-[0-9]{6}-[0-9]+)$/);
   const common={marketplaceIds:'ATVPDKIKX0DER',issueLocale:'en_US'};let pathname,query;
   if(p.operation==='library'){pathname='/definitions/2020-09-01/productTypes';query={marketplaceIds:common.marketplaceIds,locale:'en_US'};}
   else if(p.operation==='definitions'){assert.ok(['DRINK_COASTER','FIGURINE'].includes(p.productType));assert.ok(['NONE','PARENT','CHILD'].includes(p.parentageLevel));pathname='/definitions/2020-09-01/productTypes/'+p.productType;query={sellerId:p.sellerId,marketplaceIds:common.marketplaceIds,requirements:'LISTING',requirementsEnforced:'ENFORCED',parentageLevel:p.parentageLevel,locale:'en_US',productTypeVersion:'LATEST'};}
@@ -33,7 +33,7 @@ function validateProtocolRoute(route){
   }else if(p.kind==='public-bytes'){
     assert.ok(/^https:\/\/selling-partner-definitions-prod-iad\.s3\.amazonaws\.com\/schema\/s10\/(drink-coaster-us|figurine-parent-us)\/(schema|meta-schema)\.json$/.test(route.publicUrl),'S10_PROTOCOL_PUBLIC_BYTES');
   }else if(p.kind==='public-image'){
-    assert.match(p.sha256,/^[a-f0-9]{64}$/);assert.equal(p.remotePath,`/s10/references/${p.sha256}.png`);assert.equal(route.publicUrl,`https://htc.185858.xyz/AAA/references/${p.sha256}.png`);
+    assert.match(p.sha256,/^[a-f0-9]{64}$/);const reference=`references/${p.sha256}.png`;let relative=p.remotePath?.slice(5);assert.ok(p.remotePath===`/s10/${reference}`||/^\d{8}\/[a-f0-9-]{36}\/[a-f0-9-]{36}-[a-f0-9]{16}\.png$/.test(relative)&&relative.endsWith('-'+p.sha256.slice(0,16)+'.png'),'S10_PUBLIC_IMAGE_PATH');assert.equal(route.publicUrl,`https://htc.185858.xyz/AAA/${relative}`);
   }else if(p.kind==='public-source'){
     assert.equal(route.publicUrl,'https://cbu01.alicdn.com/s10/blue-coaster.png');
   }else throw Error('S10_PROTOCOL_UNIMPLEMENTED');

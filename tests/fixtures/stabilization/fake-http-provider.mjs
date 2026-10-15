@@ -89,6 +89,7 @@ export async function createFakeProvider({directory,routes,responders={},ftp=fal
     });ftpPort=await listen(controlServer);
   }
   return {origin:`http://127.0.0.1:${port}`,port,routes:known.map(({response,...route})=>structuredClone(route)),directory,ledgerPath:ledger.path,
+    register(route,respond){assert.ok(!closed&&typeof respond==='function','S10_REGISTRATION_CLOSED');const copy=verifyRoutes([...known,route]).at(-1);known.push(copy);responders[copy.id]=respond;ledger.append({event:'route-registered',routeId:copy.id,method:copy.method,path:copy.path,publicUrlSha256:digest(copy.publicUrl)});return structuredClone(copy);},
     ftp:ftp?{host:'127.0.0.1',port:ftpPort,dataPort,user:'s10-user',password:'s10-password'}:null,
     ledger:()=>structuredClone(ledger.rows),release(id){const releases=held.get(id)??[];held.delete(id);releases.forEach(fn=>fn());},readFtp:path=>readFile(ftpPath(path)),
     async close(){if(closed)return;closed=true;held.clear();for(const socket of [...sockets,...ftpSockets])socket.destroy();await Promise.all([server,controlServer,dataServer].filter(Boolean).map(value=>new Promise(done=>value.close(done))));}

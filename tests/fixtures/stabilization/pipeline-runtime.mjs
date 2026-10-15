@@ -18,7 +18,9 @@ export async function cleanupFailure({close,force,record,timeoutMs=2000},failure
 export async function writePolicy({directory,provider,guardFile}){
   directory=resolve(directory);assertTrustedWithin(join(worktreeRoot,'.test-data'),directory);assertTrustedWithin(join(worktreeRoot,'tests/fixtures/stabilization'),guardFile);
   await mkdir(directory,{recursive:true});assertTrustedWithin(worktreeRoot,directory);const dataRoot=join(directory,'workspace');await mkdir(dataRoot);
+  provider.bindWorkspace?.(dataRoot);
   const policy={version:1,origin:provider.origin,routes:provider.routes,dataRoot,reportPath:join(directory,'guard-report'),ftp:provider.ftp?{port:provider.ftp.port,dataPort:provider.ftp.dataPort}:null};
+  if(provider.permitAuthority)policy.permitAuthority=provider.permitAuthority;
   const path=join(directory,'policy.json');await writeFile(path,JSON.stringify(policy,null,2),{flag:'wx'});return {path,dataRoot,directory,origin:provider.origin};
 }
 export async function fixtureInventory(){

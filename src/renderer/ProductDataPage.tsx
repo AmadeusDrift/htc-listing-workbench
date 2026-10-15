@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import { PageSizeSelect, useListPageSize } from './ListPagination';
 import { usePageState } from './navigation-context';
 import { useEffect, useRef, useState } from 'react';
@@ -44,6 +45,7 @@ function Metric({ name, rows, read, source }: {
 }
 const count = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString();
 export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettings }: Props) {
+  const readElement = useRef<HTMLElement>(null);
   const [pageSize, setPageSize] = useListPageSize('product-data');
   const live = targets.filter(target => target.mode === 'live');
   const [selection, setSelection] = usePageState('data:selection', '');
@@ -75,9 +77,8 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
         if (initial && active && requestId.current === id) setLoading(false);
       }
     }
-    void read(true);
-    const timer = window.setInterval(() => { if (currentSnapshot.current?.job.state === 'running') void read(); }, 2500);
-    return () => { active = false; window.clearInterval(timer); };
+    const stop = startVisiblePolling(async resumed => { if (resumed || currentSnapshot.current?.job.state === 'running') await read(true); return 5000; }, { element: () => readElement.current });
+    return () => { active = false; stop(); };
   }, [targetId]);
   async function action(kind: 'get' | 'sync' | 'stop') {
     if (!targetId || acting.current) return;
@@ -104,7 +105,7 @@ export function ProductDataPage({ targets, busy, onOpen, onProcurement, onSettin
     && (row.title + ' ' + row.sku + ' ' + (row.listing.value?.asin ?? '')).toLowerCase().includes(query.trim().toLowerCase()));
   const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
   useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
-  return <section className="operations-page product-data-page">
+  return <section ref={readElement} className="operations-page product-data-page">
     <div className="ops-toolbar">
       <label className="ops-grow">查看哪个店铺<select value={targetId} disabled={busy || loading || running} onChange={event => { setSelection(event.target.value); setPage(0); }}>
         {!live.length && <option value="">尚未连接正式店铺</option>}{live.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}

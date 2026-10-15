@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import { sanitizeFailureReason } from '../shared/automatic-resume';
 import { ImageRetryAllowance } from './ImageRetryAllowance';
 import { imageSlotAttemptLimit } from '../shared/image-workflow-contracts';
@@ -20,10 +21,10 @@ export function ImageSlotProgress({draftId,revision,active,sku,color,defaultExpa
   const setRun=(value:ImageWorkflowProgress|null)=>setSnapshot({draftId,run:value});
   useEffect(()=>{if(active)setExpanded(true);},[active]);
   useEffect(()=>{
-    let current=true,timer:ReturnType<typeof setTimeout>|undefined;
-    const read=async()=>{try{const value=await window.red.getAutomaticProductProgress(draftId);if(current){setRun(value);setLoaded(true);setError('');}}catch(cause){if(current)setError(errorText(cause));}finally{if(current&&active)timer=setTimeout(()=>void read(),2000);}};
-    void read();return()=>{current=false;if(timer)clearTimeout(timer);};
-  },[draftId,revision,active]);
+    let current=true;
+    const read=async()=>{try{const value=await window.red.getAutomaticProductProgress(draftId);if(current){setRun(value);setLoaded(true);setError('');}}catch(cause){if(current)setError(errorText(cause));}return active?4000:null;};
+    const stop=startVisiblePolling(read,{element:()=>container.current,visible:()=>expanded});return()=>{current=false;stop();};
+  },[draftId,revision,active,expanded]);
   useEffect(()=>{
     if(focusSlot===undefined || !loaded || located.current)return;
     if(!run?.slots?.some(slot=>slot.index===focusSlot)){setLocationError(`目标图位 ${focusSlot} 已不存在或没有保存记录；未定位其他图位。`);return;}
@@ -32,8 +33,8 @@ export function ImageSlotProgress({draftId,revision,active,sku,color,defaultExpa
     if(target){target.scrollIntoView({block:'center'});target.focus({preventScroll:true});located.current=true;}
   },[loaded,run,focusSlot,expanded]);
   if(locationError)return <p className="workflow-warning" role="alert">{locationError}</p>;
-  if(error)return <p className="small-copy" role="status">图片进度暂不可读：{error}</p>;
-  if(!run)return null;
+  if(error)return <details ref={container} className="image-slot-progress" open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}><summary>图片进度暂不可读</summary><p className="small-copy" role="status">{error}</p></details>;
+  if(!run)return <details ref={container} className="image-slot-progress" open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}><summary>图片进度</summary>{expanded&&<p className="small-copy">正在读取图片进度…</p>}</details>;
   const unknown=run.resultUnknown===true||run.slots?.some(s=>s.status==='UNKNOWN'||s.attempts.some(a=>['UNKNOWN','GENERATING'].includes(a.state)));
   const failure=unknown||run.error||run.rejection?<p className="workflow-warning" role="status">{run.error?sanitizeFailureReason(run.error):presentRejection(run.rejection?.code,unknown)}</p>:null;
   if(!run.slots)return <>{failure}<p className="small-copy">历史单图流程 · 新自动准备需要七张通过审核的图片。</p></>;

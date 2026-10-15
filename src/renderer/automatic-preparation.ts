@@ -1,3 +1,4 @@
+import { startVisiblePolling } from './visible-polling.ts';
 import type { AmazonDraft, AmazonTarget } from '../shared/amazon-contracts.ts';
 import type { ProductDetail, RedApi } from '../shared/contracts.ts';
 import type { ListingRules } from '../shared/listing-rules.ts';
@@ -47,7 +48,7 @@ function reusableDraft(drafts: AmazonDraft[], row: AutomaticPreparationItem, tar
 
 /** A bounded preparation run that downloads mapped sources but never submits listings. */
 export async function runAutomaticPreparation(api: AutomaticPreparationApi, input: { plan: AutomaticPreparationPlan; target: AmazonTarget; productType: string },
-  options: { signal?: AbortSignal; onProgress?: (rows: AutomaticPreparationProgress[]) => void } = {}): Promise<AutomaticPreparationProgress[]> {
+  options: { signal?: AbortSignal; isProgressVisible?: () => boolean; onProgress?: (rows: AutomaticPreparationProgress[]) => void } = {}): Promise<AutomaticPreparationProgress[]> {
   const { plan, target } = input, productType = input.productType.trim(), { signal } = options;
   if (!target.configured || target.paused) throw new Error('请选择已配置且启用的目标店铺');
   if (!productType) throw new Error('请先确认商品类型');
@@ -126,18 +127,19 @@ export async function runAutomaticPreparation(api: AutomaticPreparationApi, inpu
         activeDraft = row.draft.id;
         publish(row, { state: 'completing' });
         if (signal?.aborted) break;
-        let polling = true, timer: ReturnType<typeof setTimeout> | undefined;
-        const stopPolling = () => { polling = false; if (timer) clearTimeout(timer); };
+        let polling = true;
+        let stopRead = () => {};
+        const stopPolling = () => { polling = false; stopRead(); };
         const poll = async () => {
           try {
             const workflow = await api.getAutomaticProductProgress(row.draft!.id);
             if (polling && workflow) publish(row, { workflow });
           } catch { /* A transient progress read must not retry the active paid operation. */ }
-          finally { if (polling && !signal?.aborted) timer = setTimeout(() => { void poll(); }, 750); }
+          return 1500;
         };
         try {
           const pending = api.completeAutomaticProduct({ draftId: row.draft.id, draftRevision: row.draft.revision });
-          void poll();
+          stopRead = startVisiblePolling(poll, { visible: () => !signal?.aborted && (options.isProgressVisible?.() ?? true) });
           const result = await pending;
           stopPolling();
           const { workflow } = result;

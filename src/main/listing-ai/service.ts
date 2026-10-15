@@ -426,7 +426,22 @@ export class ListingAiService {
     // Preserve the response under its original frozen context before evaluating
     // whether changed current data still permits adoption. Never runs on startup.
     const prior=operationId?journal.get(operationId):journal.list(initial.draftId).find(op=>op.state==='ACTIVE');
-    if(prior){if(prior.draftId!==initial.draftId)throw new UserFacingError('字段操作不属于当前草稿');journal.recoverReceived(prior.id);}
+    if(prior){
+      if(prior.draftId!==initial.draftId)throw new UserFacingError('字段操作不属于当前草稿');
+      journal.recoverReceived(prior.id);
+      // A derived-evidence policy change must not conceal an unresolved paid
+      // request. Recover retained outputs first; groups and Batch keep their
+      // existing recovery entry points. The journal validates the original
+      // owner and ledger before reporting an unknown ordinary request.
+      if(journal.unknown(prior.id)){
+        const pending=journal.get(prior.id),round=pending.rounds.at(-1);
+        if(pending.state==='GUARD')unknownCompletion();
+        if(round)for(const kind of ['candidate','review'] as const){
+          const entry=round[kind];
+          if(entry?.sent&&!journal.result(entry,round)&&!this.ai.hasListingFieldGroup?.(entry.id)&&!this.ai.batchTasks?.find(entry.id))journal.retryMissing(pending.id,kind);
+        }
+      }
+    }
     const proofDraft=this.amazon.getDraft(initial.draftId);this.store.assertSourceConsistency(proofDraft.productId,proofDraft.salesPlan?.recipe.components.map(c=>c.variantId)??[proofDraft.variantId]);
     let operation=this.beginCompletion(initial,operationId),draft=this.completionDraft(operation),aiCalls=0,previewAttempts=0;
     const operationContext=(reference:SuggestAmazonFieldsInput)=>this.current(reference,operation.scopeHash===this.completionScope(draft)?undefined:{} as ListingAiContext);

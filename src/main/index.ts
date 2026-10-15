@@ -1,4 +1,5 @@
 import { beginDatabaseStartupValidation } from './startup-database-validation.ts';
+import { decodePreviewInBackground, closeImageProcessing } from './image-processing/client.ts';
 import { consumeStartupReceipt, saveCleanShutdownReceipt, type StartupReceiptCodec } from './startup-session.ts';
 import { createStartupProgress } from './startup-progress.ts';
 import { openDatabase } from './database.ts';
@@ -130,6 +131,7 @@ async function start() {
   const aiFetch = createSystemProxyFetch((url, init) => {guardExternal({kind:'ai'});if(controlledAcceptanceMode)controlledAcceptance!.assertBillingPlanAvailable();return net.fetch(url, init);});
   const networkDiagnostics = createAiNetworkDiagnostics({fetch:aiFetch,resolveProxy:url=>session.defaultSession.resolveProxy(url)});
   imageGeneration = new ImageGenerationService(dataRoot, db, safeStorage, {
+    processPreview: decodePreviewInBackground,
     ...(controlledAcceptanceMode?{requiredSpendScopeId:CONTROLLED_RUN_ID,beforeEffect:(scope:import('../shared/ai-request-identity-contracts.ts').AiRequestScope,transactionDb?:import('node:sqlite').DatabaseSync)=>guardExternal({kind:'image',productId:scope.productId,sku:scope.sku,targetId:scope.targetId,marketplaceId:scope.marketplaceId,variantIds:scope.variantIds},transactionDb)}:{}),
     normalizeImage: normalizeGeneratedImage,
     fetch: aiFetch, decodePreview,
@@ -368,6 +370,7 @@ else {
       finally {
         await followup?.close(); followup = undefined; await catalog?.close(); catalog = undefined; procurement?.close(); procurement = undefined; controlledAcceptance?.close();controlledAcceptance=undefined; amazon?.close(); amazon = undefined; store?.close(); store = undefined;
         try {
+          await closeImageProcessing();
           if(startupCompleted&&servicesClosed){const checked=openDatabase(dataRoot);checked.close();}
           const snapshot=await snapshotWorkspaceDatabase(dataRoot,{prune:!controlledAcceptanceMode});
           if(startupCompleted&&servicesClosed&&snapshot&&!controlledAcceptanceMode)await saveCleanShutdownReceipt(dataRoot,startupBuild,snapshot,startupCodec);

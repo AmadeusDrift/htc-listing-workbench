@@ -164,6 +164,7 @@ async function start() {
       return classifyProduct(input, {
         keywords: value => aiService.decideCategory({...value,phase:'keywords',candidates:[]},fresh,signal),
         search: (targetId,query) => catalogService.search({targetId,query}),
+        localCandidates: targetId => catalogService.get(targetId)?.productTypes??[],
         fallback: (targetId,keywords) => amazonService.searchProductTypes({targetId,keywords}),
         choose: (value,phase) => aiService.decideCategory({...value,phase},fresh,signal),
       });

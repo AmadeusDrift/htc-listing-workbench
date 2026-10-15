@@ -2219,6 +2219,18 @@ test('from-start preserves original identities, counters and continuation round 
   assert.equal(f.calls.images,0);assert.equal(f.calls.submissions,0);
 });
 
+test('from-start retries an old failed row through the normal owners instead of skipping its error text',async t=>{
+  const f=fixture(t),task=await f.create(),originalSku=task.items[0].sku;
+  const memory=(f.service as any).tasks.get(task.id);
+  memory.items[0].status='FAILED';memory.items[0].error='Saved historical local failure';
+  (f.service as any).save(memory);
+  await f.service.confirmStartOver(task.id,async()=>true);await f.service.waitForIdle();await f.service.refreshWaiting();
+  const after=f.service.get(task.id);
+  assert.equal(after.id,task.id);assert.equal(after.items[0].sku,originalSku);
+  assert.equal(after.status,'COMPLETED');assert.equal(f.calls.images,1);assert.equal(f.calls.submissions,1);
+  assert.ok(after.items[0].failureHistory?.some(event=>event.reason.includes('Saved historical local failure')));
+});
+
 test('light targeted preview reports saved scope without source, field or image revalidation',async t=>{
   const f=fixture(t),task=await f.create();
   f.dependencies.store.getProduct=()=>{throw new Error('preview must not inspect source payloads');};

@@ -2,7 +2,7 @@ import {spawn,execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createWriteStream} from 'node:fs';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
-import {resolve} from 'node:path';
+import {resolve,dirname} from 'node:path';
 import {createRequire} from 'node:module';
 const files=['tests/run-report-classification.test.ts','tests/run-report.test.ts','tests/run-report-certainty.test.ts','tests/run-evidence.test.ts','tests/error-stage-evidence.test.ts','tests/diagnostics.test.ts','tests/openrouter-call-identity.test.ts','tests/automatic-classification.test.ts','tests/category-ai-service.test.ts','tests/release-api-surface.test.ts'];
 const mode=process.argv[2],label=process.argv[3]??'classification';
@@ -14,7 +14,7 @@ const dataRoot=resolve('.test-data/s01-report-final'),output=resolve('artifacts/
 for(const path of [dataRoot,output]){assertTrustedWithin(worktreeRoot,path);await mkdir(path,{recursive:true});assertTrustedWithin(worktreeRoot,path);}
 process.env.HTC_STABILIZATION_DATA_DIR=dataRoot;require(resolve('tests/fixtures/stabilization/network-guard.cjs'));
 const inventory=async()=>Object.fromEntries(await Promise.all(git('ls-files','--','src','tests','scripts','package.json','package-lock.json').split('\n').filter(Boolean).map(async file=>[file,createHash('sha256').update(await readFile(file)).digest('hex')])));
-const hashes=await inventory(),args=mode==='related'?['--test','--test-concurrency=1',...files]:mode==='typecheck'?[require.resolve('typescript/bin/tsc'),'--noEmit']:['scripts/check-module-boundaries.mjs','--strict'];
+const hashes=await inventory(),args=mode==='related'?['--test','--test-concurrency=1',...files]:mode==='typecheck'?[resolve(dirname(require.resolve('typescript')),'../bin/tsc'),'--noEmit']:['scripts/check-module-boundaries.mjs','--strict'];
 const startedAt=new Date().toISOString(),stem=resolve(output,mode+'-'+label+'-'+startedAt.replaceAll(':','-'));
 const env={...process.env,NODE_OPTIONS:`--require="${resolve('tests/fixtures/stabilization/network-guard.cjs').replaceAll('\\','/')}"`};delete env.ELECTRON_RUN_AS_NODE;
 const log=createWriteStream(stem+'.log'),child=spawn(process.execPath,args,{cwd:process.cwd(),env,windowsHide:true,stdio:['ignore','pipe','pipe']});

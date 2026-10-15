@@ -318,8 +318,10 @@ export function validateGeneratedImageOcr(raw: unknown): GeneratedImageOcrOutput
   return { ...parsed, kind: 'generated-image-ocr', candidate };
 }
 export function validateImageTextReview(raw: unknown): ImageTextReviewOutput {
-  const value = keys(raw, ['kind','candidate','planResultId','ocrResultId','verdict','checks','expectedTextChecks','noTextVerified','issues','visualReview']);
+  const value = keys(raw, ['kind','candidate','planResultId','ocrResultId','verdict','checks','expectedTextChecks','noTextVerified','issues','visualReview'],['method']);
   if (value.kind !== 'image-text-review' || !['PASS','NEEDS_CHANGES','BLOCKED'].includes(String(value.verdict)) || value.visualReview !== 'not_performed') fail();
+  const direct=value.method==='candidate-vision/v1';
+  if(value.method!==undefined&&!direct||direct&&value.ocrResultId!==null||!direct&&value.ocrResultId===null)fail();
   const checks = list(value.checks, 5001, raw => {
     const check = keys(raw, ['source','index','text','verdict','evidenceIds','reason']);
     if (!['summary','line'].includes(String(check.source))) fail();
@@ -330,7 +332,7 @@ export function validateImageTextReview(raw: unknown): ImageTextReviewOutput {
   const issues = list(value.issues, 50, issue => boundedText(issue, 2000));
   if (new Set(checks.map(check => `${check.source}.${check.index}`)).size !== checks.length || new Set(expectedTextChecks.map(check => check.index)).size !== expectedTextChecks.length) fail();
   if (value.verdict === 'PASS' ? issues.length || checks.some(check => check.verdict === 'CONTRADICTED') : !issues.length) fail();
-  return { kind: 'image-text-review', candidate: validateCandidateImageIdentity(value.candidate), planResultId: uuid(value.planResultId), ocrResultId: uuid(value.ocrResultId), verdict: value.verdict as ImageTextReviewOutput['verdict'], checks, expectedTextChecks, noTextVerified: flag(value.noTextVerified), issues, visualReview: 'not_performed' };
+  return { kind: 'image-text-review', candidate: validateCandidateImageIdentity(value.candidate), planResultId: uuid(value.planResultId), ocrResultId: direct?null:uuid(value.ocrResultId), ...(direct?{method:'candidate-vision/v1' as const}:{}), verdict: value.verdict as ImageTextReviewOutput['verdict'], checks, expectedTextChecks, noTextVerified: flag(value.noTextVerified), issues, visualReview: 'not_performed' };
 }
 export function validateListingCurrentReview(raw: unknown): ListingCurrentReviewOutput {
   const value = keys(raw, ['kind','currentListingCopy','copySha256','verdict','checks','issues'],['contract']);
@@ -472,6 +474,20 @@ export function assertImageTextReview(review: ImageTextReviewOutput, context: Pr
     if (plan.output.textMode === 'planned' && (!expected.length || review.noTextVerified || review.expectedTextChecks.some(check => !check.present))) fail();
   }
   if(context.slot&&review.verdict!=='PASS'&&!review.checks.some(check=>check.verdict==='CONTRADICTED'&&check.evidenceIds.length))fail();
+}
+
+/** Direct candidate pixels, never an empty or synthesized OCR record. */
+export function assertImageTextReviewDirect(review:ImageTextReviewOutput,context:ProductImageContext,plan:AiResult,candidate:CandidateImageIdentity,options:ImageEvidenceOptions={}):void {
+  if(review.method!=='candidate-vision/v1'||review.ocrResultId!==null||plan.output.kind!=='image-plan'||review.planResultId!==plan.id||listingFingerprint(review.candidate)!==listingFingerprint(candidate))fail();
+  assertImagePlan(plan.output,context,options);
+  if(review.expectedTextChecks.length!==plan.output.expectedText.length||review.noTextVerified!==(review.checks.length===0))fail();
+  for(const [index,check] of review.checks.entries()){
+    if(check.source!=='line'||check.index!==index||check.evidenceIds.some(id=>!imageEvidence(context).some(e=>e.id===id)))fail();
+    if(check.verdict==='SUPPORTED')assertImageMeasurements(check.text,{evidence:imageEvidence(context)},true);
+  }
+  for(const index of plan.output.expectedText.keys())if(!review.expectedTextChecks.some(c=>c.index===index))fail();
+  const textViolation=plan.output.textMode==='none'?review.checks.length>0:!review.checks.length||review.expectedTextChecks.some(c=>!c.present);
+  if(review.verdict==='PASS'&&(textViolation||review.checks.some(c=>c.verdict!=='SUPPORTED')))fail();
 }
 
 /** Same local validation pipeline for a new reply and an immutable retained reply. */

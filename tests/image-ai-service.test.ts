@@ -1,3 +1,4 @@
+import { taskAiContext } from '../src/main/ai/batch/task-context.ts';
 import {withManualImageReviewCommand} from '../src/main/image-workflow/review-authority.ts';
 import {imageSlotConsumedAttempts} from '../src/shared/image-workflow-contracts.ts';
 import { confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
@@ -2103,4 +2104,53 @@ test('403 image continuation cannot increase exhausted original three-call plann
  for(let i=0;i<3;i++)await assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId));assert.equal(calls,3);
  const scope={taskId:randomUUID(),rowKey:f.context.listing.productId+':'+f.context.listing.variantId,phase:'IMAGES',mode:'immediate' as const,explicitContinueAt:'2099-01-01T00:00:00.000Z',authorize:()=>true};await taskAiContext.run(scope,()=>assert.rejects(f.ai.imagePlan(f.context,()=>{},undefined,undefined,workflowId),/次数|三次|上限|3 次尝试/));assert.equal(calls,3);
  const db=openDatabase(f.directory);try{assert.equal(db.prepare("SELECT count(*) n FROM audit_events WHERE action='ai.forbidden.manual-retry'").get()!.n,0);}finally{db.close();}
+});
+
+test('direct candidate vision sends real bytes without OCR and persists explicit provenance', async t => {
+  const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{});
+  f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_text_review')!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+  assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
+  const result=await (f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{});
+  assert.equal(result.output.method,'candidate-vision/v1');assert.equal(result.output.ocrResultId,null);
+  assert.deepEqual(result.sourceResultIds,[f.context.listingReviewResultId,plan.id]);assert.deepEqual(validateAiResult(result),result);
+  const wire=f.requests.at(-1)!;assert.equal(wire.body.model,'deepseek-flash');assert.equal(wire.body.messages[1].content[1].image_url.url,`data:image/png;base64,${f.bytes.toString('base64')}`);
+  assert.equal(f.requests.some(r=>r.operation==='ocr'),false);
+  assert.ok(!JSON.stringify(wire.payload).includes(f.draft.targetId));
+});
+
+test('direct candidate vision rejects invisible or mismatched candidate bytes before sending',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),before=f.requests.length;
+ assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
+ for(const bytes of [Buffer.alloc(0),Buffer.from('not an image'),Buffer.from(f.bytes).fill(1)])await assert.rejects((f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,bytes,()=>{}));
+ assert.equal(f.requests.length,before);
+});
+
+test('direct candidate vision cannot pass visible main text or missing planned captions',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{});
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_text_review')!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+ assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
+ f.respond(op=>op==='image-text-review'?chat({verdict:'PASS',checks:[{source:'line',index:0,text:'SALE',verdict:'SUPPORTED',evidenceIds:[],reason:'Visible word'}],expectedTextChecks:[],noTextVerified:false,issues:[]}):undefined);
+ await assert.rejects((f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{}));
+});
+
+
+test('direct candidate vision rejects planned-caption PASS with no visible words',async t=>{
+ const f=await fixture(t);f.context.purpose='detail';
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:f.ai.getPurposeProfiles().find(p=>p.purposeId==='image_text_review')!.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+ assert.equal(typeof (f.ai as any).reviewGeneratedImageDirect,'function');
+ f.respond((op,payload)=>op==='image-plan'?chat({kind:'image-plan',prompt:'Show Silicone.',textMode:'planned',expectedText:[{text:'Silicone',evidenceIds:[payload.evidence.find((e:any)=>e.meaning==='material').id]}],ipRisk:{verdict:'PASS',findings:[]},productUnderstanding:understanding(payload)}):op==='image-text-review'?chat({verdict:'PASS',checks:[],expectedTextChecks:[{index:0,present:true,reason:'Present'}],noTextVerified:false,issues:[]}):undefined);
+ const plan=await f.ai.imagePlan(f.context,()=>{});await assert.rejects((f.ai as any).reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{}));
+});
+
+test('direct candidate vision uses current DeepSeek settings while retaining frozen task authorization and durable owner',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{});
+ const old=f.ai.purposeProfile('image_text_review').routing!;
+ f.ai.savePurposeProfile({purposeId:'image_text_review',expectedRevision:old.revision,patch:{gateway:'deepseek',model:'deepseek-flash',effort:'none'}});
+ const frozen={...old,gateway:'openrouter' as const,model:'openai/gpt-6-luna'},fileId=randomUUID();let auth=0,reserved=0,linked=0;
+ const scope={taskId:randomUUID(),rowKey:f.context.listing.productId+':'+f.context.listing.variantId,phase:'IMAGES',mode:'immediate' as const,purposes:[frozen],authorize:()=>{auth++;return true;}};
+ const owner={fileId,reserve:()=>{assert.equal(taskAiContext.getStore()?.taskId,scope.taskId);reserved++;},resultStored:()=>{linked++;}};
+ const result=await taskAiContext.run(scope,()=>f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));
+ assert.equal(result.callId,fileId);assert.equal(result.model,'deepseek-flash');assert.equal(reserved,1);assert.equal(linked,1);assert.ok(auth>0);
+ const count=f.requests.length;const recovered=await taskAiContext.run(scope,()=>f.ai.reviewGeneratedImageDirect(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));
+ assert.equal(recovered.id,result.id);assert.equal(f.requests.length,count);assert.equal(reserved,1);
 });

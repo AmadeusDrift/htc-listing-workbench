@@ -757,15 +757,14 @@ test('invalidated completed approval does not attempt to persist RUNNING with a 
   try{db.prepare('UPDATE assets SET sha256=? WHERE id=?').run('a'.repeat(64),first.workflow.approvedAssetId!);}finally{db.close();}
   await assert.doesNotReject(f.run());
 });
-test('resuming interrupted copy recheck never generates pending images again',async t=>{
+test('legacy interrupted copy recheck without call identity stays pending and never regenerates images',async t=>{
   const f=await fixture(t),first=await f.run();
   const changed=f.amazon.saveDraft({id:f.draft.id,revision:f.draft.revision,attributes:{...f.draft.attributes,item_name:[{value:'Updated title'}]}});
   const risk=f.ai.reviewGeneratedImageRisk;let calls=0;
   f.ai.reviewGeneratedImageRisk=async(...args)=>{if(++calls===2)throw new AiError('RATE_LIMITED');return risk(...args);};
   const partial=await f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id});
   assert.equal(partial.workflow.slots![0].status,'PASSED');assert.equal(partial.workflow.status,'FAILED');
-  const resumed=await f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id});assert.equal(resumed.workflow.id,partial.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED');assert.equal(calls,8);assert.equal(f.calls.filter(call=>call==='generate').length,7);
-  assert.equal((await f.run()).workflow.id,resumed.workflow.id);
+  const before=JSON.stringify(partial.workflow);await assert.rejects(f.service.recheck({draftId:changed.id,draftRevision:changed.revision,sourceWorkflowId:first.workflow.id}),(e:unknown)=>e instanceof AiError&&e.diagnosticReason==='IMAGE_REVIEW_IDENTITY_MISSING');assert.equal(calls,2);assert.equal(f.calls.filter(call=>call==='generate').length,7);assert.equal(JSON.stringify(f.service.getProgress(changed.id)),before);
 });
 test('source preparation is deduplicated and cancellable, blocks paid overlap, and drains on close',async t=>{
   const f=await fixture(t),input={productId:f.product.id,productRevision:f.product.revision,variantIds:[f.product.variants[0].id]};

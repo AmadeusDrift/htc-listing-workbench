@@ -8,7 +8,7 @@ export interface ImageRiskSettings { enabled:boolean; scoreThreshold?:number; le
 export interface CopyReviewSettings { enabled:boolean }
 
 /** An original review request; absence in historical records never proves NOT_SENT. */
-export interface ImageReviewRequest {
+export interface ImageReviewRequestV1 {
   version:1;requestId:string;step:'risk'|'ocr'|'text';runId:string;draftId:string;
   productId:string;productRevision:number;variantId:string;sku:string;slot:number;attempt:number;
   generationRequestId:string;candidate:CandidateImageIdentity;planResultId:string;ocrResultId:string|null;
@@ -16,6 +16,14 @@ export interface ImageReviewRequest {
   execution:{providerId:import('./ai-contracts.ts').AiProviderId;model:string;generation:number;purposeSnapshot:import('./ai-purpose-contracts.ts').AiPurposeSnapshot|null};
   reservedAt:string;state:'SENT_UNKNOWN'|'RESULT_STORED';resultId:string|null;
 }
+
+/** Producer-v2 intent exists before credentials/limits/transport. No token or OSS credential is stored. */
+export interface ImageReviewRequestV2 extends Omit<ImageReviewRequestV1,'version'|'reservedAt'|'requestFingerprint'|'state'> {
+ version:2;preparedAt:string;reservedAt:string|null;requestFingerprint:string|null;
+ state:'PREPARED'|'SENT_UNKNOWN'|'RESULT_STORED'|'RECEIVED_INVALID'|'DEFINITIVE_REJECTION';
+ effects:{id:string;kind:'token'|'upload'|'moderation'|'ocr'|'text';state:'UNPERMITTED'|'PERMITTED'|'RECEIVED';permittedAt:string|null;receivedAt:string|null}[];
+}
+export type ImageReviewRequest=ImageReviewRequestV1|ImageReviewRequestV2;
 
 export const IMAGE_WORKFLOW_STAGES = ['content', 'planning', 'generating', 'ip-check', 'ocr', 'reviewing', 'adopting', 'complete'] as const;
 export type ImageWorkflowStage = typeof IMAGE_WORKFLOW_STAGES[number];

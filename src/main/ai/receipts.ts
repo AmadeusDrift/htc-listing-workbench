@@ -16,23 +16,31 @@ import type {AiRequestScope} from '../../shared/ai-request-identity-contracts.ts
 import {listingFingerprint} from '../json-fingerprint.ts';
 
 export const PROVIDER_RECEIPT_TABLES={ai_provider_receipts:['id','record_json'],ai_image_requests:['id','record_json']};
-export interface ProviderReceipt {executionIdentity?:{actualModel:string|null;actualProvider:string|null};version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
+export interface ProviderReceiptV1 {executionIdentity?:{actualModel:string|null;actualProvider:string|null};version:1;id:string;callId:string;gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;relativePath:string;sha256:string;byteSize:number;costUsd:number|null;reportedTokens:number|null}
+export interface ProviderReceiptV2 extends Omit<ProviderReceiptV1,'version'|'gateway'>{version:2;gateway:'aliyun';aliyun:import('./transport.ts').AliyunFinalIdentity;requestFingerprint:string;scopeSha256:string}
+export type ProviderReceipt=ProviderReceiptV1|ProviderReceiptV2;
+function validAliyunIdentity(a:import('./transport.ts').AliyunFinalIdentity,endpoint:string):boolean{return !!a&&Object.keys(a).sort().join()==='action,apiVersion,candidateSha256,host,region'&&/^[a-f0-9]{64}$/.test(a.candidateSha256)&&(a.action==='RecognizeAllText'&&a.region==='cn-hangzhou'&&a.host==='ocr-api.cn-hangzhou.aliyuncs.com'&&a.apiVersion==='2021-07-07'&&endpoint==='/?Type=Commerce'||a.action==='ImageModeration'&&a.region==='cn-shanghai'&&a.host==='green-cip.cn-shanghai.aliyuncs.com'&&a.apiVersion==='2022-03-02'&&endpoint==='/');}
+
 const hash=(bytes:Buffer|string)=>createHash('sha256').update(bytes).digest('hex');
 function parse(raw:unknown):ProviderReceipt{
   const r=raw as ProviderReceipt;
+  if(r?.version===2&&r.executionIdentity!==undefined)throw new UserFacingError('阿里审核回执不能包含文本路由身份');
   if(r?.executionIdentity!==undefined){const e=r.executionIdentity;if(!e||Object.keys(e).sort().join()!=='actualModel,actualProvider'||[e.actualModel,e.actualProvider].some(v=>v!==null&&(typeof v!=='string'||v.length<1||v.length>200||!/^[-a-zA-Z0-9_.:/ ()]+$/.test(v))))throw new UserFacingError('AI实际路由记录无效');}
-  if(!r||Object.keys(r).filter(key=>key!=='executionIdentity').sort().join()!=='byteSize,callId,costUsd,endpoint,gateway,id,model,receivedAt,relativePath,reportedTokens,requestId,sha256,status,version'||r.version!==1||!/^[a-f0-9-]{36}$/.test(r.callId)||!Number.isInteger(r.status)||r.status<100||r.status>599||typeof r.model!=='string'||r.model.length>200||typeof r.endpoint!=='string'||!(r.endpoint.startsWith('/api/')||r.gateway==='deepseek'&&r.endpoint==='/chat/completions')||r.endpoint.length>200||r.requestId!==null&&(typeof r.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(r.requestId))||!Number.isSafeInteger(r.byteSize)||r.byteSize<1||r.byteSize>200*1024*1024||!/^[a-f0-9]{64}$/.test(r.id)||!/^[a-f0-9]{64}$/.test(r.sha256)
-    ||r.relativePath!==`ai-receipts/${r.id}.json`||!['openrouter','deepseek'].includes(r.gateway)||!Number.isFinite(Date.parse(r.receivedAt))
+  if(!r||Object.keys(r).filter(key=>key!=='executionIdentity'&&!(r.version===2&&['aliyun','requestFingerprint','scopeSha256'].includes(key))).sort().join()!=='byteSize,callId,costUsd,endpoint,gateway,id,model,receivedAt,relativePath,reportedTokens,requestId,sha256,status,version'||![1,2].includes(r.version)||!/^[a-f0-9-]{36}$/.test(r.callId)||!Number.isInteger(r.status)||r.status<100||r.status>599||typeof r.model!=='string'||r.model.length>200||typeof r.endpoint!=='string'||!(r.version===2?validAliyunIdentity(r.aliyun,r.endpoint):r.endpoint.startsWith('/api/')||r.gateway==='deepseek'&&r.endpoint==='/chat/completions')||r.endpoint.length>200||r.requestId!==null&&(typeof r.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(r.requestId))||!Number.isSafeInteger(r.byteSize)||r.byteSize<1||r.byteSize>200*1024*1024||!/^[a-f0-9]{64}$/.test(r.id)||!/^[a-f0-9]{64}$/.test(r.sha256)
+    ||r.relativePath!==`ai-receipts/${r.id}.json`||!(r.version===2?r.gateway==='aliyun'&&/^[a-f0-9]{64}$/.test(r.requestFingerprint)&&/^[a-f0-9]{64}$/.test(r.scopeSha256):['openrouter','deepseek'].includes(r.gateway))||!Number.isFinite(Date.parse(r.receivedAt))
     ||r.costUsd!==null&&(typeof r.costUsd!=='number'||!Number.isFinite(r.costUsd)||r.costUsd<0)
     ||r.reportedTokens!==null&&(!Number.isSafeInteger(r.reportedTokens)||r.reportedTokens<0||r.reportedTokens>2_000_000_000))throw new UserFacingError('AI原始收据记录无效');return r;
 }
 export async function saveProviderReceipt(db:DatabaseSync,directory:string,callId:string,capture:ProviderReceiptCapture,purpose:AiPurposeSnapshot|undefined):Promise<ProviderReceipt>{
   assertOpaqueResponse(capture.body);
   if(!/^[a-f0-9-]{36}$/.test(callId))throw new UserFacingError('AI收据调用身份无效');
-  const bytes=Buffer.from(JSON.stringify({version:1,callId,purpose:purpose??null,...capture})),sha256=hash(bytes),id=hash(callId+':'+sha256),relativePath=`ai-receipts/${id}.json`;
+  let binding:{requestFingerprint:string;scopeSha256:string}|undefined;
+  if(capture.gateway==='aliyun'){const row=db.prepare('SELECT record_json FROM ai_calls WHERE id=?').get(callId),call=row?JSON.parse(String(row.record_json)):null;if(!call?.requestFingerprint||!call.requestScope||call.requestScope.candidateSha256!==capture.aliyun.candidateSha256||call.providerId!==(capture.aliyun.action==='ImageModeration'?'aliyun-image-risk':'aliyun-ocr')||call.model!==capture.model||!validAliyunIdentity(capture.aliyun,capture.endpoint))throw new UserFacingError('阿里审核回执原请求身份不一致');binding={requestFingerprint:call.requestFingerprint,scopeSha256:listingFingerprint(validateRequestScope(call.requestScope))};}
+  const version=capture.gateway==='aliyun'?2:1;
+  const bytes=Buffer.from(JSON.stringify({version,callId,purpose:purpose??null,...capture,...binding})),sha256=hash(bytes),id=hash(callId+':'+sha256),relativePath=`ai-receipts/${id}.json`;
   const metadata=openRouterMetadata(capture.body);
   const executionIdentity=capture.gateway==='openrouter'?openRouterExecutionIdentity(capture.body,capture.status):undefined;
-  const value:ProviderReceipt={...(executionIdentity?{executionIdentity}:{}),reportedTokens:metadata.usageKnown?metadata.usage.promptTokens+metadata.usage.completionTokens:null,version:1,id,callId,gateway:capture.gateway,endpoint:capture.endpoint,model:capture.model,status:capture.status,requestId:capture.requestId,receivedAt:capture.receivedAt,relativePath,sha256,byteSize:bytes.length,costUsd:capture.costUsd};parse(value);
+  const value={...(executionIdentity?{executionIdentity}:{}),...(capture.gateway==='aliyun'?{aliyun:capture.aliyun,...binding}:{}),reportedTokens:metadata.usageKnown?metadata.usage.promptTokens+metadata.usage.completionTokens:null,version,id,callId,gateway:capture.gateway,endpoint:capture.endpoint,model:capture.model,status:capture.status,requestId:capture.requestId,receivedAt:capture.receivedAt,relativePath,sha256,byteSize:bytes.length,costUsd:capture.costUsd} as ProviderReceipt;parse(value);
   await mkdir(join(directory,'ai-receipts'),{recursive:true});
   const folder=await lstat(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())throw new UserFacingError('AI收据目录无效');
   const path=resolve(directory,relativePath);
@@ -57,9 +65,10 @@ export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import
   try{
     const row=db.prepare('SELECT id,record_json FROM ai_provider_receipts WHERE id=?').get(call.providerReceiptId);if(!row)return null;
     const record=parse(JSON.parse(String(row.record_json)));
-    const gateway=call.providerId.startsWith('openrouter')?'openrouter':call.providerId.startsWith('deepseek')?'deepseek':null;
-    const endpoint=gateway==='deepseek'?'/chat/completions':call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions';
+    const gateway=call.providerId.startsWith('openrouter')?'openrouter':call.providerId.startsWith('deepseek')?'deepseek':call.providerId==='aliyun-ocr'||call.providerId==='aliyun-image-risk'?'aliyun':null;
+    const endpoint=gateway==='aliyun'?(call.providerId==='aliyun-ocr'?'/?Type=Commerce':'/'):gateway==='deepseek'?'/chat/completions':call.purposeSnapshot?.capability.endpoint==='decisions'?'/api/alpha/decisions':'/api/v1/chat/completions';
     if(record.id!==row.id||record.id!==call.providerReceiptId||record.callId!==call.id||record.model!==call.model||record.gateway!==gateway||record.endpoint!==endpoint||record.id!==hash(call.id+':'+record.sha256))return null;
+    if(record.version===2&&(record.gateway!==gateway||record.requestFingerprint!==call.requestFingerprint||record.scopeSha256!==listingFingerprint(call.requestScope)||record.aliyun.candidateSha256!==call.requestScope?.candidateSha256||record.aliyun.action!==(call.providerId==='aliyun-ocr'?'RecognizeAllText':'ImageModeration')))return null;
     const folder=lstatSync(join(directory,'ai-receipts'));if(!folder.isDirectory()||folder.isSymbolicLink())return null;
     const path=join(directory,record.relativePath),before=lstatSync(path);
     if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size!==record.byteSize)return null;
@@ -67,7 +76,8 @@ export function readCallReceiptSync(db:DatabaseSync,directory:string,call:import
     if(bytes.length!==record.byteSize||before.ino!==after.ino||before.dev!==after.dev||before.mtimeMs!==after.mtimeMs||hash(bytes)!==record.sha256)return null;
     const capture=JSON.parse(bytes.toString('utf8'));
     assertOpaqueResponse(capture.body);
-    if(!Object.hasOwn(capture,'body')||capture.version!==1||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    if(!Object.hasOwn(capture,'body')||capture.version!==record.version||capture.callId!==call.id||capture.model!==record.model||capture.gateway!==record.gateway||capture.endpoint!==record.endpoint||capture.status!==record.status||capture.receivedAt!==record.receivedAt||capture.requestId!==record.requestId||capture.costUsd!==record.costUsd)return null;
+    if(record.version===2&&(listingFingerprint(capture.aliyun)!==listingFingerprint(record.aliyun)||capture.requestFingerprint!==record.requestFingerprint||capture.scopeSha256!==record.scopeSha256))return null;
     return {record,capture};
   }catch{return null;}
 }

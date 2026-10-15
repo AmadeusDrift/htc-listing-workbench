@@ -124,6 +124,46 @@ test('image plan, candidate OCR and independent text review persist source-bound
   assert.ok(!JSON.stringify(f.requests[1].payload).includes(f.draft.targetId));
 });
 
+test('S05 durable risk owner joins the original call reservation and result transactions',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),fileId=randomUUID();let reserved=0,linked=0;
+ f.respond(operation=>operation==='ip-upload'?new Response(null,{status:200}):undefined);
+ const owner={fileId,reserve:(db:DatabaseSync,call:AiCall)=>{assert.equal(db.isTransaction,true);assert.equal(call.id,fileId);assert.ok(db.prepare('SELECT id FROM ai_calls WHERE id=?').get(fileId));assert.ok(db.prepare('SELECT id FROM ai_usage_ledger WHERE id=?').get(fileId));reserved++;},resultStored:(db:DatabaseSync,result:AiResult)=>{assert.equal(db.isTransaction,true);assert.equal(result.callId,fileId);assert.ok(db.prepare('SELECT id FROM ai_results WHERE id=?').get(result.id));linked++;}};
+ const result=await f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);
+ assert.equal(reserved,1);assert.equal(linked,1);assert.equal(result.callId,fileId);
+ const before=f.requests.length,recovered=await f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);assert.equal(recovered.id,result.id);assert.equal(f.requests.length,before);assert.equal(reserved,1);assert.equal(linked,2);
+});
+
+test('S05 final Ali risk receipt recovers a result-link crash on the original ID without token or PUT replay',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),fileId=randomUUID();f.respond(op=>op==='ip-upload'?new Response(null,{status:200}):undefined);let reserve=0,links=0;
+ const owner={fileId,reserve:()=>{reserve++;},resultStored:()=>{links++;if(links===1)throw new Error('synthetic association crash');}};
+ await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));
+ const original=f.ai.getCall(fileId)!;assert.equal(original.status,'FAILED');assert.equal(original.usage.processedImages,1);assert.ok(original.providerReceiptId);
+ const raw=await f.ai.readProviderReceipt(fileId) as any;assert.equal(raw.version,2);assert.equal(raw.gateway,'aliyun');assert.equal(raw.aliyun.action,'ImageModeration');assert.doesNotMatch(JSON.stringify(raw),/fixture-upload-(?:id|secret|token)/);
+ const calls=f.requests.length,result=await f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);assert.equal(result.callId,fileId);assert.ok(result.providerReceiptRecovery);assert.equal(f.requests.length,calls);assert.equal(reserve,1);assert.equal(links,2);assert.deepEqual(f.ai.getCall(fileId),original);
+ const saved=await f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner);assert.equal(saved.id,result.id);assert.equal(links,3);assert.equal(f.requests.length,calls);assert.deepEqual(f.ai.getCall(fileId),original);
+});
+
+test('S05 a different durable file ID cannot bypass the same original candidate UNKNOWN',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),fileId=randomUUID(),owner={fileId,reserve:()=>{},resultStored:()=>{}};
+ f.respond(op=>{if(op==='ImageModeration')throw Error('synthetic unknown');return op==='ip-upload'?new Response(null,{status:200}):undefined;});
+ await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,owner));const original=f.ai.getCall(fileId),before=f.requests.length;
+ for(const next of [fileId,randomUUID()])await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,{...owner,fileId:next}),(e:unknown)=>e instanceof AiError&&e.callId===fileId&&e.certainty==='SENT_UNKNOWN');
+ assert.equal(f.requests.length,before);assert.deepEqual(f.ai.getCall(fileId),original);assert.equal(f.ai.listCalls().filter(c=>c.providerId==='aliyun-image-risk').length,1);
+});
+
+for(const step of ['ocr','text'] as const)test('S05 '+step+' original receipt relinks after owner failure with zero new provider sends',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),ocr=step==='text'?await f.ai.recognizeGeneratedImage(f.context,f.candidate,f.bytes,()=>{}):undefined,fileId=randomUUID();let links=0,reserves=0;
+ const owner={fileId,reserve:()=>{reserves++;},resultStored:()=>{if(++links===1)throw Error('synthetic association crash');}},send=()=>step==='ocr'?f.ai.recognizeGeneratedImage(f.context,f.candidate,f.bytes,()=>{},undefined,owner):f.ai.reviewGeneratedImage(f.context,plan,ocr!,f.candidate,()=>{},undefined,owner);
+ await assert.rejects(send());const original=f.ai.getCall(fileId)!;assert.equal(original.status,'FAILED');assert.ok(original.providerReceiptId);const before=f.requests.length;
+ const recovered=await send();assert.equal(recovered.callId,fileId);assert.ok(recovered.providerReceiptRecovery);assert.equal(f.requests.length,before);assert.equal(reserves,1);assert.equal(links,2);assert.deepEqual(f.ai.getCall(fileId),original);
+ assert.equal((await send()).id,recovered.id);assert.equal(f.requests.length,before);assert.equal(links,3);
+});
+
+test('S05 durable reserve failure rolls back the original call and usage before any token POST',async t=>{
+ const f=await fixture(t),plan=await f.ai.imagePlan(f.context,()=>{}),before=f.requests.length,fileId=randomUUID();
+ await assert.rejects(f.ai.reviewGeneratedImageRisk(f.context,plan,f.candidate,f.bytes,()=>{},undefined,{fileId,reserve:()=>{throw Error('synthetic reserve abort');},resultStored:()=>{}}));assert.equal(f.requests.length,before);assert.equal(f.ai.getCall(fileId),undefined);assert.equal(f.ai.getUsageSummary('aliyun-image-risk').attempts,0);
+});
+
 test('v4 current-copy review accepts interpreted source wording without requiring claim substring coverage',async t=>{
   const f=await fixture(t,false,true),context=structuredClone(f.context.listing);
   const changedCopy=structuredClone(context);
@@ -1239,6 +1279,27 @@ function approvalSafetySnapshot(directory:string){
  const db=new DatabaseSync(join(directory,'red.sqlite'),{readOnly:true});
  try{const records=Object.fromEntries(['ai_calls','ai_results','ai_usage_ledger','ai_provider_receipts','ai_image_requests','image_workflow_runs'].map(table=>[table,db.prepare('SELECT id,record_json FROM '+table+' ORDER BY id').all()]));return {records,receiptRawHashes:records.ai_provider_receipts.map(row=>{const record=JSON.parse(String(row.record_json));return{id:record.id,sha256:createHash('sha256').update(readFileSync(join(directory,record.relativePath))).digest('hex')};})};}finally{db.close();}
 }
+test('S05 actual quota-before-send keeps a PREPARED review and resumes its original seven-image run',async t=>{
+ const {f,workflow,first,request,images}=await completedApprovalRecheck(t),originalGenerations=first.workflow.slots!.map(s=>s.attempts[0].requestId);
+ f.ai.setUsagePolicy({providerId:'aliyun-image-risk',dailyCallLimit:8,dailyTokenLimit:null});
+ const partial=await (workflow as unknown as {recheckWithFreshEvidence(input:unknown):ReturnType<ImageWorkflowService['recheck']>}).recheckWithFreshEvidence(request);assert.equal(partial.workflow.status,'FAILED',partial.workflow.error??'');assert.equal(partial.workflow.slots![0].status,'PASSED');
+ const prepared=partial.workflow.reviewRequests?.find(r=>r.slot===2&&r.step==='risk');assert.equal(prepared?.version,2);assert.equal(prepared?.state,'PREPARED');assert.equal(f.ai.getCall(prepared!.requestId),undefined);
+ const before=f.requests.length;f.ai.setUsagePolicy({providerId:'aliyun-image-risk',dailyCallLimit:14,dailyTokenLimit:null});
+ const resumed=await workflow.recheck(request);assert.equal(resumed.workflow.id,partial.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');assert.equal(images(),7);
+ assert.ok(resumed.workflow.reviewRequests?.some(r=>r.requestId===prepared!.requestId&&r.state==='RESULT_STORED'));
+ assert.deepEqual(first.workflow.slots!.map(s=>s.attempts[0].requestId),originalGenerations);assert.equal(f.requests.slice(before).filter(r=>r.operation==='DescribeUploadToken').length,6);
+});
+
+test('S05 actual workflow relinks a final risk receipt after an association crash and restart without regenerating or resending risk',async t=>{
+ const {f,workflow,first,request,createWorkflow,images}=await completedApprovalRecheck(t),db=openDatabase(f.directory);
+ db.exec(`CREATE TRIGGER s05_association_crash BEFORE UPDATE ON image_workflow_runs WHEN json_extract(NEW.record_json,'$.recheckedFromRunId') IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(NEW.record_json,'$.reviewRequests') r WHERE json_extract(r.value,'$.state')='RESULT_STORED') BEGIN SELECT RAISE(ABORT,'synthetic association crash'); END`);
+ const partial=await (workflow as unknown as {recheckWithFreshEvidence(input:unknown):ReturnType<ImageWorkflowService['recheck']>}).recheckWithFreshEvidence(request);assert.equal(partial.workflow.status,'FAILED');const original=partial.workflow.reviewRequests!.find(r=>r.step==='risk')!;assert.equal(original.state,'SENT_UNKNOWN');assert.equal(partial.workflow.slots![0].attempts[0].ipReviewResultId,null);
+ const call=f.ai.getCall(original.requestId)!;assert.ok(call.providerReceiptId);assert.equal(call.usage.processedImages,1);assert.equal(f.requests.filter(r=>r.operation==='ImageModeration').length,8);db.exec('DROP TRIGGER s05_association_crash');db.close();
+ const providerFetch=(f.ai as unknown as {context:{fetch:typeof fetch}}).context.fetch;await workflow.close();await f.ai.close();f.ai=new AiService(f.directory,f.store,f.hosting,mockStorage,{fetch:providerFetch});f.listing=new ListingAiService(f.store,f.amazon,f.ai);const reopened=createWorkflow();f.cleanup(async()=>{await reopened.close();await f.ai.close();});
+ const before=f.requests.length,resumed=await reopened.recheck(request);assert.equal(resumed.workflow.id,partial.workflow.id);assert.equal(resumed.workflow.status,'COMPLETED',resumed.workflow.error??'');assert.equal(resumed.workflow.reviewRequests?.find(r=>r.requestId===original.requestId)?.state,'RESULT_STORED');assert.deepEqual(f.ai.getCall(original.requestId),call);assert.equal(images(),7);assert.equal(f.requests.slice(before).filter(r=>r.operation==='ImageModeration').length,6);assert.equal(f.requests.slice(before).filter(r=>r.operation==='DescribeUploadToken').length,6);assert.equal(first.workflow.slots!.length,7);
+ const stable=f.requests.length;assert.equal((await reopened.recheck(request)).workflow.id,resumed.workflow.id);assert.equal(f.requests.length,stable);
+});
+
 test('S05 UNKNOWN IP recheck keeps its original call and workflow instead of reusing an old approval',async t=>{
   const {f,workflow,first,request,createWorkflow,images}=await completedApprovalRecheck(t);
   const oldVersion=(workflow as unknown as {recheckWithFreshEvidence(input:unknown):ReturnType<ImageWorkflowService['recheck']>});

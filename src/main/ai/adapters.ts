@@ -1,3 +1,5 @@
+import {aliyunFinalContext} from './aliyun-final-receipt.ts';
+import {createHash} from 'node:crypto';
 import { requestOpenRouterJson } from './adapters/openrouter-chat.ts';
 import { openRouterMetadata } from './adapters/openrouter-http.ts';
 import {opaqueResponse} from './opaque-response.ts';
@@ -48,7 +50,10 @@ function noSecrets<T>(value: T, credentials: AiCredentials): T { if (containsSec
 
 export async function recognizeWithAliyun(bytes: Buffer, size: { width: number; height: number }, credentials: AliyunCredentials, signal: AbortSignal, context: AdapterContext): Promise<AdapterResult<OcrOutput>> {
   const signed = signAcs3({ host: 'ocr-api.cn-hangzhou.aliyuncs.com', action: 'RecognizeAllText', version: '2021-07-07', query: { Type: 'Commerce' }, body: bytes, contentType: 'application/octet-stream', now: context.now(), nonce: context.nonce(), ...credentials });
-  const raw = await postJson(signed.url, signed.headers, bytes, signal, context, body => failureMetadata(body, 'ocr', credentials, context));
+  const raw = await postJson(signed.url, signed.headers, bytes, signal, context.onReviewEffect?aliyunFinalContext(context,{action:'RecognizeAllText',region:'cn-hangzhou',host:'ocr-api.cn-hangzhou.aliyuncs.com',apiVersion:'2021-07-07',candidateSha256:createHash('sha256').update(bytes).digest('hex')},'RecognizeAllText/Commerce',[credentials]):context, body => failureMetadata(body, 'ocr', credentials, context));
+  return parseAliyunOcr(raw,size,credentials,context);
+}
+export function parseAliyunOcr(raw:unknown,size:{width:number;height:number},credentials:AliyunCredentials,context:AdapterContext):AdapterResult<OcrOutput> {
   return outputError(() => {
     const body = object(raw);
     if (body.Code !== undefined && body.Code !== 'success' && body.Code !== 'Success') { failureMetadata(body, 'ocr', credentials, context); throw httpError(400, body.Code); }

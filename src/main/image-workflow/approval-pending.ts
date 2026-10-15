@@ -1,3 +1,5 @@
+import {verifiedRecoveryReceipt} from '../ai/receipt-recovery.ts';
+import {imageReviewProvenNotSent} from './review-journal.ts';
 import type {DatabaseSync} from 'node:sqlite';
 import type {AiCall} from '../../shared/ai-contracts.ts';
 import type {ImageWorkflowRun} from '../../shared/image-workflow-contracts.ts';
@@ -19,7 +21,7 @@ function reviewStep(call:AiCall):ReviewStep|undefined {
 }
 /** M07 determines request certainty from its original call/result/strict receipt.
  * This image-owner query performs no writes, settlement, recovery or permission claim. */
-export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,anchor:ImageWorkflowRun,runs:readonly ImageWorkflowRun[],calls:readonly AiCall[]|undefined):void {
+export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,anchor:ImageWorkflowRun,runs:readonly ImageWorkflowRun[],calls:readonly AiCall[]|undefined,recoveryRunId?:string):void {
  const owned=runs.filter(run=>run.draftId===anchor.draftId&&run.productId===anchor.productId&&run.variantId===anchor.variantId&&run.sku===anchor.sku);
  const relevant=(calls??[]).filter(call=>{
   if(!reviewStep(call)||call.productId!==anchor.productId)return false;
@@ -28,6 +30,8 @@ export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,a
  });
  for(const call of relevant){
   if(localAiRequestResolved(db,directory,call.id,call))continue;
+  const originalRecovery=owned.find(r=>r.id===recoveryRunId)?.reviewRequests?.find(r=>r.version===2&&r.requestId===call.id&&r.state==='SENT_UNKNOWN');
+  if(originalRecovery&&verifiedRecoveryReceipt(db,directory,call))continue;
   const p=call.presentationContext,s=call.requestScope,scopeSlot=s?.slot??(p?.slot===0?0:undefined),slot=p?.slot===scopeSlot?p?.slot:undefined;
   // Exact context and candidate evidence establish ownership; time is only an additional bound.
   const matches=owned.filter(run=>{
@@ -44,6 +48,8 @@ export function assertApprovalReviewsResolved(db:DatabaseSync,directory:string,a
   const slot=run.slots?.find(slot=>slot.index===run.activeSlot),attempt=slot?.attempts.at(-1);
   const step:ReviewStep|undefined=run.stage==='ip-check'&&!attempt?.ipReviewResultId?'risk':run.stage==='ocr'&&!attempt?.ocrResultId?'ocr':run.stage==='reviewing'&&attempt?.appearanceReview?.state==='PENDING'?'appearance':run.stage==='reviewing'&&slot?.index===1&&!attempt?.reviewResultId?'text':undefined;
   if(!step||!slot||!attempt?.candidateId)continue;
+  const prepared=run.reviewRequests?.findLast(r=>r.version===2&&r.step===step&&r.slot===slot.index&&r.attempt===attempt.number&&r.candidate.id===attempt.candidateId&&r.contextSha256===slot.contextSha256);
+  if(prepared&&imageReviewProvenNotSent(db,prepared))continue;
   if(!relevant.some(call=>reviewStep(call)===step&&call.presentationContext?.sourceSha256===slot.contextSha256&&call.presentationContext.slot===slot.index&&call.startedAt>=run.createdAt))throw new ImageReviewPendingError({workflowId:run.id,slot:slot.index,step});
  }
 }

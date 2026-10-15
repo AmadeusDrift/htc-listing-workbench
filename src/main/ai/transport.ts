@@ -15,6 +15,7 @@ export interface AdapterContext {
   gateway?:'openrouter'|'deepseek';
   effectiveEffort?:ReasoningEffort;
   purposeSnapshot?:AiPurposeSnapshot;
+  onReviewEffect?:(kind:import('../../shared/image-workflow-contracts.ts').ImageReviewRequestV2['effects'][number]['kind'],event:'permit'|'received')=>void;
   onProviderReceipt?:(receipt:ProviderReceiptCapture)=>void|Promise<void>;
   captureRawResponse?:(status:number,text:string)=>Promise<void>;
   /** Complete undecodable bytes are opaque receipt evidence, never domain data. */
@@ -30,7 +31,9 @@ export interface AdapterContext {
   /** Synchronous reservation at the last boundary before one paid POST. */
   beforeSend?: (body: string | Buffer) => void;
 }
-export interface ProviderReceiptCapture{gateway:'openrouter'|'deepseek';endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;body:unknown;costUsd:number|null}
+export interface AliyunFinalIdentity {action:'RecognizeAllText'|'ImageModeration';region:'cn-hangzhou'|'cn-shanghai';host:'ocr-api.cn-hangzhou.aliyuncs.com'|'green-cip.cn-shanghai.aliyuncs.com';apiVersion:'2021-07-07'|'2022-03-02';candidateSha256:string}
+interface ReceiptCaptureBase {endpoint:string;model:string;status:number;requestId:string|null;receivedAt:string;body:unknown;costUsd:number|null}
+export type ProviderReceiptCapture=ReceiptCaptureBase&({gateway:'openrouter'|'deepseek'}|{gateway:'aliyun';aliyun:AliyunFinalIdentity});
 export const emptyUsage = (): AiUsage => ({ promptTokens: 0, completionTokens: 0, processedImages: 0 });
 export async function readBounded(response: Response, max: number, signal: AbortSignal, onInvalidResponseText?: (text:string)=>void, captureRawResponse?:(status:number,text:string)=>Promise<void>,captureRawBytes?:(status:number,bytes:Buffer)=>Promise<void>,onBodyRead?:(evidence:{receivedBytes:number;complete:boolean})=>void): Promise<unknown> {
   let size=0;

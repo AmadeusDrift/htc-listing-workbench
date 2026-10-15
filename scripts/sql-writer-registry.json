@@ -6,10 +6,12 @@
       "role": "images",
       "review": "S05 image owner CAS only, borrowing an already active reservation transaction on the same physical workspace; no AI table writes or network wait.",
       "commands": [
-        "reserveImageReviewRequest|UPDATE|image_workflow_runs"
+        "reserveImageReviewRequest|UPDATE|image_workflow_runs",
+        "writeReviewRun|UPDATE|image_workflow_runs"
       ],
       "statements": {
-        "reserveImageReviewRequest|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1
+        "reserveImageReviewRequest|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1,
+        "writeReviewRun|516a2bf962a3c4b5a2e7cad543a32338aad913814f40623a3011ff9dec5d51c0": 1
       }
     },
     "main/ai/batch/records.ts": {

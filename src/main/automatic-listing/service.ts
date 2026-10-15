@@ -2,6 +2,8 @@ import type {UnitImageRecheckInput} from '../image-workflow/unit-review.ts';
 import { queryTaskSummaries, queryTaskGroups, getTaskItem, queryResumeItems, taskQueryId } from './task-query.ts';
 import {ControlledRunScopes,ControlledRunError,readControlledRunScope,pauseControlledRunScopes,revokeControlledRunGrant,type ControlledRunGrant} from '../application/controlled-run-scope.ts';
 import { AiError,AI_ERROR_CODES } from '../ai/errors.ts';
+import {categoryUnknownCode,categoryFailureRequestId} from '../ai/category-knowledge.ts';
+import {CategoryNoSuitableError} from '../catalog/classification.ts';
 import { validateResumeSelection, rowSelected, rememberFailure, sanitizeFailureReason } from '../../shared/automatic-resume.ts';
 import type { AutomaticResumeSelection } from '../../shared/automatic-resume.ts';
 import { listWorkBatches, currentWorkBatch, archiveWorkBatch, addWorkBatchProducts, bindWorkBatchTask } from './work-batches.ts';
@@ -112,7 +114,7 @@ export interface AutomaticListingDependencies {
   ensureParent?: (child:AmazonDraft,profileId:string,signal:AbortSignal) => Promise<{draftId:string;ready:boolean}>;
   rebindFamily?: (input:{id:string;revision:number;plan:SalesListingPlan},signal:AbortSignal) => Promise<AmazonDraft>;
 }
-const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN'].includes(code);
+const recoverableAiUnknown=(code:string|null):boolean=>code!==null&&['SOURCE_CONSISTENCY_SENT_UNKNOWN','FIELD_RESULT_UNKNOWN','IMAGE_RESULT_UNKNOWN','CATEGORY_RESULT_UNKNOWN','CATEGORY_EXPANSION_RESULT_UNKNOWN'].includes(code);
 const adaptationBlocked=(task:AutomaticListingTask,key:string):boolean=>!!task.adaptation?.blockedKeys.includes(key)&&!task.adaptation.unitResolvedKeys?.includes(key);
 const submitted = (draft: AmazonDraft): boolean => !!draft.submittedAt || ['SUBMITTING','SUBMITTED','PROCESSING','BUYABLE','DISCOVERABLE','UNKNOWN'].includes(draft.state);
 const final = (task: AutomaticListingTask): boolean => ['COMPLETED','CANCELLED'].includes(task.status);
@@ -133,6 +135,7 @@ const needsSourceColor = (draft: AmazonDraft, remaining: string[] = []): boolean
 
 /** Main-process state machine. Approval is volatile, while every costly/write intent is durable. */
 export class AutomaticListingService {
+  private directory:string;
   private db: DatabaseSync;
   private deps: AutomaticListingDependencies;
   private tasks = new Map<string, AutomaticListingTask>();
@@ -151,7 +154,7 @@ export class AutomaticListingService {
   private closing: Promise<void> | null = null;
   private archiving = false;
   constructor(directory: string, dependencies: AutomaticListingDependencies) {
-    this.deps = dependencies; this.db = openDatabase(directory);
+    this.directory=directory;this.deps = dependencies; this.db = openDatabase(directory);
     this.controlledRuns=new ControlledRunScopes(this.db);
     try {
       this.pauseManagedControlledScope();
@@ -401,49 +404,57 @@ export class AutomaticListingService {
       if (!variant || variant.sku !== item.sku || stamp !== item.sourceStamp || product.revision !== item.productRevision&&!(allowSourceRecovery&&product.revision>item.productRevision&&this.canRebaseSources(task,item))) throw new UserFacingError('来源商品或 SKU 发生变化，请重新建立任务');
     }
   }
-  private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
+  private unknownCode(row:AutomaticListingItem,task:AutomaticListingTask,categoryCache?:Map<string,string|null>):string|null {
     const draft=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined;
     if(draft&&(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted))))return 'SUBMISSION_UNKNOWN';
     if(sourceConsistencyUnknown(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId]))return 'SOURCE_CONSISTENCY_SENT_UNKNOWN';
-    return this.nonSourceUnknownCode(row,task,draft);
+    return this.nonSourceUnknownCode(row,task,draft,categoryCache);
   }
-  private nonSourceUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask,draft:AmazonDraft|undefined=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined):string|null {
+  private categoryUnknown(row:AutomaticListingItem,task:AutomaticListingTask,cache?:Map<string,string|null>):string|null {
+    const key=task.targetId+':'+row.productId;if(cache?.has(key))return cache.get(key)!;
+    const code=categoryUnknownCode(this.db,this.directory,row.productId,()=>{const {target}=this.deps.amazon.executionTargetScope(task.targetId);return {targetId:target.id,sellerId:target.sellerId,marketplaceId:target.marketplaceId,region:target.region,locale:target.locale,mode:target.mode};});cache?.set(key,code);return code;
+  }
+  private nonSourceUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask,draft:AmazonDraft|undefined=row.draftId?this.deps.amazon.getDraft(row.draftId):undefined,categoryCache?:Map<string,string|null>):string|null {
     const journal=new CompletionJournal(this.db);
     // A retained guard without its old draft uses the same source sale identity as begin().
     const identity=completionSafetyIdentity(draft??{mode:task.mode,productId:row.productId,productRevision:row.productRevision,variantId:row.variantId,sku:row.sku,sellerId:task.sellerId,marketplaceId:task.marketplaceId,listingProgram:task.mode==='live'?'haul':'standard',salesPlan:row.salesPlan});
     if(journal.saleOperations(identity).some(op=>journal.unknown(op.id)))return 'FIELD_RESULT_UNKNOWN';
     if(row.repair?.phase==='FIELDS_STARTED'&&(!row.repair.operationId||journal.unknown(row.repair.operationId)))return 'FIELD_RESULT_UNKNOWN';
-    if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':null;
+    if(!row.draftId)return row.imageStarted?'IMAGE_RESULT_UNKNOWN':this.categoryUnknown(row,task,categoryCache);
     if(!draft)throw new UserFacingError('字段草稿记录缺失');
     if(['UNKNOWN','SUBMITTING'].includes(draft.state)||!submitted(draft)&&this.deps.execution.list().some(child=>child.items.some(item=>item.draftId===draft.id&&item.submitStarted)))return 'SUBMISSION_UNKNOWN';
     const run=this.deps.images.getProgress(row.draftId);
     if(run?.contentPreparation?.state==='STARTED'&&(!run.contentPreparation.operationId||journal.unknown(run.contentPreparation.operationId)))return 'FIELD_RESULT_UNKNOWN';
     if(run?.pendingRequest||run?.status==='RUNNING'||run?.slots?.some(slot=>slot.status==='UNKNOWN'||slot.attempts?.some(attempt=>['UNKNOWN','GENERATING'].includes(attempt.state))))return 'IMAGE_RESULT_UNKNOWN';
     if(row.imageStarted&&!run)return 'IMAGE_RESULT_UNKNOWN';
-    return null;
+    return this.categoryUnknown(row,task,categoryCache);
   }
   /** Only failure presentation uses receipt certainty; send/admit/archive guards
    * continue to use unknownCode and the original source reservation guard. */
-  private displayUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask):string|null {
-    const original=this.unknownCode(row,task);
+  private displayUnknownCode(row:AutomaticListingItem,task:AutomaticListingTask,categoryCache?:Map<string,string|null>):string|null {
+    const original=this.unknownCode(row,task,categoryCache);
     if(original!=='SOURCE_CONSISTENCY_SENT_UNKNOWN'||sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return original;
-    return this.nonSourceUnknownCode(row,task);
+    return this.nonSourceUnknownCode(row,task,undefined,categoryCache);
   }
-  private displayItem(row:AutomaticListingItem,task:AutomaticListingTask):AutomaticListingItem {
-    if(row.status!=='FAILED'||row.outcome?.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
+  private displayItem(row:AutomaticListingItem,task:AutomaticListingTask,categoryCache?:Map<string,string|null>):AutomaticListingItem {
+    if(row.status!=='FAILED'||!row.outcome)return row;
     try{
+      const unknown=this.displayUnknownCode(row,task,categoryCache);if(unknown)return row.outcome.kind==='UNKNOWN'&&row.outcome.code===unknown?row:{...row,outcome:{...row.outcome,kind:'UNKNOWN',code:unknown}};
+      if(row.outcome.kind!=='UNKNOWN'||row.outcome.code!=='SOURCE_CONSISTENCY_SENT_UNKNOWN')return row;
       if(sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])!=='RECEIVED_INVALID')return row;
-      const unknown=this.nonSourceUnknownCode(row,task);if(unknown)return {...row,outcome:{...row.outcome,code:unknown}};
       return {...row,outcome:{...row.outcome,kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'}};
     }catch{
       // Historical missing dependencies cannot prove the other safety states.
       // Preserve UNKNOWN in this read-only view, without changing the task/guard.
-      return {...row,outcome:{...row.outcome,code:'EVIDENCE_READ_FAILED'}};
+      return row.outcome.kind==='UNKNOWN'?{...row,outcome:{...row.outcome,code:'EVIDENCE_READ_FAILED'}}:row;
     }
   }
   private displayPresenter(){
     const cache=new WeakMap<AutomaticListingItem,AutomaticListingItem>();
-    return (row:AutomaticListingItem,task:AutomaticListingTask)=>{let value=cache.get(row);if(!value){value=this.displayItem(row,task);cache.set(row,value);}return value;};
+    // One synchronous read only: siblings share a product lookup; a later query
+    // always re-reads original receipts and never inherits time-based certainty.
+    const categoryCache=new Map<string,string|null>();
+    return (row:AutomaticListingItem,task:AutomaticListingTask)=>{let value=cache.get(row);if(!value){value=this.displayItem(row,task,categoryCache);cache.set(row,value);}return value;};
   }
   private async classifyFailure(task:AutomaticListingTask,row:AutomaticListingItem,failure?:unknown):Promise<void> {
     const protectedCode=failure instanceof AiError&&failure.code!=='OUTPUT_INVALID'?'AI_'+failure.code:row.outcome?.kind==='SYSTEM_REPAIR'&&(AI_ERROR_CODES.some(code=>code!=='OUTPUT_INVALID'&&row.outcome?.code==='AI_'+code)||['SOURCE_CONSISTENCY_REQUEST_FAILED','SOURCE_CONSISTENCY_UNAVAILABLE','SOURCE_CONSISTENCY_AUTH_FAILED'].includes(row.outcome.code))?row.outcome.code:null;
@@ -459,6 +470,8 @@ export class AutomaticListingService {
       }
       const unknown=this.displayUnknownCode(row,task)??(failure instanceof AiError&&failure.diagnosticReason==='IMAGE_PLAN_RESULT_UNKNOWN'?'IMAGE_RESULT_UNKNOWN':null);
       if(unknown)classification={kind:'UNKNOWN',code:unknown};
+      else if(row.stage==='CLASSIFY'&&failure instanceof CategoryNoSuitableError)classification={kind:'NEEDS_INPUT',code:failure.code};
+      else if(row.stage==='CLASSIFY'&&failure instanceof AiError&&failure.certainty==='DEFINITIVE_REJECTION'&&categoryFailureRequestId(this.db,row.productId,failure))classification={kind:'SYSTEM_REPAIR',code:'CATEGORY_EXPANSION_REJECTED'};
       else if(this.unknownCode(row,task)==='SOURCE_CONSISTENCY_SENT_UNKNOWN'&&sourceConsistencyPresentation(this.db,row.productId,row.salesPlan?.recipe.components.map(c=>c.variantId)??[row.variantId])==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'SOURCE_CONSISTENCY_INVALID_OUTPUT'};
       else if(failure instanceof AiError&&failure.certainty==='RECEIVED_INVALID')classification={kind:'SYSTEM_REPAIR',code:'AI_RECEIVED_INVALID_OUTPUT'};
       else if(protectedCode)classification={kind:'SYSTEM_REPAIR',code:protectedCode};
@@ -892,7 +905,7 @@ export class AutomaticListingService {
             catch (error) {
               if(error instanceof BatchWaitingError){row.batchWait={operationId:error.operationId};row.status='WAITING';row.error=error.message;this.save(task);continue;}
               if(row.batchWait&&this.deps.batch?.find(row.batchWait.operationId)?.adoption)delete row.batchWait;
-              recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+              recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,requestId:row.stage==='CLASSIFY'?categoryFailureRequestId(this.db,row.productId,error):undefined,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
               if (!this.running(task)) { row.status = 'PENDING'; this.save(task); break; }
               if(isSchemaTransientError(error)&&error.selection&&this.deferSchema(task,row,error))continue;
               row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
@@ -1493,7 +1506,7 @@ export class AutomaticListingService {
             const legacyOutcome=!row.observationFailureStamp&&savedFailureStamp&&savedFailureTime!==undefined&&row.outcome
               &&savedFailureTime<=Date.parse(row.outcome.classifiedAt)?structuredClone(row.outcome):undefined;
             if(savedFailureStamp)row.observationFailureStamp=savedFailureStamp;else delete row.observationFailureStamp;
-            recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
+            recordErrorEvidence(detail=>appendAuditEvent(this.db,randomUUID(),row.productId,'operation.failed','自动任务步骤失败（脱敏诊断）',JSON.stringify(detail),new Date().toISOString()),error,{stage:row.stage,requestId:row.stage==='CLASSIFY'?categoryFailureRequestId(this.db,row.productId,error):undefined,taskId:task.id,itemKey:row.key,sku:row.sku,operationId:row.repair?.operationId,variantId:row.variantId,draftId:row.draftId,executionTaskIds:row.executionTaskIds});
             row.status = 'FAILED'; row.error = error instanceof UserFacingError?errorMessage(error):`${row.sku} · ${row.stage}：${errorMessage(error)}`.slice(0,2000);
             const revision=task.revision,classified=structuredClone(row);await this.classifyFailure(task,classified);
             if(!canObserve()||task.revision!==revision){interrupted=true;break;}

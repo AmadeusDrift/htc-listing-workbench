@@ -8,6 +8,7 @@ import { defaultListingRules } from '../src/shared/listing-rules.ts';
 import { slowHttp } from './fixtures/stabilization/slow-http.ts';
 import { materializeSourceSnapshot, confirmSourceConsistencyFixture } from './helpers/source-consistency-proof.ts';
 import type { AmazonTarget } from '../src/shared/amazon-contracts.ts';
+import {automaticItemReason} from '../src/shared/automatic-status-projection.ts';
 import {createServer,get} from 'node:http';
 import {createHash,randomUUID} from 'node:crypto';
 import type {ClassificationDependencies} from '../src/main/catalog/classification.ts';
@@ -45,6 +46,7 @@ for(const scenario of ['none','manual','expanded'] as const)test(`actual automat
   const row=automatic.get(task.id).items[0];assert.equal(row.classification?.productType,'PLATFORM_SPECIALTY');assert.equal(row.stage,'DRAFT');assert.equal(row.draftId,null);assert.equal(counts.drafts,1);assert.equal(counts.images,0);assert.equal(counts.submissions,0);assert.equal(gets,1);assert.equal(http.posts,1);assert.equal(expanded.posts,1);assert.equal(f.requests.length,2);return;
  }
  const saved=automatic.get(task.id);assert.equal(saved.status,'NEEDS_ATTENTION');assert.equal(saved.items[0].stage,'CLASSIFY');assert.equal(saved.items[0].draftId,null);assert.match(saved.items[0].error??'',/无适用.*人工/);
+ assert.equal(saved.items[0].outcome?.kind,'NEEDS_INPUT');assert.equal(saved.items[0].outcome?.code,'CATEGORY_NO_SUITABLE');assert.match(automaticItemReason(saved.items[0]),/人工确认类目/);
  assert.deepEqual(counts,{schema:0,drafts:0,images:0,submissions:0,select:1});assert.equal(http.posts,1);assert.equal(f.requests.length,1);
  const calls=f.service.listCalls();assert.equal(calls.length,1);assert.equal(calls[0].status,'SUCCEEDED');assert.equal(f.service.listResults(product.id)[0].output.kind,'category-decision');
  assert.equal((await f.service.readProviderReceipt(calls[0].id) as {costUsd:number}).costUsd,.001);

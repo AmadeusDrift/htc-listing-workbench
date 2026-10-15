@@ -47,7 +47,7 @@ export async function createFakeProvider({directory,routes,responders={},ftp=fal
     const parts=[];let size=0;
     try{for await(const chunk of request){size+=chunk.length;if(size>maxRequestBytes){reject(413,'size');return;}parts.push(Buffer.from(chunk));}
       const input=Buffer.concat(parts);if(route.protocol){try{verifyProtocol(route,request.headers,input);}catch{return reject(403,'protocol');}}
-      const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true}:{})});
+      const row=ledger.append({event:'request',requestId:'s10-http-'+(ledger.rows.length+1),routeId:route.id,method:route.method,path:route.path,bodySha256:digest(input),bodyBytes:size,...(route.protocol?{protocolVerified:true,publicUrlSha256:digest(route.publicUrl)}:{})});
       const output=responders[route.id]?await responders[route.id]({body:input,headers:new Headers(request.headers),requestId:row.requestId}):route.response??{};let json=output.json??{};
       if(output.issueTokenFor){const target=known.find(row=>row.id===output.issueTokenFor);assert.equal(target?.protocol?.kind,'oss4');assert.equal(route.protocol?.action,'DescribeUploadToken');const p=target.protocol;
         json={Code:200,Data:{AccessKeyId:p.accessKeyId,AccessKeySecret:p.accessKeySecret,SecurityToken:p.securityToken,BucketName:p.bucket,FileNamePrefix:'s10/',OssInternetEndPoint:'https://oss-'+p.region+'.aliyuncs.com',Expiration:Date.parse(p.now)/1000+1800}};

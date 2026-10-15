@@ -1,7 +1,7 @@
 import { AiError,httpError,throwIfAborted,abortable } from '../errors.ts';
 import type { AdapterContext } from '../transport.ts';
 import type { ProviderMetadata } from '../transport.ts';
-import { emptyUsage } from '../transport.ts';
+import { emptyUsage,checkPaidAdapterEffect } from '../transport.ts';
 import { responseCollection, transportEvidence } from '../response-lifecycle.ts';
 import {opaqueResponse} from '../opaque-response.ts';
 
@@ -59,6 +59,7 @@ export async function postOpenRouter(endpoint:OpenRouterEndpoint,body:Record<str
   let response:Response|undefined,size=0,dispatched=false,complete=false,capturedBody:unknown;
   try {
   throwIfAborted(collection.signal);
+  checkPaidAdapterEffect(context,{service:endpoint==='/api/v1/images'?'openrouter-image':endpoint==='/api/v1/batches'?'openrouter-batch-create':endpoint==='/api/alpha/decisions'?'openrouter-decisions':'openrouter-chat',url:'https://openrouter.ai'+endpoint,method:'POST',body:serialized});
   context.beforeSend?.(serialized);
   throwIfAborted(collection.signal);dispatched=true;
   transportEvidence(context,{event:'DISPATCH_ATTEMPTED',certainty:'SENT_UNKNOWN'});

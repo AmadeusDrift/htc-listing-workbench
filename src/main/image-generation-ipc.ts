@@ -1,6 +1,8 @@
 import type { ImageGenerationService } from './image-generation/service.ts';
 
 export function installImageGenerationIpc(service: ImageGenerationService, handle: (channel: string, count: number, callback: (...args: unknown[]) => unknown) => void): void {
+  handle('red:image-generation:spend-status',0,()=>service.getSpendStatus());
+  handle('red:image-generation:spend-limit-save',1,input=>service.setDailySpendLimit(input));
   handle('red:image-generation:models', 0, () => service.getModels());
   handle('red:image-generation:refresh-models', 0, () => service.refreshModels());
   handle('red:image-generation:connection', 0, () => service.getConnection());

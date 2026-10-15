@@ -88,10 +88,11 @@ export class AmazonPersistence {
     const row = this.db.prepare('SELECT draft_id,state,owner_kind,owner_id FROM amazon_write_locks WHERE listing_hash=?').get(hash);
     return row ? { draftId: String(row.draft_id), state: String(row.state),ownerKind:String(row.owner_kind),ownerId:String(row.owner_id)||String(row.draft_id) } : null;
   }
-  beginWrite(hash: string, record: DraftRecord): void {
+  beginWrite(hash: string, record: DraftRecord, beforeIntent?:()=>void): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.locked(hash)) throw new UserFacingError('此 SKU 有结果未知或尚未确认的提交，请先回读并人工核对；禁止重放');
+      if(beforeIntent?.constructor.name==='AsyncFunction')throw new UserFacingError('提交意图权限检查必须同步完成');const checked=beforeIntent?.() as unknown;if(checked&&typeof(checked as PromiseLike<unknown>).then==='function')throw new UserFacingError('提交意图权限检查必须同步完成');
       this.db.prepare('INSERT INTO amazon_write_locks(listing_hash,draft_id,state,created_at,owner_kind,owner_id) VALUES(?,?,?,?,?,?)').run(hash, record.draft.id, 'SUBMITTING', record.draft.updatedAt, 'draft', record.draft.id);
       this.putRecord(record); this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

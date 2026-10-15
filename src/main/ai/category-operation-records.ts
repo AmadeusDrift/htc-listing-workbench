@@ -1,4 +1,4 @@
-import type {CategoryOperationRecord,CategoryExpansionOperation,CategoryExpansionSnapshot} from '../../shared/category-operation-contracts.ts';
+import type {CategoryOperationRecord,CategoryExpansionOperation,CategoryExpansionSnapshot,CategoryExpansionCaptureProof} from '../../shared/category-operation-contracts.ts';
 import type {CategoryRepairClaim} from '../../shared/category-ai-contracts.ts';
 import {categoryOperationId,categoryCandidateSnapshot} from './category-context.ts';
 import {listingFingerprint} from '../json-fingerprint.ts';
@@ -6,9 +6,9 @@ import {uuid,sha256,date,boundedText} from './primitives.ts';
 import {AiError} from './errors.ts';
 
 function invalid():never {throw new AiError('INVALID_CONFIG');}
-function record(raw:unknown,names:readonly string[]):Record<string,unknown>{
+function record(raw:unknown,names:readonly string[],optional:readonly string[]=[]):Record<string,unknown>{
  if(!raw||typeof raw!=='object'||Object.getPrototypeOf(raw)!==Object.prototype||Reflect.ownKeys(raw).some(key=>typeof key!=='string')||Object.values(Object.getOwnPropertyDescriptors(raw)).some(value=>!('value' in value)))invalid();
- const value=raw as Record<string,unknown>;if(Reflect.ownKeys(value).length!==names.length||names.some(name=>!Object.hasOwn(value,name)))invalid();return value;
+ const value=raw as Record<string,unknown>;if(Reflect.ownKeys(value).some(key=>!names.includes(String(key))&&!optional.includes(String(key)))||names.some(name=>!Object.hasOwn(value,name)))invalid();return value;
 }
 function list(raw:unknown,max:number,min=0):unknown[]{
  if(!Array.isArray(raw)||Object.getPrototypeOf(raw)!==Array.prototype||raw.length<min||raw.length>max||Reflect.ownKeys(raw).length!==raw.length+1)invalid();
@@ -32,11 +32,18 @@ function snapshot(raw:unknown,requestId:string):CategoryExpansionSnapshot {
  return{version:1,candidates,evidence,candidateSnapshotSha256,sha256:contentSha256,requestId,receiptSha256:sha256(s.receiptSha256),receivedAt:date(s.receivedAt)};
 }
 function expansion(raw:unknown,id:string):CategoryExpansionOperation {
- const e=record(raw,['version','operationId','inputVersion','originalDecisionId','originalCallId','fromCandidateSnapshotSha256','claimedAt','requestId','targetId','query','requestSha256','permittedAt','snapshot']);
+ const e=record(raw,['version','operationId','inputVersion','originalDecisionId','originalCallId','fromCandidateSnapshotSha256','claimedAt','requestId','targetId','query','requestSha256','permittedAt','snapshot'],['captureProof']);
  if(e.version!==1||e.operationId!==id)invalid();const claimedAt=date(e.claimedAt),permittedAt=e.permittedAt===null?null:date(e.permittedAt),requestId=uuid(e.requestId),received=e.snapshot===null?null:snapshot(e.snapshot,requestId);
  if(permittedAt!==null&&permittedAt<claimedAt||received&&(!permittedAt||received.receivedAt<permittedAt))invalid();
  const targetId=boundedText(e.targetId,100),query=boundedText(e.query,1000),requestSha256=listingFingerprint({method:'GET',targetId,query});if(e.requestSha256!==requestSha256)invalid();
- return{version:1,operationId:id,inputVersion:sha256(e.inputVersion),originalDecisionId:uuid(e.originalDecisionId),originalCallId:uuid(e.originalCallId),fromCandidateSnapshotSha256:sha256(e.fromCandidateSnapshotSha256),claimedAt,requestId,targetId,query,requestSha256,permittedAt,snapshot:received};
+ const value:CategoryExpansionOperation={version:1,operationId:id,inputVersion:sha256(e.inputVersion),originalDecisionId:uuid(e.originalDecisionId),originalCallId:uuid(e.originalCallId),fromCandidateSnapshotSha256:sha256(e.fromCandidateSnapshotSha256),claimedAt,requestId,targetId,query,requestSha256,permittedAt,snapshot:received};
+ if(Object.hasOwn(e,'captureProof')){value.captureProof=captureProof(e.captureProof,value);if(received&&received.receiptSha256!==value.captureProof.receiptSha256)invalid();}return value;
+}
+function captureProof(raw:unknown,owner:CategoryExpansionOperation):CategoryExpansionCaptureProof {
+ const p=record(raw,['version','operationId','inputVersion','requestId','requestSha256','targetScope','targetGeneration','query','status','remoteRequestId','receivedAt','receiptSha256','byteSize','fileSha256','fileByteSize']),target=record(p.targetScope,['targetId','sellerId','marketplaceId','region','locale','mode']);
+ if(p.version!==1||!owner.permittedAt||p.operationId!==owner.operationId||p.inputVersion!==owner.inputVersion||p.requestId!==owner.requestId||p.requestSha256!==owner.requestSha256||p.query!==owner.query||target.targetId!==owner.targetId||typeof target.region!=='string'||!['na','eu','fe'].includes(target.region)||typeof target.mode!=='string'||!['live','demo'].includes(target.mode)||!Number.isSafeInteger(p.targetGeneration)||Number(p.targetGeneration)<1||!Number.isInteger(p.status)||Number(p.status)<100||Number(p.status)>599||!Number.isSafeInteger(p.byteSize)||Number(p.byteSize)<0||Number(p.byteSize)>2*1024*1024||!Number.isSafeInteger(p.fileByteSize)||Number(p.fileByteSize)<1||Number(p.fileByteSize)>4*1024*1024||p.remoteRequestId!==null&&(typeof p.remoteRequestId!=='string'||!/^[A-Za-z0-9_.:-]{1,160}$/.test(p.remoteRequestId)))invalid();
+ const receivedAt=date(p.receivedAt);if(receivedAt<owner.permittedAt)invalid();
+ return {version:1,operationId:owner.operationId,inputVersion:owner.inputVersion,requestId:owner.requestId,requestSha256:owner.requestSha256,targetScope:{targetId:owner.targetId,sellerId:boundedText(target.sellerId,200),marketplaceId:boundedText(target.marketplaceId,100),region:target.region as 'na'|'eu'|'fe',locale:boundedText(target.locale,100),mode:target.mode as 'live'|'demo'},targetGeneration:Number(p.targetGeneration),query:owner.query,status:Number(p.status),remoteRequestId:p.remoteRequestId as string|null,receivedAt,receiptSha256:sha256(p.receiptSha256),byteSize:Number(p.byteSize),fileSha256:sha256(p.fileSha256),fileByteSize:Number(p.fileByteSize)};
 }
 export function parseCategoryOperation(raw:unknown):CategoryOperationRecord {
  const o=record(raw,['version','id','productId','repairs','expansion']),productId=uuid(o.productId),id=categoryOperationId(productId);
@@ -57,11 +64,15 @@ export function permitCategoryExpansion(raw:unknown,requestId:string,at:string):
 export function completeCategoryExpansion(raw:unknown,received:unknown):ExpandedOperation {
  const operation=parseCategoryOperation(raw),prior=operation.expansion;if(!prior||!prior.permittedAt)invalid();const next=expansion({...prior,snapshot:received},operation.id);if(prior.snapshot&&listingFingerprint(prior.snapshot)!==listingFingerprint(next.snapshot))invalid();return{...operation,expansion:next};
 }
+export function freezeCategoryExpansionCapture(raw:unknown,received:unknown):ExpandedOperation {
+ const operation=parseCategoryOperation(raw),prior=operation.expansion;if(!prior||!prior.permittedAt)invalid();const proof=captureProof(received,prior);
+ if(prior.captureProof&&listingFingerprint(prior.captureProof)!==listingFingerprint(proof))invalid();return {...operation,expansion:expansion({...prior,captureProof:prior.captureProof??proof},operation.id)};
+}
 /** Restore is an immutable union, never a reset of a claimed or permitted effect. */
 export function mergeCategoryOperations(left:unknown,right:unknown):CategoryOperationRecord {
  const a=parseCategoryOperation(left),b=parseCategoryOperation(right);if(a.id!==b.id||a.productId!==b.productId)invalid();
  const repairs=new Map(a.repairs.map(claim=>[claim.phase,claim]));for(const claim of b.repairs){const old=repairs.get(claim.phase);if(old&&listingFingerprint(old)!==listingFingerprint(claim))invalid();repairs.set(claim.phase,claim);}
  let merged=a.expansion??b.expansion;
- if(a.expansion&&b.expansion){const {permittedAt:ap,snapshot:as,...ai}=a.expansion,{permittedAt:bp,snapshot:bs,...bi}=b.expansion;if(listingFingerprint(ai)!==listingFingerprint(bi)||ap&&bp&&ap!==bp||as&&bs&&listingFingerprint(as)!==listingFingerprint(bs))invalid();merged={...ai,permittedAt:ap??bp,snapshot:as??bs};}
+ if(a.expansion&&b.expansion){const {permittedAt:ap,snapshot:as,captureProof:ac,...ai}=a.expansion,{permittedAt:bp,snapshot:bs,captureProof:bc,...bi}=b.expansion;if(listingFingerprint(ai)!==listingFingerprint(bi)||ap&&bp&&ap!==bp||as&&bs&&listingFingerprint(as)!==listingFingerprint(bs)||ac&&bc&&listingFingerprint(ac)!==listingFingerprint(bc))invalid();merged={...ai,permittedAt:ap??bp,snapshot:as??bs,...(ac??bc?{captureProof:ac??bc}:{})};}
  return parseCategoryOperation({...a,repairs:[...repairs.values()],expansion:merged});
 }

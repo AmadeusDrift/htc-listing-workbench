@@ -50,3 +50,17 @@ test('an empty expanded response is a received snapshot and identical local coll
  const completed=records.completeCategoryExpansion(permitted,snapshot);assert.deepEqual(completed.expansion.snapshot!.candidates,[]);assert.deepEqual(records.completeCategoryExpansion(completed,snapshot),completed);
  assert.throws(()=>records.completeCategoryExpansion(completed,{...snapshot,receiptSha256:'e'.repeat(64)}));
 });
+function captureFixture(){const f=fixture(),claimed=records!.addCategoryExpansion(records!.newCategoryOperation(f.productId),f.expansion),permitted=records!.permitCategoryExpansion(claimed,f.expansion.requestId,at),proof={version:1,operationId:f.operationId,inputVersion:f.expansion.inputVersion,requestId:f.expansion.requestId,requestSha256:f.expansion.requestSha256,targetScope:{targetId:f.expansion.targetId,sellerId:'SYNTHETIC_SELLER',marketplaceId:'ATVPDKIKX0DER',region:'na',locale:'en_US',mode:'live'},targetGeneration:1,query:f.expansion.query,status:200,remoteRequestId:'synthetic-remote',receivedAt:later,receiptSha256:'d'.repeat(64),byteSize:100,fileSha256:'e'.repeat(64),fileByteSize:1000};return{f,claimed,permitted,proof};}
+test('original capture proof is optional for legacy reads but immutable and independently merged once present',()=>{
+ assert.ok(records);assert.equal(typeof records.freezeCategoryExpansionCapture,'function');const {claimed,permitted,proof}=captureFixture();
+ const captured=records.freezeCategoryExpansionCapture(permitted,proof);assert.deepEqual(captured.expansion.captureProof,proof);assert.deepEqual(records.freezeCategoryExpansionCapture(captured,proof),captured);
+ assert.deepEqual(records.parseCategoryOperation(permitted),permitted);assert.equal(Object.hasOwn(permitted.expansion,'captureProof'),false);
+ assert.deepEqual(records.mergeCategoryOperations(permitted,captured),captured);assert.deepEqual(records.mergeCategoryOperations(captured,claimed),captured);
+ assert.throws(()=>records.freezeCategoryExpansionCapture(captured,{...proof,fileSha256:'f'.repeat(64)}));assert.throws(()=>records.mergeCategoryOperations(captured,records.freezeCategoryExpansionCapture(permitted,{...proof,targetGeneration:2})));
+});
+test('capture proof cannot forge original scope, metadata shape, permission or invoke accessors',()=>{
+ assert.ok(records);assert.equal(typeof records.freezeCategoryExpansionCapture,'function');const {claimed,permitted,proof}=captureFixture();let getters=0;
+ const target={...proof.targetScope};Object.defineProperty(target,'sellerId',{enumerable:true,get(){getters++;return proof.targetScope.sellerId;}});
+ for(const value of [{...proof,requestId:randomUUID()},{...proof,query:'foreign'},{...proof,targetScope:{...proof.targetScope,targetId:'foreign'}},{...proof,fileSha256:'bad'},{...proof,status:'200'},{...proof,unexpected:true},{...proof,targetScope:target}])assert.throws(()=>records.freezeCategoryExpansionCapture(permitted,value));
+ assert.throws(()=>records.freezeCategoryExpansionCapture(claimed,proof));assert.throws(()=>records.parseCategoryOperation({...permitted,expansion:{...permitted.expansion,captureProof:null}}));assert.equal(getters,0);
+});

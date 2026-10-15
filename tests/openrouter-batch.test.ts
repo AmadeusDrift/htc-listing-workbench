@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve,join } from 'node:path';
 import { openDatabase } from '../src/main/database.ts';
 import { resolvePurpose } from '../src/main/ai/purpose-routing.ts';
+import {ControlledRunScopes} from '../src/main/application/controlled-run-scope.ts';
 
 async function fixture(t:test.TestContext,fetcher:typeof fetch){
   const { BatchService }=await import('../src/main/ai/batch/service.ts');
@@ -60,3 +61,15 @@ test('A47 unsupported modes and unpinned vision explain ordinary routing without
 });
 
 export {fixture};
+
+test('controlled Batch creates no prepared identity or send permit without a reliable all-route fee upper',async t=>{
+ let requests=0;const f=await fixture(t,async()=>{requests++;return Response.json({id:'batch_controlled',status:'validating',model:'openai/gpt-6-luna',endpoint:'/v1/chat/completions',results:null});}),op=f.operation(),grant=batchGrant(f,op);
+ assert.throws(()=>grant(()=>f.service.prepare([op])),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE'&&e.certainty==='NOT_SENT');assert.equal(requests,0);for(const table of ['ai_batches','ai_batch_items','ai_calls','ai_usage_ledger','ai_spend_reservations'])assert.equal(f.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n,0);
+});
+for(const effect of ['create','get'] as const)test(`controlled original Batch ${effect} preserves the existing identity and fees on unavailable pricing`,async t=>{
+ let requests=0;const f=await fixture(t,async()=>{requests++;return Response.json({id:'batch_controlled',status:'validating',model:'openai/gpt-6-luna',endpoint:'/v1/chat/completions',results:null});}),op=f.operation(),[batch]=f.service.prepare([op]);if(effect==='get')await f.service.submit(batch.id);const grant=batchGrant(f,op),before=f.service.get(batch.id),usage=f.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),count=requests;
+ await assert.rejects(grant(()=>effect==='create'?f.service.submit(batch.id):f.service.reconcile(batch.id)),(e:any)=>e.diagnosticReason==='SPEND_BOUND_UNAVAILABLE'&&e.certainty==='NOT_SENT');assert.equal(requests,count);assert.deepEqual(f.service.get(batch.id),before);assert.deepEqual(f.db.prepare('SELECT * FROM ai_usage_ledger ORDER BY id').all(),usage);assert.equal(f.db.prepare('SELECT count(*) n FROM ai_spend_reservations').get()!.n,0);
+});
+function batchGrant(f:Awaited<ReturnType<typeof fixture>>,op:ReturnType<Awaited<ReturnType<typeof fixture>>['operation']>){
+ const variantId=randomUUID(),task={id:op.taskId,revision:1,status:'RUNNING',mode:'live',targetId:'synthetic',sellerId:'seller',marketplaceId:'US',items:[{key:'first',productId:op.owner.productId,variantId,sku:'S08-BATCH'}]};f.db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?)').run(task.id,JSON.stringify(task));const scopes=new ControlledRunScopes(f.db),scope=scopes.register({taskId:task.id,expectedTaskRevision:1,targetId:task.targetId,sellerId:task.sellerId,marketplaceId:task.marketplaceId,items:[{itemKey:'first',productId:op.owner.productId,variantIds:[variantId],sku:'S08-BATCH',recipeKey:null,parentage:'NONE'}]});return scopes.activate(scope.id);
+}

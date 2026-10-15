@@ -30,9 +30,10 @@ import { imageRequestNotSent, invalidImageOutput } from './errors.ts';
 import { recordErrorEvidence } from '../error-evidence.ts';
 import {AiSpendBudget} from '../ai/spend-budget.ts';
 import {prepareImageSpendReceiptProof} from '../ai/spend-receipts.ts';
-import {SpendBudgetError,priceEvidence,imageSpendBound} from '../ai/spend-records.ts';
+import {SpendBudgetError,priceEvidence,imageSpendBound,spendObject,spendDate,usdLimitMicros} from '../ai/spend-records.ts';
+import type {ImageGenerationSpendStatus} from '../../shared/ai-spend-contracts.ts';
 import type {ImagePriceEvidence} from '../../shared/ai-spend-contracts.ts';
-import {ControlledRunScopes,ControlledRunError} from '../application/controlled-run-scope.ts';
+import {ControlledRunScopes,ControlledRunError,readControlledRunScope} from '../application/controlled-run-scope.ts';
 
 export interface ImageGenerationDependencies { fetch?: typeof fetch; timeoutMs?: number; decodePreview: (bytes: Buffer) => Buffer; normalizeImage?: (bytes: Buffer) => Buffer; downloadDependencies?: RelayDownloadDependencies }
 function parseInput(raw: unknown, provider: ImageGenerationProvider, model: string): GenerateImageCandidateInput {
@@ -78,6 +79,9 @@ export class ImageGenerationService {
     return{state:'ready',config:{...(saved.state==='ready'?saved.config:{provider:'openrouter' as const,...imageDefaults('openrouter'),enabled:false}),apiKey,credentialRef:'openrouter'}};
   }
   get busy(): boolean { return !!this.running; }
+  /** Local ledger observation only: never obtains pricing, models, credits or credentials. */
+  getSpendStatus():ImageGenerationSpendStatus{this.ensureOpen();return{currency:'USD',unit:'microUSD',daily:this.spend.status('image-generation-daily'),controlledLifetime:this.spend.status('controlled-live-lifetime'),controlledRunStatus:readControlledRunScope(this.db)?.status??'not-registered',quoteStatus:'not-checked'};}
+  setDailySpendLimit(raw:unknown):ImageGenerationSpendStatus{this.ensureOpen();const value=spendObject(raw,['limitUsd','expectedUpdatedAt']);if(value.expectedUpdatedAt!==null)spendDate(value.expectedUpdatedAt);this.spend.setImagePolicy(usdLimitMicros(value.limitUsd),value.expectedUpdatedAt);return this.getSpendStatus();}
   getModels(): ImageModelCatalog {
     this.ensureOpen(); const current = this.readConnection('openrouter');
     return structuredClone(current.state === 'ready' && this.catalog?.keyHash === digest(current.config.apiKey) ? this.catalog.value : ({source:'builtin' as const,fetchedAt:null,models:OPENROUTER_IMAGE_MODELS.map(id=>({id,protocol:'images' as const,endpoints:['/api/v1/images']}))}));
@@ -195,7 +199,7 @@ export class ImageGenerationService {
         const proof=prepareImageSpendReceiptProof(saved.record,saved.capture),settled=transaction(this.db,()=>this.spend.settleReceiptInTransaction(this.db,id,saved.record.id,proof));if(settled.state==='COST_ANOMALY')throw Object.assign(new SpendBudgetError('SPEND_COST_ANOMALY'),{requestId:id,certainty:proof.certainty});}}
       const failure=openRouterFailure(receipt.status,receipt.body);if(failure)throw failure;
       const state=openRouterReceiptState(receipt.status,receipt.body);if(state==='unknown'||state==='invalid')throw Object.assign(new AiError('OUTPUT_INVALID'),{certainty:state==='unknown'?'SENT_UNKNOWN' as const:'RECEIVED_INVALID' as const,diagnosticReason:receipt.body?.encoding==='raw-utf8-invalid/v1'?'RESPONSE_UTF8_INVALID':receipt.body==='[omitted: credential echo]'?'RESPONSE_SECRET_ECHO':'RESPONSE_BODY_EMPTY'});
-      const result=decodeOpenRouterImage(receipt.body),preview=this.decodePreview(result.bytes);
+      let result:ReturnType<typeof decodeOpenRouterImage>;try{result=decodeOpenRouterImage(receipt.body);}catch(error){const verified=readImageReceiptSync(this.db,this.directory,intent);if(error instanceof AiError&&error.code==='OUTPUT_INVALID'&&verified&&listingFingerprint(verified.capture)===listingFingerprint(receipt))error.certainty??='RECEIVED_INVALID';throw error;}const preview=this.decodePreview(result.bytes);
       const candidate:GeneratedImageCandidate={id:intent.id,provider:intent.provider,model:intent.model,productId:intent.productId,productRevision:intent.productRevision,createdAt:intent.createdAt,mode:intent.mode,sourceAssets:intent.sourceAssets,...(intent.editSource?{editSource:intent.editSource}:{}),requestId:result.requestId,reviewState:'unreviewed',mimeType:'image/png',width:result.width,height:result.height,byteSize:result.bytes.length,sha256:digest(result.bytes),previewUrl:'data:image/png;base64,'+preview.toString('base64')};
       delete (candidate as any).version;this.saveCandidate(candidate,result.bytes,preview,()=>{});
     }

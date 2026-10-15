@@ -1,7 +1,7 @@
 import type {DatabaseSync} from 'node:sqlite';
 import {realpathSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-import type {AiSpendBound,AiSpendPolicy,AiSpendReservation,AiSpendSummary,AiSpendReceiptProof} from '../../shared/ai-spend-contracts.ts';
+import type {AiSpendBound,AiSpendPolicy,AiSpendReservation,AiSpendSummary,AiSpendReceiptProof,AiSpendStatus} from '../../shared/ai-spend-contracts.ts';
 import {transaction} from '../application/transaction.ts';
 import {listingFingerprint} from '../json-fingerprint.ts';
 import {SpendBudgetError,spendDate,spendHash,spendInteger,spendInvalid,spendText,spendUuid,validateSpendPolicy,validateSpendReservation,imageSpendBound,usdMicrosCeil} from './spend-records.ts';
@@ -36,13 +36,14 @@ export class AiSpendBudget {
  constructor(db:DatabaseSync,now:()=>Date=()=>new Date()){this.db=db;this.now=now;}
  private at():string{return spendDate(this.now().toISOString());}
  list():AiSpendReservation[]{return readReservations(this.db);}
+ policyRecord(id:AiSpendPolicy['id'],db=this.db):AiSpendPolicy|null{return readPolicies(db).find(p=>p.id===id)??null;}
  policy(id:AiSpendPolicy['id'],db=this.db):AiSpendPolicy{
-  return readPolicies(db).find(p=>p.id===id)??{version:1,id,period:id==='image-generation-daily'?'UTC_DAY':'LIFETIME',limitUsdMicros:id==='image-generation-daily'?null:5_000_000,updatedAt:this.at()};
+  return this.policyRecord(id,db)??{version:1,id,period:id==='image-generation-daily'?'UTC_DAY':'LIFETIME',limitUsdMicros:id==='image-generation-daily'?null:5_000_000,updatedAt:this.at()};
  }
- setImagePolicy(limitUsdMicros:number|null):AiSpendPolicy{
-  const policy=validateSpendPolicy({version:1,id:'image-generation-daily',period:'UTC_DAY',limitUsdMicros,updatedAt:this.at()});
-  transaction(this.db,()=>this.db.prepare('INSERT INTO ai_spend_policies(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(policy.id,JSON.stringify(policy)));return policy;
+ setImagePolicy(limitUsdMicros:number|null,expectedUpdatedAt?:string|null):AiSpendPolicy{
+  return transaction(this.db,()=>{const previous=this.policyRecord('image-generation-daily');if(expectedUpdatedAt!==undefined&&(previous?.updatedAt??null)!==expectedUpdatedAt)throw new SpendBudgetError('SPEND_POLICY_CONFLICT');const updatedAt=new Date(Math.max(Date.parse(this.at()),previous?Date.parse(previous.updatedAt)+1:0)).toISOString(),policy=validateSpendPolicy({version:1,id:'image-generation-daily',period:'UTC_DAY',limitUsdMicros,updatedAt});this.db.prepare('INSERT INTO ai_spend_policies(id,record_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(policy.id,JSON.stringify(policy));return policy;});
  }
+ status(id:AiSpendPolicy['id']):AiSpendStatus{const summary=this.summary(id),records=this.list().filter(r=>r.policyIds.includes(id));return{...summary,policyUpdatedAt:this.policyRecord(id)?.updatedAt??null,remainingUsdMicros:summary.limitUsdMicros===null?null:Math.max(0,summary.limitUsdMicros-spendInteger(summary.reportedUsdMicros+summary.heldUsdMicros)),pendingCalls:records.filter(r=>r.state==='DISPATCH_ATTEMPTED').length,unknownCalls:records.filter(r=>r.state==='UNKNOWN').length};}
  summary(id:AiSpendPolicy['id'],db=this.db,at=this.at()):AiSpendSummary{
   const policy=this.policy(id,db),result:AiSpendSummary={reportedUsdMicros:0,heldUsdMicros:0,unboundedCalls:0,anomaly:false,limitUsdMicros:policy.limitUsdMicros};
   const records=readReservations(db).filter(r=>r.policyIds.includes(id));result.anomaly=records.some(r=>r.state==='COST_ANOMALY');

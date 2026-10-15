@@ -69,6 +69,7 @@ import type { AutomaticListingOutcome, AutomaticListingQueue, AutomaticQueueRow,
 import { outcomeScope, pricingOutcome, pricingEvidenceCurrent, qualifiedPricing, recipeKey } from './outcomes.ts';
 import { previewSalesRecipes } from '../sales-plans/planning.ts';
 import { selectSalesRecipes } from '../sales-plans/selection.ts';
+import { AutomaticTaskCheckpoints,type TaskCheckpointChange } from './checkpoints.ts';
 
 export interface AutomaticListingDependencies {
   /** Main-only controlled-window boundary; unrelated persisted tasks stay read-only. */
@@ -139,6 +140,20 @@ export class AutomaticListingService {
   private db: DatabaseSync;
   private deps: AutomaticListingDependencies;
   private tasks = new Map<string, AutomaticListingTask>();
+  private checkpoints = new AutomaticTaskCheckpoints();
+  private checkpointDataVersions=new Map<string,number>();
+  private progressListeners=new Set<(value:ReturnType<AutomaticListingService['getOperationProgress']>)=>void>();
+  private progressValue:{taskId:string|null;phase:'PREPARING'|'VERIFYING'|'SAVING';completed:number;total:number;message:string}|null=null;
+  private progressNotifiedAt=0;
+  private get operationProgress(){return this.progressValue;}
+  private set operationProgress(value:typeof this.progressValue){
+    const prior=this.progressValue;this.progressValue=value;const now=performance.now();
+    if(value&&prior&&value.taskId===prior.taskId&&value.phase===prior.phase&&value.total===prior.total&&value.completed!==value.total&&now-this.progressNotifiedAt<100)return;
+    this.progressNotifiedAt=now;for(const listener of this.progressListeners){try{listener(value?{...value}:null);}catch{/* UI subscribers cannot grant, block or roll back business writes. */}}
+  }
+  getOperationProgress(){return this.operationProgress?{...this.operationProgress}:null;}
+  onOperationProgress(listener:(value:ReturnType<AutomaticListingService['getOperationProgress']>)=>void):()=>void{this.progressListeners.add(listener);try{listener(this.getOperationProgress());}catch{/* A closed window cannot change workflow authority. */}return ()=>{this.progressListeners.delete(listener);};}
+  getItemChangeStamp(taskId:string,key:string):string|null{return this.checkpoints.itemStamp(taskId,key);}
   private grants = new Set<string>();
   private controlledRuns:ControlledRunScopes;
   private controlledGrants=new Map<string,ControlledRunGrant>();
@@ -164,6 +179,7 @@ export class AutomaticListingService {
         assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(this.db,task);
         if (task.id !== saved.id) throw new UserFacingError('自动任务身份不一致');
         this.tasks.set(task.id, task);
+        this.checkpoints.remember(task);
         if (this.canManage(task.id) && ['QUEUED','RUNNING','WAITING'].includes(task.status)) {
           this.deps.batch?.stop(task.id);task.status = 'PAUSED'; task.error = '工作台曾中断，已保留进度；继续任务前会核对范围，不会自动重发未知生图或提交。';
           for (const row of task.items) { if(row.schemaRetry?.state==='IN_FLIGHT')row.schemaRetry.state='WAITING'; if (row.status === 'RUNNING') row.status = 'PENDING'; }
@@ -171,6 +187,7 @@ export class AutomaticListingService {
         }
       }
     } catch (error) { this.db.close(); throw error; }
+    const dataVersion=Number(this.db.prepare('PRAGMA data_version').get()!.data_version);for(const id of this.tasks.keys())this.checkpointDataVersions.set(id,dataVersion);
   }
   private pauseManagedControlledScope():void{const scope=readControlledRunScope(this.db);if(!scope||this.canManage(scope.taskId))pauseControlledRunScopes(this.db);}
   private canManage(id:string):boolean{return this.deps.canManageTask?.(id)??true;}
@@ -181,18 +198,31 @@ export class AutomaticListingService {
   private save(task: AutomaticListingTask, db:DatabaseSync=this.db, completed: { key: string; stage: AutomaticListingItem['stage'] }[] = [], at?:string): void {
     if(this.tasks.has(task.id))this.assertManaged(task.id);
     const priorRevision=task.revision,priorUpdatedAt=task.updatedAt;
+    let savedChange:TaskCheckpointChange|undefined;
     try{transaction(db,()=>{
     const persisted=db.prepare("SELECT json_extract(record_json,'$.revision') revision FROM automatic_listing_tasks WHERE id=?").get(task.id);
-    const priorStages = new Map(db.prepare("SELECT json_extract(i.value,'$.key') key,json_extract(i.value,'$.stage') stage,json_extract(i.value,'$.status') status FROM automatic_listing_tasks t,json_each(t.record_json,'$.items') i WHERE t.id=?").all(task.id).map(row => [String(row.key), { stage: String(row.stage), status: String(row.status) }]));
     if(persisted&&persisted.revision!==task.revision)throw new UserFacingError('任务检查点已变化，未覆盖较新的暂停或执行结果');
-    for(const row of task.items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));
+    // Other owner connections may have committed while a request was awaiting.
+    // Never reuse the in-memory proof over an unobserved persisted-task change,
+    // even when an invalid writer forgot to advance the task revision.
+    const dataVersion=Number(this.db.prepare('PRAGMA data_version').get()!.data_version);
+    if(persisted&&(db!==this.db||this.checkpointDataVersions.get(task.id)!==dataVersion)){
+      const durable=validateAutomaticListingTask(JSON.parse(String(db.prepare('SELECT record_json FROM automatic_listing_tasks WHERE id=?').get(task.id)!.record_json)));
+      if(!this.checkpoints.matches(durable)){
+        if(this.checkpoints.revision(task.id)===durable.revision)throw new UserFacingError('任务检查点已变化，请重新读取原任务；未覆盖历史');
+        // A caller explicitly reloaded a newer legitimate revision (or an outer
+        // transaction rolled back). Rebuild the whole proof, never incrementally
+        // validate against the stale in-memory checkpoint.
+        assertAutomaticRejectionHistory(db,durable);assertTaskAdaptationHistory(db,durable);this.checkpoints.remember(durable);
+      }
+    }
     task.revision++; task.updatedAt = at??new Date().toISOString();
-    validateAutomaticListingTask(task);
+    const change=savedChange=this.checkpoints.prepare(task,false,completed.map(result=>result.key),items=>{for(const row of items)if(row.schemaRetry)Object.assign(row.schemaRetry,saveSchemaOperation(db,task.id,row.key,row.schemaRetry));});
     this.controlledRuns.advanceTaskInTransaction(db,task,persisted?Number(persisted.revision):null);
-    assertAutomaticRejectionHistory(this.db,task);assertTaskAdaptationHistory(db,task);
-    db.prepare('INSERT INTO automatic_listing_tasks VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json').run(task.id, JSON.stringify(task));
-    for (const row of task.items) {
-      const prior = priorStages.get(row.key), context = { version: 1 as const, at: task.updatedAt, taskId: task.id, itemKey: row.key, ...(evidenceSku(row.sku) ? { sku: row.sku } : {}), ...(row.draftId ? { draftId: row.draftId } : {}) };
+    assertAutomaticRejectionHistory(db,{...task,items:change.items});assertTaskAdaptationHistory(db,task);
+    this.checkpoints.write(db,task,change,persisted?Number(persisted.revision):null);
+    for (const row of change.items) {
+      const prior = change.priorStages.get(row.key), context = { version: 1 as const, at: task.updatedAt, taskId: task.id, itemKey: row.key, ...(evidenceSku(row.sku) ? { sku: row.sku } : {}), ...(row.draftId ? { draftId: row.draftId } : {}) };
       try {
         // Checkpoint movement can also mean reuse, rewind or unresolved submission.
         // Completion comes only from the service boundary that checked its result.
@@ -202,7 +232,8 @@ export class AutomaticListingService {
         if (row.status === 'DONE' && prior?.status !== 'DONE') appendRunEvidence(db, row.productId, { ...context, event: 'STAGE_COMPLETED', stage: row.stage });
       } catch { /* State remains authoritative; only actual changes append diagnostic events. */ }
     }
-    });}catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
+    });this.checkpoints.remember(task,savedChange);this.checkpointDataVersions.set(task.id,Number(this.db.prepare('PRAGMA data_version').get()!.data_version));
+    }catch(error){task.revision=priorRevision;task.updatedAt=priorUpdatedAt;throw error;}
   }
   listWorkBatches() { this.ensureOpen(); return listWorkBatches(this.db); }
   addWorkBatchProducts(raw:unknown) {
@@ -593,6 +624,11 @@ export class AutomaticListingService {
     return {targetId,scope:{mode:target.target.mode,sellerId:target.target.sellerId,marketplaceId:target.target.marketplaceId},ruleRevision:rules.revision,products};
   }
   async create(raw: unknown): Promise<AutomaticListingTask> {
+    if(this.operationProgress)throw new UserFacingError('正在核对或保存任务，请稍候');
+    this.operationProgress={taskId:null,phase:'PREPARING',completed:0,total:0,message:'正在核对销售范围与原请求记录'};
+    try{return await this.createTask(raw);}finally{this.operationProgress=null;}
+  }
+  private async createTask(raw: unknown): Promise<AutomaticListingTask> {
     this.ensureOpen();
     const input = record(raw, '自动上架参数', ['productIds','targetId','productType','profileId','executionMode','workBatchId']);
     if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');
@@ -657,7 +693,7 @@ export class AutomaticListingService {
         status: 'PENDING', stage: 'SOURCES', draftId: null, executionTaskIds: [], imageStarted: false, imageAttempts: 0, repairAttempts: 0, repairPolicyVersion: FIELD_REPAIR_POLICY_VERSION, categoryFieldPolicyVersion:CATEGORY_FIELD_REPAIR_POLICY_VERSION, repair: null, batchId: null, error: null,
       } as AutomaticListingItem;});
     };
-    for(const id of ids){items.push(...planSource(id));await yieldToEventLoop();}
+    for(const [index,id] of ids.entries()){this.operationProgress={taskId:null,phase:'PREPARING',completed:index,total:ids.length,message:'正在逐商品规划；保留原SKU、历史和未知请求锁'};items.push(...planSource(id));await yieldToEventLoop();}
     this.ensureOpen();
     if(fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile)
       ||relevantTaskVersions()!==taskVersions
@@ -679,6 +715,12 @@ export class AutomaticListingService {
       rulesStamp: fingerprint(rules), ruleRevision: rules.revision, productType: input.productType ? text(input.productType, '商品类型', 100, true) : 'AUTO', locale: target.target.locale,
       labelFormat: validateItemLabelFormat(this.deps.labelFormat?.()), items, createdAt: now, updatedAt: now, error: null };
     for(const row of items)if(row.stage==='PLAN')row.outcome={version:1,kind:'NEEDS_INPUT',code:'SOURCE_INPUT_REQUIRED',message:row.error!,classifiedAt:now,scope:outcomeScope(task,row),draftId:null,draftRevision:null};
+    this.operationProgress={taskId:task.id,phase:'SAVING',completed:0,total:items.length,message:'正在保存已核对的任务范围'};await yieldToEventLoop();
+    // Yield happened before the atomic commit: recheck all frozen inputs, never
+    // treat the earlier display/progress pass as permission to send or allocate.
+    if(relevantTaskVersions()!==taskVersions||[...sourceVersions].some(([id,stamp])=>fingerprint({product:this.deps.store.getProduct(id),receipt:this.deps.sourceReceipt?.(id)??null})!==stamp)
+      ||fingerprint(this.deps.rules())!==fingerprint(rules)||fingerprint(this.deps.amazon.executionTargetScope(targetId))!==fingerprint(target)||fingerprint(this.deps.hosting.getProfile(profileId))!==fingerprint(profile)
+      ||saleChecks.some(check=>fingerprint(this.deps.existingSale?.(check.productId,check.plan,targetId)??null)!==check.stamp))throw new UserFacingError('创建期间范围已变化，请刷新');
     transaction(this.db,()=>{if(this.archiving)throw new UserFacingError('批次正在归档，请稍候');currentWorkBatch(this.db,workBatch.id);for(const id of new Set(items.map(item=>item.productId)))freezeSourceForProduct(this.db,id);this.save(task);addWorkBatchProducts(this.db,workBatch.id,[...ids,...items.map(item=>item.productId)]);bindWorkBatchTask(this.db,workBatch.id,task.id);});
     this.tasks.set(task.id, task); return structuredClone(task);
   }
@@ -757,7 +799,7 @@ export class AutomaticListingService {
     this.confirming.add(id);
     try{if(!await confirm({...approved,resumeScope:scope,items:approved.items.filter(row=>rowSelected(scope,row.key)),error:preview.lines.join('\n')}))return null;
       const fresh=await this.previewResume({taskId:id,scope});if(fresh.token!==preview.token)throw new UserFacingError('确认期间本地证据变化，请重新预览');
-      return this.startAuthorized(approved,scope);
+      return await this.startAuthorizedResponsive(approved,scope);
     }finally{this.confirming.delete(id);}
   }
   async confirmStart(id:string,confirm:(task:AutomaticListingTask)=>Promise<boolean>):Promise<AutomaticListingTask|null>{
@@ -767,19 +809,31 @@ export class AutomaticListingService {
     try{
       const consent=structuredClone(approved);delete consent.resumeScope;
       if(!await confirm(consent))return null;
-      return this.startAuthorized(approved);
+      return await this.startAuthorizedResponsive(approved);
     }finally{this.confirming.delete(approved.id);}
   }
   startAuthorized(approved: AutomaticListingTask, scope?:AutomaticResumeSelection): AutomaticListingTask {
+    const steps=this.startAuthorizedSteps(approved,scope);let step=steps.next();
+    while(!step.done)step=steps.next();return step.value;
+  }
+  private async startAuthorizedResponsive(approved:AutomaticListingTask,scope?:AutomaticResumeSelection):Promise<AutomaticListingTask>{
+    if(this.operationProgress)throw new UserFacingError('正在核对或保存任务，请稍候');
+    const steps=this.startAuthorizedSteps(approved,scope);
+    try{let step=steps.next();while(!step.done){this.operationProgress={taskId:approved.id,phase:'PREPARING',completed:step.value.completed,total:step.value.total,message:'正在逐SKU恢复原检查点；不会重发未知请求'};await yieldToEventLoop();step=steps.next();}return step.value;}
+    finally{steps.return?.(undefined as never);this.operationProgress=null;}
+  }
+  private *startAuthorizedSteps(approved: AutomaticListingTask, scope?:AutomaticResumeSelection):Generator<{completed:number;total:number},AutomaticListingTask,void> {
     this.assertManaged(approved.id);const task = this.task(approved.id);
     if (fingerprint(task) !== fingerprint(approved)) throw new UserFacingError('确认期间任务范围发生变化');
     this.deps.admitTask?.(structuredClone(task));
     scope=this.controlledRuns.taskSelection(task.id,scope);
     this.prepareStart(task.id,scope);
     const previous=structuredClone(task);
+    const checkedYield=function* (completed:number,total:number){const revision=task.revision,status=task.status;yield {completed,total};if(task.revision!==revision||task.status!==status)throw new UserFacingError('准备期间任务已暂停或变化，请重新核对');};
     try {
       if(scope)task.resumeScope=validateResumeSelection(scope,task.items.map(row=>row.key));else delete task.resumeScope;
       for(const row of task.items.filter(row=>rowSelected(task.resumeScope,row.key))){
+        yield* checkedYield(task.items.indexOf(row),task.items.length);
         if(row.status==='FAILED'){
           // Classification, task refresh and run.updatedAt are never failure timestamps.
           rememberFailure(row,null);
@@ -796,9 +850,9 @@ export class AutomaticListingService {
       }
       // A user-confirmed image binding may advance only untouched source rows. Submitted
       // siblings retain their exact draft/product revision and never repeat paid work.
-      for(const row of task.items)if(rowSelected(task.resumeScope,row.key)&&this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;
-      for(const row of task.items)if(rowSelected(task.resumeScope,row.key))this.migrateRepairPolicy(task,row);
+      for(const row of task.items)if(rowSelected(task.resumeScope,row.key)){yield* checkedYield(task.items.indexOf(row),task.items.length);if(this.canRebaseSources(task,row))row.productRevision=this.deps.store.getProduct(row.productId).revision;this.migrateRepairPolicy(task,row);}
       for (const row of task.items) if (rowSelected(task.resumeScope,row.key)&&(!row.schemaRetry||row.schemaRetry.state==='SUCCEEDED')&&row.status === 'FAILED'&&row.stage!=='PLAN'&&!adaptationBlocked(task,row.key)) {
+        yield* checkedYield(task.items.indexOf(row),task.items.length);
         if(row.outcome?.kind==='UNKNOWN'){const code=this.unknownCode(row,task);if(code&&!recoverableAiUnknown(code))continue;}
         if(row.draftId&&this.deps.amazon.applyBusinessDefaults&&!this.unknownCode(row,task)&&row.repair?.phase!=='FIELDS_STARTED'){
           const old=this.deps.amazon.getDraft(row.draftId);
@@ -841,7 +895,10 @@ export class AutomaticListingService {
         // Retain the precise source failure if a ready sibling has frozen this product's revision.
         if (row.stage !== 'SOURCES' && !row.repair) row.error = null;
       }
-      this.reconcileSelection(task);
+      yield* this.reconcileSelection(task);
+      // No proof carried across an await grants execution. Recheck source/seller/
+      // rules in the same synchronous segment as the final queued checkpoint.
+      this.assertScope(task,undefined,true,scope);this.deps.preflight?.();
       task.status = 'QUEUED'; task.error = null;
       const controlledGrant=transaction(this.db,()=>{this.save(task);return this.controlledRuns.activateQueuedTask(task.id);});if(controlledGrant)this.controlledGrants.set(task.id,controlledGrant);
     } catch(error) {
@@ -858,8 +915,11 @@ export class AutomaticListingService {
     }
     this.deps.batch?.resume(task.id);this.grants.add(task.id);this.pump();return structuredClone(task);
   }
-  private reconcileSelection(task: AutomaticListingTask): void {
-    for(const productId of new Set(task.items.map(row=>row.productId))){
+  private *reconcileSelection(task: AutomaticListingTask):Generator<{completed:number;total:number},void,void> {
+    const products=[...new Set(task.items.map(row=>row.productId))];
+    for(const [index,productId] of products.entries()){
+      const revision=task.revision,status=task.status;yield {completed:index,total:products.length};
+      if(task.revision!==revision||task.status!==status)throw new UserFacingError('准备期间任务已暂停或变化，请重新核对');
       const rows=task.items.filter(row=>row.productId===productId);
       const candidates=rows.flatMap(row=>{
         if(!rowSelected(task.resumeScope,row.key)||row.status!=='PENDING'||['PLAN','EXECUTION','READBACK','LABELS','COMPLETE'].includes(row.stage))return [];
@@ -930,7 +990,7 @@ export class AutomaticListingService {
             }
           }
           if(this.running(task)&&this.deps.batch){try{await this.deps.batch.flush(task.id);}catch(error){for(const row of task.items.filter(r=>rowSelected(task.resumeScope,r.key)&&r.batchWait))row.error=errorMessage(error);}}
-          if (this.running(task)) this.summarize(task);
+          if (this.running(task)) await this.summarize(task);
         } finally { if(!task.items.some(row=>rowSelected(task.resumeScope,row.key)&&row.status==='WAITING'))this.grants.delete(task.id); this.activeId = null; this.controller = null; }
       }
       await this.refreshWaiting();
@@ -1430,12 +1490,16 @@ export class AutomaticListingService {
     }
     return this.deps.execution.create({ draftIds: [draft.id], profileId: task.profileId, concurrency: 1 });
   }
-  private summarize(task: AutomaticListingTask, observedBefore?: string): void {
+  private async summarize(task: AutomaticListingTask, observedBefore?: string): Promise<void> {
     if (['PAUSED','CANCELLED'].includes(task.status)) return;
+    const completing=task.items.every(row=>['DONE','SCREENED'].includes(row.status));
+    if(completing){const revision=task.revision,status=task.status;this.operationProgress={taskId:task.id,phase:'VERIFYING',completed:0,total:task.items.length,message:'商品已处理完，正在核对整份任务并保存最终结果'};await yieldToEventLoop();if(task.revision!==revision||task.status!==status){this.operationProgress=null;return;}}
+    try{
     task.status = task.items.every(row => ['DONE','SCREENED'].includes(row.status)) ? 'COMPLETED'
       : task.items.some(row => row.status === 'WAITING') ? 'WAITING' : 'NEEDS_ATTENTION';
     task.error = task.items.find(row => row.status === 'FAILED')?.error ?? null;
     if (observedBefore === undefined || JSON.stringify(task) !== observedBefore) this.save(task);
+    }finally{if(completing)this.operationProgress=null;}
   }
   refreshWaiting(): Promise<void> {
     if (this.closed || this.closing || this.schedulingSuspended) return Promise.resolve();
@@ -1532,7 +1596,7 @@ export class AutomaticListingService {
         }
         if(interrupted||!canObserve())continue;
         if(resumeParents&&this.grants.has(task.id)){task.status='QUEUED';this.save(task);queueMicrotask(()=>this.pump());}
-        else this.summarize(task, observedBefore);
+        else await this.summarize(task, observedBefore);
       }
     }).finally(() => { this.observing = null; });
     return this.observing;

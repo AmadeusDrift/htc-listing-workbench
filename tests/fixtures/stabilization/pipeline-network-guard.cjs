@@ -33,7 +33,7 @@ function mapped(input,init={},transport='fetch'){
   if(route===dynamic&&(permitApi.headerHash(headers)!==permit.headersSha256||permitApi.sha(wireBody(init.body))!==permit.bodySha256))return deny('permit-input');
   if(url.search&&!route.protocol)return deny(transport);
   if(route.protocol){
-    const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText'||route.native===true&&['public-source','public-bytes','public-image','lwa','amazon','acs3','oss4'].includes(route.protocol.kind);
+    const nativeSupported=route.protocol.kind==='miaoshou'||route.protocol.kind==='acs3'&&route.protocol.action==='RecognizeAllText'||route.native===true&&['public-source','public-bytes','public-image','lwa','amazon','acs3','oss4','openrouter-price'].includes(route.protocol.kind);
     if(!['fetch','electron.net.fetch'].includes(transport)||transport==='electron.net.fetch'&&!nativeSupported||raw!==route.publicUrl||init.redirect!==undefined&&!['error','manual'].includes(init.redirect))return deny('protocol-transport');
     if(['connection','transfer-encoding','content-length','expect','upgrade','trailer'].some(name=>headers.has(name))||headers.has('host')&&headers.get('host')!==url.host)return deny('protocol-headers');
     try{verifyProtocol(route,headers,wireBody(init.body));}catch{return deny('protocol-auth');}
